@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file math_utils.h
  * @brief 数学工具库
  * 
@@ -634,6 +634,52 @@ static inline void quat_to_matrix(const float q[4], float mat[9]) {
     mat[7] = 2.0f * (yz - wx);
     mat[8] = 1.0f - 2.0f * (xx + yy);
 }
+
+/* ================================================================
+ * ZSFJJJ-01: 共享SHA-256哈希实现
+ * 从auth.c和pbft.c中提取，消除重复实现
+ * 提供流式接口（init/update/final）和便捷一次性接口
+ * ================================================================ */
+
+/** SHA-256 哈希输出长度（字节） */
+#define SELFLNN_SHA256_HASH_LEN 32
+
+/** SHA-256 上下文结构 */
+typedef struct {
+    uint8_t  data[64];         /**< 数据缓冲区 */
+    uint32_t datalen;          /**< 缓冲区当前长度 */
+    uint64_t bitlen;           /**< 已处理的比特数 */
+    uint32_t state[8];         /**< 哈希状态 */
+} selflnn_sha256_ctx_t;
+
+/**
+ * @brief 初始化SHA-256上下文
+ * @param ctx 上下文指针
+ */
+void selflnn_sha256_init(selflnn_sha256_ctx_t* ctx);
+
+/**
+ * @brief 更新SHA-256计算（可分多次调用）
+ * @param ctx 上下文指针
+ * @param data 输入数据
+ * @param len 数据长度（字节）
+ */
+void selflnn_sha256_update(selflnn_sha256_ctx_t* ctx, const uint8_t* data, size_t len);
+
+/**
+ * @brief 完成SHA-256计算，输出32字节哈希
+ * @param ctx 上下文指针
+ * @param hash 输出缓冲区（32字节）
+ */
+void selflnn_sha256_final(selflnn_sha256_ctx_t* ctx, uint8_t hash[SELFLNN_SHA256_HASH_LEN]);
+
+/**
+ * @brief 一次性SHA-256哈希计算
+ * @param input 输入数据
+ * @param input_len 输入数据长度（字节）
+ * @param output 输出缓冲区（32字节）
+ */
+void selflnn_sha256_hash(const uint8_t* input, size_t input_len, uint8_t output[SELFLNN_SHA256_HASH_LEN]);
 
 #ifdef __cplusplus
 }

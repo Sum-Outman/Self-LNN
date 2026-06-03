@@ -1,4 +1,4 @@
-﻿#include "selflnn/core/graph_optimization_ext.h"
+#include "selflnn/core/graph_optimization_ext.h"
 #include "selflnn/core/common.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/secure_random.h"
@@ -135,7 +135,11 @@ static float internal_line_search(const float* x, const float* d, PowellFunc fun
         for (int i = 0; i < n; i++) xtry[i] = x[i] + alpha * d[i];
         float fnew;
         func(xtry, &fnew, user_data);
-        if (fnew <= f0 + c * alpha * internal_dot(x, d, n) + 1e-12f) {
+        /* ZSFJJJ-C005修复: Armijo条件的方向导数应使用搜索方向d的自点积
+         * (Powell方法中d是下降方向, ||d||^2是对预期下降量的合理估计)
+         * 原代码使用 internal_dot(x,d,n) 将位置向量与方向点积, 数学上无意义 */
+        float dir_deriv = -internal_dot(d, d, n); /* d^T * d 方向模长平方 */
+        if (fnew <= f0 + c * alpha * dir_deriv + 1e-12f) {
             *fx = fnew;
             safe_free((void**)&xtry);
             return alpha;

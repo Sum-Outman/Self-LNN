@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file reinforcement_learning.c
  * @brief 强化学习算法实现
  *
@@ -12,6 +12,7 @@
  */
 
 #include "selflnn/learning/reinforcement_learning.h"
+#include "selflnn/learning/exploration_strategies.h" /* ZSFJJJ-H005: 高级探索策略集成 */
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/secure_random.h"
 #include "selflnn/utils/logging.h"
@@ -93,6 +94,10 @@ struct RLAgent {
     float best_return;
     float current_episode_return;
     OUNoiseState* ou_noise;
+    /* ZSFJJJ-H005: 高级探索策略状态 */
+    void* icm_state;                    /**< ICM好奇心模块状态 */
+    void* rnd_state;                    /**< RND随机网络蒸馏状态 */
+    void* go_explore_state;            /**< Go-Explore状态 */
     float* action_buffer;
     int action_buffer_size;
     RLReplayBuffer* external_buffer;
@@ -3101,6 +3106,40 @@ RLAgent* rl_agent_create(const RLConfig* config)
             config->explore_config.ou_dt);
     }
 
+    /* ZSFJJJ-H005: 高级探索策略初始化 */
+    if (config->explore_config.strategy == RL_EXPLORE_ICM) {
+        ICMConfig icm_cfg;
+        memset(&icm_cfg, 0, sizeof(icm_cfg));
+        icm_cfg.state_dim = config->state_dim;
+        icm_cfg.action_dim = config->action_dim;
+        icm_cfg.forward_hidden = 64;
+        icm_cfg.inverse_hidden = 64;
+        icm_cfg.eta = 0.1f;
+        icm_cfg.beta = 0.2f;
+        icm_cfg.lambda = 0.1f;
+        icm_cfg.learning_rate = 0.001f;
+        icm_cfg.batch_size = 64;
+        agent->icm_state = explore_icm_create(&icm_cfg);
+    }
+    if (config->explore_config.strategy == RL_EXPLORE_RND) {
+        RNDConfig rnd_cfg;
+        memset(&rnd_cfg, 0, sizeof(rnd_cfg));
+        rnd_cfg.state_dim = config->state_dim;
+        rnd_cfg.hidden_dim = 64;
+        rnd_cfg.output_dim = 32;
+        rnd_cfg.learning_rate = 0.001f;
+        rnd_cfg.batch_size = 64;
+        agent->rnd_state = explore_rnd_create(&rnd_cfg);
+    }
+    if (config->explore_config.strategy == RL_EXPLORE_GO_EXPLORE) {
+        GoExploreConfig ge_cfg;
+        memset(&ge_cfg, 0, sizeof(ge_cfg));
+        ge_cfg.state_dim = config->state_dim;
+        ge_cfg.max_cells = 100;
+        ge_cfg.cell_score_threshold = 0.1f;
+        agent->go_explore_state = explore_go_create(&ge_cfg);
+    }
+
     agent->is_initialized = 1;
     agent->action_buffer = (float*)safe_malloc((size_t)config->action_dim * sizeof(float));
     agent->action_buffer_size = config->action_dim;
@@ -3123,6 +3162,10 @@ void rl_agent_free(RLAgent* agent)
     }
     rl_ou_noise_free(agent->ou_noise);
     agent->ou_noise = NULL;
+    /* ZSFJJJ-H005: 释放高级探索策略 */
+    if (agent->icm_state) { explore_destroy((ExploreState*)agent->icm_state); agent->icm_state = NULL; }
+    if (agent->rnd_state) { explore_destroy((ExploreState*)agent->rnd_state); agent->rnd_state = NULL; }
+    if (agent->go_explore_state) { explore_destroy((ExploreState*)agent->go_explore_state); agent->go_explore_state = NULL; }
     safe_free((void**)&agent->action_buffer);
     safe_free((void**)&agent->log_alpha);
     safe_free((void**)&agent->last_action_probs);

@@ -16500,25 +16500,13 @@ static int handle_api_get_skills_stats(BackendServer* server,
     }
     return 0;
 }
-/* JSON字符串转义辅助函数 */
+/* ZSFJJJ-02: json_escape_str 复用 json_escape_into，消除重复逻辑 */
 static char* json_escape_str(const char* src) {
     if (!src) return NULL;
     size_t len = strlen(src);
     char* esc = (char*)safe_malloc(len * 2 + 1);
     if (!esc) return NULL;
-    size_t j = 0;
-    for (size_t i = 0; i < len; i++) {
-        char c = src[i];
-        switch (c) {
-            case '"': esc[j++] = '\\'; esc[j++] = '"'; break;
-            case '\\': esc[j++] = '\\'; esc[j++] = '\\'; break;
-            case '\n': esc[j++] = '\\'; esc[j++] = 'n'; break;
-            case '\r': esc[j++] = '\\'; esc[j++] = 'r'; break;
-            case '\t': esc[j++] = '\\'; esc[j++] = 't'; break;
-            default: esc[j++] = c; break;
-        }
-    }
-    esc[j] = '\0';
+    json_escape_into(esc, len * 2 + 1, src);
     return esc;
 }
 

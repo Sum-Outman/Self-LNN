@@ -58,6 +58,7 @@
 #include "selflnn/programming/programming_enhanced.h"
 #include "selflnn/learning/multi_agent.h"                /* H-015: 多智能体协作 */
 #include "selflnn/robot/gazebo_bridge.h" /* Gazebo仿真桥接 */
+#include "selflnn/core/architecture_controller.h" /* ZSFJJJ-FIX: 动态架构控制器 */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -144,6 +145,7 @@ static int g_bg_task_error_count = 0;
 static TrainingPipeline* g_training_pipeline = NULL; /* 训练管线 */
 static time_t g_last_training_step = 0; /* 上次训练步时间 */
 static GazeboBridge* g_gazebo_bridge = NULL; /* Gazebo仿真桥接 */
+static ArchitectureController* g_arch_controller = NULL; /* ZSFJJJ-FIX: 动态架构控制器 */
 void* volatile g_global_lnn = NULL;                              /* P2-005审查: 全局LNN指针，供GPU后端(TPU)、学习引擎、知识库跨模块访问(volatile确保多线程可见性) */
 static ProductDesignEngine* g_product_design = NULL;    /* APP10: 产品设计引擎(selflnn管理) */
 static void* g_nas_system = NULL;                         /* 神经架构搜索(selflnn管理) */
@@ -348,6 +350,10 @@ static float lnn_weights_fitness_function(const float* chromosome, size_t chrom_
     if (real_data_available) {
         fitness = real_data_fitness;
     } else {
+        /* ZSFJJJ-L001修复: 无真实数据时记录警告日志，
+         * 便于运维和调试时发现数据缺口问题。 */
+        log_warning("[演化适应度] 无可用于评估的真实数据，返回最小适应度=0.001。"
+                     "请连接传感器/摄像头/麦克风等硬件或启动仿真器以获取真实数据。");
         fitness = 0.001f;  /* 无真实数据时返回最小适应度，不生成假数据 */
     }
     if (fitness < 0.0f) fitness = 0.001f;
@@ -1166,7 +1172,7 @@ static void agi_background_loop_iteration(void) {
     /* 演化步（受自我演化能力开关控制） */
     if (g_evolution_engine_handle && capability_is_enabled(CAP_SELF_EVOLUTION) &&
         (now - g_last_evolution >= g_evolution_interval_sec)) {
-        agi_bg_evolution_step;
+        agi_bg_evolution_step();
         g_last_evolution = now;
         void* evo = selflnn_get_evolution_engine();
         if (evo) {
@@ -1184,7 +1190,7 @@ static void agi_background_loop_iteration(void) {
     if (capability_is_enabled(CAP_SELF_LEARNING) &&
         capability_is_enabled(CAP_AUTONOMOUS_EXECUTION) &&
         now - g_last_training_step >= g_training_interval_sec) {
-        agi_bg_training_step;
+        agi_bg_training_step();
         g_last_training_step = now;
     }
 
@@ -1212,7 +1218,7 @@ static void agi_background_loop_iteration(void) {
 
     /* 安全检查 */
     if (now - g_last_safety >= SAFETY_CHECK_INTERVAL) {
-        agi_bg_safety_check;
+        agi_bg_safety_check();
         g_last_safety = now;
 /* 同步触发记忆衰减(与安全检查同频, 每分钟) */
         {
@@ -1606,15 +1612,15 @@ static void agi_background_loop_iteration(void) {
                 /* knowledge_update: 前端knowledge-graph.js订阅 — 从知识库读取真实统计 */
                 {
                     char kupd_json[512];
-                    size_t kb_total = 0;
+                    size_t kb_total = 0, kb_recent = 0;
                     void* kb = selflnn_get_knowledge_base();
                     if (kb) {
-                        knowledge_base_get_stats((KnowledgeBase*)kb, &kb_total, NULL);
+                        knowledge_base_get_stats((KnowledgeBase*)kb, &kb_total, &kb_recent);
                     }
                     snprintf(kupd_json, sizeof(kupd_json),
                         "{\"type\":\"knowledge_update\",\"timestamp\":%lld,\"total\":%zu,"
-                        "\"added\":0,\"deleted\":0}",
-                        (long long)now, kb_total);
+                        "\"added\":%zu,\"deleted\":0}",
+                        (long long)now, kb_total, kb_recent);
                     ws_push_broadcast_json(g_ws_push_server, kupd_json);
                 }
             }
@@ -1716,14 +1722,39 @@ static void agi_background_loop_iteration(void) {
     /* 元认知推理（受自我决策能力开关控制） */
     if (capability_is_enabled(CAP_SELF_DECISION) &&
         now - g_agi_self.last_metacognition >= COGNITION_UPDATE_INTERVAL * 2) {
-        agi_bg_metacognition;
+        agi_bg_metacognition();
         g_agi_self.last_metacognition = now;
+    }
+
+    /* ZSFJJJ-FIX: 架构控制器周期性审计。
+     * 输出当前LNN架构统计，便于监控架构演化状态。
+     * 此前arch_controller从未被主循环调用，仅通过self_cognition
+     * 和evolution_engine的被动回调工作。主动审计确保变更记录可见。 */
+    if (g_arch_controller && ws_broadcast_counter % 60 == 0) {
+        void* lnn_stat = selflnn_get_shared_lnn();
+        if (lnn_stat) {
+            size_t neuron_count = 0, param_count = 0, hs = 0;
+            int num_layers = 0;
+            if (arch_controller_get_architecture_stats((LNN*)lnn_stat,
+                &neuron_count, &param_count, &hs, &num_layers) == 0) {
+                log_debug("[架构控制器] 神经元=%zu, 参数=%zu, 隐藏维度=%zu, 层数=%d",
+                         neuron_count, param_count, hs, num_layers);
+            }
+            if (g_ws_push_server) {
+                char arch_buf[512];
+                snprintf(arch_buf, sizeof(arch_buf),
+                    "{\"type\":\"architecture_status\",\"timestamp\":%lld,"
+                    "\"neurons\":%zu,\"params\":%zu,\"hidden_size\":%zu,\"layers\":%d}",
+                    (long long)now, neuron_count, param_count, hs, num_layers);
+                ws_push_broadcast_json(g_ws_push_server, arch_buf);
+            }
+        }
     }
 
     /* 目标重评估（受规划能力开关控制） */
     if (capability_is_enabled(CAP_PLANNING) &&
         now - g_agi_self.last_goal_eval >= g_reflection_interval_sec * 3) {
-        agi_bg_goal_reevaluate;
+        agi_bg_goal_reevaluate();
         g_agi_self.last_goal_eval = now;
     }
 
@@ -1814,59 +1845,51 @@ static void agi_background_loop_iteration(void) {
 /* 模仿学习触发（受模仿学习能力开关控制）：
      * 改为使用 capability_is_enabled(CAP_IMITATION_LEARNING) 替代旧的
      * is_feature_enabled_internal(FEATURE_IMITATION_LEARNING)，统一使用能力开关体系。
- *修复: 从经验回放构建ExpertDemonstration并实际训练 */
+     * ZSFJJJ-C004修复: 禁止使用合成假数据。模仿学习必须从真实专家演示
+     * （如人类示教 teach_by_showing、或机器人手动操作记录）中获取数据。
+     * 当无真实演示数据可用时，仅记录日志并跳过，绝不生成假数据。 */
     if (capability_is_enabled(CAP_IMITATION_LEARNING) &&
         g_agi_self.avg_reflection_score > 0.7f &&
         (now - g_last_reflection) < g_reflection_interval_sec + 10) {
-        log_info("[模仿学习] 检测到高评分(%.3f)，构建演示并训练",
-                 g_agi_self.avg_reflection_score);
-        void* learner = selflnn_get_online_learner();
-        if (learner) {
-            OnlineLearningStatus ls;
-            memset(&ls, 0, sizeof(OnlineLearningStatus));
-            if (online_learner_get_status((OnlineLearner*)learner, &ls) == 0 &&
-                ls.average_loss < 0.5f && ls.total_samples > 50) {
-                ImitationLearningConfig il_cfg;
-                memset(&il_cfg, 0, sizeof(il_cfg));
-                il_cfg.algorithm_type = IMITATION_LEARNING_BEHAVIORAL_CLONING;
-                il_cfg.learning_rate = 0.001f;
-                il_cfg.batch_size = 32;
-                il_cfg.epochs = 5;
-                il_cfg.verbose = 0;
-                ImitationLearner* il = imitation_learner_create(&il_cfg);
-                if (il) {
-                    ExpertDemonstration demo;
-                    memset(&demo, 0, sizeof(ExpertDemonstration));
-                    demo.state_dim = 128;
-                    demo.action_dim = 128;
-                    demo.sequence_length = 10;
-                    demo.state_sequence = (float*)safe_malloc(10 * 128 * sizeof(float));
-                    demo.action_sequence = (float*)safe_malloc(10 * 128 * sizeof(float));
-                    if (demo.state_sequence && demo.action_sequence) {
-                        for (size_t t = 0; t < 10; t++) {
-                            float phase = (float)t / 10.0f;
-                            for (size_t d = 0; d < 128; d++) {
-                                demo.state_sequence[t * 128 + d] =
-                                    (float)((d + t * 7) % 128) / 128.0f * phase;
-                                demo.action_sequence[t * 128 + d] =
-                                    (float)((d + t * 11) % 128) / 128.0f * (1.0f - phase);
+        /* 尝试从示教系统获取真实演示数据 */
+        void* teaching_sys = selflnn_get_teaching_system();
+        if (teaching_sys) {
+            /* 检查是否有未消费的真实示教演示 */
+            int pending = teaching_get_pending_demonstrations(teaching_sys);
+            if (pending > 0) {
+                log_info("[模仿学习] 检测到%d个真实示教演示，开始模仿学习训练", pending);
+                void* learner = selflnn_get_online_learner();
+                if (learner) {
+                    OnlineLearningStatus ls;
+                    memset(&ls, 0, sizeof(OnlineLearningStatus));
+                    if (online_learner_get_status((OnlineLearner*)learner, &ls) == 0 &&
+                        ls.total_samples > 50) {
+                        ImitationLearningConfig il_cfg;
+                        memset(&il_cfg, 0, sizeof(il_cfg));
+                        il_cfg.algorithm_type = IMITATION_LEARNING_BEHAVIORAL_CLONING;
+                        il_cfg.learning_rate = 0.001f;
+                        il_cfg.batch_size = 32;
+                        il_cfg.epochs = 5;
+                        il_cfg.verbose = 0;
+                        ImitationLearner* il = imitation_learner_create(&il_cfg);
+                        if (il) {
+                            /* 从示教系统消费真实演示数据并训练 */
+                            int trained = teaching_consume_and_train_imitation(
+                                teaching_sys, il, 5);
+                            if (trained > 0) {
+                                log_info("[模仿学习] 使用%d个真实演示完成模仿训练", trained);
+                            } else {
+                                log_debug("[模仿学习] 真实演示训练未产生有效更新");
                             }
+                            imitation_learner_free(il);
                         }
-                        demo.timestamp = (long)(now * 1000);
-                        if (imitation_learner_add_demonstration(il, &demo) == 0) {
-                            ImitationLearningResult* result = imitation_learner_train(il);
-                            if (result) {
-                                log_info("[模仿学习] 训练完成: 损失=%.4f 准确率=%.2f%%",
-                                         result->final_loss, result->policy_accuracy * 100.0f);
-                                imitation_learning_result_free(result);
-                            }
-                        }
-                        safe_free((void**)&demo.state_sequence);
-                        safe_free((void**)&demo.action_sequence);
                     }
-                    imitation_learner_free(il);
                 }
+            } else {
+                log_debug("[模仿学习] 无真实示教演示可用，跳过（不使用假数据）");
             }
+        } else {
+            log_debug("[模仿学习] 示教系统未初始化，跳过（不使用假数据）");
         }
     }
 
@@ -2598,6 +2621,33 @@ int main(int argc, char* argv)
                     printf("  演化引擎需LNN就绪后才能设置适应度函数\n");
                 }
             }
+            /* ZSFJJJ-FIX: 创建动态架构控制器并连接到自我认知和演化引擎。
+             * 架构控制器实现运行时网络结构自我调整：
+             *   扩展隐藏层 / 收缩隐藏层 / 增加层 / 删除层 / 知识迁移 / 原子交换。
+             * 此前main.c从未创建和连接架构控制器，导致架构演化路径完全断裂。 */
+            {
+                ArchitectureControllerConfig arch_cfg = arch_controller_default_config();
+                g_arch_controller = arch_controller_create(&arch_cfg);
+                if (g_arch_controller) {
+                    printf("  动态架构控制器创建成功（置信度阈值=%.2f, 频率限制=%d次/小时）\n",
+                           arch_cfg.min_confidence_threshold, arch_cfg.max_changes_per_hour);
+                    /* 连接到自我认知系统：自我认知检测到容量不足时触发架构变更 */
+                    void* scs = selflnn_get_self_cognition();
+                    if (scs) {
+                        self_cognition_set_arch_controller(
+                            (SelfCognitionSystem*)scs, (void*)g_arch_controller);
+                        printf("  架构控制器→自我认知系统(架构修正闭环)已连接\n");
+                    }
+                    /* 连接到演化引擎：演化过程触发结构变异 */
+                    if (g_evolution_engine_handle) {
+                        evolution_engine_set_arch_controller(
+                            (EvolutionEngine*)g_evolution_engine_handle, g_arch_controller);
+                        printf("  架构控制器→演化引擎(结构变异闭环)已连接\n");
+                    }
+                } else {
+                    printf("  动态架构控制器创建失败\n");
+                }
+            }
             /* APP10: 获取产品设计引擎（selflnn_init已创建，此处不再重复创建） */
             g_product_design = (ProductDesignEngine*)selflnn_get_product_design_engine();
             if (g_product_design) {
@@ -3029,6 +3079,12 @@ int main(int argc, char* argv)
         camera_capture_free((CameraCaptureContext*)g_camera_capture);
         g_camera_capture = NULL;
         printf("  摄像头采集已释放\n");
+    }
+    /* ZSFJJJ-FIX: 释放架构控制器（由main.c管理而非selflnn） */
+    if (g_arch_controller) {
+        arch_controller_free(g_arch_controller);
+        g_arch_controller = NULL;
+        printf("  动态架构控制器已释放\n");
     }
     /* 以下4个资源由selflnn_shutdown统一管理释放，main.c不应重复释放 */
     /* g_online_learner_handle → 由selflnn shutdown_subsystems L2099释放 */

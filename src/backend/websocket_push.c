@@ -666,6 +666,67 @@ int ws_push_get_next_available_client(WSPushServer* srv)
     return -1;
 }
 
+/* ZSFJJJ-C002修复: 实现 ws_client_process() — WebSocket客户端帧处理
+ * 此函数在epoll/kqueue路径中被调用(原代码仅声明未实现),
+ * 负责处理客户端WebSocket帧的接收和解析。
+ * 逻辑与select回退路径(ws_push_server_poll内)保持一致:
+ *   1. 接收数据
+ *   2. 解析WebSocket帧(opcode: close/ping/pong/data)
+ *   3. 更新last_active时间戳
+ */
+static void ws_client_process(WSClientInternal* cli) {
+    if (!cli || !cli->active || cli->sock == WS_INVALID) return;
+
+    unsigned char buf[8192];
+    int n = (int)recv(cli->sock, (char*)buf, sizeof(buf), 0);
+    if (n <= 0) {
+        ws_client_close(cli);
+        return;
+    }
+    size_t remain = (size_t)n;
+    unsigned char* ptr = buf;
+    while (remain > 0) {
+        size_t header_size = 2;
+        uint8_t raw_plen = ptr[1] & 0x7F;
+        if (raw_plen == 126) header_size += 2;
+        else if (raw_plen == 127) header_size += 8;
+        int masked = (ptr[1] & 0x80) ? 1 : 0;
+        if (masked) header_size += 4;
+
+        size_t raw_payload_len;
+        if (raw_plen <= 125) raw_payload_len = raw_plen;
+        else if (raw_plen == 126)
+            raw_payload_len = ((size_t)ptr[2] << 8) | (size_t)ptr[3];
+        else {
+            raw_payload_len = 0;
+            for (int m = 0; m < 8; m++)
+                raw_payload_len = (raw_payload_len << 8) | (size_t)ptr[2 + m];
+        }
+        size_t frame_size = header_size + raw_payload_len;
+        if (frame_size > remain) break;
+
+        uint8_t opcode;
+        unsigned char* payload;
+        size_t payload_len;
+        if (ws_parse_frame(ptr, remain, &opcode, &payload, &payload_len) != 0) break;
+        if (frame_size > remain) break;
+
+        if (opcode == 0x08) {
+            if (masked) safe_free((void**)&payload);
+            ws_client_close(cli);
+            return;
+        } else if (opcode == 0x09) {
+            ws_send_pong(cli->sock, payload, payload_len);
+        }
+        /* opcode 0x0A (pong) 无需处理 */
+
+        if (masked) safe_free((void**)&payload);
+        remain -= frame_size;
+        ptr += frame_size;
+    }
+    cli->last_active = (long)time(NULL);
+}
+
 int ws_push_server_poll(WSPushServer* srv, int timeout_ms)
 {
     if (!srv || !srv->running) return -1;

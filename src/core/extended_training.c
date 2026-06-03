@@ -31,8 +31,11 @@ static size_t find_nearest_checkpoint(const LNN* network, size_t target_layer)
     size_t best_idx = 0;
     size_t best_dist = target_layer;
     for (size_t i = 0; i < network->num_activation_checkpoints; i++) {
-        if (!network->activation_checkpoint_sizes) continue;
-        size_t ckpt_layer = (size_t)network->activation_checkpoint_sizes[i];
+        /* ZSFJJJ-C006修复: 使用 activation_checkpoint_layers 而非 sizes。
+         * sizes 存储的是激活缓冲区大小(字节), 而非层索引编号。
+         * 使用 sizes 作为层索引会导致反向传播恢复错误的层, 梯度完全错乱。 */
+        if (!network->activation_checkpoint_layers) continue;
+        size_t ckpt_layer = (size_t)network->activation_checkpoint_layers[i];
         if (ckpt_layer <= target_layer) {
             size_t dist = target_layer - ckpt_layer;
             if (dist < best_dist) {

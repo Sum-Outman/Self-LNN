@@ -187,7 +187,9 @@ typedef struct {
  */
 typedef struct {
     CfCNetwork* network;        /**< 目标CfC网络 */
-    const float* input;         /**< 固定输入（零阶保持） */
+    const float* input;         /**< 固定输入（零阶保持）— 仅用于向后兼容 */
+    float* input_copy;          /**< ZSFJJJ-C008: 输入数据的安全副本 */
+    size_t input_size;          /**< ZSFJJJ-C008: 输入副本的维度 */
     float* temp_buffer1;        /**< 临时缓冲区1 [hidden_size] */
     float* temp_buffer2;        /**< 临时缓冲区2 [hidden_size] */
     int current_layer;          /**< 当前层索引 */

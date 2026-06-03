@@ -1766,14 +1766,21 @@ CfCRHSContext* cfc_create_rhs_context(CfCNetwork* network, const float* input) {
     CfCRHSContext* ctx = (CfCRHSContext*)safe_calloc(1, sizeof(CfCRHSContext));
     if (!ctx) return NULL;
     size_t hs = network->config.hidden_size;
+    size_t is = network->config.input_size;
     ctx->temp_buffer1 = (float*)safe_calloc(hs, sizeof(float));
     ctx->temp_buffer2 = (float*)safe_calloc(hs, sizeof(float));
-    if (!ctx->temp_buffer1 || !ctx->temp_buffer2) {
+    /* ZSFJJJ-C008修复: 复制输入数据到上下文自有缓冲区,
+     * 避免存储指向调用者内存的悬空指针。
+     * 长时ODE演化可跨越数千步, 原始input指针极可能已被释放。 */
+    ctx->input_copy = (float*)safe_malloc(is * sizeof(float));
+    if (!ctx->temp_buffer1 || !ctx->temp_buffer2 || !ctx->input_copy) {
         cfc_free_rhs_context(ctx);
         return NULL;
     }
+    memcpy(ctx->input_copy, input, is * sizeof(float));
+    ctx->input_size = is;
     ctx->network = network;
-    ctx->input = input;
+    ctx->input = ctx->input_copy; /* 向后兼容: input指针指向安全副本 */
     return ctx;
 }
 
@@ -1781,6 +1788,7 @@ void cfc_free_rhs_context(CfCRHSContext* ctx) {
     if (!ctx) return;
     safe_free((void**)&ctx->temp_buffer1);
     safe_free((void**)&ctx->temp_buffer2);
+    safe_free((void**)&ctx->input_copy); /* ZSFJJJ-C008: 释放输入副本 */
     safe_free((void**)&ctx);
 }
 

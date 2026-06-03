@@ -1,4 +1,4 @@
-﻿#include "selflnn/core/cfc_enhanced.h"
+#include "selflnn/core/cfc_enhanced.h"
 #include "selflnn/core/ode_solvers.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/math_utils.h"
@@ -11,6 +11,10 @@
 /* 运行时配置镜像：存储最后一次使用的增强配置，供 cfc_get_enhanced_config 查询 */
 static CfcEnhancedConfig g_runtime_config;
 static int g_runtime_config_set = 0;
+
+/* ZSFJJJ-M003修复: 统一多时间尺度tau比率常量，消除硬编码重复 */
+#define CFC_FAST_TAU_RATIO   0.1f   /* 快时间尺度比率 */
+#define CFC_SLOW_TAU_RATIO  10.0f   /* 慢时间尺度比率 */
 
 #define CFC_ENHANCED_VERBOSE(fmt, ...) do { if (config && config->verbose) { printf("[CfC增强] " fmt "\n", ##__VA_ARGS__); } } while(0)
 
@@ -66,8 +70,8 @@ CfcEnhancedState* cfc_enhanced_state_create(void)
     state->stiffness_detected_count = 0;
     state->multi_rate_active = 0;
     state->saved_use_multi_timescale = 0;
-    state->saved_fast_tau_ratio = 0.1f;
-    state->saved_slow_tau_ratio = 10.0f;
+    state->saved_fast_tau_ratio = CFC_FAST_TAU_RATIO;
+    state->saved_slow_tau_ratio = CFC_SLOW_TAU_RATIO;
     state->power_iter_buffer = NULL;
     state->power_iter_buffer2 = NULL;
     state->power_iter_buffer_size = 0;
@@ -382,8 +386,8 @@ int cfc_enhanced_state_reset(CfcEnhancedState* state)
     state->stiffness_detected_count = 0;
     state->multi_rate_active = 0;
     state->saved_use_multi_timescale = 0;
-    state->saved_fast_tau_ratio = 0.1f;
-    state->saved_slow_tau_ratio = 10.0f;
+    state->saved_fast_tau_ratio = CFC_FAST_TAU_RATIO;
+    state->saved_slow_tau_ratio = CFC_SLOW_TAU_RATIO;
     return 0;
 }
 

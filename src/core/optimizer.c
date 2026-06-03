@@ -287,6 +287,17 @@ int optimizer_step(Optimizer* optimizer, float* parameters, float* gradients,
                 float m_hat = optimizer->momentum_buffer[i] / (1.0f - *optimizer->beta1_power);
                 float v_hat = optimizer->velocity_buffer[i] / (1.0f - *optimizer->beta2_power);
 
+                /* ZSFJJJ-H003修复: 防止Adam偏差校正分母趋零。
+                 * 长期训练(t>10000)后beta1_power下溢为0(float精度~1e-7),
+                 * 导致1.0-0=1.0, 偏差校正失去意义。
+                 * 使用min epsilon确保分母始终>=1e-8, 避免除零和校正失效。 */
+                float b1_corr = (1.0f - *optimizer->beta1_power);
+                float b2_corr = (1.0f - *optimizer->beta2_power);
+                if (b1_corr < 1e-7f) b1_corr = 1e-7f;
+                if (b2_corr < 1e-7f) b2_corr = 1e-7f;
+                m_hat = optimizer->momentum_buffer[i] / b1_corr;
+                v_hat = optimizer->velocity_buffer[i] / b2_corr;
+
                 parameters[i] -= lr * m_hat / (sqrtf(v_hat) + eps);
             }
             break;

@@ -177,6 +177,34 @@ void dynamics_free(DynamicsSystem* system) {
     safe_free((void**)&system);
 }
 
+/* ZSFJJJ-H001修复: 动力学力计算提取为共享内联函数。
+ * dynamics_update()和compute_derivatives()中原有~50行完全相同
+ * 的力计算代码(恢复力/阻尼/非线性/耦合), 提取后消除重复,
+ * 确保ODE求解器与前向传播使用完全相同的物理模型。 */
+static inline float dynamics_compute_force_internal(
+    const DynamicsSystem* system, const float* state, const float* velocity,
+    const float* noise, float input_val, size_t i, size_t state_size)
+{
+    float spring_constant = 1.0f / (system->config.time_scale + 1e-6f);
+    float restoring_force = -spring_constant * state[i];
+    float damping_force = -system->config.damping * velocity[i];
+    float cubic_nonlinearity = system->config.nonlinearity * state[i] * state[i] * state[i];
+    float sine_nonlinearity = system->config.nonlinearity * 0.5f * sinf(state[i] * system->config.time_scale);
+    float tanh_nonlinearity = system->config.nonlinearity * 0.3f * tanhf(state[i] * 2.0f);
+    float coupling_force = 0.0f;
+    if (state_size > 1) {
+        for (size_t j = 0; j < state_size; j++) {
+            if (j != i) {
+                float state_diff = state[j] - state[i];
+                coupling_force += system->config.damping * 0.1f * state_diff;
+            }
+        }
+        coupling_force /= (float)(state_size - 1);
+    }
+    return input_val + restoring_force + damping_force + cubic_nonlinearity +
+           sine_nonlinearity + tanh_nonlinearity + coupling_force + noise[i];
+}
+
 /**
  * @brief 更新动态系统状态
  */
@@ -204,7 +232,7 @@ int dynamics_update(DynamicsSystem* system, const float* input,
     
     size_t state_size = system->config.state_size;
     
-    // 添加噪声（如果启用）
+    /* 添加噪声(如果启用) */
     if (system->config.enable_noise) {
         for (size_t i = 0; i < state_size; i++) {
             system->noise_buffer[i] = rng_normal(0.0f, system->config.noise_std);
@@ -213,61 +241,13 @@ int dynamics_update(DynamicsSystem* system, const float* input,
         memset(system->noise_buffer, 0, state_size * sizeof(float));
     }
     
-    // 计算新的加速度（基于完整动力学方程）
-    // 完整模型：加速度 = 外部输入 + 恢复力 + 阻尼力 + 非线性项 + 耦合效应 + 噪声
-    
     float avg_velocity = 0.0f;
     float max_velocity = 0.0f;
     
     for (size_t i = 0; i < state_size; i++) {
-        // 1. 恢复力：趋向零点的力（类似弹簧恢复力）
-        // 使用时间尺度的倒数作为有效弹簧常数
-        float spring_constant = 1.0f / (system->config.time_scale + 1e-6f);
-        float restoring_force = -spring_constant * system->state[i];
-        
-        // 2. 线性阻尼力：-c * velocity
-        float damping_force = -system->config.damping * system->velocity[i];
-        
-        // 3. 非线性项：多种非线性效应组合
-        // 立方非线性：α * x³（软/硬弹簧效应）
-        float cubic_nonlinearity = system->config.nonlinearity * 
-                                  system->state[i] * system->state[i] * system->state[i];
-        
-        // 正弦非线性：使用时间尺度作为频率参数
-        float sine_nonlinearity = system->config.nonlinearity * 0.5f * 
-                                 sinf(system->state[i] * system->config.time_scale);
-        
-        // 双曲正切非线性（饱和效应）
-        float tanh_nonlinearity = system->config.nonlinearity * 0.3f * 
-                                 tanhf(system->state[i] * 2.0f);
-        
-        // 4. 状态耦合：状态变量之间的相互作用
-        float coupling_force = 0.0f;
-        if (state_size > 1) {
-            // 自适应耦合：基于状态差异和全局统计
-            for (size_t j = 0; j < state_size; j++) {
-                if (j != i) {
-                    // 耦合强度与状态差异成正比（扩散耦合）
-                    float state_diff = system->state[j] - system->state[i];
-                    // 归一化耦合系数：使用阻尼系数的一部分
-                    float coupling_strength = system->config.damping * 0.1f;
-                    coupling_force += coupling_strength * state_diff;
-                }
-            }
-            // 归一化耦合项
-            coupling_force /= (state_size - 1);
-        }
-        
-        // 5. 综合加速度计算（完整动力学方程）
-        // 总力 = 外部输入 + 恢复力 + 阻尼力 + 非线性项总和 + 耦合 + 噪声
-        float total_force = input[i] + 
-                           restoring_force + 
-                           damping_force + 
-                           cubic_nonlinearity + 
-                           sine_nonlinearity + 
-                           tanh_nonlinearity + 
-                           coupling_force + 
-                           system->noise_buffer[i];
+        float total_force = dynamics_compute_force_internal(
+            system, system->state, system->velocity,
+            system->noise_buffer, input[i], i, state_size);
         
         system->acceleration[i] = total_force;
     }
@@ -507,61 +487,14 @@ static void compute_derivatives(const DynamicsSystem* system,
     
     size_t state_size = system->config.state_size;
     
-    // 添加噪声（如果启用）
-    float* effective_noise = system->noise_buffer;
-    if (system->config.enable_noise) {
-        // 噪声已经预先计算并存储在noise_buffer中
-        effective_noise = system->noise_buffer;
-    }
+    /* 使用共享力计算函数(ZSFJJJ-H001) */
+    float zero_noise[256] = {0};
+    const float* noise = system->config.enable_noise ? system->noise_buffer : zero_noise;
     
     for (size_t i = 0; i < state_size; i++) {
-        // 位置导数：dq/dt = velocity
         dstate_dt[i] = velocity[i];
-        
-        // 1. 恢复力：趋向零点的力（类似弹簧恢复力）
-        float spring_constant = 1.0f / (system->config.time_scale + 1e-6f);
-        float restoring_force = -spring_constant * state[i];
-        
-        // 2. 线性阻尼力：-c * velocity
-        float damping_force = -system->config.damping * velocity[i];
-        
-        // 3. 非线性项：多种非线性效应组合
-        // 立方非线性：α * x³（软/硬弹簧效应）
-        float cubic_nonlinearity = system->config.nonlinearity * 
-                                  state[i] * state[i] * state[i];
-        
-        // 正弦非线性：使用时间尺度作为频率参数
-        float sine_nonlinearity = system->config.nonlinearity * 0.5f * 
-                                 sinf(state[i] * system->config.time_scale);
-        
-        // 双曲正切非线性（饱和效应）
-        float tanh_nonlinearity = system->config.nonlinearity * 0.3f * 
-                                 tanhf(state[i] * 2.0f);
-        
-        // 4. 状态耦合：状态变量之间的相互作用
-        float coupling_force = 0.0f;
-        if (state_size > 1) {
-            for (size_t j = 0; j < state_size; j++) {
-                if (j != i) {
-                    float state_diff = state[j] - state[i];
-                    float coupling_strength = system->config.damping * 0.1f;
-                    coupling_force += coupling_strength * state_diff;
-                }
-            }
-            coupling_force /= (state_size - 1);
-        }
-        
-        // 5. 综合加速度计算（完整动力学方程）
-        float total_force = input[i] + 
-                           restoring_force + 
-                           damping_force + 
-                           cubic_nonlinearity + 
-                           sine_nonlinearity + 
-                           tanh_nonlinearity + 
-                           coupling_force + 
-                           effective_noise[i];
-        
-        dvelocity_dt[i] = total_force;
+        dvelocity_dt[i] = dynamics_compute_force_internal(
+            system, state, velocity, noise, input[i], i, state_size);
     }
 }
 
@@ -1784,21 +1717,22 @@ int dynamics_differentiable_forward(DynamicsSystem* system,
     /* 记录初始轨迹点 */
     memcpy(trajectory, initial_state, state_dim * sizeof(float));
 
+    /* ZSFJJJ-M001修复: 预分配复合输入缓冲区, 避免每步malloc/free。
+     * 原实现每步在循环内分配释放, num_steps=1000时产生2000次堆操作。 */
+    size_t composite_dim = control_dim + state_dim;
+    float* composite_input = (float*)safe_malloc(composite_dim * sizeof(float));
+    if (!composite_input) {
+        memcpy(system->state, saved_state, state_dim * sizeof(float));
+        memcpy(system->velocity, saved_velocity, state_dim * sizeof(float));
+        safe_free((void**)&saved_state);
+        safe_free((void**)&saved_velocity);
+        return -1;
+    }
+
     /* 前向仿真 num_steps 步 */
     for (int step = 0; step < num_steps; step++) {
         float t = (float)(step + 1) * dt;
         (void)t;
-
-        /* 构建复合输入：控制信号 + 当前状态 */
-        size_t composite_dim = control_dim + state_dim;
-        float* composite_input = (float*)safe_malloc(composite_dim * sizeof(float));
-        if (!composite_input) {
-            memcpy(system->state, saved_state, state_dim * sizeof(float));
-            memcpy(system->velocity, saved_velocity, state_dim * sizeof(float));
-            safe_free((void**)&saved_state);
-            safe_free((void**)&saved_velocity);
-            return -1;
-        }
 
         if (control_input && control_dim > 0) {
             memcpy(composite_input, control_input, control_dim * sizeof(float));
@@ -1814,9 +1748,9 @@ int dynamics_differentiable_forward(DynamicsSystem* system,
         /* 记录轨迹 */
         memcpy(trajectory + (size_t)(step + 1) * state_dim,
                system->state, state_dim * sizeof(float));
-
-        safe_free((void**)&composite_input);
     }
+
+    safe_free((void**)&composite_input);
 
     /* 恢复原始状态 */
     memcpy(system->state, saved_state, state_dim * sizeof(float));

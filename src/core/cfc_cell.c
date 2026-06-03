@@ -4788,7 +4788,14 @@ int cfc_cell_forward_liquid(CfCCell* cell, const float* input, float* hidden_sta
     }
 
     // 步骤3: 使用更新后的时间常数执行标准前向传播
+    // ZSFJJJ-FIX: 修复无限递归Bug。
+    // cfc_cell_forward()第2239行检测use_liquid_scaling后会重新路由到本函数，
+    // 形成cfc_cell_forward_liquid → cfc_cell_forward → cfc_cell_forward_liquid的无限递归。
+    // 修复: 临时清除use_liquid_scaling标志，确保cfc_cell_forward直接进入ODE求解路径。
+    int saved_liquid_scaling = cell->use_liquid_scaling;
+    cell->use_liquid_scaling = 0;
     ret = cfc_cell_forward(cell, input, hidden_state);
+    cell->use_liquid_scaling = saved_liquid_scaling;
 
     // 步骤4: 如果需要，输出计算出的时间常数
     if (computed_tau) {

@@ -197,6 +197,10 @@ float loss_compute_ex(const float* predictions, const float* targets, int n,
                 if (p > 1.0f - 1e-7f) p = 1.0f - 1e-7f;
                 float t = targets[i];
                 float pt = (t > 0.5f) ? p : 1.0f - p;
+                /* ZSFJJJ-H002修复: 限制pt最大值防止除零。
+                 * 当pt极度接近1.0时(如0.99999)，logf(pt)/（1-pt+EPS）分母接近0。
+                 * FOCAL_EPS_SAFE=1e-5不足以防止数值爆炸。 */
+                pt = (pt > 0.999f) ? 0.999f : pt;
                 float at = (t > 0.5f) ? alpha : 1.0f - alpha;
                 float log_pt = logf(pt > 1e-7f ? pt : 1e-7f);
                 loss -= at * powf(1.0f - pt, gamma) * log_pt;

@@ -666,6 +666,7 @@ int quaternion_cfc_solve_with_solver(void* qcfc_cell, const float* quat_input,
             safe_free((void**)&workspace);
             if (ret != 0) { break; }
             break; /* ZSF-003修复：case 6末尾添加break防止fall-through到case 7 */
+        }   
         case 7: {
             /* BDF2自适应步长 */
             size_t n = (size_t)n_quat * 4;
@@ -716,7 +717,6 @@ int quaternion_cfc_solve_with_solver(void* qcfc_cell, const float* quat_input,
     return ret;
 }
 
-; /* IntelliSense解析锚点: 清除级联误报 */
 
 /**
  * @brief 批量并行四元数ODE求解

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file reinforcement_learning.h
  * @brief 强化学习算法接口
  *
@@ -49,7 +49,10 @@ typedef enum {
     RL_EXPLORE_UCB = 1,
     RL_EXPLORE_GAUSSIAN_NOISE = 2,
     RL_EXPLORE_OU_NOISE = 3,
-    RL_EXPLORE_BOLTZMANN = 4
+    RL_EXPLORE_BOLTZMANN = 4,
+    RL_EXPLORE_ICM = 5,         /* ZSFJJJ-H005: 内在好奇心模块 */
+    RL_EXPLORE_RND = 6,         /* ZSFJJJ-H005: 随机网络蒸馏 */
+    RL_EXPLORE_GO_EXPLORE = 7   /* ZSFJJJ-H005: Go-Explore */
 } RLExploreStrategy;
 
 /**
