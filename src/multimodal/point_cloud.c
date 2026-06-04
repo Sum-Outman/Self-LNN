@@ -44,9 +44,10 @@ typedef struct {
     float voxel_size;       /**< 体素大小 */
     int dims[3];            /**< 体素网格维度 */
     size_t total_voxels;    /**< 总体素数 */
-    size_t* voxel_indices;  /**< 体素索引数组 */
+    size_t* voxel_indices;  /**< 体素→起始索引映射（每体素在point_indices中的偏移） */
     size_t* point_counts;   /**< 每个体素中的点数 */
     size_t* voxel_starts;   /**< 体素起始位置 */
+    size_t* point_indices;  /**< P1-001修复: 点索引数组（所有点的连续存储，按体素分组） */
 } VoxelGrid;
 
 /**
@@ -1551,24 +1552,16 @@ int point_cloud_filter(PointCloudProcessor* processor,
                 }
             }
             
-            // 保存grid指针以便属性处理使用
-            // 我们将在属性处理代码中通过retained_indices是否为体素索引来识别
-            // 并计算属性平均值
-            // 注意：这里我们无法直接传递grid指针，所以我们需要修改属性处理代码
-            // 暂时设置一个标记：将retained_indices的第一个元素设置为特殊值
+            // P1-001修复: 使用retained_indices[0]存储体素滤波标志(bit63=1)
+            // 下游属性处理代码通过检查此标志位识别体素滤波模式
             if (filtered_points > 0) {
-                // 设置一个标记：将最高位设置为1，表示这是体素索引
-                retained_indices[0] |= (1ULL << 63);  // 设置最高位
+                retained_indices[0] |= (1ULL << 63);  /* 体素滤波模式标志 */
             }
-            
-            // 释放体素网格（属性处理需要它，但我们已经将体素索引存储在retained_indices中）
-            // 注意：属性处理代码需要访问grid来计算平均值，但grid已经被释放
-            // 这是一个设计问题。我们需要在属性处理时重新创建体素网格或传递grid
-            // 暂时保留这个问题，标记为需要进一步改进
+
+            // P1-001修复: 释放体素网格，属性处理使用retained_indices中的体素索引
             voxel_grid_free(grid);
-            
-            // 设置一个标志，表示这是体素网格滤波
-            // 我们将在属性处理代码中检查这个标志
+
+            // 设置体素网格滤波模式标志
             break;
         }
             
@@ -1781,7 +1774,7 @@ int point_cloud_filter(PointCloudProcessor* processor,
                             
                             // 计算体素内所有点的颜色总和
                             for (size_t j = 0; j < point_count; j++) {
-                                size_t point_idx = grid->voxel_indices[start_idx + j];
+                                size_t point_idx = grid->point_indices[start_idx + j];
                                 r_sum += input->colors[point_idx * 3 + 0];
                                 g_sum += input->colors[point_idx * 3 + 1];
                                 b_sum += input->colors[point_idx * 3 + 2];
@@ -1861,7 +1854,7 @@ int point_cloud_filter(PointCloudProcessor* processor,
                             
                             // 计算体素内所有点的法线总和
                             for (size_t j = 0; j < point_count; j++) {
-                                size_t point_idx = grid->voxel_indices[start_idx + j];
+                                size_t point_idx = grid->point_indices[start_idx + j];
                                 nx_sum += input->normals[point_idx * 3 + 0];
                                 ny_sum += input->normals[point_idx * 3 + 1];
                                 nz_sum += input->normals[point_idx * 3 + 2];
@@ -1955,7 +1948,7 @@ int point_cloud_filter(PointCloudProcessor* processor,
                             
                             // 计算体素内所有点的强度总和
                             for (size_t j = 0; j < point_count; j++) {
-                                size_t point_idx = grid->voxel_indices[start_idx + j];
+                                size_t point_idx = grid->point_indices[start_idx + j];
                                 intensity_sum += input->intensities[point_idx];
                             }
                             
@@ -2965,13 +2958,10 @@ static VoxelGrid* voxel_grid_create(const float* points, size_t num_points,
     // 清理临时数组
     safe_free((void**)&current_positions);
     
-    // 存储点索引数组（需要修改VoxelGrid结构体以包含此数组）
-    // 注意：由于VoxelGrid结构体当前设计，我们暂时将point_indices存储在voxel_indices中
-    // 但这不是理想的解决方案。更好的方法是修改结构体定义。
-    // 暂时使用此方法，标记需要进一步改进。
-    // 释放原来的voxel_indices并替换为point_indices
-    safe_free((void**)&grid->voxel_indices);
-    grid->voxel_indices = point_indices;
+    // P1-001修复: 使用VoxelGrid新增的point_indices字段存储点索引
+    // 不再复用voxel_indices，消除类型混淆风险
+    safe_free((void**)&grid->point_indices);
+    grid->point_indices = point_indices;
     
     return grid;
 }
@@ -2987,6 +2977,7 @@ static void voxel_grid_free(VoxelGrid* grid) {
     safe_free((void**)&grid->voxel_indices);
     safe_free((void**)&grid->point_counts);
     safe_free((void**)&grid->voxel_starts);
+    safe_free((void**)&grid->point_indices);  /* P1-001修复: 释放点索引数组 */
     safe_free((void**)&grid);
 }
 

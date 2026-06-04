@@ -572,6 +572,27 @@ class ApiService {
     }
     
     /**
+     * F-致命修复: trainingStart — training-center.js调用的训练启动方法
+     * 将位置参数映射为后端期望的配置对象格式
+     * @param {string} mode - 训练模式: 'pretrain'|'train'|'finetune'|'transfer'|'continual'|'from-scratch'
+     * @param {number} lr - 学习率
+     * @param {number} batch - 批量大小
+     * @param {number} epochs - 训练轮数
+     * @param {string} datasetPath - 数据集路径
+     * @returns {Promise<Object>} {success, data, error}
+     */
+    async trainingStart(mode, lr, batch, epochs, datasetPath) {
+        var config = {
+            mode: mode || 'train',
+            learning_rate: lr || 0.001,
+            batch_size: batch || 64,
+            epochs: epochs || 100,
+            dataset_path: datasetPath || '/data/training'
+        };
+        return await this.startTraining(config);
+    }
+    
+    /**
      * 获取音频频谱分析数据
      */
     async getAudioSpectrum() {

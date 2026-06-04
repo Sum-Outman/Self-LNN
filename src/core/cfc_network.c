@@ -9,6 +9,7 @@
 #define SELFLNN_CORE_INTERNAL
 #include "selflnn/core/cfc_network.h"
 #include "selflnn/core/cfc_cell.h"
+#include "selflnn/core/cfc_enhanced.h"  /* P0-001修复: 集成CfC增强层(SIMD/自动求解器/刚度检测) */
 #include "selflnn/core/ode_solvers.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/core/lnn_layer_norm.h"
@@ -262,6 +263,22 @@ CfCNetwork* cfc_create(const CfCNetworkConfig* config) {
         }
     }
 
+    /* P0-001修复: 初始化CfC增强层状态（SIMD加速/自动求解器选择/刚度检测）
+     * 仅在 config->use_enhanced=1 时分配，否则enhanced_state=NULL走原始快速路径 */
+    network->enhanced_state = NULL;
+    network->enhanced_cfg = NULL;
+    if (config->use_enhanced) {
+        network->enhanced_state = cfc_enhanced_state_create();
+        if (network->enhanced_state) {
+            CfcEnhancedConfig* ecfg = (CfcEnhancedConfig*)safe_calloc(1, sizeof(CfcEnhancedConfig));
+            if (ecfg) {
+                *ecfg = cfc_enhanced_default_config();
+                ecfg->verbose = 0;
+                network->enhanced_cfg = ecfg;
+            }
+        }
+    }
+
     // 初始化统计信息
     network->is_initialized = 1;
     network->is_trained = 0;
@@ -326,6 +343,13 @@ void cfc_free(CfCNetwork* network) {
     safe_free((void**)&network->per_layer_b_offset);
     safe_free((void**)&network->per_layer_w_size);
     
+    /* P0-001修复: 释放CfC增强层状态 */
+    if (network->enhanced_state) {
+        cfc_enhanced_state_free((CfcEnhancedState*)network->enhanced_state);
+        network->enhanced_state = NULL;
+    }
+    safe_free((void**)&network->enhanced_cfg);
+    
     safe_free((void**)&network);
 }
 
@@ -380,10 +404,19 @@ int cfc_forward(CfCNetwork* network, const float* input,
         // 获取当前层的输出位置（使用最大层大小作为步长）
         float* layer_output = network->layer_outputs + (layer * max_layer_size);
         
-        // 执行CfC单元前向传播
-        int result = cfc_cell_forward(network->layers[layer], 
+        // P0-001修复: 如果启用增强层，使用SIMD加速/自动求解器选择/刚度检测
+        int result;
+        if (network->enhanced_state && network->enhanced_cfg) {
+            result = cfc_enhanced_forward(network->layers[layer],
+                                         current_input,
+                                         layer_output,
+                                         (const CfcEnhancedConfig*)network->enhanced_cfg,
+                                         (CfcEnhancedState*)network->enhanced_state);
+        } else {
+            result = cfc_cell_forward(network->layers[layer], 
                                      current_input, 
                                      layer_output);
+        }
         
         SELFLNN_CHECK(result == 0, SELFLNN_ERROR_CFC_CELL_CONFIG,
                      "第%d层CfC单元前向传播失败", layer);
@@ -1054,107 +1087,16 @@ int cfc_accumulate_gradients(CfCNetwork* network, const float* error,
 }
 
 /**
- * @brief 应用各层CfC单元的cell级参数梯度
+ * @brief 应用各层CfC单元的cell级参数梯度（使用Adam自适应学习率）
  * 
- * FIX-011: cfc_backward Step3 在单样本路径中直接更新cell级参数，
- * 但 cfc_accumulate_gradients（批量训练路径）不处理这些参数。
- * 此函数由批量训练循环在累积共享梯度后调用，应用各cell内部的门控/
- * 时间常数梯度到对应参数。
+ * P0-003修复: 原先使用简单SGD更新cell参数，与网络级Adam双轨运行，收敛不一致。
+ * 现统一委托给 cfc_apply_cell_gradients_adam（完整Adam β1=0.9, β2=0.999），
+ * 消除优化路径分裂问题，所有参数统一使用Adam自适应学习率更新。
  * 
- * 注意：当前cell级梯度来自最后一样本（cfc_cell_backward用=覆盖），
- * 未来改进：在 cfc_accumulate_gradients 中为cell级梯度增加+=累积通道。
+ * 调用方不需要传入Adam超参数——内部使用标准默认值。
  */
 int cfc_apply_cell_gradients(CfCNetwork* network, float learning_rate) {
-    SELFLNN_CHECK_NULL(network, "CfC网络句柄为空");
-    SELFLNN_CHECK_INITIALIZED(network, "CfC网络未初始化");
-    
-    size_t hidden_size = network->config.hidden_size;
-    size_t input_size = network->config.input_size;
-    int num_layers = network->config.num_layers;
-    
-    for (int layer = 0; layer < num_layers; layer++) {
-        CfCCell* cell = network->layers[layer];
-        if (!cell) continue;
-        
-        size_t layer_input = (layer == 0) ? input_size : hidden_size;
-        size_t cell_w_count = layer_input * hidden_size;
-        size_t hh_count = hidden_size * hidden_size;
-        size_t k;
-        
-        /* W_gx: 输入到门控权重 */
-        if (cell->input_gate_weight_grad && cell->input_gate_weights) {
-            for (k = 0; k < cell_w_count; k++) {
-                float g = cell->input_gate_weight_grad[k];
-                if (isfinite(g)) cell->input_gate_weights[k] -= learning_rate * g;
-            }
-        }
-        /* W_fx: 遗忘门权重 (补充遗漏) */
-        if (cell->forget_gate_weight_grad && cell->forget_gate_weights) {
-            for (k = 0; k < cell_w_count; k++) {
-                float g = cell->forget_gate_weight_grad[k];
-                if (isfinite(g)) cell->forget_gate_weights[k] -= learning_rate * g;
-            }
-        }
-        /* W_ox: 输出门权重 (补充遗漏) */
-        if (cell->output_gate_weight_grad && cell->output_gate_weights) {
-            for (k = 0; k < cell_w_count; k++) {
-                float g = cell->output_gate_weight_grad[k];
-                if (isfinite(g)) cell->output_gate_weights[k] -= learning_rate * g;
-            }
-        }
-        /* W_ghi / W_ghf / W_gho / W_ah: 隐藏到隐藏权重——P0-003三门独立 */
-        for (k = 0; k < hh_count; k++) {
-            if (cell->hidden_to_input_gate_weight_grad && cell->hidden_to_input_gate_weights) {
-                float g = cell->hidden_to_input_gate_weight_grad[k];
-                if (isfinite(g)) cell->hidden_to_input_gate_weights[k] -= learning_rate * g;
-            }
-            if (cell->hidden_to_forget_gate_weight_grad && cell->hidden_to_forget_gate_weights) {
-                float g = cell->hidden_to_forget_gate_weight_grad[k];
-                if (isfinite(g)) cell->hidden_to_forget_gate_weights[k] -= learning_rate * g;
-            }
-            if (cell->hidden_to_output_gate_weight_grad && cell->hidden_to_output_gate_weights) {
-                float g = cell->hidden_to_output_gate_weight_grad[k];
-                if (isfinite(g)) cell->hidden_to_output_gate_weights[k] -= learning_rate * g;
-            }
-            if (cell->hidden_to_activation_weight_grad && cell->hidden_to_activation_weights) {
-                float g = cell->hidden_to_activation_weight_grad[k];
-                if (isfinite(g)) cell->hidden_to_activation_weights[k] -= learning_rate * g;
-            }
-        }
-        /* b_g: 门控偏置 */
-        if (cell->gate_bias_grad && cell->gate_biases) {
-            for (k = 0; k < hidden_size * 3; k++) {
-                float g = cell->gate_bias_grad[k];
-                if (isfinite(g)) cell->gate_biases[k] -= learning_rate * g;
-            }
-        }
-        /* τ: 自适应时间常数 */
-        if (cell->use_adaptive_tau && cell->time_constant_grad && cell->time_constants) {
-            for (k = 0; k < hidden_size; k++) {
-                float g = cell->time_constant_grad[k];
-                if (isfinite(g)) {
-                    cell->time_constants[k] -= cell->tau_learning_rate * g;
-                    if (cell->time_constants[k] < cell->min_time_constant)
-                        cell->time_constants[k] = cell->min_time_constant;
-                    if (cell->time_constants[k] > cell->max_time_constant)
-                        cell->time_constants[k] = cell->max_time_constant;
-                }
-            }
-        }
-    }
-
-    /* P0-001: 同步更新层归一化(γ, β)参数
-     * LN的γ/β梯度在 layer_norm_backward 中已通过+=累积，
-     * 此处统一在批量结束后更新。γ/β学习率自动减半以保证稳定性。 */
-    if (network->layer_norms) {
-        for (int layer = 0; layer < num_layers; layer++) {
-            if (network->layer_norms[layer]) {
-                layer_norm_update_params((LayerNorm*)network->layer_norms[layer], learning_rate);
-            }
-        }
-    }
-
-    return 0;
+    return cfc_apply_cell_gradients_adam(network, learning_rate, 0.9f, 0.999f, 1e-8f, 1);
 }
 
 /**
@@ -1538,6 +1480,11 @@ void cfc_reset(CfCNetwork* network) {
     // 重置各层
     for (int i = 0; i < network->config.num_layers; i++) {
         cfc_cell_reset(network->layers[i]);
+    }
+    
+    /* P0-001修复: 重置CfC增强层状态 */
+    if (network->enhanced_state) {
+        cfc_enhanced_state_reset((CfcEnhancedState*)network->enhanced_state);
     }
     
     // 重置缓冲区

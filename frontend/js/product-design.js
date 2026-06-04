@@ -64,7 +64,7 @@
             return;
         }
         pdShowLoading();
-        var url = '/product/spec';
+        var url = '/api/product/spec';
         var postData = JSON.stringify({ requirement: reqText });
 
         window.SelfLnnApi.request(url, {

@@ -167,6 +167,7 @@ typedef struct {
     float* state;           /**< 单元状态向量 */
     float* adapted_params;  /**< 自适应参数 */
     float* noise_buffer;    /**< 噪声缓冲区 */
+    float* ode_rhs_temp;    /**< P2-003修复: RHS RK2中间态预分配缓冲区 */
     float* activation;      /**< 激活值缓冲区 */
     float* gradient;        /**< 梯度缓冲区 */
     float* input_buffer;    /**< 输入缓冲区 */
@@ -516,6 +517,7 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
     cell->state->state = (float*)safe_calloc(hidden_size, sizeof(float));
     cell->state->adapted_params = (float*)safe_calloc(hidden_size, sizeof(float));
     cell->state->noise_buffer = (float*)safe_calloc(hidden_size, sizeof(float));
+    cell->state->ode_rhs_temp = (float*)safe_calloc(hidden_size, sizeof(float)); /* P2-003修复 */
     cell->state->activation = (float*)safe_calloc(hidden_size, sizeof(float));
     cell->state->gradient = (float*)safe_calloc(hidden_size, sizeof(float));
     cell->state->input_buffer = (float*)safe_calloc(input_size, sizeof(float));
@@ -950,6 +952,7 @@ void cfc_cell_free(CfCCell* cell) {
         safe_free((void**)&cell->state->state);
         safe_free((void**)&cell->state->adapted_params);
         safe_free((void**)&cell->state->noise_buffer);
+        safe_free((void**)&cell->state->ode_rhs_temp); /* P2-003修复 */
         safe_free((void**)&cell->state->activation);
         safe_free((void**)&cell->state->gradient);
         safe_free((void**)&cell->state->input_buffer);
@@ -1234,6 +1237,10 @@ static void cfc_cell_compute_rhs(CfCCell* cell, const float* input,
         rhs_output[i] = rhs_val;
     }
 }
+#undef CFC_CLOSED_FORM_EPSILON
+#undef CFC_EXTREME_DECAY_THRESHOLD
+#undef CFC_TANH_CLAMP_THRESHOLD
+#undef CFC_ADAPTIVE_TAU_BETA
 
 /**
  * @brief 多时间尺度并行演化的封闭形式解
@@ -1380,6 +1387,12 @@ static void cfc_multi_timescale_solution(CfCCell* cell, const float* input,
  */
 static void cfc_closed_form_solution(CfCCell* cell, const float* input,
                                     const float* prev_state, float delta_t, float* output) {
+    /* P2-001修复: 提取硬编码数值为命名常量，统一管理与修改 */
+    #define CFC_CLOSED_FORM_EPSILON         1e-8f  /* 数值稳定epsilon，防止除零 */
+    #define CFC_EXTREME_DECAY_THRESHOLD     20.0f  /* 遗忘门极端衰减阈值 */
+    #define CFC_TANH_CLAMP_THRESHOLD        10.0f  /* tanh饱和钳位阈值 */
+    #define CFC_ADAPTIVE_TAU_BETA           2.0f   /* 自适应τ的β衰减系数 */
+    
     size_t hidden_size = cell->config.hidden_size;
     size_t input_size = cell->config.input_size;
     const float* time_constants = cell->time_constants;
@@ -1477,16 +1490,16 @@ static void cfc_closed_form_solution(CfCCell* cell, const float* input,
         float new_state;
         float f_dt_tau = forget_gate * dt_over_tau;
         
-        if (f_dt_tau < 1e-8f) {
+        if (f_dt_tau < CFC_CLOSED_FORM_EPSILON) {
             /* 遗忘门几乎关闭：状态几乎不变 + 输入线性累积 */
             new_state = prev_state[i] + driver * dt_over_tau;
-        } else if (f_dt_tau > 20.0f) {
+        } else if (f_dt_tau > CFC_EXTREME_DECAY_THRESHOLD) {
             /* 遗忘门全开：旧状态完全替换为driver/f */
-            float steady_state = driver / (forget_gate + 1e-8f);
+            float steady_state = driver / (forget_gate + CFC_CLOSED_FORM_EPSILON);
             new_state = steady_state;
         } else {
             float exp_term = expf(-f_dt_tau);
-            float steady_state = driver / (forget_gate + 1e-8f);
+            float steady_state = driver / (forget_gate + CFC_CLOSED_FORM_EPSILON);
             new_state = prev_state[i] * exp_term + steady_state * (1.0f - exp_term);
         }
         
@@ -1494,8 +1507,8 @@ static void cfc_closed_form_solution(CfCCell* cell, const float* input,
         
         /* 输出门调制（应用于可见输出，不改变递归用的内部状态） */
         float tanh_new = new_state;
-        if (tanh_new > 10.0f) tanh_new = 1.0f;
-        else if (tanh_new < -10.0f) tanh_new = -1.0f;
+        if (tanh_new > CFC_TANH_CLAMP_THRESHOLD) tanh_new = 1.0f;
+        else if (tanh_new < -CFC_TANH_CLAMP_THRESHOLD) tanh_new = -1.0f;
         else tanh_new = tanhf(new_state);
         
         output[i] = output_gate * tanh_new;
@@ -1506,7 +1519,7 @@ static void cfc_closed_form_solution(CfCCell* cell, const float* input,
          * 此处的启发式更新仅用于非液时域模式下的自适应τ调整。 */
         if (cell->use_adaptive_tau && !cell->use_liquid_scaling) {
             float activation_magnitude = fabsf(new_state);
-            float beta = 2.0f;
+            float beta = CFC_ADAPTIVE_TAU_BETA;
             float target_tau = cell->min_time_constant + 
                               (cell->max_time_constant - cell->min_time_constant) * 
                               expf(-beta * activation_magnitude);
@@ -2336,21 +2349,12 @@ int cfc_cell_forward(CfCCell* cell, const float* input, float* hidden_state) {
                                 cell->config.delta_t,
                                 cell->state->activation);
     } else if (cell->config.ode_solver_type == ODE_SOLVER_RHS) {
-        /* R3-07/M-001修复: 升级RHS求解器从前向欧拉到RK2(Heun方法)
-         * 二阶精度，每步2次RHS评估，显著优于欧拉法O(h)→O(h²) */
+        /* P2-003修复: 使用预分配的ode_rhs_temp缓冲区代替每步malloc/free
+         * RK2(Heun方法)，二阶精度O(h²) */
         size_t hs = cell->config.hidden_size;
         float dt = cell->config.delta_t;
         float* rhs = cell->state->noise_buffer;
-        float* k2_buf = (float*)safe_malloc(hs * sizeof(float)); /* 临时中间态缓冲区 */
-        if (!k2_buf) {
-            /* 内存不足回退到欧拉法 */
-            for (size_t i = 0; i < hs; i++) {
-                float new_h = cell->state->state[i] + dt * rhs[i];
-                if (isnan(new_h) || isinf(new_h)) new_h = cell->state->state[i];
-                cell->state->activation[i] = new_h;
-            }
-            return -1; /* int返回类型，不可裸return */
-        }
+        float* k2_buf = cell->state->ode_rhs_temp; /* 预分配中间态缓冲区 */
         /* 第1步: k1 = f(t, y) * dt */
         cfc_cell_compute_rhs(cell, cell->state->input_buffer,
                             cell->state->state, rhs);
@@ -2370,7 +2374,7 @@ int cfc_cell_forward(CfCCell* cell, const float* input, float* hidden_state) {
             if (isnan(new_h) || isinf(new_h)) new_h = cell->state->state[i];
             cell->state->activation[i] = new_h;
         }
-        safe_free((void**)&k2_buf);
+        /* P2-003修复: k2_buf是预分配缓冲区，不需要safe_free */
     } else {
         cfc_closed_form_solution(cell,
                                 cell->state->input_buffer,

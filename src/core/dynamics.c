@@ -28,6 +28,26 @@ static int dynamics_ode_rhs(float t, const float* y, float* dydt, void* ctx);
 
 /* MSVC警告处理 */
 
+/* P1-004修复: 提取DP54 Butcher Tableau为文件级共享常量
+ * 原先在两处(adaptive_rk和内置dp54)独立定义了完全相同的系数。
+ * 现统一为static const，消除重复并确保系数一致性。 */
+static const float DP54_A21 = 1.0f / 5.0f;
+static const float DP54_A31 = 3.0f / 40.0f, DP54_A32 = 9.0f / 40.0f;
+static const float DP54_A41 = 44.0f / 45.0f, DP54_A42 = -56.0f / 15.0f, DP54_A43 = 32.0f / 9.0f;
+static const float DP54_A51 = 19372.0f / 6561.0f, DP54_A52 = -25360.0f / 2187.0f;
+static const float DP54_A53 = 64448.0f / 6561.0f, DP54_A54 = -212.0f / 729.0f;
+static const float DP54_A61 = 9017.0f / 3168.0f, DP54_A62 = -355.0f / 33.0f;
+static const float DP54_A63 = 46732.0f / 5247.0f, DP54_A64 = 49.0f / 176.0f, DP54_A65 = -5103.0f / 18656.0f;
+static const float DP54_A71 = 35.0f / 384.0f, DP54_A73 = 500.0f / 1113.0f;
+static const float DP54_A74 = 125.0f / 192.0f, DP54_A75 = -2187.0f / 6784.0f, DP54_A76 = 11.0f / 84.0f;
+/* 5阶解系数 */
+static const float DP54_B1 = 35.0f / 384.0f, DP54_B3 = 500.0f / 1113.0f;
+static const float DP54_B4 = 125.0f / 192.0f, DP54_B5 = -2187.0f / 6784.0f, DP54_B6 = 11.0f / 84.0f;
+/* 4阶嵌入系数（误差估计） */
+static const float DP54_BE1 = 5179.0f / 57600.0f, DP54_BE3 = 7571.0f / 16695.0f;
+static const float DP54_BE4 = 393.0f / 640.0f, DP54_BE5 = -92097.0f / 339200.0f;
+static const float DP54_BE6 = 187.0f / 2100.0f, DP54_BE7 = 1.0f / 40.0f;
+
 /* 静态求解器函数前向声明 */
 static void dynamics_internal_solve_euler(DynamicsSystem* system, const float* input, float dt);
 static void dynamics_internal_solve_rk2(DynamicsSystem* system, const float* input, float dt);
@@ -1131,26 +1151,8 @@ static float dynamics_internal_solve_dp54(DynamicsSystem* system, const float* i
     float h_max = system->config.max_step_size > 0.0f ?
                   system->config.max_step_size : dt_requested;
 
-    /* Dormand-Prince 5(4) Butcher Tableau系数 */
-    const float a21 = 1.0f / 5.0f;
-    const float a31 = 3.0f / 40.0f, a32 = 9.0f / 40.0f;
-    const float a41 = 44.0f / 45.0f, a42 = -56.0f / 15.0f, a43 = 32.0f / 9.0f;
-    const float a51 = 19372.0f / 6561.0f, a52 = -25360.0f / 2187.0f;
-    const float a53 = 64448.0f / 6561.0f, a54 = -212.0f / 729.0f;
-    const float a61 = 9017.0f / 3168.0f, a62 = -355.0f / 33.0f;
-    const float a63 = 46732.0f / 5247.0f, a64 = 49.0f / 176.0f;
-    const float a65 = -5103.0f / 18656.0f;
-    const float a71 = 35.0f / 384.0f, a73 = 500.0f / 1113.0f;
-    const float a74 = 125.0f / 192.0f, a75 = -2187.0f / 6784.0f, a76 = 11.0f / 84.0f;
-
-    /* 5阶解系数 */
-    const float b1 = 35.0f / 384.0f, b3 = 500.0f / 1113.0f;
-    const float b4 = 125.0f / 192.0f, b5 = -2187.0f / 6784.0f, b6 = 11.0f / 84.0f;
-
-    /* 4阶解系数（用于误差估计） */
-    const float be1 = 5179.0f / 57600.0f, be3 = 7571.0f / 16695.0f;
-    const float be4 = 393.0f / 640.0f, be5 = -92097.0f / 339200.0f;
-    const float be6 = 187.0f / 2100.0f, be7 = 1.0f / 40.0f;
+    /* P1-004修复: 使用文件级共享DP54系数常量，消除重复定义 */
+    /* 7级方法，利用FSAL特性(k7作为下一步k1)，实际每步仅需6次新函数求值 */
 
     /* 分配缓冲区 */
     float* k1 = system->workspace;
@@ -1174,65 +1176,65 @@ static float dynamics_internal_solve_dp54(DynamicsSystem* system, const float* i
     float actual_h = h;
 
     for (int attempt = 0; attempt < 10; attempt++) {
-        /* k2: f(y_n + a21*h*k1) */
+        /* k2: f(y_n + DP54_A21*h*k1) */
         for (size_t i = 0; i < state_size; i++) {
-            temp_state[i] = system->state[i] + actual_h * a21 * system->velocity[i];
-            temp_vel[i] = system->velocity[i] + actual_h * a21 * k1[i];
+            temp_state[i] = system->state[i] + actual_h * DP54_A21 * system->velocity[i];
+            temp_vel[i] = system->velocity[i] + actual_h * DP54_A21 * k1[i];
         }
         compute_derivatives(system, temp_state, temp_vel, input, temp_dstate, k2);
 
-        /* k3: f(y_n + h*(a31*k1 + a32*k2)) */
+        /* k3: f(y_n + h*(DP54_A31*k1 + DP54_A32*k2)) */
         for (size_t i = 0; i < state_size; i++) {
-            temp_state[i] = system->state[i] + actual_h * (a31 * system->velocity[i] + a32 * k2[i]);
-            temp_vel[i] = system->velocity[i] + actual_h * (a31 * k1[i] + a32 * k2[i]);
+            temp_state[i] = system->state[i] + actual_h * (DP54_A31 * system->velocity[i] + DP54_A32 * k2[i]);
+            temp_vel[i] = system->velocity[i] + actual_h * (DP54_A31 * k1[i] + DP54_A32 * k2[i]);
         }
         compute_derivatives(system, temp_state, temp_vel, input, temp_dstate, k3);
 
-        /* k4: f(y_n + h*(a41*k1 + a42*k2 + a43*k3)) */
+        /* k4: f(y_n + h*(DP54_A41*k1 + DP54_A42*k2 + DP54_A43*k3)) */
         for (size_t i = 0; i < state_size; i++) {
             temp_state[i] = system->state[i] + actual_h * (
-                a41 * system->velocity[i] + a42 * k2[i] + a43 * k3[i]);
+                DP54_A41 * system->velocity[i] + DP54_A42 * k2[i] + DP54_A43 * k3[i]);
             temp_vel[i] = system->velocity[i] + actual_h * (
-                a41 * k1[i] + a42 * k2[i] + a43 * k3[i]);
+                DP54_A41 * k1[i] + DP54_A42 * k2[i] + DP54_A43 * k3[i]);
         }
         compute_derivatives(system, temp_state, temp_vel, input, temp_dstate, k4);
 
-        /* k5: f(y_n + h*(a51*k1 + a52*k2 + a53*k3 + a54*k4)) */
+        /* k5: f(y_n + h*(DP54_A51*k1 + DP54_A52*k2 + DP54_A53*k3 + DP54_A54*k4)) */
         for (size_t i = 0; i < state_size; i++) {
             temp_state[i] = system->state[i] + actual_h * (
-                a51 * system->velocity[i] + a52 * k2[i] + a53 * k3[i] + a54 * k4[i]);
+                DP54_A51 * system->velocity[i] + DP54_A52 * k2[i] + DP54_A53 * k3[i] + DP54_A54 * k4[i]);
             temp_vel[i] = system->velocity[i] + actual_h * (
-                a51 * k1[i] + a52 * k2[i] + a53 * k3[i] + a54 * k4[i]);
+                DP54_A51 * k1[i] + DP54_A52 * k2[i] + DP54_A53 * k3[i] + DP54_A54 * k4[i]);
         }
         compute_derivatives(system, temp_state, temp_vel, input, temp_dstate, k5);
 
-        /* k6: f(y_n + h*(a61*k1 + a62*k2 + a63*k3 + a64*k4 + a65*k5)) */
+        /* k6: f(y_n + h*(DP54_A61*k1 + DP54_A62*k2 + DP54_A63*k3 + DP54_A64*k4 + DP54_A65*k5)) */
         for (size_t i = 0; i < state_size; i++) {
             temp_state[i] = system->state[i] + actual_h * (
-                a61 * system->velocity[i] + a62 * k2[i] + a63 * k3[i] +
-                a64 * k4[i] + a65 * k5[i]);
+                DP54_A61 * system->velocity[i] + DP54_A62 * k2[i] + DP54_A63 * k3[i] +
+                DP54_A64 * k4[i] + DP54_A65 * k5[i]);
             temp_vel[i] = system->velocity[i] + actual_h * (
-                a61 * k1[i] + a62 * k2[i] + a63 * k3[i] + a64 * k4[i] + a65 * k5[i]);
+                DP54_A61 * k1[i] + DP54_A62 * k2[i] + DP54_A63 * k3[i] + DP54_A64 * k4[i] + DP54_A65 * k5[i]);
         }
         compute_derivatives(system, temp_state, temp_vel, input, temp_dstate, k6);
 
-        /* k7: f(y_n + h*(a71*k1 + a73*k3 + a74*k4 + a75*k5 + a76*k6)) */
+        /* k7: f(y_n + h*(DP54_A71*k1 + DP54_A73*k3 + DP54_A74*k4 + DP54_A75*k5 + DP54_A76*k6)) */
         for (size_t i = 0; i < state_size; i++) {
             temp_state[i] = system->state[i] + actual_h * (
-                a71 * system->velocity[i] + a73 * k3[i] + a74 * k4[i] +
-                a75 * k5[i] + a76 * k6[i]);
+                DP54_A71 * system->velocity[i] + DP54_A73 * k3[i] + DP54_A74 * k4[i] +
+                DP54_A75 * k5[i] + DP54_A76 * k6[i]);
             temp_vel[i] = system->velocity[i] + actual_h * (
-                a71 * k1[i] + a73 * k3[i] + a74 * k4[i] + a75 * k5[i] + a76 * k6[i]);
+                DP54_A71 * k1[i] + DP54_A73 * k3[i] + DP54_A74 * k4[i] + DP54_A75 * k5[i] + DP54_A76 * k6[i]);
         }
         compute_derivatives(system, temp_state, temp_vel, input, temp_dstate, k7);
 
         /* 5阶解（位置和速度） */
         for (size_t i = 0; i < state_size; i++) {
             float new_state = system->state[i] + actual_h * (
-                b1 * system->velocity[i] + b3 * temp_vel[i] + b4 * k3[i] +
-                b5 * k5[i] + b6 * k6[i]);
+                DP54_B1 * system->velocity[i] + DP54_B3 * temp_vel[i] + DP54_B4 * k3[i] +
+                DP54_B5 * k5[i] + DP54_B6 * k6[i]);
             float new_vel = system->velocity[i] + actual_h * (
-                b1 * k1[i] + b3 * k2[i] + b4 * k3[i] + b5 * k5[i] + b6 * k6[i]);
+                DP54_B1 * k1[i] + DP54_B3 * k2[i] + DP54_B4 * k3[i] + DP54_B5 * k5[i] + DP54_B6 * k6[i]);
             temp_state[i] = new_state;
             temp_vel[i] = new_vel;
         }
@@ -1241,7 +1243,7 @@ static float dynamics_internal_solve_dp54(DynamicsSystem* system, const float* i
         float max_error = 0.0f;
         for (size_t i = 0; i < state_size; i++) {
             float y4 = system->velocity[i] + actual_h * (
-                be1 * k1[i] + be3 * k2[i] + be4 * k3[i] + be5 * k5[i] + be6 * k6[i] + be7 * k7[i]);
+                DP54_BE1 * k1[i] + DP54_BE3 * k2[i] + DP54_BE4 * k3[i] + DP54_BE5 * k5[i] + DP54_BE6 * k6[i] + DP54_BE7 * k7[i]);
             float error = fabsf(temp_vel[i] - y4);
             float scale = fabsf(temp_vel[i]) + fabsf(y4) + 1e-10f;
             float rel_error = error / scale;

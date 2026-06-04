@@ -265,6 +265,23 @@ class DialogueEnhanced {
             metadata: options && options.metadata ? options.metadata : null
         };
         this.dialogueHistory.push(entry);
+
+        /* F-严重修复: 对话历史持久化到后端
+         * 之前对话历史仅存储在客户端数组，页面刷新后全部丢失。
+         * 现在异步发送到后端 /api/dialogue 端点进行持久化存储。 */
+        if (window.SelfLnnApi && window.SelfLnnApi.connected) {
+            try {
+                window.SelfLnnApi.request('/api/dialogue', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        role: role,
+                        text: text,
+                        timestamp: entry.timestamp
+                    })
+                }).catch(function() {}); /* 静默失败，不阻塞UI */
+            } catch(e) {} /* 忽略持久化异常 */
+        }
         return entry;
     }
 
@@ -381,6 +398,13 @@ class DialogueEnhanced {
     clearHistory() {
         var count = this.dialogueHistory ? this.dialogueHistory.length : 0;
         this.dialogueHistory = [];
+        /* F-严重修复: 清空后端对话历史 */
+        if (window.SelfLnnApi && window.SelfLnnApi.connected) {
+            try {
+                window.SelfLnnApi.request('/api/dialogue/clear', { method: 'POST' })
+                    .catch(function() {});
+            } catch(e) {}
+        }
         return count;
     }
 

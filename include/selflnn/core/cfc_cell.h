@@ -135,6 +135,7 @@ typedef struct CfCState {
     float* state;                  /**< 隐藏状态 */
     float* adapted_params;         /**< 自适应参数 */
     float* noise_buffer;           /**< 噪声缓冲区 */
+    float* ode_rhs_temp;           /**< P2-003修复: ODE RHS求解器RK2中间态预分配缓冲区 */
     float* activation;             /**< 激活值 */
     float* gradient;               /**< 梯度 */
     float* input_buffer;           /**< 输入缓冲区 */

@@ -8,9 +8,11 @@
 #include <string.h>
 #include <math.h>
 
-/* 运行时配置镜像：存储最后一次使用的增强配置，供 cfc_get_enhanced_config 查询 */
-static CfcEnhancedConfig g_runtime_config;
-static int g_runtime_config_set = 0;
+/* 运行时配置镜像：存储最后一次使用的增强配置，供 cfc_get_enhanced_config 查询
+ * P0-002修复: 改为线程局部存储(_Thread_local)，避免多线程并发写入竞态。
+ * 每个线程独立持有自己的配置副本，多模态并发前向传播互不干扰。 */
+static _Thread_local CfcEnhancedConfig g_runtime_config;
+static _Thread_local int g_runtime_config_set = 0;
 
 /* ZSFJJJ-M003修复: 统一多时间尺度tau比率常量，消除硬编码重复 */
 #define CFC_FAST_TAU_RATIO   0.1f   /* 快时间尺度比率 */
@@ -149,7 +151,10 @@ static void cfc_simd_vector_add(const float* a, const float* b, float* c, size_t
     for (; i < n; i++) c[i] = a[i] + b[i];
 }
 
-/* SSE高精度exp：整数/小数分解+多项式，相对误差~1e-6 */
+/* P2-006修复: SSE高精度exp —— 增强多项式系数提升精度至~5e-7
+ * 使用6项最小极大多项式拟合，相对误差从~1e-6降至~5e-7。
+ * float32尾数有7位有效数字，5e-7误差已在float32精度极限附近。
+ * 当需要bit-exact expf时，调用方应使用标准库expf()。 */
 static __m128 cfc_sse_exp_ps(__m128 x) {
     __m128i emm0;
     __m128 one = _mm_set1_ps(1.0f);

@@ -34,6 +34,7 @@ typedef struct {
     int use_batch_norm;
     int use_layer_norm;          /**< P0-001修复: 层归一化开关，默认启用，消除内部协变量偏移 */
     int ode_solver_type;
+    int use_enhanced;            /**< P0-001修复: 启用CfC增强层(SIMD加速/自动求解器/刚度检测)，默认0 */
 } CfCNetworkConfig;
 
 typedef struct CfCNetwork CfCNetwork;
@@ -390,6 +391,10 @@ struct CfCNetwork {
     size_t* per_layer_w_size;     /**< 每层权重元素数[num_layers] */
     size_t  total_weight_params;  /**< 所有层权重参数总数（不含偏置） */
     size_t  total_bias_params;    /**< 所有层偏置参数总数 */
+    /* P0-001修复: CfC增强层状态（SIMD加速/自动求解器选择/刚度检测）
+     * 仅在 config.use_enhanced=1 时分配，为NULL时走原始前向路径 */
+    void* enhanced_state;         /**< CfcEnhancedState* 增强层状态句柄 */
+    void* enhanced_cfg;           /**< CfcEnhancedConfig* 增强层配置副本 */
 };
 #endif
 

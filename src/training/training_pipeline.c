@@ -128,6 +128,7 @@ struct TrainingPipeline {
     float last_best_val_loss;                  /**< 上次最佳验证损失（用于平台检测） */
     int plateau_counter;                       /**< 损失平台计数器（连续未下降epoch数） */
     int plateau_threshold;                     /**< 平台阈值（超过此时长触发LR衰减） */
+    int plateau_decay_count;                   /**< F-严重修复: 连续学习率衰减计数（触发结构变异用） */
     float plateau_lr_decay_factor;             /**< 平台时学习率衰减因子（0.5=减半） */
     int convergence_max_patience;              /**< 早停最大耐心值 */
     float convergence_rate; /**< EMA平滑收敛速率 */
@@ -286,6 +287,35 @@ static int pipeline_convergence_check(TrainingPipeline* pipeline,
                     "学习率衰减: %.8f → %.8f (衰减因子=%.2f)",
                     phase_name, pipeline->plateau_threshold,
                     old_lr, *lr_ptr, pipeline->plateau_lr_decay_factor);
+
+        /* F-严重修复: 损失平台→结构变异桥接
+         * 当学习率已连续衰减2次以上且损失仍在平台时，
+         * 触发架构控制器进行结构变异（增长/修剪/层数调整）。
+         * 这实现了真正的"自我演化进化能力"在训练中的闭环。 */
+        if (pipeline->plateau_decay_count >= 2) {
+            extern void* selflnn_get_evolution_engine(void);
+            extern int evolution_engine_structural_mutate(void*, void*, const void*, int);
+            void* evo = selflnn_get_evolution_engine();
+            if (evo) {
+                log_info("[训练收敛] %s | 连续%d次学习率衰减, 触发结构变异探索",
+                         phase_name, pipeline->plateau_decay_count);
+                /* 使用默认变异配置（10%扩展/收缩比例，30%概率） */
+                StructuralMutationConfig sm_cfg;
+                memset(&sm_cfg, 0, sizeof(sm_cfg));
+                sm_cfg.mut_type = STRUCT_MUTATE_EXPAND_RATIO;
+                sm_cfg.mutation_ratio = 0.1f;
+                sm_cfg.mutation_probability = 0.5f;
+                sm_cfg.min_hidden_size = 32;
+                sm_cfg.max_hidden_size = 4096;
+                sm_cfg.min_layers = 1;
+                sm_cfg.max_layers = 12;
+                evolution_engine_structural_mutate(evo, NULL, &sm_cfg, 
+                    (int)pipeline->plateau_decay_count);
+                pipeline->plateau_decay_count = 0;
+            }
+        } else {
+            pipeline->plateau_decay_count++;
+        }
     }
 
     return 0;
@@ -1302,6 +1332,7 @@ TrainingPipeline* training_pipeline_create(const TrainingPipelineConfig* config)
     tp->last_best_train_loss = FLT_MAX;
     tp->last_best_val_loss = FLT_MAX;
     tp->plateau_counter = 0;
+    tp->plateau_decay_count = 0;  /* F-严重修复: 结构变异触发计数器初始化为0 */
     tp->plateau_threshold = (tp->config.early_stopping_patience > 0)
         ? tp->config.early_stopping_patience / 2 : 4;  /**< 默认4个epoch无改善触发LR衰减 */
     if (tp->plateau_threshold < 2) tp->plateau_threshold = 2;
