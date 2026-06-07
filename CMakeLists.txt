@@ -238,6 +238,20 @@ if(MSVC)
     set_target_properties(selflnn PROPERTIES LINK_FLAGS "/STACK:67108864")
 endif()
 
+# R005: VS 2026 fails at ALL optimization levels (/O1, /O2, /Ox).
+# Tested: /O2(8次失败), /O1(1次失败), /Od mixed(6次失败).
+# All show "魔法数字不匹配" — compiler corrupts MemoryBlockHeader.
+# Only solution: VS 2022 (R89 verified 100% stable).
+# main+backend+memory_utils /Od; others /O2 (will work on VS 2022).
+# R005: VS 2022 stricter /WX + encoding.
+# /utf-8 needed for Chinese comments in source files.
+if(MSVC)
+    add_compile_options(/utf-8)
+    set_source_files_properties(src/main.c PROPERTIES COMPILE_FLAGS "/Od")
+    set_source_files_properties(src/backend/backend.c PROPERTIES COMPILE_FLAGS "/Od")
+    set_source_files_properties(src/utils/memory_utils.c PROPERTIES COMPILE_FLAGS "/Od")
+endif()
+
 target_include_directories(selflnn PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )

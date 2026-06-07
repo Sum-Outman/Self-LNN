@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file memory_utils.h
  * @brief 内存工具库
  * 
@@ -9,6 +9,7 @@
 #define SELFLNN_MEMORY_UTILS_H
 
 #include <stddef.h>
+#include <stdlib.h>
 
 /* 清理释放宏 — 安全释放单字段 */
 #define DEEP_COPY_CLEANUP_FREE(ptr) do { \
@@ -101,7 +102,11 @@ void* _safe_aligned_malloc(size_t size, size_t alignment, const char* file, int 
  * @param size 分配大小
  * @return void* 分配的内存指针，失败返回NULL
  */
-#define safe_malloc(size) _safe_malloc(size, __FILE__, __LINE__)
+#ifdef USE_STANDARD_ALLOC
+#  define safe_malloc(size) malloc(size)
+#else
+#  define safe_malloc(size) _safe_malloc(size, __FILE__, __LINE__)
+#endif
 
 /**
  * @brief 安全内存分配：分配并清零内存（类似calloc）
@@ -110,7 +115,11 @@ void* _safe_aligned_malloc(size_t size, size_t alignment, const char* file, int 
  * @param size 元素大小
  * @return void* 分配的内存指针，失败返回NULL
  */
-#define safe_calloc(num, size) _safe_calloc(num, size, __FILE__, __LINE__)
+#ifdef USE_STANDARD_ALLOC
+#  define safe_calloc(num, size) calloc(num, size)
+#else
+#  define safe_calloc(num, size) _safe_calloc(num, size, __FILE__, __LINE__)
+#endif
 
 /**
  * @brief 安全内存分配：分配对齐内存
@@ -119,7 +128,11 @@ void* _safe_aligned_malloc(size_t size, size_t alignment, const char* file, int 
  * @param alignment 对齐要求
  * @return void* 分配的内存指针，失败返回NULL
  */
-#define safe_aligned_malloc(size, alignment) _safe_aligned_malloc(size, alignment, __FILE__, __LINE__)
+#ifdef USE_STANDARD_ALLOC
+#  define safe_aligned_malloc(size, alignment) _aligned_malloc(size, alignment)
+#else
+#  define safe_aligned_malloc(size, alignment) _safe_aligned_malloc(size, alignment, __FILE__, __LINE__)
+#endif
 
 /**
  * @brief 安全内存释放：释放内存并置空指针
@@ -127,6 +140,9 @@ void* _safe_aligned_malloc(size_t size, size_t alignment, const char* file, int 
  * @param ptr 内存指针的地址
  */
 void safe_free(void** ptr);
+
+/* P6-R90: enable bypass to standard malloc/free for debugging */
+void memory_utils_bypass_safe_alloc(int bypass);
 
 /**
  * @brief 安全内存重新分配
@@ -288,6 +304,10 @@ int memory_unlock(void* ptr, size_t size);
         if (dest) { memcpy(dest, src, (src_count) * sizeof(float)); (dest_count) = (src_count); } \
     } \
 } while(0)
+
+/* R004: Bypass safe_alloc magic checks for VS 2026 /O2 compatibility.
+ * When enabled, safe_malloc/safe_free delegate directly to malloc/free. */
+void memory_utils_bypass_safe_alloc(int bypass);
 
 #ifdef __cplusplus
 }

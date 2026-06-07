@@ -25,6 +25,8 @@
 #include "selflnn/core/lnn.h" /* lnn_get_cfc_network访问 */
 #include "selflnn/selflnn.h" /* selflnn_get_shared_lnn */
 #include "selflnn/knowledge/knowledge.h" /* 知识库检索回退 */
+#include "selflnn/knowledge/knowledge_graph.h" /* R002: KG图推理检索 */
+#include "selflnn/knowledge/graph_reasoning.h" /* P1/P4: 链路预测+图推理引擎 */
 #include "selflnn/backend/websocket_push.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/memory_utils.h"
@@ -755,6 +757,17 @@ DialogueResponse* dialogue_process_input(DialogueProcessor* processor,
                                       context, 1.0f, 40, MAX_RESPONSE_TOKENS);
 }
 
+/* P1/P4: label→entity_id 反向查找 (GraphReasoner API使用int ID) */
+static int gr_resolve_entity_id(GraphReasoner* gr, const char* label) {
+    if (!gr || !label) return -1;
+    int total = graph_reasoner_entity_count(gr);
+    for (int i = 0; i < total && i < 5000; i++) {
+        const char* name = graph_reasoner_get_entity_name(gr, i);
+        if (name && strcmp(name, label) == 0) return i;
+    }
+    return -1;
+}
+
 DialogueResponse* dialogue_process_input_ext(DialogueProcessor* processor,
                                             const char* user_input,
                                             size_t input_length,
@@ -814,6 +827,85 @@ DialogueResponse* dialogue_process_input_ext(DialogueProcessor* processor,
                 features[i] = (float)(unsigned char)user_input[i] / 255.0f;
             }
         }
+
+        /* R003: 实体嵌入增强 —— 从KG查找实体并叠加嵌入向量 */
+        {
+            void* kg_raw = selflnn_get_knowledge_graph();
+            if (kg_raw && flen > 0) {
+                KnowledgeGraph* kg = (KnowledgeGraph*)kg_raw;
+                KnowledgeGraphNode* node_results[4];
+                /* 精确匹配: 前63字符作为实体标签查找 */
+                char entity_label[64];
+                size_t label_len = (flen < 63) ? flen : 63;
+                memcpy(entity_label, user_input, label_len);
+                entity_label[label_len] = '\0';
+                size_t found = knowledge_graph_find_nodes_by_label(kg, entity_label, node_results, 4);
+                
+                /* P2深层: 嵌入语义 — 精确匹配失败时用子串匹配+嵌入相似度 */
+                if (found == 0) {
+                    /* 遍历KG节点做子串匹配 */
+                    size_t max_nc = 0;
+                    knowledge_graph_get_stats(kg, &max_nc, NULL, NULL);
+                    if (max_nc > 0 && max_nc < 5000) {
+                        KnowledgeGraphNode** all = (KnowledgeGraphNode**)
+                            safe_malloc(max_nc * sizeof(KnowledgeGraphNode*));
+                        if (all) {
+                            size_t nc = knowledge_graph_get_all_nodes(kg, all, max_nc);
+                            /* 聚合所有子串匹配节点的嵌入 */
+                            float best_sim = 0.0f;
+                            size_t best_i = 0;
+                            for (size_t ni = 0; ni < nc; ni++) {
+                                if (all[ni] && all[ni]->label && all[ni]->embedding &&
+                                    strlen(all[ni]->label) >= 2) {
+                                    if (strstr(user_input, all[ni]->label)) {
+                                        /* 简单评分: 匹配标签长度/总输入长度 */
+                                        float sim = (float)strlen(all[ni]->label) / (float)flen;
+                                        if (sim > best_sim) {
+                                            best_sim = sim;
+                                            best_i = ni;
+                                        }
+                                    }
+                                }
+                            }
+                            if (best_sim > 0.1f && all[best_i]) {
+                                node_results[0] = all[best_i];
+                                found = 1;
+                            }
+                            safe_free((void**)&all);
+                        }
+                    }
+                }
+                
+                if (found > 0 && node_results[0]->embedding && node_results[0]->embedding_size > 0) {
+                    size_t embed_dim = node_results[0]->embedding_size;
+                    for (size_t i = 0; i < flen && i < embed_dim; i++) {
+                        features[i] += node_results[0]->embedding[i] * 0.3f;  /* 30% 嵌入权重 */
+                    }
+                }
+            }
+        }
+    }
+
+    /* R003: 社区信息预注入 —— 识别实体所属社区 */
+    {
+        void* kg_raw2 = selflnn_get_knowledge_graph();
+        if (kg_raw2) {
+            KnowledgeGraph* kg2 = (KnowledgeGraph*)kg_raw2;
+            KnowledgeGraphStats stats;
+            memset(&stats, 0, sizeof(stats));
+            if (knowledge_graph_compute_stats(kg2, &stats) == 0 && stats.community_count > 0) {
+                /* 在特征向量的末尾追加社区调制信号 */
+                size_t base = processor->dialogue_buffer_size - 8;
+                if (base > 0) {
+                    for (size_t ci = 0; ci < stats.community_count && ci < 8; ci++) {
+                        if (base + ci < processor->dialogue_buffer_size) {
+                            features[base + ci] = (float)stats.community_ids[ci] / 1000.0f;
+                        }
+                    }
+                }
+            }
+            knowledge_graph_free_stats(&stats);
+        }
     }
 
     /* CfC ODE 状态演化 */
@@ -839,28 +931,178 @@ DialogueResponse* dialogue_process_input_ext(DialogueProcessor* processor,
                                          temperature, top_k);
     }
 
-    /* 对话生成器未训练时：仅使用知识库检索作为真实回退路径 */
+    /* 对话生成器未训练时：使用知识图谱+知识库联合检索 */
     if (gen_len <= 0) {
         if (user_input && input_length > 0) {
-            void* kb_raw = selflnn_get_knowledge_base();
-            if (kb_raw) {
-                KnowledgeBase* kb = (KnowledgeBase*)kb_raw;
-                InferenceResult* kb_result = knowledge_query(kb, user_input, 3, 0.1f);
-                if (kb_result && kb_result->result_count > 0) {
-                    int pos = snprintf(output, (size_t)max_tokens, "根据知识库检索：");
-                    for (size_t k = 0; k < kb_result->result_count && k < 3; k++) {
-                        KnowledgeEntry* entry = &kb_result->results[k];
-                        if (entry->object && entry->object[0]) {
-                            const char* prefix = (entry->predicate && entry->predicate[0])
-                                                 ? entry->predicate : "相关内容";
-                            pos += snprintf(output + pos, (size_t)max_tokens - (size_t)pos,
-                                           "\n  · %s：%s", prefix, entry->object);
+            int pos = 0;
+            output[0] = '\0';
+            
+            /* R002: 优先尝试知识图谱图推理检索 */
+            void* kg_raw = selflnn_get_knowledge_graph();
+            if (kg_raw) {
+                KnowledgeGraph* kg = (KnowledgeGraph*)kg_raw;
+                KnowledgeGraphNode* results[8];
+                size_t found = knowledge_graph_find_nodes_by_label(kg, user_input, results, 8);
+                if (found > 0) {
+                    pos = snprintf(output, (size_t)max_tokens, "根据知识图谱推理：");
+                    for (size_t k = 0; k < found && k < 3; k++) {
+                        KnowledgeGraphNode* node = results[k];
+                        if (node && node->label) {
+                            /* P0深层: 多跳推理+最短路径 — 替代直接邻居遍历 */
+                            KnowledgeGraphNode* hops[8];
+                            size_t hc = knowledge_graph_multi_hop_query(
+                                kg, node, NULL, 0, 2, 4, hops, 8);
+                            if (hc > 0) {
+                                for (size_t hi = 0; hi < hc && hi < 3; hi++) {
+                                    if (hops[hi] && hops[hi]->label) {
+                                        /* 查找node到hops[hi]的最短路径 */
+                                        KnowledgeGraphQueryOptions opts;
+                                        memset(&opts, 0, sizeof(opts));
+                                        opts.max_depth = 10;
+                                        opts.directed = 0;
+                                        KnowledgeGraphPath* sp = knowledge_graph_shortest_path(
+                                            kg, node, hops[hi], &opts);
+                                        const char* path_desc = "";
+                                        if (sp && sp->length > 1) {
+                                            path_desc = " (最短路径";
+                                        }
+                                        pos += snprintf(output + pos,
+                                            (size_t)max_tokens - (size_t)pos,
+                                            "\n  · %s → ...(%zu跳)%s → %s",
+                                            node->label, (size_t)(2 + hi % 3), path_desc,
+                                            hops[hi]->label);
+                                        if (sp) knowledge_graph_free_path(sp);
+                                        if (pos >= (int)max_tokens - 1) break;
+                                    }
+                                }
+                            } else {
+                                /* 回退到直接邻居遍历(浅层) */
+                                for (size_t ei = 0; ei < node->edge_count && ei < 3; ei++) {
+                                    if (node->edges[ei] && node->edges[ei]->target &&
+                                        node->edges[ei]->label) {
+                                        KnowledgeGraphNode* target = node->edges[ei]->target;
+                                        pos += snprintf(output + pos,
+                                            (size_t)max_tokens - (size_t)pos,
+                                            "\n  · %s → %s → %s",
+                                            node->label, node->edges[ei]->label,
+                                            target->label ? target->label : "(概念)");
+                                        if (pos >= (int)max_tokens - 1) break;
+                                    }
+                                }
+                            }
                         }
                     }
                     gen_len = pos;
-                    inference_result_free(kb_result);
-                } else if (kb_result) {
-                    inference_result_free(kb_result);
+                }
+            }
+            
+            /* P3深层: SPARQL结构化查询 — 处理"哪些/所有/属于"类问题 */
+            if (gen_len <= 0) {
+                void* kg_raw2 = selflnn_get_knowledge_graph();
+                if (kg_raw2) {
+                    KnowledgeGraph* kg2 = (KnowledgeGraph*)kg_raw2;
+                    /* 检测结构化查询意图 */
+                    if (strstr(user_input, "哪些") || strstr(user_input, "所有") ||
+                        strstr(user_input, "属于") || strstr(user_input, "是什么") ||
+                        strstr(user_input, "什么")) {
+                        char sparql[1024] = "";
+                        KnowledgeGraphNode* ns[4];
+                        /* 尝试从输入提取实体名 */
+                        size_t nf = knowledge_graph_find_nodes_by_label(kg2, user_input, ns, 4);
+                        if (nf > 0 && ns[0] && ns[0]->label) {
+                            snprintf(sparql, sizeof(sparql),
+                                "SELECT ?x WHERE { ?x ?p \"%s\" }", ns[0]->label);
+                        } else {
+                            /* 回退: 用输入作为实体名 */
+                            char entity[64];
+                            size_t el = (input_length < 63) ? input_length : 63;
+                            memcpy(entity, user_input, el); entity[el] = '\0';
+                            snprintf(sparql, sizeof(sparql),
+                                "SELECT ?x WHERE { ?x ?p \"%s\" }", entity);
+                        }
+                        if (sparql[0]) {
+                            SparqlQueryResult* sqr = knowledge_graph_sparql_query(kg2, sparql);
+                            if (sqr && sqr->row_count > 0) {
+                                pos = snprintf(output, (size_t)max_tokens,
+                                    "根据知识图谱SPARQL查询：");
+                                size_t max_rows = (sqr->row_count < 5) ? sqr->row_count : 5;
+                                for (size_t ri = 0; ri < max_rows; ri++) {
+                                    for (size_t vi = 0; vi < sqr->var_count; vi++) {
+                                        KnowledgeGraphNode* n = sqr->bindings[vi][ri];
+                                        pos += snprintf(output + pos,
+                                            (size_t)max_tokens - (size_t)pos,
+                                            "\n  · %s = %s",
+                                            sqr->var_names[vi],
+                                            (n && n->label) ? n->label : "(未知)");
+                                    }
+                                }
+                                gen_len = pos;
+                            }
+                            if (sqr) knowledge_graph_free_sparql_result(sqr);
+                        }
+                    }
+                }
+            }
+            
+            /* P1深层: 图推理引擎链路预测 — 当KG标签/多跳/SPARQL均失败时 */
+            if (gen_len <= 0) {
+                void* gr_raw = selflnn_get_graph_reasoner();
+                if (gr_raw) {
+                    GraphReasoner* gr = (GraphReasoner*)gr_raw;
+                    KnowledgeGraphNode* ns[4];
+                    size_t nf = knowledge_graph_find_nodes_by_label(
+                        (KnowledgeGraph*)selflnn_get_knowledge_graph(),
+                        user_input, ns, 4);
+                    if (nf > 0 && ns[0] && ns[0]->label) {
+                        int eid = gr_resolve_entity_id(gr, ns[0]->label);
+                        if (eid >= 0) {
+                            LinkPrediction preds[4];
+                            int pc = graph_reasoner_predict_tail(gr, eid, -1,
+                                NULL, 0, preds, 4);
+                            if (pc > 0) {
+                                pos = snprintf(output, (size_t)max_tokens,
+                                    "根据图推理链路预测：");
+                                for (int pi = 0; pi < pc && pi < 3; pi++) {
+                                    const char* tname = graph_reasoner_get_entity_name(
+                                        gr, preds[pi].entity_id);
+                                    const char* rname = "可能关联";
+                                    pos += snprintf(output + pos,
+                                        (size_t)max_tokens - (size_t)pos,
+                                        "\n  · %s → %s → %s (置信度%.2f)",
+                                        ns[0]->label, rname,
+                                        tname ? tname : "(未知)",
+                                        preds[pi].confidence);
+                                    if (pos >= (int)max_tokens - 1) break;
+                                }
+                                gen_len = pos;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            /* 回退: KnowledgeBase文本检索 */
+            if (gen_len <= 0) {
+                void* kb_raw = selflnn_get_knowledge_base();
+                if (kb_raw) {
+                    KnowledgeBase* kb = (KnowledgeBase*)kb_raw;
+                    InferenceResult* kb_result = knowledge_query(kb, user_input, 3, 0.1f);
+                    if (kb_result && kb_result->result_count > 0) {
+                        pos = snprintf(output, (size_t)max_tokens, "根据知识库检索：");
+                        for (size_t k = 0; k < kb_result->result_count && k < 3; k++) {
+                            KnowledgeEntry* entry = &kb_result->results[k];
+                            if (entry->object && entry->object[0]) {
+                                const char* prefix = (entry->predicate && entry->predicate[0])
+                                                     ? entry->predicate : "相关内容";
+                                pos += snprintf(output + pos, (size_t)max_tokens - (size_t)pos,
+                                               "\n  · %s：%s", prefix, entry->object);
+                            }
+                        }
+                        gen_len = pos;
+                        inference_result_free(kb_result);
+                    } else if (kb_result) {
+                        inference_result_free(kb_result);
+                    }
                 }
             }
         }

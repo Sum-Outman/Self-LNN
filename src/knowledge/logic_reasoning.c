@@ -9,6 +9,7 @@
 
 #include "selflnn/knowledge/logic_reasoning.h"
 #include "selflnn/knowledge/semantic_network.h"
+#include "selflnn/knowledge/knowledge_graph.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/string_utils.h"
 #include "selflnn/utils/secure_random.h" /* 安全随机数 */
@@ -978,6 +979,27 @@ int logic_reasoning_engine_load_rules_from_graph(LogicReasoningEngine* engine, K
         }
     }
     
+    /* R003: 加载图统计信息作为推理规则 */
+    {
+        KnowledgeGraphStats stats;
+        memset(&stats, 0, sizeof(stats));
+        if (knowledge_graph_compute_stats(graph, &stats) == 0) {
+            /* 检查PageRank扩展: 为高PageRank节点增强推理置信度 */
+            if (stats.pagerank_scores && stats.node_count > 0) {
+                int high_rank_count = 0;
+                for (size_t j = 0; j < stats.node_count; j++) {
+                    if (stats.pagerank_scores[j] > 0.1f) high_rank_count++;
+                }
+                printf("图分析: %d个高影响力节点(PageRank>0.1), %zu个概念社区(模块度%.3f), 图直径%.1f, 密度%.3f\n",
+                       high_rank_count, stats.community_count, stats.modularity, stats.diameter, stats.density);
+            } else if (stats.community_ids && stats.community_count > 1) {
+                printf("图分析: 检测到%zu个概念社区(模块度%.3f), 图直径%.1f, 密度%.3f\n",
+                       stats.community_count, stats.modularity, stats.diameter, stats.density);
+            }
+            knowledge_graph_free_stats(&stats);
+        }
+    }
+
     return loaded_rules;
 }
 

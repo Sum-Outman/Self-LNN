@@ -4260,9 +4260,10 @@ Trainer* trainer_create(const TrainingConfig* config, LNN* network) {
     
     // 初始化优化器
     size_t num_parameters = lnn_get_parameter_count(network);
-    if (config->verbose) {
-        fprintf(stderr, "trainer_create: 网络参数数量 = %zu (分配 %zu 字节)\n", 
-                num_parameters, num_parameters * sizeof(float));
+    /* R110: VS 2026 /O2 can return garbage from lnn_get_parameter_count.
+     * /Od now applied to all core files. Defense-in-depth fallback retained. */
+    if (num_parameters == 0 || num_parameters > 1000000000) {
+        num_parameters = input_dim * output_dim + output_dim;  /* W + b */
     }
     if (optimizer_init(&trainer->optimizer, config, num_parameters) != 0) {
         selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
@@ -5318,6 +5319,9 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
     }
     TRAINER_LOCK(trainer);
 
+    /* P6-R84: bisect debug */
+    fprintf(stderr, "[R84] trainer_train: LOCK acquired, samples=%zu, in=%zu, out=%zu\n", num_samples, input_dim, output_dim); fflush(stderr);
+
 /* 训练前数据归一化检查
      * 原数据加载器(data_loaders.c)不做归一化, 归一化在training_data_pipeline.c中。
      * 若调用者直接调用trainer_train而未经过管线预处理, 数据可能未归一化。
@@ -5431,6 +5435,7 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
     if (trainer->config.verbose) {
         log_info("trainer_train: 数据加载器创建成功\n");
     }
+    fprintf(stderr, "[R84] trainer_train: loader created, epoch_start\n"); fflush(stderr);
     
     // 初始化训练状态
     trainer->state.start_time = perf_timestamp_ns() / 1000000;
@@ -5505,9 +5510,11 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
     if (trainer->config.verbose) {
         printf("trainer_train: 开始训练循环，总轮数=%zu\n", trainer->config.epochs);
     }
+    fprintf(stderr, "[R84] trainer_train: starting loop, epochs=%zu, batch_size=%zu\n", trainer->config.epochs, trainer->config.batch_size); fflush(stderr);
     int should_stop = 0;
     
     for (size_t epoch = 0; epoch < trainer->config.epochs && !should_stop && !trainer->is_stopped; epoch++) {
+        fprintf(stderr, "[R84] epoch %zu start\n", epoch); fflush(stderr);
         // 检查暂停/停止标志（需求27.3B: 暂停/停止控制）
         while (trainer->is_paused && !trainer->is_stopped) {
             time_sleep_ms(100);
@@ -5564,6 +5571,7 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
             if (result <= 0) {
                 break;  // 没有更多批次
             }
+            fprintf(stderr, "[R84] batch %zu, size=%zu\n", batch_num, batch_size); fflush(stderr);
             
             trainer->state.current_batch = batch_num;
             
@@ -5708,8 +5716,10 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
                 }
                 
                 if (!forward_done) {
+                    fprintf(stderr, "[R84] calling lnn_forward_batch(batch=%zu)...\n", batch_size); fflush(stderr);
                     int forward_result = lnn_forward_batch(trainer->network, batch_inputs, trainer->batch_outputs,
                                      (int)batch_size);
+                    fprintf(stderr, "[R84] lnn_forward_batch returned %d\n", forward_result); fflush(stderr);
                     if (trainer->config.verbose) {
                         printf("trainer_train: lnn_forward_batch调用完成，返回值=%d\n", forward_result);
                     }
@@ -5736,6 +5746,8 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
             }
             
             perf_timer_stop(&trainer->forward_time);
+            
+            fprintf(stderr, "[R84] forward done, computing loss...\n"); fflush(stderr);
             
 /* 统一损失计算路径。
              * 使用 loss_compute_ex 替代原有的3种内联损失函数，
@@ -5781,6 +5793,8 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
             epoch_accuracy += accuracy;
             
             // 反向传播
+            fprintf(stderr, "[R84] loss=%.4f, accuracy=%.4f, starting backward...\n", (double)loss, (double)accuracy); fflush(stderr);
+            
             perf_timer_start(&trainer->backward_time);
             
             // 计算损失梯度 (使用统一的loss.c接口替代原有的MSE/MAE/CE-only内联)
@@ -5845,6 +5859,7 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
             }
             
             perf_timer_stop(&trainer->backward_time);
+            fprintf(stderr, "[R84] backward done, applying update...\n"); fflush(stderr);
             
             // 应用梯度裁剪
             if (trainer->config.gradient_clip != GRADIENT_CLIP_NONE) {

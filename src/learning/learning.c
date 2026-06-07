@@ -69,7 +69,7 @@ typedef struct {
 /* 内部经验缓冲区常量 */
 #define LEARNING_INTERNAL_EXP_CAPACITY 512
 #define LEARNING_INTERNAL_STATE_DIM 256
-#define LEARNING_INTERNAL_ACTION_DIM 64
+#define LEARNING_INTERNAL_ACTION_DIM 128  /* R112: 64→128 to match LNN output_dim */
 
 /**
  * @brief 学习引擎内部结构体
@@ -4021,9 +4021,51 @@ int learning_engine_is_enabled(const LearningEngine* engine) {
     return (engine && engine->enabled) ? 1 : 0;
 }
 
+/* P6-R82: 直接向内部经验缓冲区注入种子数据 */
+int learning_engine_seed_experience(LearningEngine* engine,
+    const float* state, size_t state_dim,
+    const float* action, size_t action_dim,
+    float reward,
+    const float* next_state, size_t next_state_dim) {
+    if (!engine || !state || !action || state_dim == 0 || action_dim == 0) {
+        return -1;
+    }
+    if (engine->internal_exp_capacity <= 0) {
+        return -1;
+    }
+    
+    size_t copy_sd = state_dim < (size_t)LEARNING_INTERNAL_STATE_DIM
+                     ? state_dim : (size_t)LEARNING_INTERNAL_STATE_DIM;
+    size_t copy_ad = action_dim < (size_t)LEARNING_INTERNAL_ACTION_DIM
+                     ? action_dim : (size_t)LEARNING_INTERNAL_ACTION_DIM;
+    size_t copy_nsd = next_state_dim < (size_t)LEARNING_INTERNAL_STATE_DIM
+                      ? next_state_dim : (size_t)LEARNING_INTERNAL_STATE_DIM;
+    
+    int idx = engine->internal_exp_count < engine->internal_exp_capacity
+              ? engine->internal_exp_count
+              : (engine->internal_exp_count % engine->internal_exp_capacity);
+    
+    memcpy(&engine->internal_exp_states[idx * LEARNING_INTERNAL_STATE_DIM],
+           state, copy_sd * sizeof(float));
+    memcpy(&engine->internal_exp_actions[idx * LEARNING_INTERNAL_ACTION_DIM],
+           action, copy_ad * sizeof(float));
+    engine->internal_exp_rewards[idx] = reward;
+    if (next_state) {
+        memcpy(&engine->internal_exp_next_states[idx * LEARNING_INTERNAL_STATE_DIM],
+               next_state, copy_nsd * sizeof(float));
+    }
+    engine->internal_exp_state_dims[idx] = (int)copy_sd;
+    engine->internal_exp_action_dims[idx] = (int)copy_ad;
+    engine->internal_exp_next_state_dims[idx] = next_state ? (int)copy_nsd : 0;
+    engine->internal_exp_count++;
+    engine->internal_exp_real_data_count++;
+    
+    return 0;
+}
+
 /* ============================================================================
  * DEADCODE-FIX: manual_learning集成 - 桥接函数
- * 
+ *
  * manual_learning.c中有23个函数、约1377行代码，虽然learning.c包含
  * 了manual_learning.h头文件，但从未通过LearningEngine调用。
  * 以下桥接函数将manual_learning功能暴露给backend，使其可以通过

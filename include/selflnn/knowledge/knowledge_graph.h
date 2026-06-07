@@ -753,6 +753,21 @@ int knowledge_graph_layout_3d(float* positions,
                                int node_count, int edge_count,
                                int iterations);
 
+/* ================================================================
+ * M-024/R002: 知识图谱→LNN桥接 —— 将图谱概念嵌入注入液态神经网络
+ * ================================================================ */
+
+/**
+ * @brief 将知识图谱的概念嵌入聚合后注入LNN状态
+ * 遍历所有CONCEPT/ENTITY节点，按confidence加权聚合嵌入向量，
+ * 通过selflnn_consume_knowledge_inference注入LNN。
+ * @param kg 知识图谱句柄
+ * @param lnn LNN实例句柄
+ * @param strength 扰动强度 (0.0~1.0, 推荐0.1~0.3)
+ * @return 0=成功, -1=参数无效, -2=无活跃概念
+ */
+SELFLNN_API int knowledge_graph_to_lnn_bridge(void* kg, void* lnn, float strength);
+
 #ifdef __cplusplus
 }
 #endif

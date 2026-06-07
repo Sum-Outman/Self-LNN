@@ -23,6 +23,8 @@ static uint32_t memory_hash_key(const char* key) {
  */
 
 #include "selflnn/memory/memory.h"
+#include "selflnn/selflnn.h"
+#include "selflnn/knowledge/knowledge_graph.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/math_utils.h"
@@ -1149,6 +1151,16 @@ int memory_consolidate(MemorySystem* system, const char* key) {
     }
 
     MEMORY_UNLOCK(system);
+
+    /* R003: 同步语义记忆到知识图谱 */
+    {
+        void* kg = selflnn_get_knowledge_graph();
+        void* kb = selflnn_get_knowledge_base();
+        if (kg && kb) {
+            knowledge_graph_import_from_knowledge_base((KnowledgeGraph*)kg, (KnowledgeBase*)kb);
+        }
+    }
+
     return 0;
 }
 

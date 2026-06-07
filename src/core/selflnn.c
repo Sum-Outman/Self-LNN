@@ -31,6 +31,7 @@
 #include "selflnn/utils/string_utils.h"
 #include "selflnn/memory/memory_manager.h"
 #include "selflnn/knowledge/knowledge_graph.h"
+#include "selflnn/knowledge/graph_reasoning.h"  /* P1: 图推理引擎全局集成 */
 #include "selflnn/knowledge/knowledge.h"
 #include "selflnn/knowledge/auto_learning.h"
 #include "selflnn/knowledge/knowledge_inference.h"
@@ -166,27 +167,28 @@ typedef enum {
     MODULE_ID_UNIFIED_STATE = 1,
     MODULE_ID_MEMORY_MANAGER = 2,
     MODULE_ID_KNOWLEDGE_GRAPH = 3,
-    MODULE_ID_KNOWLEDGE_BASE = 4,
-    MODULE_ID_REASONING_ENGINE = 5,
-    MODULE_ID_UNIFIED_SIGNAL = 6,
-    MODULE_ID_DIALOGUE = 7,
-    MODULE_ID_SELF_COGNITION = 8,
-    MODULE_ID_METACOGNITION = 9,
-    MODULE_ID_PROGRAMMING = 10,
-    MODULE_ID_PRODUCT_DESIGN = 11,
-    MODULE_ID_MULTISYSTEM = 12,
-    MODULE_ID_GPU_CONTEXT = 13,
-    MODULE_ID_EVOLUTION = 14,
-    MODULE_ID_SAFETY = 15,
-    MODULE_ID_DISTRIBUTED = 16,
-    MODULE_ID_THREAD_POOL = 17,
-    MODULE_ID_ONLINE_LEARNER = 18,
-    MODULE_ID_PLANNING = 19,
-    MODULE_ID_ROBOT = 20,
-    MODULE_ID_AUTO_LEARNING = 21,
-    MODULE_ID_KNOWLEDGE_INFERENCE = 22,
-    MODULE_ID_MULTI_AGENT = 23,  /* H-015: 多智能体协作框架 */
-    MODULE_ID_DATA_PIPELINE = 24, /* 数据采集管线独立模块ID */
+    MODULE_ID_GRAPH_REASONER = 4,
+    MODULE_ID_KNOWLEDGE_BASE = 5,
+    MODULE_ID_REASONING_ENGINE = 6,
+    MODULE_ID_UNIFIED_SIGNAL = 7,
+    MODULE_ID_DIALOGUE = 8,
+    MODULE_ID_SELF_COGNITION = 9,
+    MODULE_ID_METACOGNITION = 10,
+    MODULE_ID_PROGRAMMING = 11,
+    MODULE_ID_PRODUCT_DESIGN = 12,
+    MODULE_ID_MULTISYSTEM = 13,
+    MODULE_ID_GPU_CONTEXT = 14,
+    MODULE_ID_EVOLUTION = 15,
+    MODULE_ID_SAFETY = 16,
+    MODULE_ID_DISTRIBUTED = 17,
+    MODULE_ID_THREAD_POOL = 18,
+    MODULE_ID_ONLINE_LEARNER = 19,
+    MODULE_ID_PLANNING = 20,
+    MODULE_ID_ROBOT = 21,
+    MODULE_ID_AUTO_LEARNING = 22,
+    MODULE_ID_KNOWLEDGE_INFERENCE = 23,
+    MODULE_ID_MULTI_AGENT = 24,
+    MODULE_ID_DATA_PIPELINE = 25,
     MODULE_COUNT
 } ModuleId;
 
@@ -214,6 +216,7 @@ static struct {
     double start_time;
     void* memory_manager;
     void* knowledge_graph;
+    void* graph_reasoner;       /* P1: 图推理引擎 — 链路预测+多跳增强+嵌入相似度 */
     void* knowledge_base;
     void* reasoning_engine;
     void* programming_engine;
@@ -445,6 +448,7 @@ int selflnn_init(const SystemConfig* config)
     selflnn_register_module(MODULE_ID_UNIFIED_STATE, g_system_state.unified_lnn_state, 0);
     if (g_system_state.memory_manager) selflnn_register_module(MODULE_ID_MEMORY_MANAGER, g_system_state.memory_manager, 1);
     if (g_system_state.knowledge_graph) selflnn_register_module(MODULE_ID_KNOWLEDGE_GRAPH, g_system_state.knowledge_graph, 1);
+    if (g_system_state.graph_reasoner) selflnn_register_module(MODULE_ID_GRAPH_REASONER, g_system_state.graph_reasoner, 1);
     if (g_system_state.knowledge_base) selflnn_register_module(MODULE_ID_KNOWLEDGE_BASE, g_system_state.knowledge_base, 1);
     if (g_system_state.reasoning_engine) selflnn_register_module(MODULE_ID_REASONING_ENGINE, g_system_state.reasoning_engine, 1);
     if (g_system_state.unified_signal_processor) selflnn_register_module(MODULE_ID_UNIFIED_SIGNAL, g_system_state.unified_signal_processor, 1);
@@ -555,6 +559,7 @@ int selflnn_process_input(const MultimodalInput* input, SystemState* state)
     /* FIX-005修复: 统计全部24个子系统，与g_system_state结构体字段一致 */
     if (g_system_state.memory_manager)          init_count++;
     if (g_system_state.knowledge_graph)          init_count++;
+    if (g_system_state.graph_reasoner)           init_count++;
     if (g_system_state.knowledge_base)           init_count++;
     if (g_system_state.reasoning_engine)         init_count++;
     if (g_system_state.unified_signal_processor) init_count++;
@@ -1314,6 +1319,7 @@ void* selflnn_get_dialogue_memory(void) { return g_system_state.dialogue_memory_
 /* 多模态教学系统公共访问器 */
 void* selflnn_get_multimodal_teaching(void) { return g_system_state.multimodal_teaching; }
 void* selflnn_get_knowledge_graph(void) { return g_system_state.knowledge_graph; } /* 知识图谱公共访问器 */
+void* selflnn_get_graph_reasoner(void) { return g_system_state.graph_reasoner; } /* P1: 图推理引擎访问器 */
 void* selflnn_get_gpu_context(void) { return g_system_state.gpu_context; } /* GPU上下文公共访问器 */
 
 /*修复: AGI后台任务所需的状态访问器函数
@@ -1581,6 +1587,10 @@ static int initialize_subsystems(const SystemConfig* config)
         goto cleanup;
     }
     
+    /* P1: 创建图推理引擎 — 基于知识图谱的链路预测/多跳增强/嵌入推理 */
+    g_system_state.graph_reasoner = graph_reasoner_create(NULL, NULL, NULL, NULL);
+    /* NULL参数: 使用默认配置, 内部自建property_graph/adjacency_list, 无需RDF */
+    
 /*修复: 知识库初始化（关键子系统）
      * 使用 knowledge_base_create_with_preset() 自动加载:
      *   - 281条内置种子知识（物理常数/数学规则/逻辑公理/常识等）
@@ -1741,32 +1751,10 @@ static int initialize_subsystems(const SystemConfig* config)
             log_info("GPU加速已禁用（--no-gpu），跳过GPU后端检测");
             g_system_state.config.gpu_backend = GPU_BACKEND_CPU;
         } else {
-            GpuBackend target_backend = config->gpu_backend;
-            if (target_backend == GPU_BACKEND_CPU || target_backend == 0) {
-                unsigned int available = gpu_get_available_backends(NULL, 0);
-                if (available & GPU_BACKEND_FLAG_CUDA) { target_backend = GPU_BACKEND_CUDA; }
-                else if (available & GPU_BACKEND_FLAG_ROCM) { target_backend = GPU_BACKEND_ROCM; }
-                else if (available & GPU_BACKEND_FLAG_OPENCL) { target_backend = GPU_BACKEND_OPENCL; }
-                else if (available & GPU_BACKEND_FLAG_VULKAN) { target_backend = GPU_BACKEND_VULKAN; }
-                else if (available & GPU_BACKEND_FLAG_METAL) { target_backend = GPU_BACKEND_METAL; }
-                else if (available & GPU_BACKEND_FLAG_ASCEND) { target_backend = GPU_BACKEND_ASCEND; }
-                else if (available & GPU_BACKEND_FLAG_CAMBRICON) { target_backend = GPU_BACKEND_CAMBRICON; }
-                else if (available & GPU_BACKEND_FLAG_TPU) { target_backend = GPU_BACKEND_TPU; }
-                else { target_backend = GPU_BACKEND_CPU; }
-                if (target_backend != GPU_BACKEND_CPU) {
-                    g_system_state.gpu_context = gpu_context_create(target_backend, 0);
-                    if (g_system_state.gpu_context) {
-                        g_system_state.config.gpu_backend = target_backend;
-                        log_info("GPU上下文已提前初始化，后端: %s", gpu_backend_name(target_backend));
-                    } else { g_system_state.config.gpu_backend = GPU_BACKEND_CPU; }
-                }
-            } else {
-                g_system_state.gpu_context = gpu_context_create(target_backend, 0);
-                if (g_system_state.gpu_context) {
-                    g_system_state.config.gpu_backend = target_backend;
-                    log_info("GPU上下文已提前初始化，后端: %s", gpu_backend_name(target_backend));
-                }
-            }
+            /* P6-060: gpu_context_create → cuda_backend_init crashes (SEH 0xC0000005)
+             * in HEAD commit. Working tree patches on gpu_cuda.c/gpu.c missing.
+             * Force CPU-only until CUDA init safety patches are restored. */
+            g_system_state.config.gpu_backend = GPU_BACKEND_CPU;
         }
     }
     
@@ -1786,6 +1774,8 @@ static int initialize_subsystems(const SystemConfig* config)
         lnn_config.enable_adaptation = 1;
         lnn_config.enable_evolution = 1;
         g_system_state.lnn_instance = selflnn_get_or_create_lnn(&lnn_config);
+        fprintf(stderr, "[R90-DIAG] LNN=%p\n", g_system_state.lnn_instance); fflush(stderr);
+        fprintf(stderr, "[R90-DIAG] entering LNN init block\n"); fflush(stderr);
         if (g_system_state.lnn_instance) {
             log_info("LNN液态神经网络初始化成功，输入维度=%zu，隐藏维度=%zu，输出维度=%zu",
                      lnn_config.input_size, lnn_config.hidden_size, lnn_config.output_size);
@@ -1798,8 +1788,10 @@ static int initialize_subsystems(const SystemConfig* config)
             }
             /* P0-001: 创建架构控制器 —— 运行时安全地修改LNN网络结构 */
             {
+                fprintf(stderr, "[R90-DIAG] before arch_controller_create\n"); fflush(stderr);
                 ArchitectureControllerConfig ac_config = arch_controller_default_config();
                 g_system_state.arch_controller = (void*)arch_controller_create(&ac_config);
+                fprintf(stderr, "[R90-DIAG] arch_controller=%p\n", g_system_state.arch_controller); fflush(stderr);
                 if (g_system_state.arch_controller) {
                     log_info("动态架构控制器初始化成功 (支持运行时扩展/收缩/增删层)");
                     /* 注入到自我认知系统，打通架构修正闭环 */
@@ -1832,6 +1824,7 @@ static int initialize_subsystems(const SystemConfig* config)
     }
     
     // 5.1 初始化统一LNN状态（单一模型原则：所有模态共享同一连续动态系统）
+    fprintf(stderr, "[R90-DIAG] before unified_lnn_state\n"); fflush(stderr);
     if (g_system_state.lnn_instance) {
         UnifiedLNNStateConfig unified_config = unified_lnn_state_get_default_config();
         unified_config.state_dimension = (size_t)config->state_dimension;
@@ -1852,10 +1845,14 @@ static int initialize_subsystems(const SystemConfig* config)
         unified_config.raw_dimensions[UNIFIED_MODALITY_RADAR] = 64;
         unified_config.raw_dimensions[UNIFIED_MODALITY_MOTOR] = 128;
         g_system_state.unified_lnn_state = unified_lnn_state_create(&unified_config);
+        fprintf(stderr, "[R90-DIAG] unified_lnn_state=%p\n", g_system_state.unified_lnn_state); fflush(stderr);
         if (g_system_state.unified_lnn_state) {
+            fprintf(stderr, "[R90-DIAG] calling set_shared_lnn(uls=%p, lnn=%p)\n", 
+                g_system_state.unified_lnn_state, g_system_state.lnn_instance); fflush(stderr);
             unified_lnn_state_set_shared_lnn(
                 (UnifiedLNNState*)g_system_state.unified_lnn_state,
                 g_system_state.lnn_instance);
+            fprintf(stderr, "[R90-DIAG] unified_lnn_state bound to LNN\n"); fflush(stderr);
             log_info("统一LNN状态初始化成功（已绑定共享LNN），状态维度=%zu，输出维度=%zu",
                      unified_config.state_dimension, unified_config.output_dimension);
         } else {
@@ -1865,6 +1862,7 @@ static int initialize_subsystems(const SystemConfig* config)
     
     // 6. 初始化自我认知系统
     {
+        fprintf(stderr, "[R90-DIAG] before self_cognition_create\n"); fflush(stderr);
         SelfCognitionConfig cognition_config;
         memset(&cognition_config, 0, sizeof(SelfCognitionConfig));
         cognition_config.enable_continuous_monitoring = 1;
@@ -1874,6 +1872,7 @@ static int initialize_subsystems(const SystemConfig* config)
         cognition_config.enable_knowledge_tracking = 1;
         cognition_config.enable_self_correction = 1;
         g_system_state.self_cognition_system = self_cognition_create(&cognition_config);
+        fprintf(stderr, "[R90-DIAG] self_cognition=%p\n", g_system_state.self_cognition_system); fflush(stderr);
         if (g_system_state.self_cognition_system) {
             log_info("自我认知系统初始化成功");
         } else {
@@ -1883,6 +1882,7 @@ static int initialize_subsystems(const SystemConfig* config)
     
     // 7. 初始化元认知系统
     {
+        fprintf(stderr, "[R90-DIAG] before metacognition_create\n"); fflush(stderr);
         MetacognitionMonitoringConfig monitoring_config;
         memset(&monitoring_config, 0, sizeof(MetacognitionMonitoringConfig));
         monitoring_config.monitoring_type = METACOGNITION_MONITORING_PERFORMANCE;
@@ -1910,14 +1910,27 @@ static int initialize_subsystems(const SystemConfig* config)
         prediction_config.enable_multiple_horizons = 1;
         prediction_config.enable_uncertainty_quantification = 1;
         
+        /* P6-R90: SEH wrapper for metacognition */
+#ifdef _WIN32
+        __try {
+#endif
         g_system_state.metacognition_system = metacognition_system_create(
             &monitoring_config, &model_update_config, &prediction_config);
+#ifdef _WIN32
+        } __except(GetExceptionCode()) {
+            g_system_state.metacognition_system = NULL;
+            fprintf(stderr, "[R90-DIAG] metacognition SEH: 0x%08X\n", GetExceptionCode()); fflush(stderr);
+        }
+#endif
+        fprintf(stderr, "[R90-DIAG] metacognition=%p\n", g_system_state.metacognition_system); fflush(stderr);
         if (g_system_state.metacognition_system) {
             // 关联LNN实例到元认知系统
             if (g_system_state.lnn_instance) {
+                fprintf(stderr, "[R90-DIAG] metacognition_set_lnn\n"); fflush(stderr);
                 metacognition_system_set_lnn(
                     (MetacognitionSystem*)g_system_state.metacognition_system,
                     (LNN*)g_system_state.lnn_instance);
+                fprintf(stderr, "[R90-DIAG] metacognition_set_lnn done\n"); fflush(stderr);
             }
             log_info("元认知系统初始化成功");
         } else {
@@ -1926,8 +1939,19 @@ static int initialize_subsystems(const SystemConfig* config)
     }
     
     // 8. 初始化自我编程引擎
+    fprintf(stderr, "[R90-DIAG] before programming_engine\n"); fflush(stderr);
     if (config->state_dimension > 0) {
+#ifdef _WIN32
+        __try {
+#endif
         g_system_state.programming_engine = self_programming_engine_create(LANG_C);
+#ifdef _WIN32
+        } __except(GetExceptionCode()) {
+            g_system_state.programming_engine = NULL;
+            fprintf(stderr, "[R90-DIAG] programming_engine SEH: 0x%08X\n", GetExceptionCode()); fflush(stderr);
+        }
+#endif
+        fprintf(stderr, "[R90-DIAG] programming_engine=%p\n", g_system_state.programming_engine); fflush(stderr);
         if (g_system_state.programming_engine) {
             log_info("自我编程引擎初始化成功");
         } else {
@@ -1936,7 +1960,18 @@ static int initialize_subsystems(const SystemConfig* config)
     }
     
     // 9. 初始化产品设计引擎
+    fprintf(stderr, "[R90-DIAG] before product_design\n"); fflush(stderr);
+#ifdef _WIN32
+    __try {
+#endif
     g_system_state.product_design_engine = product_design_engine_create();
+#ifdef _WIN32
+    } __except(GetExceptionCode()) {
+        g_system_state.product_design_engine = NULL;
+        fprintf(stderr, "[R90-DIAG] product_design SEH: 0x%08X\n", GetExceptionCode()); fflush(stderr);
+    }
+#endif
+    fprintf(stderr, "[R90-DIAG] product_design=%p\n", g_system_state.product_design_engine); fflush(stderr);
     if (g_system_state.product_design_engine) {
         log_info("产品设计引擎初始化成功");
         int seeds_loaded = product_design_load_seed_cases(
@@ -1951,7 +1986,18 @@ static int initialize_subsystems(const SystemConfig* config)
     }
     
     // 10. 初始化多系统控制器
+    fprintf(stderr, "[R90-DIAG] before multisystem_control\n"); fflush(stderr);
+#ifdef _WIN32
+    __try {
+#endif
     g_system_state.multisystem_controller = multisystem_control_engine_create();
+#ifdef _WIN32
+    } __except(GetExceptionCode()) {
+        g_system_state.multisystem_controller = NULL;
+        fprintf(stderr, "[R90-DIAG] multisystem SEH: 0x%08X\n", GetExceptionCode()); fflush(stderr);
+    }
+#endif
+    fprintf(stderr, "[R90-DIAG] multisystem=%p\n", g_system_state.multisystem_controller); fflush(stderr);
     if (g_system_state.multisystem_controller) {
         log_info("多系统控制器初始化成功");
     } else {
@@ -1974,6 +2020,7 @@ static int initialize_subsystems(const SystemConfig* config)
     
     // 13. 初始化对话系统
     {
+        fprintf(stderr, "[R90-DIAG] before dialogue_processor\n"); fflush(stderr);
         DialogueConfig dialogue_config;
         memset(&dialogue_config, 0, sizeof(DialogueConfig));
         dialogue_config.max_context_length = config->memory_capacity > 0 ? config->memory_capacity : 100;
@@ -2426,6 +2473,7 @@ static int initialize_subsystems(const SystemConfig* config)
     }
 
     log_info("总共完成 35 个子系统初始化（含10个新增模块 + 机器人模块）");
+    fprintf(stderr, "[R90-DIAG] selflnn_init COMPLETE\n"); fflush(stderr);
     return result;
 
 cleanup:
@@ -2446,7 +2494,13 @@ static void shutdown_subsystems(void)
         g_system_state.memory_manager = NULL;
     }
     
-    // 2. 销毁知识图谱
+    // 2. 销毁图推理引擎 (P1: 在知识图谱前销毁, 因为依赖它)
+    if (g_system_state.graph_reasoner) {
+        graph_reasoner_destroy((GraphReasoner*)g_system_state.graph_reasoner);
+        g_system_state.graph_reasoner = NULL;
+    }
+    
+    // 2.1 销毁知识图谱
     if (g_system_state.knowledge_graph) {
         knowledge_graph_free((KnowledgeGraph*)g_system_state.knowledge_graph);
         g_system_state.knowledge_graph = NULL;

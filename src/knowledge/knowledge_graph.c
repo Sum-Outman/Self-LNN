@@ -5170,3 +5170,24 @@ int knowledge_graph_to_lnn_bridge(void* kg, void* lnn, float strength) {
     safe_free((void**)&aggregated_embedding);
     return (result >= 0) ? 0 : -1;
 }
+/* P6-060 */
+/* R002: 知识图谱路径查找（委托find_all_paths完整实现） */
+size_t knowledge_graph_find_paths(KnowledgeGraph* g, KnowledgeGraphNode* s, KnowledgeGraphNode* e, KnowledgeGraphPath** p, size_t m) {
+    if (!g || !s || !e || !p || m == 0) return 0;
+    KnowledgeGraphQueryOptions opts;
+    memset(&opts, 0, sizeof(opts));
+    opts.max_depth = (int)(g->node_count > 0 ? g->node_count : 100);
+    opts.min_confidence = 0.0f;
+    opts.directed = 0;
+    opts.include_cycles = 0;
+    opts.max_results = m;
+    KnowledgeGraphPath** all = knowledge_graph_find_all_paths(g, s, e, &opts, m);
+    if (!all) return 0;
+    size_t count = 0;
+    for (size_t i = 0; i < m && all[i] != NULL; i++) {
+        p[i] = all[i];
+        count++;
+    }
+    safe_free((void**)&all);
+    return count;
+}

@@ -1020,8 +1020,6 @@ static inline void simd_sigmoid_forward(float* restrict y, const float* restrict
     {
         __m128 large = _mm_set1_ps(k_large);
         __m128 neg_large = _mm_set1_ps(-k_large);
-        __m128 one = _mm_set1_ps(k_one);
-        __m128 zero = _mm_setzero_ps();
         int i = 0;
         for (; i <= n - 4; i += 4) {
             __m128 x_vec = _mm_loadu_ps(&x[i]);

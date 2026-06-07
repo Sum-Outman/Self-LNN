@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file json_parser.c
  * @brief 纯C RFC 8259 JSON解析器实现
  *
@@ -234,6 +234,7 @@ static JsonValue* json_parse_object(JsonParser* p, int depth) {
     if (c == '}') { p->pos++; return v; }
 
     for (;;) {
+        skip_whitespace(p); /* P6-064: skip newlines before object key */
         char* key = json_parse_string_core(p);
         if (!key) { json_free(v); return NULL; }
 

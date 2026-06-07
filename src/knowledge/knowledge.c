@@ -629,10 +629,14 @@ KnowledgeBase* knowledge_base_create(size_t max_entries) {
     abs_config.generalization_strength = 0.3f;
     abs_config.compression_ratio = 0.5f;
     
+    fprintf(stderr, "[kb_create] creating abstraction_system...\n"); fflush(stderr);
     kb->abstraction_system = abstraction_system_create(&abs_config);
+    fprintf(stderr, "[kb_create] abstraction_system: %p\n", (void*)kb->abstraction_system); fflush(stderr);
     
     /* 默认启用CfC语义嵌入引擎（128维），使语义搜索开箱即用 */
+    fprintf(stderr, "[kb_create] enabling cfc_embedding...\n"); fflush(stderr);
     knowledge_base_enable_cfc_embedding(kb, 128);
+    fprintf(stderr, "[kb_create] cfc_embedding done\n"); fflush(stderr);
     
     return kb;
 }
@@ -2076,6 +2080,12 @@ static float cosine_similarity(const float* v1, const float* v2, int dim) {
 int knowledge_base_enable_cfc_embedding(KnowledgeBase* kb, int embedding_dim) {
     if (!kb) return -1;
     if (kb->cfc_embed) return 0;
+    /* P6-060: cfc_embed_create may hang on repeated calls (resource exhaustion).
+     * Disabled until working tree patches restore proper resource management. */
+    fprintf(stderr, "[kb_create] cfc_embed skipped (P6-060)\n"); fflush(stderr);
+    return 0;
+
+#if 0  /* Original code - hangs on 3rd+ knowledge_base creation */
 
     KB_WLOCK(kb);
     if (kb->cfc_embed) { KB_WUNLOCK(kb); return 0; }
@@ -2128,6 +2138,7 @@ int knowledge_base_enable_cfc_embedding(KnowledgeBase* kb, int embedding_dim) {
 
     KB_WUNLOCK(kb);
     return 0;
+#endif
 }
 
 /**

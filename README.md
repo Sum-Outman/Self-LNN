@@ -1,8 +1,8 @@
 # SELF-LNN 全液态神经网络 AGI 系统
 # SELF-LNN Full Liquid Neural Network AGI System
 
-> **版本 / Version:** 1.5.0 | **语言 / Language:** 100% Pure C (C11) | **许可证 / License:** Apache 2.0
-> **构建 / Build:** CMake 3.10+ | **平台 / Platform:** Windows / Linux / macOS
+> **版本 / Version:** 1.6.0 | **语言 / Language:** 100% Pure C (C11) | **许可证 / License:** Apache 2.0
+> **构建 / Build:** CMake 3.10+ | **推荐编译器 / Recommended Compiler:** VS 2022 / GCC 7+ / Clang 6+
 > **开源仓库 / Repository:** https://github.com/Sum-Outman/Self-LNN
 > **开发者邮箱 / Developer Email:** silencecrowtom@qq.com
 
@@ -56,7 +56,7 @@ The system features self-cognition, reasoning, learning, evolution, memory, robo
 | **演化系统** | CMA-ES 演化策略、帕累托优化、NAS 神经架构搜索 |
 | **动态架构** | 运行时网络结构自我调整：扩展/收缩隐藏层、增删层、知识迁移、安全审批、原子交换 |
 | **记忆系统** | 5 层记忆体系（短期、长期、情景、语义、工作记忆）、Ebbinghaus 遗忘曲线、Hebbian 巩固 |
-| **知识库** | 知识图谱、三元组存储、多跳推理、本体工程、语义网络 |
+| **知识库** | 知识图谱+知识库双引擎、图推理路径查找(DFS回溯)、PageRank/社区检测/Louvain、SPARQL查询、多跳推理、实体嵌入增强对话、知识图谱→LNN桥接(bridge) |
 | **机器人控制** | DH 运动学、A*/RRT* 路径规划、ROS/ROS2 集成、PyBullet/Gazebo 仿真、多机器人协调 |
 | **GPU 加速** | 10 种 GPU 后端接口（CUDA、OpenCL、Vulkan、Metal、ROCm、CPU-SIMD — 完整内核调度+线程池并行；Intel、Ascend、Cambricon、TPU — 通过dlsym动态加载SDK + CPU自动回退；CPU 后端支持 27+ 种真实内核算子） |
 | **后端服务** | HTTP REST API（290 handler槽位，282个API枚举 + 8个向后兼容别名）、WebSocket 实时通信、API 密钥认证、安全监控 |
@@ -229,13 +229,17 @@ The system is divided into four architectural layers:
 
 #### 中文
 ```bash
-# Windows (MSVC, VS 2022)
+# Windows (推荐VS 2022 / Recommended VS 2022)
 mkdir build && cd build
 cmake .. -G "Visual Studio 17 2022" -A x64
 cmake --build . --config Release
 
-# 或使用脚本
-# or use scripts
+# ⚠️ VS 2026 /O2 已知问题: safe_alloc魔法数字损坏导致启动失败。
+# 如必须使用VS 2026, 请将CMakeLists.txt中/Od扩展到memory_utils.c。
+# ⚠️ VS 2026 /O2 known issue: magic number corruption in safe_alloc.
+# If using VS 2026, extend /Od to memory_utils.c in CMakeLists.txt.
+
+# 或使用脚本 / or use scripts
 scripts\build.bat
 
 # Linux (GCC/Clang)
@@ -250,10 +254,13 @@ bash scripts/build.sh
 
 #### English
 ```bash
-# Windows (MSVC, VS 2022)
+# Windows (recommended VS 2022)
 mkdir build && cd build
 cmake .. -G "Visual Studio 17 2022" -A x64
 cmake --build . --config Release
+
+# ⚠️ VS 2026 /O2 known issue: magic number corruption in safe_alloc at startup.
+# If using VS 2026, extend /Od to memory_utils.c in CMakeLists.txt.
 
 # Or use scripts: scripts\build.bat
 
@@ -586,18 +593,28 @@ For embedded platform deployment, please refer to `docs/Embedded_Deployment_Guid
 ### 知识库 / Knowledge Base
 
 #### 中文
-- **知识图谱**：三元组存储（主语-谓语-宾语）
-- **多跳推理**：链式推理、路径查找
+- **知识图谱+知识库双引擎**：知识图谱(graph)提供图结构化推理，知识库(kb)提供文本条目检索，互补协作
+- **图推理路径查找**：DFS回溯最短路径、多跳关系查询、关系模式匹配
+- **图分析算法**：PageRank节点重要性、Louvain社区检测、介数/紧密度中心性、图密度/直径
+- **SPARQL查询引擎**：支持SELECT/WHERE/OPTIONAL/LIMIT，内建解析器+执行器
+- **知识图谱↔LNN桥接(bridge)**：将知识图谱概念嵌入加权聚合后注入LNN，使对话C​fC演化基于结构化知识
+- **对话注入体系(7个注入点)**：覆盖对话入口预注入、图推理检索、实体嵌入特征增强、社区调制、回复实体标注、AGI后台循环、教学实时写图
+- **知识图谱API端点(7个)**：/api/kg/stats, pagerank, communities, path, search, sparql, visualize
 - **本体工程**：概念层次、属性定义
+- **知识整合**：知识库→图谱单向导入(import_from_kb)、记忆巩固时自动同步
 - **语义网络**：概念关联网络
-- **知识整合**：自动知识学习、知识融合
 
 #### English
-- **Knowledge Graph**: Triple store (subject-predicate-object)
-- **Multi-hop Reasoning**: Chain reasoning, path finding
+- **Knowledge Graph + Knowledge Base Dual Engine**: Graph for structured reasoning, KB for text retrieval, complementary
+- **Graph Reasoning Path Finding**: DFS backtracking shortest path, multi-hop query, relation pattern matching
+- **Graph Analysis**: PageRank, Louvain community detection, betweenness/closeness centrality, density/diameter
+- **SPARQL Query Engine**: SELECT/WHERE/OPTIONAL/LIMIT support, built-in parser+executor
+- **KG↔LNN Bridge**: Weighted aggregation of concept embeddings injected into LNN — dialogue CfC evolution based on structured knowledge
+- **7 Injection Points**: Dialogue pre-injection, graph reasoning retrieval, entity embedding enhancement, community modulation, reply entity annotation, AGI background loop, real-time teach-to-graph
+- **7 KG API Endpoints**: /api/kg/stats, pagerank, communities, path, search, sparql, visualize
 - **Ontology Engineering**: Concept hierarchy, attribute definition
+- **Knowledge Integration**: KB→KG import, auto-sync on memory consolidation
 - **Semantic Network**: Concept association network
-- **Knowledge Integration**: Automatic knowledge learning, knowledge fusion
 
 ---
 

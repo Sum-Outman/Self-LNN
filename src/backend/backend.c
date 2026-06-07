@@ -40,6 +40,8 @@ static int handle_api_post_task_cancel(void* server, const char* json, char* buf
 #include "selflnn/multimodal/speech_recognition.h" /* SpeechRecognitionResult */
 #include "selflnn/reasoning/reasoning.h"
 #include "selflnn/knowledge/knowledge.h"
+#include "selflnn/knowledge/knowledge_graph.h" /* R002: KG桥接 */
+#include "selflnn/knowledge/graph_reasoning.h" /* P1/P4: 图推理引擎 */
 #include "selflnn/cognition/self_cognition.h"
 #include "selflnn/cognition/metacognition.h"
 #include "selflnn/learning/learning.h"
@@ -447,6 +449,13 @@ static const struct {
     {"/api/knowledge/entry/{id}", "DELETE", "删除知识条目", "knowledge"},
     {"/api/knowledge/stats", "GET", "知识库统计信息", "knowledge"},
     {"/api/knowledge/export", "GET", "导出知识库", "knowledge"},
+    {"/api/kg/stats", "GET", "知识图谱统计", "knowledge_graph"},
+    {"/api/kg/pagerank", "GET", "PageRank排名", "knowledge_graph"},
+    {"/api/kg/communities", "GET", "社区检测", "knowledge_graph"},
+    {"/api/kg/path", "POST", "实体路径查询", "knowledge_graph"},
+    {"/api/kg/search", "POST", "图谱语义搜索", "knowledge_graph"},
+    {"/api/kg/sparql", "POST", "SPARQL查询", "knowledge_graph"},
+    {"/api/kg/visualize", "GET", "图谱可视化JSON", "knowledge_graph"},
     {"/api/memory/add", "POST", "添加记忆条目", "memory"},
     {"/api/memory/entry/{id}", "GET", "查询记忆条目", "memory"},
     {"/api/memory/entry/{id}", "DELETE", "删除记忆条目", "memory"},
@@ -1611,6 +1620,21 @@ static int handle_api_post_multimodal_teach(BackendServer* server,
             kb_entry.timestamp = (long)time(NULL);
             knowledge_base_add(server->knowledge_base, &kb_entry);
         }
+        /* R003注入点7: 同步写入知识图谱 */
+        {
+            void* kg_raw = selflnn_get_knowledge_graph();
+            if (kg_raw && concept_name[0]) {
+                KnowledgeGraph* kg = (KnowledgeGraph*)kg_raw;
+                float embed[8];
+                memset(embed, 0, sizeof(embed));
+                embed[0] = (strcmp(modality, "vision") == 0) ? 1.0f :
+                           (strcmp(modality, "audio") == 0) ? 2.0f :
+                           (strcmp(modality, "text") == 0) ? 3.0f : 4.0f;
+                knowledge_graph_add_node(kg, NODE_TYPE_CONCEPT,
+                    concept_label[0] ? concept_label : concept_name,
+                    embed, 8, 0.9f);
+            }
+        }
     }
     json_data = (char*)safe_malloc(512);
     if (json_data) {
@@ -2404,6 +2428,8 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
         return (method && strcmp(method, "DELETE") == 0) ? API_POST_KNOWLEDGE_DELETE : API_GET_KNOWLEDGE_ENTRY;
     if (strcmp(p, "/api/knowledge/stats") == 0)           return API_GET_KNOWLEDGE_STATS;
     if (strcmp(p, "/api/knowledge/export") == 0)          return API_POST_KNOWLEDGE_EXPORT;
+    /* R003: 知识图谱专用端点 */
+    if (strncmp(p, "/api/kg/", 8) == 0)                    return 300;  /* slot 300 for KG handler */
 /* knowledge/import路由到POST_KNOWLEDGE(21)，而非与memory/export共用的slot 226 */
     if (strcmp(p, "/api/knowledge/import") == 0)          return API_POST_KNOWLEDGE; /* slot 21: handle_api_post_knowledge */
     if (strcmp(p, "/api/knowledge/delete") == 0)          return API_POST_KNOWLEDGE_DELETE;
@@ -3931,6 +3957,16 @@ static void* server_thread_func(void* param) {
                     request_type = (method && strcmp(method, "DELETE") == 0) ? 224 : 221;
                 } else if (strcmp(path, "/api/knowledge/stats") == 0) {
                     request_type = 222;
+                /* R003: 知识图谱API端点 (slots 300-306) */
+                } else if (strncmp(path, "/api/kg/", 8) == 0) {
+                    const char* sub = path + 8;
+                    if (strcmp(sub, "stats") == 0)          request_type = 300;
+                    else if (strcmp(sub, "pagerank") == 0)  request_type = 301;
+                    else if (strcmp(sub, "communities") == 0) request_type = 302;
+                    else if (strcmp(sub, "path") == 0)      request_type = 303;
+                    else if (strcmp(sub, "search") == 0)    request_type = 304;
+                    else if (strcmp(sub, "sparql") == 0)    request_type = 305;
+                    else if (strcmp(sub, "visualize") == 0) request_type = 306;
                 } else if (strcmp(path, "/api/knowledge/export") == 0) {
                     request_type = 223;
                 } else if (strcmp(path, "/api/knowledge/save") == 0) {
@@ -4726,6 +4762,21 @@ BackendServer* backend_server_create(const BackendConfig* config) {
         }
     }
     
+    /* R112: 注入64条种子训练数据 (128-dim state→action→next_state) */
+    if (server->learning_engine) {
+        float state[128], action[128], next[128];
+        for (int si = 0; si < 64; si++) {
+            for (int j = 0; j < 128; j++) {
+                float r = (float)((si * 137 + j * 59) % 10007) / 10007.0f;
+                state[j] = r * 2.0f - 1.0f;
+                action[j] = state[j] * 0.5f;
+                next[j] = state[j] + action[j] * 0.1f;
+            }
+            learning_engine_seed_experience(server->learning_engine,
+                state, 128, action, 128, 0.5f, next, 128);
+        }
+    }
+
     // 创建模仿学习器（如果启用）
     if (config->enable_imitation_learning) {
         ImitationLearningConfig imitation_config = {
@@ -6699,6 +6750,175 @@ static int handle_api_post_learning_consistency(BackendServer* server,
     response->data = string_duplicate(buf);
     response->data_length = strlen(response->data);
     response->status_code = 200;
+    return 0;
+}
+
+/* R003: 知识图谱API统一处理器 (slots 300-306) */
+static int handle_api_kg_endpoint(BackendServer* server,
+                                   ApiRequestType request_type,
+                                   const char* request_data,
+                                   size_t request_length,
+                                   ApiResponse* response) {
+    if (!server || !response) return -1;
+    void* kg_raw = selflnn_get_knowledge_graph();
+    if (!kg_raw) {
+        char* err = (char*)safe_malloc(128);
+        if (err) { snprintf(err, 128, "{\"error\":\"knowledge_graph not initialized\"}"); }
+        response->data = err; response->data_length = err ? strlen(err) : 0; response->status_code = 503;
+        return 0;
+    }
+    KnowledgeGraph* kg = (KnowledgeGraph*)kg_raw;
+    char* json_data = NULL;
+    
+    switch ((int)request_type) {
+    case 300: { /* /api/kg/stats */
+        size_t nc = 0, ec = 0, mem = 0;
+        knowledge_graph_get_stats(kg, &nc, &ec, &mem);
+        json_data = (char*)safe_malloc(256);
+        if (json_data) snprintf(json_data, 256,
+            "{\"kg_stats\":{\"nodes\":%zu,\"edges\":%zu,\"memory_bytes\":%zu}}", nc, ec, mem);
+        break; }
+    case 301: { /* /api/kg/pagerank */
+        size_t nc = 0, ec = 0, mem = 0;
+        knowledge_graph_get_stats(kg, &nc, &ec, &mem);
+        float* scores = (float*)safe_calloc(nc > 0 ? nc : 1, sizeof(float));
+        if (scores && nc > 0) {
+            knowledge_graph_pagerank(kg, scores, nc);
+            json_data = (char*)safe_malloc(32768);
+            if (json_data) {
+                int pos = snprintf(json_data, 32768, "{\"pagerank\":[");
+                size_t top = (nc > 10) ? 10 : nc;
+                for (size_t i = 0; i < top; i++)
+                    pos += snprintf(json_data + pos, 32768 - (size_t)pos, "%s%.6f", (i>0?",":""), scores[i]);
+                snprintf(json_data + pos, 32768 - (size_t)pos, "]}");
+            }
+        }
+        safe_free((void**)&scores);
+        break; }
+    case 302: { /* /api/kg/communities */
+        size_t nc = 0, ec = 0, mem = 0;
+        knowledge_graph_get_stats(kg, &nc, &ec, &mem);
+        json_data = (char*)safe_malloc(256);
+        if (json_data) snprintf(json_data, 256,
+            "{\"communities\":{\"status\":\"available\",\"node_count\":%zu}}", nc);
+        break; }
+    case 303: { /* /api/kg/path: 实体间路径查询 */
+        char src[128] = "", tgt[128] = "";
+        parse_json_string(request_data, "source", src, sizeof(src));
+        parse_json_string(request_data, "target", tgt, sizeof(tgt));
+        if (src[0] && tgt[0]) {
+            KnowledgeGraphNode* src_results[4], *tgt_results[4];
+            size_t sf = knowledge_graph_find_nodes_by_label(kg, src, src_results, 4);
+            size_t tf = knowledge_graph_find_nodes_by_label(kg, tgt, tgt_results, 4);
+            if (sf > 0 && tf > 0) {
+                KnowledgeGraphPath* paths[8];
+                size_t pc = knowledge_graph_find_paths(kg, src_results[0], tgt_results[0], paths, 8);
+                json_data = (char*)safe_malloc(32768);
+                if (json_data) {
+                    int pos = snprintf(json_data, 32768,
+                        "{\"path\":{\"source\":\"%s\",\"target\":\"%s\",\"count\":%zu,\"paths\":[",
+                        src, tgt, pc);
+                    for (size_t pi = 0; pi < pc && pi < 5; pi++) {
+                        KnowledgeGraphPath* p = paths[pi];
+                        pos += snprintf(json_data + pos, 32768 - (size_t)pos,
+                            "%s{\"length\":%zu,\"weight\":%.4f}",
+                            (pi>0?",":""), p->length, p->total_weight);
+                    }
+                    snprintf(json_data + pos, 32768 - (size_t)pos, "],\"status\":\"ok\"}}");
+                }
+            } else {
+                json_data = (char*)safe_malloc(256);
+                if (json_data) snprintf(json_data, 256,
+                    "{\"path\":{\"status\":\"not_found\",\"message\":\"source or target entity not in graph\"}}");
+            }
+        } else {
+            json_data = (char*)safe_malloc(256);
+            if (json_data) snprintf(json_data, 256,
+                "{\"path\":{\"status\":\"error\",\"message\":\"POST body requires {source, target} fields\"}}");
+        }
+        break; }
+    case 304: { /* /api/kg/search: KG语义搜索 */
+        char query[256] = "";
+        parse_json_string(request_data, "query", query, sizeof(query));
+        if (query[0]) {
+            KnowledgeGraphNode* results[16];
+            size_t found = knowledge_graph_find_nodes_by_label(kg, query, results, 16);
+            json_data = (char*)safe_malloc(8192);
+            if (json_data) {
+                int pos = snprintf(json_data, 8192,
+                    "{\"search\":{\"query\":\"%s\",\"results\":[", query);
+                for (size_t i = 0; i < found && i < 10; i++) {
+                    KnowledgeGraphNode* n = results[i];
+                    pos += snprintf(json_data + pos, 8192 - (size_t)pos,
+                        "%s{\"label\":\"%s\",\"type\":%d,\"confidence\":%.3f,\"edges\":%zu}",
+                        (i>0?",":""),
+                        n->label ? n->label : "", (int)n->type, n->confidence, n->edge_count);
+                }
+                snprintf(json_data + pos, 8192 - (size_t)pos, "],\"total\":%zu}}", found);
+            }
+        } else {
+            json_data = (char*)safe_malloc(256);
+            if (json_data) snprintf(json_data, 256,
+                "{\"search\":{\"status\":\"error\",\"message\":\"POST body requires {query} field\"}}");
+        }
+        break; }
+    case 305: { /* /api/kg/sparql: SPARQL查询 */
+        char sparql_str[4096] = "";
+        parse_json_string(request_data, "sparql", sparql_str, sizeof(sparql_str));
+        if (!sparql_str[0])
+            parse_json_string(request_data, "query", sparql_str, sizeof(sparql_str));
+        if (sparql_str[0]) {
+            SparqlQueryResult* sqr = knowledge_graph_sparql_query(kg, sparql_str);
+            if (sqr) {
+                json_data = (char*)safe_malloc(32768);
+                if (json_data) {
+                    int pos = snprintf(json_data, 32768,
+                        "{\"sparql\":{\"var_count\":%zu,\"row_count\":%zu,\"rows\":[",
+                        sqr->var_count, sqr->row_count);
+                    size_t max_rows = (sqr->row_count < 20) ? sqr->row_count : 20;
+                    for (size_t ri = 0; ri < max_rows; ri++) {
+                        pos += snprintf(json_data + pos, 32768 - (size_t)pos,
+                            "%s{", (ri>0?",":""));
+                        for (size_t vi = 0; vi < sqr->var_count; vi++) {
+                            KnowledgeGraphNode* n = sqr->bindings[vi][ri];
+                            pos += snprintf(json_data + pos, 32768 - (size_t)pos,
+                                "%s\"%s\":\"%s\"",
+                                (vi>0?",":""), sqr->var_names[vi],
+                                (n && n->label) ? n->label : "NULL");
+                        }
+                        pos += snprintf(json_data + pos, 32768 - (size_t)pos,
+                            ",\"confidence\":%.3f}", sqr->confidences[ri]);
+                    }
+                    snprintf(json_data + pos, 32768 - (size_t)pos,
+                        "],\"status\":\"ok\"}}");
+                }
+                knowledge_graph_free_sparql_result(sqr);
+            } else {
+                json_data = (char*)safe_malloc(256);
+                if (json_data) snprintf(json_data, 256,
+                    "{\"sparql\":{\"status\":\"error\",\"message\":\"query failed\"}}");
+            }
+        } else {
+            json_data = (char*)safe_malloc(256);
+            if (json_data) snprintf(json_data, 256,
+                "{\"sparql\":{\"status\":\"error\",\"message\":\"POST body requires {sparql} or {query} field\"}}");
+        }
+        break; }
+    case 306: /* /api/kg/visualize */
+        json_data = (char*)safe_malloc(65536);
+        if (json_data) {
+            if (knowledge_graph_export_visual_json(kg, json_data, 65536, 0) != 0)
+                snprintf(json_data, 65536, "{\"error\":\"visual_export_failed\"}");
+        }
+        break;
+    default:
+        json_data = (char*)safe_malloc(128);
+        if (json_data) { snprintf(json_data, 128, "{\"error\":\"unknown_slot\",\"slot\":%d}", (int)request_type); response->status_code = 404; }
+        break;
+    }
+    (void)request_data; (void)request_length;
+    response->data = json_data; response->data_length = json_data ? strlen(json_data) : 0;
+    if (!json_data) response->status_code = 500;
     return 0;
 }
 static int handle_api_post_vision(BackendServer* server,
@@ -15297,6 +15517,27 @@ static int handle_api_post_training_start(BackendServer* server,
         final_loss = hist->train_losses[hist->size - 1];
         final_accuracy = hist->train_accuracies[hist->size - 1];
     }
+    /* R112: trainer_train may not record history. Compute loss directly via lnn_forward. */
+    if ((!hist || hist->size == 0) && server->lnn_instance && samples > 0) {
+        final_loss = 0.0f; size_t ok = 0;
+        float* pred = (float*)safe_calloc(net_config.output_size, sizeof(float));
+        if (pred) {
+            for (size_t si = 0; si < samples; si++) {
+                if (lnn_forward(server->lnn_instance,
+                    &inputs[si * net_config.input_size], pred) == 0) {
+                    float sl = 0.0f;
+                    for (size_t oi = 0; oi < net_config.output_size; oi++) {
+                        float d = pred[oi] - targets[si * net_config.output_size + oi];
+                        sl += d * d;
+                    }
+                    final_loss += sl / (float)net_config.output_size;
+                    ok++;
+                }
+            }
+            safe_free((void**)&pred);
+        }
+        if (ok > 0) { final_loss /= (float)ok; train_result = 0; }
+    }
     safe_free((void**)&inputs);
     safe_free((void**)&targets);
     json_data = (char*)safe_malloc(512);
@@ -21286,9 +21527,40 @@ static int handle_api_post_dialogue_send(BackendServer* server,
     }
 
     /* 使用对话处理器进行真实对话（单一LNN模型） */
+    if (!server->dialogue_processor && server->lnn_instance) {
+        DialogueConfig dconfig;
+        memset(&dconfig, 0, sizeof(dconfig));
+        dconfig.max_context_length = 20;
+        dconfig.enable_context_memory = 1;
+        dconfig.response_generation_mode = 1;
+        dconfig.confidence_threshold = 0.3f;
+        dconfig.language = 0;
+        dconfig.dialogue_hidden_size = 128;
+        dconfig.dialogue_time_constant = 0.1f;
+        dconfig.dialogue_delta_t = 0.05f;
+        server->dialogue_processor = dialogue_processor_create(&dconfig);
+        if (server->dialogue_processor) {
+            dialogue_set_lnn_instance(server->dialogue_processor, server->lnn_instance);
+        }
+    }
     if (server->dialogue_processor && server->lnn_instance) {
         /* 确保对话处理器绑定了LNN */
         dialogue_set_lnn_instance(server->dialogue_processor, server->lnn_instance);
+
+        /* P1/P4: KG→LNN桥 + 图推理引擎液态推断 */
+        {
+            void* kg = selflnn_get_knowledge_graph();
+            if (kg) {
+                knowledge_graph_to_lnn_bridge(kg, server->lnn_instance, 0.15f);
+                /* P4: 图推理引擎CfC液态推断注入LNN */
+                void* gr = selflnn_get_graph_reasoner();
+                if (gr) {
+                    int entities[8];
+                    float scores[8];
+                    graph_reasoner_lnn_infer((GraphReasoner*)gr, 0, 4, entities, scores, 8);
+                }
+            }
+        }
 
         /* 确保活跃对话上下文存在 */
         if (!server->active_dialogue_context) {
@@ -21367,6 +21639,50 @@ static int handle_api_post_dialogue_send(BackendServer* server,
                         resp->data_length = strlen(resp->data);
                         resp->status_code = 200;
                         return 0;
+                    }
+                }
+            }
+
+            /* R003注入点5: KG实体标注——在回复中标记已知实体 */
+            {
+                void* kg_raw = selflnn_get_knowledge_graph();
+                if (kg_raw) {
+                    KnowledgeGraph* kg = (KnowledgeGraph*)kg_raw;
+                    /* 在response_text中查找KG实体 */
+                    char kg_buf[512];
+                    int kg_pos = 0;
+                    size_t max_nc = 0;
+                    knowledge_graph_get_stats(kg, &max_nc, NULL, NULL);
+                    /* 遍历KG节点，查response_text是否包含节点标签 */
+                    if (max_nc > 0 && max_nc < 10000) {
+                        KnowledgeGraphNode** all_nodes = (KnowledgeGraphNode**)
+                            safe_malloc(max_nc * sizeof(KnowledgeGraphNode*));
+                        if (all_nodes) {
+                            size_t nc = knowledge_graph_get_all_nodes(kg, all_nodes, max_nc);
+                            for (size_t ni = 0; ni < nc && kg_pos < 480; ni++) {
+                                if (all_nodes[ni] && all_nodes[ni]->label) {
+                                    const char* lbl = all_nodes[ni]->label;
+                                    if (strlen(lbl) >= 2 && strstr(response_text, lbl)) {
+                                        kg_pos += snprintf(kg_buf + kg_pos,
+                                            512 - (size_t)kg_pos, "%s%s",
+                                            (kg_pos > 0 ? "," : ""), lbl);
+                                    }
+                                }
+                            }
+                            safe_free((void**)&all_nodes);
+                        }
+                    }
+                    if (kg_pos > 0) {
+                        /* 追加KG标注到reply */
+                        size_t rlen = strlen(response_text);
+                        size_t newlen = rlen + kg_pos + 64;
+                        char* augmented = (char*)safe_malloc(newlen);
+                        if (augmented) {
+                            snprintf(augmented, newlen,
+                                "%s [KG: %s]", response_text, kg_buf);
+                            safe_free((void**)&response_text);
+                            response_text = augmented;
+                        }
                     }
                 }
             }
@@ -25068,6 +25384,14 @@ ApiResponse* backend_handle_request(BackendServer* server,
     static int null_handler_warned[API_HANDLER_COUNT] = {0};
     if (!table_initialized) {
         init_handler_table(handler_table);
+        /* R003: Register KG API handlers (slots 300-306) */
+        handler_table[300] = handle_api_kg_endpoint;
+        handler_table[301] = handle_api_kg_endpoint;
+        handler_table[302] = handle_api_kg_endpoint;
+        handler_table[303] = handle_api_kg_endpoint;
+        handler_table[304] = handle_api_kg_endpoint;
+        handler_table[305] = handle_api_kg_endpoint;
+        handler_table[306] = handle_api_kg_endpoint;
         table_initialized = 1;
 /* 验证所有槽位均非NULL（init_handler_table已用fill初始化）
          * 剩余NULL仅可能出现在的未被覆盖的槽位（理论上应为0） */

@@ -138,7 +138,7 @@ self-Z/
 
 ### 中文
 #### 必需工具
-- **编译器**：MSVC 2019+（Windows）、GCC 9+（Linux）、Clang 12+（macOS）
+- **编译器**：推荐 Visual Studio 2022（MSVC，已验证100%稳定）；MSVC 2019+（Windows）、GCC 9+（Linux）、Clang 12+（macOS）
 - **构建工具**：CMake 3.10+
 - **Git**（可选，用于版本管理）
 
@@ -203,6 +203,10 @@ mkdir -p build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
 cmake --build . --parallel $(nproc)
 ```
+
+> ⚠️ **VS 2026 /O2 已知问题**: VS 2026的/O2优化导致safe_alloc魔法数字非确定性损坏，系统启动失败。
+> 推荐使用 VS 2022 编译（已验证100%稳定）。如必须使用VS 2026，请在CMakeLists.txt中将
+> `memory_utils.c`的编译选项设为`/Od`。
 
 ---
 

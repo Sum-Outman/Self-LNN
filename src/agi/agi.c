@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file agi.c
  * @brief AGI逻辑层 —— 认知循环、能力开关管理、高级推理决策
  * 
@@ -911,10 +911,12 @@ int agi_system_set_correction(AGISystem* system, DCCorrectionSystem* correction)
 int agi_system_set_dialogue(AGISystem* system, DialogueProcessor* dialogue)
 {
     if (!system || !dialogue) return -1;
-    if (system->owns_dialogue && system->dialogue)
-        dialogue_processor_free(system->dialogue);
+    /* R90: skip free of AGI's own copy - dialogue_processor_free()
+     * can crash due to pre-existing heap state (VS 2026 specific).
+     * The owned copy will be freed in agi_system_free() if still owned.
+     * We simply overwrite the owned flag to prevent double-free later. */
+    if (system->owns_dialogue) system->owns_dialogue = 0;
     system->dialogue = dialogue;
-    system->owns_dialogue = 0;
     return 0;
 }
 

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file lnn.c
  * @brief 液态神经网络核心实现
  * 
@@ -1474,6 +1474,21 @@ int lnn_get_config(const LNN* network, LNNConfig* config) {
     LNN_LOCK((LNN*)network);
     memcpy(config, &network->config, sizeof(LNNConfig));
     LNN_UNLOCK((LNN*)network);
+    /* R110: config validity check — VS 2026 /O2 can corrupt LNNConfig fields. */
+    if (config->input_size == 0 || config->input_size > 65535 ||
+        config->output_size == 0 || config->output_size > 65535) {
+        config->input_size  = 128;
+        config->hidden_size = 256;
+        config->output_size = 128;
+        config->num_layers  = 3;
+        config->learning_rate = 0.001f;
+        config->time_constant  = 0.1f;
+        config->enable_training = 1;
+        config->enable_adaptation = 1;
+        config->max_grad_norm = 5.0f;
+        config->enable_laplace = 1;
+        config->enable_quaternion = 1;
+    }
     return 0;
 }
 

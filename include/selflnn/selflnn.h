@@ -355,6 +355,7 @@ SELFLNN_API const ProductDesignLabels* selflnn_get_product_design_labels(void);
 SELFLNN_API void* selflnn_get_self_cognition(void); /* 自我认知系统 */
 SELFLNN_API void* selflnn_get_metacognition(void); /* 元认知系统 */
 SELFLNN_API void* selflnn_get_knowledge_graph(void); /* 知识图谱 */
+SELFLNN_API void* selflnn_get_graph_reasoner(void); /* P1: 图推理引擎 — 链路预测/多跳增强/嵌入相似度 */
 SELFLNN_API void* selflnn_get_gpu_context(void); /* GPU上下文 */
 SELFLNN_API void* selflnn_get_dialogue_processor(void);
 SELFLNN_API void* selflnn_get_dialogue_memory(void);    /* 对话记忆管理器（F-007修复） */

@@ -1,7 +1,7 @@
 # SELF-LNN 全液态神经网络 AGI 系统架构图
 # SELF-LNN Full Liquid Neural Network AGI System Architecture Diagram
 
-> **版本 / Version:** 1.5.0 | **语言 / Language:** 100% Pure C (C11) | **构建 / Build:** CMake 3.10+
+> **版本 / Version:** 1.6.0 | **语言 / Language:** 100% Pure C (C11) | **构建 / Build:** CMake 3.10+
 > **核心模型 / Core Model:** CfC LNN — Token-Free 连续信号架构 / Continuous Signal Architecture
 > **ODE求解器 / Solvers:** 8种/8 types | **GPU后端 / Backends:** 10种 | **API Slots:** 290
 > **前端/Frontend:** SPA + 19 JS | **项目:** [GitHub](https://github.com/Sum-Outman/Self-LNN)
@@ -44,9 +44,12 @@
 │  │                                                                      │  │
 │  │  子系统: 认知|知识库|推理|记忆|学习|训练|机器人|GPU|安全|演化        │  │
 │  │                                                                      │  │
+│  │  知识图谱桥接: knowledge_graph_to_lnn_bridge() → 概念嵌入聚合 → LNN扰动      │  │
+│  │  KG→LNN Injection: bridge(kg,lnn,0.15f) at dialogue entry + 0.1f at AGI loop │  │
+│  │                                                                      │  │
 │  │  ┌──────────────────────────────────────────────────────────────────┐│  │
 │  │  │ 动态架构控制器 / Dynamic Architecture Controller                ││  │
-│  │  │ 运行时扩展/收缩/增删层·知识迁移·安全审批·原子交换                ││  │
+│  │  │ 运行时扩展/收缩/增删层·知识迁移·安全审批·原子交换·KG API(7端点)/KG API(7 endpoints)││  │
 │  │  └──────────────────────────────────────────────────────────────────┘│  │
 │  └──────────────────────────────────────────────────────────────────────┘  │
 │                                                                             │

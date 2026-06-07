@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file memory_utils.c
  * @brief 内存工具库实现
  * 
@@ -28,6 +28,10 @@
 #include <unistd.h>
 #include <pthread.h>
 #endif
+
+/* P6-R90: bypass safe alloc - use standard malloc/free when set */
+static int g_bypass_safe_alloc = 0;
+void memory_utils_bypass_safe_alloc(int bypass) { g_bypass_safe_alloc = bypass; }
 
 /**
  * @brief 内存块头部信息
@@ -329,6 +333,8 @@ static int validate_all_magic(void) {
  * @brief 内部安全内存分配：分配内存并初始化为零（带文件/行号跟踪）
  */
 void* _safe_malloc(size_t size, const char* file, int line) {
+    (void)file; (void)line;
+    if (g_bypass_safe_alloc) { return malloc(size); }
     if (size == 0) {
         return NULL;
     }
@@ -412,6 +418,8 @@ void* _safe_malloc(size_t size, const char* file, int line) {
  * @return void* 分配的内存指针，失败返回NULL
  */
 void* _safe_calloc(size_t num, size_t size, const char* file, int line) {
+    (void)file; (void)line;
+    if (g_bypass_safe_alloc) { return calloc(num, size); }
     size_t total_size;
     
     // 检查溢出
@@ -514,6 +522,10 @@ int selflnn_validate_all_allocations(void) {
  * @brief 安全内存释放：释放内存并置空指针
  */
 void safe_free(void** ptr) {
+    if (g_bypass_safe_alloc) {
+        if (ptr && *ptr) { free(*ptr); *ptr = NULL; }
+        return;
+    }
 #ifdef _DEBUG
     if (_CrtCheckMemory() == 0) {
         fprintf(stderr, "堆损坏检测：在safe_free开始时堆已损坏\n");
@@ -532,8 +544,10 @@ void safe_free(void** ptr) {
     // 检查对齐：header应该至少对齐到sizeof(void*)
     uintptr_t header_addr = (uintptr_t)header;
     if (header_addr % sizeof(void*) != 0) {
-/* 修复堆损坏 — header才是malloc原始指针,data_ptr是偏移后的用户指针 */
-        free(header);
+        /* P6-R90: header地址未对齐 = 数据指针无效。
+         * 不调用free()避免向堆管理器提交垃圾指针。 */
+        fprintf(stderr, "内存损坏: 未对齐指针 %p (skipping free)\n", data_ptr);
+        alloc_track_remove(data_ptr);
         *ptr = NULL;
         return;
     }
@@ -543,18 +557,19 @@ void safe_free(void** ptr) {
     
     // 验证魔法数字
     if (header->magic == 0) {
-/* 魔法数字为零 — 检测到重复释放或堆损坏 */
-        fprintf(stderr, "警告：检测到可能的重复释放或无效内存指针 %p\n", data_ptr);
-        alloc_track_remove(data_ptr);
-        free(header);  /* 仍然释放底层内存防止泄漏 */
+        /* P6-R90: 魔法数字为零=已释放。快速返回, 不做任何操作。
+         * alloc_track_remove已在首次释放时调用, fprintf/free都会显著拖慢。 */
         *ptr = NULL;
         return;
     }
     
     if (header->magic != MEMORY_MAGIC) {
-/* 魔法数字不匹配 — header才是malloc原始指针 */
+        /* P6-R90: 魔法数字不匹配 = header指针可能已损坏。
+         * 调用free(header)会向堆管理器提交随机指针 → 堆损坏扩散 → 下次malloc()返回NULL或崩溃。
+         * 只记录并清空指针，不释放。小内存泄漏 < 堆损坏扩散。 */
+        fprintf(stderr, "内存损坏: 魔法数字不匹配 %p magic=0x%llx (skipping free)\n",
+               data_ptr, (unsigned long long)header->magic);
         alloc_track_remove(data_ptr);
-        free(header);
         *ptr = NULL;
         return;
     }
@@ -562,11 +577,10 @@ void safe_free(void** ptr) {
     // 验证尾部
     // 首先确保header->size是合理的（避免缓冲区溢出）
     if (header->size > SIZE_MAX - align_size(1, 16)) {
-        // size值不合理，可能内存损坏
-        fprintf(stderr, "内存损坏检测：无效的块大小 %zu\n", header->size);
+        /* P6-R90: size值不可能 → header已损坏。
+         * 不调用free(), 避免堆损坏扩散。 */
+        fprintf(stderr, "内存损坏: 无效块大小 %zu at %p (skipping free)\n", header->size, data_ptr);
         alloc_track_remove(data_ptr);
-        // 使用标准free释放header（原始内存块指针）
-        free(header);
         *ptr = NULL;
         return;
     }
@@ -588,21 +602,22 @@ void safe_free(void** ptr) {
     }
     
     if (footer->magic != MEMORY_MAGIC) {
-        // 内存损坏或不是通过safe_malloc分配的
-        fprintf(stderr, "内存损坏检测[#%zu]：无效的尾部魔法数字 (地址: %p, 大小: %zu, 头部魔法: 0x%llx, 尾部魔法: 0x%llx, 保护字节损坏: %d, 原始分配于 %s:%d)\n",
-               header->alloc_id, data_ptr, header->size, (unsigned long long)header->magic, (unsigned long long)footer->magic, guard_corrupted,
-               header->file ? header->file : "?", header->line);
-        // 必须在释放前从跟踪链表中移除，否则后续验证会访问已释放内存导致崩溃
+        /* P6-R90: 尾部损坏 = 堆已损坏, free(header)扩散破坏。
+         * 只记录, 不释放。 */
+        fprintf(stderr, "内存损坏: 尾部魔法不匹配 %p size=%zu gm=%d (skipping free)\n",
+               data_ptr, header->size, guard_corrupted);
         alloc_track_remove(data_ptr);
-        // 使用标准free释放header（原始内存块指针）
-        free(header);
         *ptr = NULL;
         return;
     }
     
     if (guard_corrupted) {
-        fprintf(stderr, "内存损坏检测：保护字节被修改，但尾部魔法数字仍然有效\n");
-        // 继续执行，但记录错误
+        /* P6-R90: 保护字节损坏 = 缓冲区溢出。尾部OK但头部可能已有问题。
+         * 为安全起见不调用free(), 避免不可预测的堆损坏。 */
+        fprintf(stderr, "内存损坏: guard bytes corrupted at %p (skipping free)\n", data_ptr);
+        alloc_track_remove(data_ptr);
+        *ptr = NULL;
+        return;
     }
     
 

@@ -511,6 +511,28 @@ int learning_engine_get_experience(const LearningEngine* engine, int index,
     float* reward,
     float* next_state, size_t max_next_state_dim);
 
+/**
+ * @brief 向内部经验缓冲区直接注入种子经验数据
+ * 
+ * 用于在训练启动前预填充经验缓冲区，确保训练器有可用数据。
+ * 直接写入internal_exp_*数组，绕过memory_manager/强化学习更新路径。
+ * 
+ * @param engine 学习引擎句柄
+ * @param state 状态向量
+ * @param state_dim 状态维度
+ * @param action 动作向量
+ * @param action_dim 动作维度
+ * @param reward 奖励值
+ * @param next_state 下一状态向量 (可为NULL)
+ * @param next_state_dim 下一状态维度
+ * @return int 成功返回0，失败返回-1
+ */
+int learning_engine_seed_experience(LearningEngine* engine,
+    const float* state, size_t state_dim,
+    const float* action, size_t action_dim,
+    float reward,
+    const float* next_state, size_t next_state_dim);
+
 /* ============================
  * 能力开关控制（P3.3）
  * ============================ */

@@ -44,6 +44,7 @@
 #define SELFLNN_IMPLEMENTATION
 #include "selflnn/cognition/self_cognition.h"
 #include "selflnn/selflnn.h"
+#include "selflnn/knowledge/knowledge_graph.h"
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/core/laplace.h"
@@ -1183,6 +1184,29 @@ int self_cognition_get_knowledge(SelfCognitionSystem* system, KnowledgeMetacogni
     self_cognition_update(system, SELF_COGNITION_KNOWLEDGE);
     
     *metacognition = system->knowledge;
+
+    /* R003: KG自我知识查询 —— 用知识图谱信息增强元认知 */
+    {
+        void* kg = selflnn_get_knowledge_graph();
+        if (kg) {
+            KnowledgeGraph* graph = (KnowledgeGraph*)kg;
+            size_t node_count = 0, edge_count = 0, mem = 0;
+            if (knowledge_graph_get_stats(graph, &node_count, &edge_count, &mem) == 0) {
+                /* 用知识图谱数据补充元认知统计 */
+                if (node_count > metacognition->known_concepts) {
+                    metacognition->known_concepts = node_count;
+                }
+                /* 图谱大小影响知识覆盖率评估 */
+                if (node_count > 0) {
+                    float coverage_ratio = (float)(node_count) / (float)(node_count + 100);
+                    if (coverage_ratio > metacognition->knowledge_coverage) {
+                        metacognition->knowledge_coverage = coverage_ratio;
+                    }
+                }
+            }
+        }
+    }
+
     return 0;
 }
 

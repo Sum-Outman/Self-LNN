@@ -88,6 +88,18 @@ Default port: `http://localhost:8080` (configurable via `--port`)
 | POST | /api/learning/from-dialogue | 从对话中学习 / Learn from dialogue |
 | POST | /api/learning/from-manual | 从说明书学习 / Learn from manual |
 
+### 知识图谱专用 / Knowledge Graph (v1.6+)
+
+| 方法/Method | 路径/Path | 描述/Description | 请求体 |
+|------------|-----------|-----------------|--------|
+| GET | /api/kg/stats | 图谱统计(节点/边/内存) / KG stats | - |
+| GET | /api/kg/pagerank | PageRank排名 / PageRank ranking | - |
+| GET | /api/kg/communities | 社区检测状态 / Community detection | - |
+| POST | /api/kg/path | 实体间路径查询 / Entity path query | `{"source":"实体A","target":"实体B"}` |
+| POST | /api/kg/search | 图谱语义搜索 / KG semantic search | `{"query":"关键词"}` |
+| POST | /api/kg/sparql | SPARQL查询 / SPARQL query | `{"sparql":"SELECT ?x WHERE {...}"}` |
+| GET | /api/kg/visualize | 图谱可视化JSON / Visual JSON export | - |
+
 ---
 
 ## 训练 / Training

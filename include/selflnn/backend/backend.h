@@ -492,6 +492,10 @@ typedef enum {
     API_DELETE_MEMORY_ENTRY = 351,           /**< 删除记忆条目 DELETE /api/memory/entry/{key} */
     API_PUT_MEMORY_ENTRY = 352,              /**< 更新记忆条目 PUT /api/memory/entry/{key} */
 
+    /* ===== R92: 传感器管理端点 ===== */
+    API_GET_SENSOR_LIST = 353,               /**< 获取传感器列表 GET /api/sensor/list */
+    API_POST_SENSOR_START = 354,             /**< 启动传感器采集 POST /api/sensor/start */
+
     /* ===== L-016修复: 哨兵值紧随最高枚举值 ===== */
     API_REQUEST_COUNT                        /**< 自动计算枚举最大值+1，反映API处理程序分发表大小 */
 } ApiRequestType;

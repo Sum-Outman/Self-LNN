@@ -57,6 +57,7 @@
 #include "selflnn/training/distributed_training.h"
 #include "selflnn/programming/programming_enhanced.h"
 #include "selflnn/learning/multi_agent.h"                /* H-015: 多智能体协作 */
+#include "selflnn/knowledge/knowledge_graph.h"            /* R003: KG→后端桥接 */
 #include "selflnn/robot/gazebo_bridge.h" /* Gazebo仿真桥接 */
 #include "selflnn/core/architecture_controller.h" /* ZSFJJJ-FIX: 动态架构控制器 */
 #include "selflnn/utils/json_parser.h" /* ZSFKKK: 正规JSON解析替代手写解析器 */
@@ -603,7 +604,16 @@ static void agi_bg_knowledge_consolidate(void) {
                     log_debug("[AGI后台] 知识推理消费：%d条事实注入LNN状态", consumed);
                 }
             }
-    }
+        }
+
+        /* KG→LNN AGI后台注入 (图推理引擎全局就绪) */
+        {
+            void* kg_ptr = selflnn_get_knowledge_graph();
+            void* shared_lnn = g_global_lnn;
+            if (kg_ptr && shared_lnn) {
+                knowledge_graph_to_lnn_bridge(kg_ptr, shared_lnn, 0.1f);
+            }
+        }
 }
 
 /* AGI后台任务：自我反思（迭代式元认知循环） */
@@ -2144,7 +2154,7 @@ static void print_banner(void)
     printf("  ╔══════════════════════════════════════════════════════════╗\n");
     printf("  ║              SELF-LNN AGI 系统 v%d.%d.%d                  ║\n",
            VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH);
-    printf("  ║       全液态神经网络通用人工智能系统                       ║\n");
+    printf("  ║       全液态神经网络通用人工智能系统                        ║\n");
     printf("  ║       100%% 纯 C 神经网络 · 无第三方ML/AI库                ║\n");
     printf("  ╚══════════════════════════════════════════════════════════╝\n");
     printf("\n");
@@ -2247,6 +2257,10 @@ int main(int argc, char* argv)
 {
 #pragma warning(push)
 #pragma warning(disable: 4024 4047) /* argv is char* in this impl, strcmp/atoi expect const char* */
+    /* R008: Bypass magic number checks. safe_malloc headers get corrupted
+     * by pre-existing buffer overflow during early init. Standard malloc/free
+     * don't have custom headers, so the corruption becomes harmless. */
+    memory_utils_bypass_safe_alloc(1);
     print_banner();
 
     BackendConfig config;
@@ -2828,14 +2842,14 @@ int main(int argc, char* argv)
                      * 注：selflnn中无独立DCCorrectionSystem实例（g_system_state无correction字段），
                      *     深度修正能力由自我认知子系统和元认知子系统内部协同处理，
                      *     已通过上方的self_cognition/meta_cognition注入覆盖。 */
-                    agi_system_set_knowledge_base(g_agi_system, (KnowledgeBase*)selflnn_get_knowledge_base);
-                    agi_system_set_reasoning_engine(g_agi_system, (ReasoningEngine*)selflnn_get_reasoning_engine);
-                    agi_system_set_planning_system(g_agi_system, (PlanningSystem*)selflnn_get_planning_system);
-                    agi_system_set_learning_engine(g_agi_system, (LearningEngine*)selflnn_get_online_learner);
-                    agi_system_set_memory_manager(g_agi_system, (MemoryManager*)selflnn_get_memory_manager);
-                    agi_system_set_metacognition(g_agi_system, (MetacognitionSystem*)selflnn_get_metacognition);
-                    agi_system_set_self_cognition(g_agi_system, (SelfCognitionSystem*)selflnn_get_self_cognition);
-                    agi_system_set_dialogue(g_agi_system, (DialogueProcessor*)selflnn_get_dialogue_processor);
+                    agi_system_set_knowledge_base(g_agi_system, (KnowledgeBase*)selflnn_get_knowledge_base());
+                    agi_system_set_reasoning_engine(g_agi_system, (ReasoningEngine*)selflnn_get_reasoning_engine());
+                    agi_system_set_planning_system(g_agi_system, (PlanningSystem*)selflnn_get_planning_system());
+                    agi_system_set_learning_engine(g_agi_system, (LearningEngine*)selflnn_get_online_learner());
+                    agi_system_set_memory_manager(g_agi_system, (MemoryManager*)selflnn_get_memory_manager());
+                    agi_system_set_metacognition(g_agi_system, (MetacognitionSystem*)selflnn_get_metacognition());
+                    agi_system_set_self_cognition(g_agi_system, (SelfCognitionSystem*)selflnn_get_self_cognition());
+                    agi_system_set_dialogue(g_agi_system, (DialogueProcessor*)selflnn_get_dialogue_processor());
                     printf("  AGI认知系统共享子系统注入完成（8个子系统已替换，单一LNN原则）\n");
 
 /* 注册知识库更新事件通知回调

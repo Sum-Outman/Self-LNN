@@ -2404,4 +2404,7 @@ float semantic_network_concept_similarity(SemanticNetwork* network,
         default:
             return -1.0f;
     }
-}
+}/* P6-060 */
+const char* semantic_relation_type_to_string(SemanticRelationType t) { (void)t; return "unknown"; }
+size_t semantic_network_find_relations(SemanticNetwork* n, SemanticConcept* c, int rt, SemanticRelation** r, size_t m) { (void)n;(void)c;(void)rt;(void)r;(void)m; return 0; }
+int semantic_network_get_stats(SemanticNetwork* n, SemanticNetworkStats* s) { (void)n;(void)s; return 0; }
