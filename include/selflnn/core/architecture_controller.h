@@ -255,6 +255,21 @@ ArchitectureControllerConfig arch_controller_default_config(void);
  */
 ArchitectureChangeRequest arch_controller_default_request(void);
 
+/**
+ * @brief P0-002修复: 回滚最近一次架构变更
+ *
+ * 从存档路径加载变更前保存的检查点文件，恢复到变更前的LNN状态。
+ * 如果变更后新LNN出现问题，调用此函数可安全回退。
+ *
+ * @param controller 控制器句柄
+ * @param lnn_ptr LNN实例指针的指针（将被替换为回滚后的LNN）
+ * @param archive_path 变更前保存的检查点路径
+ * @return 0=回滚成功，-1=失败
+ */
+int arch_controller_rollback(ArchitectureController* controller,
+                              LNN** lnn_ptr,
+                              const char* archive_path);
+
 /* ============ P2-001: NAS 架构部署桥接 ============ */
 
 /**

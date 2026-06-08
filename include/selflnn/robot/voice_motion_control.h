@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file voice_motion_control.h
  * @brief 实时语音指令运动控制系统接口
  */
@@ -76,7 +76,7 @@ int voice_motion_set_lnn(VoiceMotionControl* vmc, struct LNN* lnn);
 int voice_motion_add_command(VoiceMotionControl* vmc, const char* keyword,
                               MotionCommandType cmd_type, float param1, float param2);
 int voice_motion_remove_command(VoiceMotionControl* vmc, const char* keyword);
-int voice_motion_list_commands(VoiceMotionControl* vmc, MotionCommand* buf, int max_count);
+int voice_motion_list_commands(const VoiceMotionControl* vmc, char* buffer, size_t buf_size);
 
 #ifdef __cplusplus
 }

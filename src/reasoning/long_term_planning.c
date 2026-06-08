@@ -2699,7 +2699,7 @@ int long_term_planning_detect_conflicts(LongTermPlanningSystem* system,
  */
 int long_term_planning_resolve_conflicts(LongTermPlanningSystem* system,
                                         int* conflicts, int conflict_count,
-                                        ConflictResolutionStrategy resolution_strategy) {
+                                        int resolution_strategy) {
     if (!system || !conflicts || conflict_count <= 0) {
         return -1;
     }

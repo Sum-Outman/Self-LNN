@@ -5502,10 +5502,10 @@ class ApiService {
  */
 class WebSocketManager {
     constructor(url) {
-        /* BUG-5修复: 运行时动态读取window.SELFLNN_CONFIG而非静态捕获 */
-        var cfg = window.SELFLNN_CONFIG || { host: 'localhost', port: 8080 };
-        /* WebSocket端口与HTTP共用8080端口，通过HTTP Upgrade升级连接 */
-        var wsPort = cfg.port || 8080;
+        /* ZSFOOO-001修复: WebSocket使用独立端口8081，与port_config.h中SELFLNN_WEBSOCKET_PORT一致 */
+        var cfg = window.SELFLNN_CONFIG || { host: 'localhost', port: 8080, wsPort: 8081 };
+        /* 后端WebSocket服务器监听独立端口8081，HTTP服务器8080未实现WebSocket Upgrade */
+        var wsPort = cfg.wsPort || cfg.port + 1 || 8081;
         var wsProtocol = (cfg.host === 'localhost' || cfg.host === '127.0.0.1') ? 'ws://' : 'wss://';
         this.url = url || (wsProtocol + cfg.host + ':' + wsPort + '/ws');
         this.ws = null;

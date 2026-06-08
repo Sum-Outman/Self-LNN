@@ -375,7 +375,7 @@ void text_detection_merge(TextRegion* regions, int num_regions,
 TextDetectionConfig text_detection_get_default_config(void) {
     TextDetectionConfig config;
     
-    config.algorithm = (TextDetectionAlgorithm)TEXT_DETECT_EDGE_BASED;
+    config.algorithm = TEXT_DETECTION_EAST;
     config.min_confidence = 0.5f;
     config.min_text_height = 8;
     config.max_text_height = 200;

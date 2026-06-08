@@ -3214,12 +3214,13 @@ static void calibrate_camera_intrinsic(const float** images, int num_images,
         safe_free((void**)&valid_image_indices);
         return;
     }
-    for (int i = 0; i < actual_valid; i++) {
+    int i, j, ii;
+    for (i = 0; i < actual_valid; i++) {
         rvecs[i] = (float*)safe_malloc(3 * sizeof(float));
         if (!rvecs[i]) {
-            for (int j = 0; j < i; j++) safe_free((void**)&rvecs[j]);
+            for (j = 0; j < i; j++) safe_free((void**)&rvecs[j]);
             safe_free((void**)&rvecs);
-            for (int ii = 0; ii < actual_valid; ii++) {
+            for (ii = 0; ii < actual_valid; ii++) {
                 safe_free((void**)&rotations[ii]);
                 safe_free((void**)&translations[ii]);
             }

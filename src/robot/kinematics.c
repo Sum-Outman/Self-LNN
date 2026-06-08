@@ -1,4 +1,4 @@
-﻿#include "selflnn/robot/kinematics.h"
+#include "selflnn/robot/kinematics.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/math_utils.h"   /* F-030: 显式包含四元数函数 */
 #include "selflnn/core/errors.h"
@@ -32,29 +32,29 @@
  * 向量运算
  * ============================================================================ */
 
-static void k_vec3_add(Vec3* out, const Vec3* a, const Vec3* b) {
+void k_vec3_add(Vec3* out, const Vec3* a, const Vec3* b) {
     out->x = a->x + b->x;
     out->y = a->y + b->y;
     out->z = a->z + b->z;
 }
 
-static void k_vec3_sub(Vec3* out, const Vec3* a, const Vec3* b) {
+void k_vec3_sub(Vec3* out, const Vec3* a, const Vec3* b) {
     out->x = a->x - b->x;
     out->y = a->y - b->y;
     out->z = a->z - b->z;
 }
 
-static float k_vec3_dot(const Vec3* a, const Vec3* b) {
+float k_vec3_dot(const Vec3* a, const Vec3* b) {
     return a->x * b->x + a->y * b->y + a->z * b->z;
 }
 
-static void k_vec3_cross(Vec3* out, const Vec3* a, const Vec3* b) {
+void k_vec3_cross(Vec3* out, const Vec3* a, const Vec3* b) {
     out->x = a->y * b->z - a->z * b->y;
     out->y = a->z * b->x - a->x * b->z;
     out->z = a->x * b->y - a->y * b->x;
 }
 
-static void k_vec3_scale(Vec3* out, const Vec3* a, float s) {
+void k_vec3_scale(Vec3* out, const Vec3* a, float s) {
     out->x = a->x * s;
     out->y = a->y * s;
     out->z = a->z * s;
@@ -64,7 +64,7 @@ float vec3_length(const Vec3* a) {
     return sqrtf(a->x * a->x + a->y * a->y + a->z * a->z);
 }
 
-static void k_vec3_normalize(Vec3* out, const Vec3* a) {
+void k_vec3_normalize(Vec3* out, const Vec3* a) {
     float len = vec3_length(a);
     if (len < KINEMATICS_EPSILON) {
         out->x = 0.0f; out->y = 0.0f; out->z = 0.0f;

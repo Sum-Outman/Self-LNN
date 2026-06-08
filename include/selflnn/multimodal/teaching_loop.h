@@ -18,6 +18,8 @@ extern "C" {
 #define TL_MAX_FEATURES 512
 #define TL_MAX_NAME 128
 
+#ifndef SELFLNN_CONCEPT_TYPE_DEFINED
+#define SELFLNN_CONCEPT_TYPE_DEFINED
 typedef enum {
     CONCEPT_OBJECT = 0,
     CONCEPT_ACTION = 1,
@@ -25,6 +27,7 @@ typedef enum {
     CONCEPT_RELATION = 3,
     CONCEPT_ABSTRACT = 4
 } ConceptType;
+#endif /* SELFLNN_CONCEPT_TYPE_DEFINED */
 
 typedef struct {
     int concept_id;

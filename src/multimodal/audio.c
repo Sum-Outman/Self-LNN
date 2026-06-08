@@ -1107,7 +1107,7 @@ static DWORD WINAPI audio_capture_thread_func(LPVOID arg) {
     return 0;
 }
 
-static int audio_capture_enumerate_devices(AudioCaptureDeviceInfo* devices, int max_devices) {
+int audio_capture_enumerate_devices(AudioCaptureDeviceInfo* devices, int max_devices) {
     if (!devices || max_devices <= 0) return 0;
 
     HRESULT hr;
@@ -1176,7 +1176,7 @@ static int audio_capture_enumerate_devices(AudioCaptureDeviceInfo* devices, int 
     return actual;
 }
 
-static AudioCaptureContext* audio_capture_create(const char* device_id,
+AudioCaptureContext* audio_capture_create(const char* device_id,
                                            int sample_rate,
                                            int channels,
                                            int bits_per_sample) {
@@ -1302,7 +1302,7 @@ static AudioCaptureContext* audio_capture_create(const char* device_id,
     return ctx;
 }
 
-static int audio_capture_start(AudioCaptureContext* ctx,
+int audio_capture_start(AudioCaptureContext* ctx,
                          void (*callback)(const float*, size_t, void*),
                          void* user_data) {
     if (!ctx || !callback) return -1;
@@ -1324,7 +1324,7 @@ static int audio_capture_start(AudioCaptureContext* ctx,
     return 0;
 }
 
-static int audio_capture_process(AudioCaptureContext* ctx) {
+int audio_capture_process(AudioCaptureContext* ctx) {
     if (!ctx || !ctx->is_capturing) return 0;
     
     if (!ctx->captureClient || !ctx->data_callback) return 0;
@@ -1370,7 +1370,7 @@ static int audio_capture_process(AudioCaptureContext* ctx) {
     return frames_processed;
 }
 
-static int audio_capture_stop(AudioCaptureContext* ctx) {
+int audio_capture_stop(AudioCaptureContext* ctx) {
     if (!ctx) return -1;
     if (ctx->is_capturing) {
         ctx->thread_running = 0;
@@ -1385,7 +1385,7 @@ static int audio_capture_stop(AudioCaptureContext* ctx) {
     return 0;
 }
 
-static void audio_capture_free(AudioCaptureContext* ctx) {
+void audio_capture_free(AudioCaptureContext* ctx) {
     if (!ctx) return;
     audio_capture_stop(ctx);
     if (ctx->capture_event) CloseHandle(ctx->capture_event);

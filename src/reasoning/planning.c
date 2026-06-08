@@ -495,7 +495,7 @@ static int plan_cmaes_sample(PlanningSystem* system) {
 
 /* === CMA-ES演化路径与协方差更新 ===
  * 使用加权选择和秩-μ更新 */
-static int cmaes_update(PlanningSystem* system) {
+static int planning_cmaes_update(PlanningSystem* system) {
     if (!system || !system->cmaes_initialized) return -1;
     size_t dim = system->cmaes_dimension;
     size_t pop = system->evolution_population_size;
@@ -2816,7 +2816,7 @@ int planning_evolve_architecture(PlanningSystem* system, size_t num_generations,
         int ret = planning_evolve_architecture_generation(system);
         if (ret != 0) return ret;
         /* 每代更新CMA-ES演化路径和协方差矩阵 */
-        cmaes_update(system);
+        planning_cmaes_update(system);
     }
 
     if (system->evolution_best_genome) {

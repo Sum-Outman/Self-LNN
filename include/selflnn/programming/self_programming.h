@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file self_programming.h
  * @brief 自我编程能力接口
  * 
@@ -74,6 +74,8 @@ typedef enum {
 /**
  * @brief 数据类型枚举
  */
+#ifndef SELFLNN_DATA_TYPE_DEFINED
+#define SELFLNN_DATA_TYPE_DEFINED
 typedef enum {
     TYPE_VOID = 0,              /**< void类型 */
     TYPE_INT = 1,               /**< 整数类型 */
@@ -82,6 +84,7 @@ typedef enum {
     TYPE_STRING = 4,            /**< 字符串类型 */
     TYPE_CUSTOM = 5             /**< 自定义类型 */
 } DataType;
+#endif /* SELFLNN_DATA_TYPE_DEFINED */
 
 /**
  * @brief AST节点结构体

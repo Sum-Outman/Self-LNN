@@ -893,6 +893,9 @@ typedef struct {
 int evolution_step(EvolutionEngine* engine) {
     if (!engine || !engine->initialized) return -1;
 
+    /* PF-004: 岛间迁移函数前向声明(函数定义在本文件末尾) */
+    int evolution_island_migrate(EvolutionEngine* engine);
+
     /* F-010/F-019: 如果使用CMA-ES算法，委托给core/cma_es.c */
     if (engine->using_cmaes && engine->cmaes_state) {
         CMAESState* cs = engine->cmaes_state;
@@ -1177,7 +1180,7 @@ static int evolution_create_islands(EvolutionEngine* engine, int num_islands) {
 }
 
 /* PF-004修复: 岛间迁移 —— 将每个岛的最优个体发送到下一个岛(环形拓扑) */
-static int evolution_island_migrate(EvolutionEngine* engine) {
+int evolution_island_migrate(EvolutionEngine* engine) {
     if (!engine || engine->island_count < 2 || !engine->islands) return -1;
 
     for (int src = 0; src < engine->island_count; src++) {
@@ -1213,7 +1216,7 @@ static int evolution_island_migrate(EvolutionEngine* engine) {
 
 /* 岛模型并行演化任务数据 - 定义在evolution_step之前，evolve_island_task复用 */
 
-static void evolve_island_task(void* arg) {
+void evolve_island_task(void* arg) {
     IslandTaskData* data = (IslandTaskData*)arg;
     if (!data || !data->island || !data->engine) return;
 
@@ -1401,6 +1404,13 @@ int evolution_load_population(EvolutionEngine* engine, const char* filepath) {
     if (magic != 0x45564F4C) { fclose(fp); return -1; }
     fread(&saved_size, sizeof(size_t), 1, fp);
     fread(&saved_chrom_size, sizeof(size_t), 1, fp);
+
+    /* 防止恶意文件指定极大值 */
+    if (saved_size == 0 || saved_size > 10000 ||
+        saved_chrom_size == 0 || saved_chrom_size > 1000000) {
+        fclose(fp);
+        return -1;
+    }
 
     for (size_t i = 0; i < engine->population.size; i++) {
         free_individual(&engine->population.individuals[i]);

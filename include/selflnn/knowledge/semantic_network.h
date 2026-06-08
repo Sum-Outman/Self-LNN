@@ -20,6 +20,8 @@ extern "C" {
 /**
  * @brief 概念类型
  */
+#ifndef SELFLNN_CONCEPT_TYPE_DEFINED
+#define SELFLNN_CONCEPT_TYPE_DEFINED
 typedef enum {
     CONCEPT_TYPE_ENTITY = 0,        /**< 实体概念（具体事物） */
     CONCEPT_TYPE_CLASS = 1,         /**< 类概念（抽象类别） */
@@ -27,6 +29,7 @@ typedef enum {
     CONCEPT_TYPE_EVENT = 3,         /**< 事件概念 */
     CONCEPT_TYPE_RELATION = 4       /**< 关系概念 */
 } ConceptType;
+#endif /* SELFLNN_CONCEPT_TYPE_DEFINED */
 
 /**
  * @brief 语义关系类型

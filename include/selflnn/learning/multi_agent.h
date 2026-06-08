@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file multi_agent.h
  * @brief 多智能体协作框架
  * 
@@ -399,6 +399,8 @@ typedef struct {
 /**
  * @brief 任务类型
  */
+#ifndef SELFLNN_TASK_TYPE_DEFINED
+#define SELFLNN_TASK_TYPE_DEFINED
 typedef enum {
     TASK_TYPE_DECISION = 0,         /**< 决策任务 */
     TASK_TYPE_PLANNING,             /**< 规划任务 */
@@ -414,6 +416,7 @@ typedef enum {
     TASK_TYPE_REASONING,            /**< 推理任务 */
     TASK_TYPE_ADAPTATION            /**< 适应任务 */
 } TaskType;
+#endif /* SELFLNN_TASK_TYPE_DEFINED */
 
 /**
  * @brief 任务状态

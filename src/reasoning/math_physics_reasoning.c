@@ -23,7 +23,7 @@ static MathExpressionNode* create_expression_node(MathExpressionType type,
                                                    MathExpressionNode* right);
 static MathExpressionNode* create_number_node(double value);
 static MathExpressionNode* clone_expression_node(const MathExpressionNode* node);
-static MathExpressionNode* symbolic_differentiate(const MathExpressionNode* node,
+MathExpressionNode* symbolic_differentiate(const MathExpressionNode* node,
                                                    const char* variable_name);
 static int is_constant_number(const MathExpressionNode* node, double val);
 
@@ -1047,28 +1047,33 @@ MathExpressionNode* symbolic_differentiate(const MathExpressionNode* node,
                     NULL),
                 arg_diff);
         case FUNC_TAN: {
-            MathExpressionNode* sec2 = create_expression_node(EXPR_POWER,
-                create_expression_node(EXPR_FUNCTION, clone_expression_node(node->left), NULL),
-                create_number_node(2.0));
+            MathExpressionNode* cos_x = create_expression_node(EXPR_FUNCTION, clone_expression_node(node->left), NULL);
+            cos_x->value.func_type = FUNC_COS;
+            MathExpressionNode* sec2 = create_expression_node(EXPR_DIVISION,
+                create_number_node(1.0),
+                create_expression_node(EXPR_POWER, cos_x, create_number_node(2.0)));
             return create_expression_node(EXPR_MULTIPLICATION, sec2, arg_diff);
         }
-        case FUNC_EXP:
-            return create_expression_node(EXPR_MULTIPLICATION,
-                create_expression_node(EXPR_FUNCTION, clone_expression_node(node->left), NULL),
-                arg_diff);
+        case FUNC_EXP: {
+            MathExpressionNode* exp_x = create_expression_node(EXPR_FUNCTION, clone_expression_node(node->left), NULL);
+            exp_x->value.func_type = FUNC_EXP;
+            return create_expression_node(EXPR_MULTIPLICATION, exp_x, arg_diff);
+        }
         case FUNC_LOG:
             return create_expression_node(EXPR_DIVISION,
                 arg_diff, clone_expression_node(node->left));
-        case FUNC_LOG10:
-            return create_expression_node(EXPR_DIVISION,
-                symbolic_differentiate(
-                    create_expression_node(EXPR_FUNCTION, clone_expression_node(node->left), NULL),
-                    variable_name),
-                create_expression_node(EXPR_FUNCTION, create_number_node(10.0), NULL));
+        case FUNC_LOG10: {
+            /* d/dx log10(x) = 1/(x * ln(10)) */
+            MathExpressionNode* denom = create_expression_node(EXPR_MULTIPLICATION,
+                clone_expression_node(node->left),
+                create_number_node(log(10.0)));
+            return create_expression_node(EXPR_DIVISION, arg_diff, denom);
+        }
         case FUNC_SQRT: {
+            MathExpressionNode* sqrt_x = create_expression_node(EXPR_FUNCTION, clone_expression_node(node->left), NULL);
+            sqrt_x->value.func_type = FUNC_SQRT;
             MathExpressionNode* two_sqrt = create_expression_node(EXPR_MULTIPLICATION,
-                create_number_node(2.0),
-                create_expression_node(EXPR_FUNCTION, clone_expression_node(node->left), NULL));
+                create_number_node(2.0), sqrt_x);
             return create_expression_node(EXPR_DIVISION, arg_diff, two_sqrt);
         }
         case FUNC_ABS:

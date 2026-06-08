@@ -265,6 +265,11 @@ void robot_agent_free(RobotAgent* agent) {
         exploration_ucb_free(agent->ucb_explore_state);
         agent->ucb_explore_state = NULL;
     }
+    /* P2-009: 释放ICM探索状态 */
+    if (agent->icm_state) {
+        explore_destroy(agent->icm_state);
+        agent->icm_state = NULL;
+    }
     safe_free((void**)&agent);
 }
 
@@ -391,6 +396,24 @@ int robot_agent_init(RobotAgent* agent, const AgentConfig* config) {
 /* 初始化UCB探索策略 */
     agent->ucb_explore_state = exploration_ucb_create(AGENT_ACTION_DIM, 0.01f);
 
+    /* P2-009: 初始化ICM内在好奇心模块探索策略 */
+    agent->icm_state = NULL;
+    {
+        ICMConfig icm_cfg;
+        icm_cfg.state_dim = AGENT_STATE_DIM;
+        icm_cfg.action_dim = AGENT_ACTION_DIM;
+        icm_cfg.embedding_dim = 64;
+        icm_cfg.hidden_dim = 128;
+        icm_cfg.head_type = ICM_DUAL;
+        icm_cfg.forward_loss_weight = 0.5f;
+        icm_cfg.inverse_loss_weight = 0.5f;
+        icm_cfg.cfc_tau = 1.0f;
+        icm_cfg.cfc_dt = 0.01f;
+        icm_cfg.cfc_steps = 10;
+        icm_cfg.learning_rate = 0.0003f;
+        agent->icm_state = explore_icm_create(&icm_cfg);
+    }
+
     for (int i = 0; i < AGENT_STATE_DIM; i++) {
         agent->state_mean[i] = 0.0f;
         agent->state_std[i] = 1.0f;
@@ -483,10 +506,16 @@ int robot_agent_learn(RobotAgent* agent, const float* state,
 
     if (!agent->enable_self_learning) return 0;
 
+    /* P2-009: ICM内在好奇心模块提供探索奖励（在存入经验前计算） */
+    float icm_intrinsic = 0.0f;
+    if (agent->icm_state && agent->curiosity_factor > 0.0f) {
+        explore_icm_compute_reward(agent->icm_state, state, next_state, action, &icm_intrinsic);
+    }
+
     AgentExperience exp;
     memcpy(exp.state, state, AGENT_STATE_DIM * sizeof(float));
     memcpy(exp.action, action, AGENT_ACTION_DIM * sizeof(float));
-    exp.reward = reward;
+    exp.reward = reward + icm_intrinsic * agent->curiosity_factor;
     memcpy(exp.next_state, next_state, AGENT_STATE_DIM * sizeof(float));
     exp.done = done;
     exp.timestamp = (float)time_utils_get_time_s();

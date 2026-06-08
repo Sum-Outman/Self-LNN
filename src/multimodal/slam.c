@@ -395,115 +395,85 @@ struct SlamSystem {
 
 #endif /* !SELFLNN_SLAM_INTERNAL_H */
 
-/* 内部辅助函数声明 — 子模块实现，签名可能有历史差异，禁用C4030/C4031 */
+/* 内部辅助函数声明已由slam_internal.h和slam.h提供
+ * MSVC版本需要这些内部声明来链接子模块函数
+ * GCC不使用，用条件编译包装以避免类型冲突 */
 #ifdef _MSC_VER
-#pragma warning(push)
-#pragma warning(disable:4030 4031)
-#endif
-static int slam_initialize_vo(SlamSystem* system);
-static int slam_initialize_map(SlamSystem* system);
-static int slam_extract_features(SlamSystem* system, const float* image_data,
-                                int width, int height, FeaturePoint** features_out,
-                                int* num_features_out);
-static int slam_match_features(const FeaturePoint* features1, int num_features1,
-                              const FeaturePoint* features2, int num_features2,
-                              FeatureMatch** matches_out, int* num_matches_out);
-static int slam_estimate_motion_2d2d(const FeaturePoint* features1,
-                                    const FeaturePoint* features2,
-                                    const FeatureMatch* matches, int num_matches,
-                                    const float* camera_params,
-                                    float* R, float* t);
-static int slam_estimate_motion_3d2d(const FeaturePoint* features2d,
-                                    const float* points3d, int num_points,
-                                    const float* camera_params,
-                                    const float* initial_pose,
-                                    float* optimized_pose);
-static int slam_triangulate_points(const FeaturePoint* features1,
-                                  const FeaturePoint* features2,
-                                  const FeatureMatch* matches, int num_matches,
-                                  const float* R, const float* t,
-                                  const float* camera_params,
-                                  float* points3d);
-static int slam_add_keyframe(SlamSystem* system, const VoFrame* frame);
-static int slam_add_landmark(SlamSystem* system, const float* point3d,
-                            const FeaturePoint* feature, int frame_id);
-static int slam_update_landmark_observation(SlamSystem* system, int landmark_id,
-                                           int frame_id, const float* point2d);
-static int slam_optimize_local_bundle(SlamSystem* system, int window_size, int iterations);
-static int slam_detect_loop_closure(SlamSystem* system, int frame_id,
+int slam_detect_loop_closure(SlamSystem* system, int frame_id,
                                    int* matched_frame_id);
-static int slam_correct_loop_closure(SlamSystem* system, int frame_id,
+int slam_correct_loop_closure(SlamSystem* system, int frame_id,
                                     int matched_frame_id);
-static int slam_build_optimization_problem(SlamSystem* system,
+int slam_build_optimization_problem(SlamSystem* system,
                                           OptimizationProblem* problem);
-static int slam_solve_optimization_problem(OptimizationProblem* problem,
+int slam_solve_optimization_problem(OptimizationProblem* problem,
                                           int max_iterations);
-static int slam_update_from_optimization(SlamSystem* system,
+int slam_update_from_optimization(SlamSystem* system,
                                         const OptimizationProblem* problem);
-static void slam_free_optimization_problem(OptimizationProblem* problem);
+void slam_free_optimization_problem(OptimizationProblem* problem);
+#endif /* _MSC_VER */
 
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif
 
 /* MUL-06: 视觉词汇表内部函数 */
-static int slam_vocabulary_init(InternalVocabulary* vocab, const VisualVocabularyConfig* config);
-static void slam_vocabulary_free(InternalVocabulary* vocab);
-static int slam_vocabulary_build(InternalVocabulary* vocab, const float* all_descriptors,
+int slam_vocabulary_init(InternalVocabulary* vocab, const VisualVocabularyConfig* config);
+void slam_vocabulary_free(InternalVocabulary* vocab);
+int slam_vocabulary_build(InternalVocabulary* vocab, const float* all_descriptors,
                                 int num_descriptors, int descriptor_length);
-static int slam_vocabulary_compute_bow(InternalVocabulary* vocab, const float* descriptors,
+int slam_vocabulary_compute_bow(InternalVocabulary* vocab, const float* descriptors,
                                       int num_descriptors, int descriptor_length,
                                       float* bow_vector, int* bow_vector_size);
-static float slam_vocabulary_compute_similarity(const float* bow1, int size1,
+float slam_vocabulary_compute_similarity(const float* bow1, int size1,
                                                const float* bow2, int size2);
-static int slam_vocabulary_add_frame(InternalVocabulary* vocab, const float* descriptors,
+int slam_vocabulary_add_frame(InternalVocabulary* vocab, const float* descriptors,
                                     int num_descriptors, int descriptor_length);
-static int slam_vocabulary_update_tfidf(InternalVocabulary* vocab);
+int slam_vocabulary_update_tfidf(InternalVocabulary* vocab);
 
 /* MUL-06: 词汇树内部函数 */
-static VocabTreeNode* slam_vocab_node_create(int descriptor_length);
-static void slam_vocab_node_free(VocabTreeNode* node);
-static int slam_vocab_node_train(VocabTreeNode* node, const float* descriptors,
+VocabTreeNode* slam_vocab_node_create(int descriptor_length);
+void slam_vocab_node_free(VocabTreeNode* node);
+int slam_vocab_node_train(VocabTreeNode* node, const float* descriptors,
                                 int num_descriptors, int descriptor_length,
                                 int depth, int max_depth, int branch_factor);
-static int slam_vocab_node_assign(VocabTreeNode* node, const float* descriptor,
+int slam_vocab_node_assign(VocabTreeNode* node, const float* descriptor,
                                  int descriptor_length);
 
 /* MUL-06: 共视图内部函数 */
-static int slam_covisibility_init(InternalCovisibility* cov, int max_frames);
-static void slam_covisibility_free(InternalCovisibility* cov);
-static int slam_covisibility_update(InternalCovisibility* cov, int frame_id,
+int slam_covisibility_init(InternalCovisibility* cov, int max_frames);
+void slam_covisibility_free(InternalCovisibility* cov);
+int slam_covisibility_update(InternalCovisibility* cov, int frame_id,
                                    int* landmark_ids, int num_landmarks,
                                    const KeyFrame* keyframes, int num_keyframes);
-static int slam_covisibility_get_connected(InternalCovisibility* cov, int frame_id,
+int slam_covisibility_get_connected(InternalCovisibility* cov, int frame_id,
                                           int* connected_ids, int max_count);
-static int slam_covisibility_build_essential_graph(InternalCovisibility* cov,
+int slam_covisibility_build_essential_graph(InternalCovisibility* cov,
                                                   const KeyFrame* keyframes,
                                                   int num_keyframes);
 
 /* MUL-06: 闭环检测增强内部函数 */
-static int slam_compute_bow_vector(SlamSystem* system, int frame_id);
-static int slam_select_candidates_by_bow(SlamSystem* system, int frame_id,
+int slam_compute_bow_vector(SlamSystem* system, int frame_id);
+int slam_select_candidates_by_bow(SlamSystem* system, int frame_id,
                                         int* candidates, int max_candidates,
                                         float* scores);
-static int slam_select_candidates_hybrid(SlamSystem* system, int frame_id,
+int slam_select_candidates_hybrid(SlamSystem* system, int frame_id,
                                         int* candidates, int max_candidates,
                                         float* scores);
-static int slam_verify_loop_geometric_8point(SlamSystem* system, int frame_id,
+int slam_verify_loop_geometric_8point(SlamSystem* system, int frame_id,
                                             int candidate_id,
                                             int* num_inliers,
                                             float* inlier_ratio,
                                             float* fundamental_matrix);
-static int slam_temporal_consistency_check(SlamSystem* system, int candidate_frame_id);
-static int slam_fuse_loop_closure_map(SlamSystem* system, int frame_id,
+int slam_temporal_consistency_check(SlamSystem* system, int candidate_frame_id);
+int slam_fuse_loop_closure_map(SlamSystem* system, int frame_id,
                                      int matched_frame_id);
-static int slam_propagate_drift_correction(SlamSystem* system, int matched_frame_id,
+int slam_propagate_drift_correction(SlamSystem* system, int matched_frame_id,
                                           int current_frame_id,
                                           const float* corrected_poses,
                                           int num_corrected);
-static int slam_compute_fundamental_matrix_8point(const float* points1, const float* points2,
+int slam_compute_fundamental_matrix_8point(const float* points1, const float* points2,
                                                   int num_points, float* F);
-static float slam_compute_sampson_distance(const float* F, float x1, float y1,
+float slam_compute_sampson_distance(const float* F, float x1, float y1,
                                           float x2, float y2);
 
 /* 内存安全包装宏（直接展开到调用点，确保__FILE__/__LINE__准确） */
@@ -518,7 +488,7 @@ static float slam_compute_sampson_distance(const float* F, float x1, float y1,
  * 消除因static inline(内部链接)与extern声明(外部链接)不一致导致的符号冲突。
  * 这些函数仅在slam_frontend.c中被调用，slam.c本身不使用它们。 */
 
-static inline void slam_quaternion_to_rotation_matrix(const float* q, float* R) {
+inline void slam_quaternion_to_rotation_matrix(const float* q, float* R) {
     float qw = q[0], qx = q[1], qy = q[2], qz = q[3];
     
     R[0] = 1.0f - 2.0f*qy*qy - 2.0f*qz*qz;
@@ -534,7 +504,7 @@ static inline void slam_quaternion_to_rotation_matrix(const float* q, float* R) 
     R[8] = 1.0f - 2.0f*qx*qx - 2.0f*qy*qy;
 }
 
-static inline void slam_rotation_matrix_to_quaternion(const float* R, float* q) {
+inline void slam_rotation_matrix_to_quaternion(const float* R, float* q) {
     float trace = R[0] + R[4] + R[8];
     
     if (trace > 0.0f) {
@@ -573,6 +543,10 @@ static inline void slam_rotation_matrix_to_quaternion(const float* R, float* q) 
     }
 }
 
+/* 以下三个函数为本地精简实现，仅在SELFLNN_SLAM_ADVANCED未定义时编译。
+ * 当SELFLNN_SLAM_ADVANCED启用时，slam_internal.h提供完整签名的声明，
+ * 实际实现由slam_frontend.c/slam_backend.c等高级模块提供。 */
+#ifndef SELFLNN_SLAM_ADVANCED
 /* 投影函数：3D点到2D图像平面 */
 static inline void slam_project_point(const float* point3d, const float* camera_params,
                                      float* point2d) {
@@ -632,6 +606,7 @@ static inline float slam_reprojection_error(const float* point3d, const float* p
     
     return dx*dx + dy*dy;
 }
+#endif /* !SELFLNN_SLAM_ADVANCED */
 
 /* ========== 公开API实现 ========== */
 
@@ -1011,7 +986,11 @@ int slam_process_visual_frame(SlamSystem* system,
     /* 检查系统是否已初始化 */
     if (!system->is_initialized) {
         /* 系统初始化 */
+#ifndef SELFLNN_SLAM_ADVANCED
         int init_result = slam_initialize_vo(system);
+#else
+        int init_result = slam_initialize_vo(system, NULL, 0, (int64_t)timestamp);
+#endif
         if (init_result != 0) {
             system->is_lost = 1;
             result->tracking_quality = 0;
@@ -1102,7 +1081,12 @@ int slam_process_visual_frame(SlamSystem* system,
         current_frame->keyframe_id = 0;
         
         /* 添加到关键帧 */
+#ifndef SELFLNN_SLAM_ADVANCED
         slam_add_keyframe(system, current_frame);
+#else
+        slam_add_keyframe(system, current_frame->features, current_frame->num_features,
+                         (const float*)&current_frame->pose, (int64_t)current_frame->pose.timestamp);
+#endif
         
         /* 更新系统状态 */
         system->current_frame_id = frame_id;
@@ -1378,7 +1362,12 @@ int slam_process_visual_frame(SlamSystem* system,
         current_frame->keyframe_id = system->local_map.num_keyframes;
         
         /* 添加到关键帧 */
+#ifndef SELFLNN_SLAM_ADVANCED
         slam_add_keyframe(system, current_frame);
+#else
+        slam_add_keyframe(system, current_frame->features, current_frame->num_features,
+                         (const float*)&current_frame->pose, (int64_t)current_frame->pose.timestamp);
+#endif
         
         /* 三角化新的地图点 */
         if (prev_frame->is_keyframe) {
@@ -1395,9 +1384,16 @@ int slam_process_visual_frame(SlamSystem* system,
             
             /* 添加三角化的点到地图中 */
             for (int i = 0; i < triangulated; i++) {
+#ifndef SELFLNN_SLAM_ADVANCED
                 slam_add_landmark(system, &points3d[3*i],
                                  &current_frame->features[matches[i].train_idx],
                                  frame_id);
+#else
+                slam_add_landmark(system, &points3d[3*i],
+                                 current_frame->features[matches[i].train_idx].descriptor,
+                                 frame_id,
+                                 matches[i].train_idx);
+#endif
             }
             
             /* 释放临时内存 */
@@ -1413,7 +1409,11 @@ int slam_process_visual_frame(SlamSystem* system,
     
     /* 局部优化（如果有关键帧） */
     if (system->local_map.num_keyframes >= 2) {
+#ifndef SELFLNN_SLAM_ADVANCED
         slam_optimize_local_bundle(system, 5, 10); /* 优化最近5个关键帧，最多10次迭代 */
+#else
+        slam_optimize_local_bundle(system, 5); /* 优化最近5个关键帧 */
+#endif
     }
     
     /* MUL-06: 更新共视图（如果是关键帧） */
@@ -1614,7 +1614,11 @@ int slam_process_point_cloud(SlamSystem* system,
     /* 检查系统是否已初始化 */
     if (!system->is_initialized) {
         /* 第一帧点云：初始化地图 */
+#ifndef SELFLNN_SLAM_ADVANCED
         slam_initialize_map(system);
+#else
+        slam_initialize_map(system, NULL, NULL, NULL, 0, NULL, NULL, NULL, 0, 0);
+#endif
         
         /* 创建初始位姿 */
         SlamPose initial_pose;
@@ -2800,7 +2804,11 @@ int slam_perform_local_optimization(SlamSystem* system, int window_size, int ite
     }
     
     /* 局部优化（捆集调整），使用传入的迭代次数控制优化精度 */
+#ifndef SELFLNN_SLAM_ADVANCED
     return slam_optimize_local_bundle(system, window_size, iterations);
+#else
+    return slam_optimize_local_bundle(system, window_size);
+#endif
 }
 
 int slam_trigger_loop_closure(SlamSystem* system, int candidate_frame_id) {
@@ -3170,7 +3178,10 @@ int slam_get_map_quality(const SlamSystem* system,
 
 /* ========== 内部函数实现 ========== */
 
-static int slam_initialize_vo(SlamSystem* system) {
+/* 以下为SLAM子模块的基本实现，仅在SELFLNN_SLAM_ADVANCED未启用时编译。
+ * 启用高级SLAM时，slam_frontend.c/slam_backend.c提供完整实现。 */
+#ifndef SELFLNN_SLAM_ADVANCED
+int slam_initialize_vo(SlamSystem* system) {
     if (!system) {
         return -1;
     }
@@ -3328,7 +3339,7 @@ static int slam_initialize_vo(SlamSystem* system) {
     return 0;
 }
 
-static int slam_initialize_map(SlamSystem* system) {
+int slam_initialize_map(SlamSystem* system) {
     if (!system) {
         return -1;
     }
@@ -3339,7 +3350,7 @@ static int slam_initialize_map(SlamSystem* system) {
     return 0;
 }
 
-static int slam_extract_features(SlamSystem* system, const float* image_data,
+int slam_extract_features(SlamSystem* system, const float* image_data,
                                 int width, int height, FeaturePoint** features_out,
                                 int* num_features_out) {
     if (!system || !image_data || !features_out || !num_features_out) {
@@ -3644,7 +3655,7 @@ static int slam_extract_features(SlamSystem* system, const float* image_data,
     return 0;
 }
 
-static int slam_match_features(const FeaturePoint* features1, int num_features1,
+int slam_match_features(const FeaturePoint* features1, int num_features1,
                               const FeaturePoint* features2, int num_features2,
                               FeatureMatch** matches_out, int* num_matches_out) {
     if (!features1 || !features2 || !matches_out || !num_matches_out) {
@@ -3715,7 +3726,7 @@ static int slam_match_features(const FeaturePoint* features1, int num_features1,
     return 0;
 }
 
-static int slam_estimate_motion_2d2d(const FeaturePoint* features1,
+int slam_estimate_motion_2d2d(const FeaturePoint* features1,
                                     const FeaturePoint* features2,
                                     const FeatureMatch* matches, int num_matches,
                                     const float* camera_params,
@@ -4277,7 +4288,7 @@ static int slam_estimate_motion_2d2d(const FeaturePoint* features1,
     return 0;
 }
 
-static int slam_estimate_motion_3d2d(const FeaturePoint* features2d,
+int slam_estimate_motion_3d2d(const FeaturePoint* features2d,
                                     const float* points3d, int num_points,
                                     const float* camera_params,
                                     const float* initial_pose,
@@ -4853,7 +4864,7 @@ static int slam_estimate_motion_3d2d(const FeaturePoint* features2d,
     return 0;
 }
 
-static int slam_triangulate_points(const FeaturePoint* features1,
+int slam_triangulate_points(const FeaturePoint* features1,
                                   const FeaturePoint* features2,
                                   const FeatureMatch* matches, int num_matches,
                                   const float* R, const float* t,
@@ -4965,7 +4976,7 @@ static int slam_triangulate_points(const FeaturePoint* features1,
     return triangulated_count;
 }
 
-static int slam_add_keyframe(SlamSystem* system, const VoFrame* frame) {
+int slam_add_keyframe(SlamSystem* system, const VoFrame* frame) {
     if (!system || !frame) {
         return -1;
     }
@@ -5027,7 +5038,7 @@ static int slam_add_keyframe(SlamSystem* system, const VoFrame* frame) {
     return 0;
 }
 
-static int slam_add_landmark(SlamSystem* system, const float* point3d,
+int slam_add_landmark(SlamSystem* system, const float* point3d,
                             const FeaturePoint* feature, int frame_id) {
     if (!system || !point3d || !feature) {
         return -1;
@@ -5091,7 +5102,7 @@ static int slam_add_landmark(SlamSystem* system, const float* point3d,
     return landmark->id;
 }
 
-static int slam_update_landmark_observation(SlamSystem* system, int landmark_id,
+int slam_update_landmark_observation(SlamSystem* system, int landmark_id,
                                            int frame_id, const float* point2d) {
     if (!system || !point2d || landmark_id < 0 || landmark_id >= system->local_map.num_landmarks) {
         return -1;
@@ -5116,7 +5127,7 @@ static int slam_update_landmark_observation(SlamSystem* system, int landmark_id,
     return 0;
 }
 
-static int slam_optimize_local_bundle(SlamSystem* system, int window_size, int iterations) {
+int slam_optimize_local_bundle(SlamSystem* system, int window_size, int iterations) {
     if (!system) {
         return -1;
     }
@@ -5796,7 +5807,7 @@ static int slam_optimize_local_bundle(SlamSystem* system, int window_size, int i
     return 0;
 }
 
-static int slam_detect_loop_closure(SlamSystem* system, int frame_id,
+int slam_detect_loop_closure(SlamSystem* system, int frame_id,
                                    int* matched_frame_id) {
     if (!system || !matched_frame_id) return -1;
     *matched_frame_id = -1;
@@ -5993,7 +6004,7 @@ static int slam_detect_loop_closure(SlamSystem* system, int frame_id,
     return -1;
 }
 
-static int slam_correct_loop_closure(SlamSystem* system, int frame_id,
+int slam_correct_loop_closure(SlamSystem* system, int frame_id,
                                     int matched_frame_id) {
     if (!system || frame_id < 0 || matched_frame_id < 0) {
         return -1;
@@ -6859,7 +6870,7 @@ static int slam_correct_loop_closure(SlamSystem* system, int frame_id,
     return 0;
 }
 
-static int slam_build_optimization_problem(SlamSystem* system,
+int slam_build_optimization_problem(SlamSystem* system,
                                           OptimizationProblem* problem) {
     if (!system || !problem) {
         return -1;
@@ -7000,7 +7011,7 @@ static int slam_build_optimization_problem(SlamSystem* system,
     return 0;
 }
 
-static int slam_solve_optimization_problem(OptimizationProblem* problem,
+int slam_solve_optimization_problem(OptimizationProblem* problem,
                                           int max_iterations) {
     if (!problem) {
         return -1;
@@ -7435,7 +7446,7 @@ static int slam_solve_optimization_problem(OptimizationProblem* problem,
     return 0;
 }
 
-static int slam_update_from_optimization(SlamSystem* system,
+int slam_update_from_optimization(SlamSystem* system,
                                         const OptimizationProblem* problem) {
     if (!system || !problem) {
         return -1;
@@ -7587,7 +7598,7 @@ static int slam_update_from_optimization(SlamSystem* system,
     return 0;
 }
 
-static void slam_free_optimization_problem(OptimizationProblem* problem) {
+void slam_free_optimization_problem(OptimizationProblem* problem) {
     if (!problem) {
         return;
     }
@@ -7605,7 +7616,7 @@ static void slam_free_optimization_problem(OptimizationProblem* problem) {
 
 /* ==================== MUL-06: 视觉词汇树节点函数实现 ==================== */
 
-static VocabTreeNode* slam_vocab_node_create(int descriptor_length) {
+VocabTreeNode* slam_vocab_node_create(int descriptor_length) {
     VocabTreeNode* node = (VocabTreeNode*)slam_calloc(1, sizeof(VocabTreeNode));
     if (!node) return NULL;
     node->descriptor_length = descriptor_length;
@@ -7620,7 +7631,7 @@ static VocabTreeNode* slam_vocab_node_create(int descriptor_length) {
     return node;
 }
 
-static void slam_vocab_node_free(VocabTreeNode* node) {
+void slam_vocab_node_free(VocabTreeNode* node) {
     if (!node) return;
     if (node->children) {
         for (int i = 0; i < node->num_children; i++) {
@@ -7634,7 +7645,7 @@ static void slam_vocab_node_free(VocabTreeNode* node) {
     slam_free(node);
 }
 
-static int slam_vocab_node_assign(VocabTreeNode* node, const float* descriptor,
+int slam_vocab_node_assign(VocabTreeNode* node, const float* descriptor,
                                  int descriptor_length) {
     if (!node || !descriptor || !node->children || node->num_children == 0) {
         return 0;
@@ -7667,7 +7678,7 @@ static int compare_float_desc(const void* a, const void* b) {
 /* 防止与slam_internal.h函数声明及slam_vocabulary.c定义冲突
  * 静态版本仅在slam_internal.h未引入时编译 */
 #ifndef SELFLNN_SLAM_INTERNAL_H
-static void slam_kmeans_plus_plus(const float* descriptors, int num_descriptors,
+void slam_kmeans_plus_plus(const float* descriptors, int num_descriptors,
                                   int descriptor_length, int k,
                                   float* centers) {
     if (num_descriptors <= 0 || k <= 0) return;
@@ -7751,7 +7762,7 @@ static void slam_kmeans_plus_plus(const float* descriptors, int num_descriptors,
 }
 #endif /* !SELFLNN_SLAM_INTERNAL_H */
 
-static int slam_vocab_node_train(VocabTreeNode* node, const float* descriptors,
+int slam_vocab_node_train(VocabTreeNode* node, const float* descriptors,
                                 int num_descriptors, int descriptor_length,
                                 int depth, int max_depth, int branch_factor) {
     if (!node || !descriptors || num_descriptors <= 0) return -1;
@@ -7846,7 +7857,7 @@ static int slam_vocab_node_train(VocabTreeNode* node, const float* descriptors,
     return 0;
 }
 
-static int slam_vocab_node_collect_leaves(VocabTreeNode* node, VisualWord* words, int* index) {
+int slam_vocab_node_collect_leaves(VocabTreeNode* node, VisualWord* words, int* index) {
     if (!node || !words || !index) return -1;
     if (node->is_leaf) {
         words[*index].descriptor_length = node->descriptor_length;
@@ -7865,7 +7876,7 @@ static int slam_vocab_node_collect_leaves(VocabTreeNode* node, VisualWord* words
     return 0;
 }
 
-static int slam_vocab_node_count_leaves(VocabTreeNode* node) {
+int slam_vocab_node_count_leaves(VocabTreeNode* node) {
     if (!node) return 0;
     if (node->is_leaf) return 1;
     int count = 0;
@@ -7877,7 +7888,7 @@ static int slam_vocab_node_count_leaves(VocabTreeNode* node) {
 
 /* ==================== MUL-06: 视觉词汇表函数实现 ==================== */
 
-static int slam_vocabulary_init(InternalVocabulary* vocab, const VisualVocabularyConfig* config) {
+int slam_vocabulary_init(InternalVocabulary* vocab, const VisualVocabularyConfig* config) {
     if (!vocab || !config) return -1;
     memset(vocab, 0, sizeof(InternalVocabulary));
     vocab->vocabulary_size = config->vocabulary_size;
@@ -7895,7 +7906,7 @@ static int slam_vocabulary_init(InternalVocabulary* vocab, const VisualVocabular
     return 0;
 }
 
-static void slam_vocabulary_free(InternalVocabulary* vocab) {
+void slam_vocabulary_free(InternalVocabulary* vocab) {
     if (!vocab) return;
     if (vocab->root) {
         slam_vocab_node_free(vocab->root);
@@ -7909,7 +7920,7 @@ static void slam_vocabulary_free(InternalVocabulary* vocab) {
     vocab->num_leaf_nodes = 0;
 }
 
-static int slam_vocabulary_build(InternalVocabulary* vocab, const float* all_descriptors,
+int slam_vocabulary_build(InternalVocabulary* vocab, const float* all_descriptors,
                                 int num_descriptors, int descriptor_length) {
     if (!vocab || !all_descriptors || num_descriptors <= 0) return -1;
     slam_vocabulary_free(vocab);
@@ -7939,7 +7950,7 @@ static int slam_vocabulary_build(InternalVocabulary* vocab, const float* all_des
     return 0;
 }
 
-static int slam_vocabulary_compute_bow(InternalVocabulary* vocab, const float* descriptors,
+int slam_vocabulary_compute_bow(InternalVocabulary* vocab, const float* descriptors,
                                       int num_descriptors, int descriptor_length,
                                       float* bow_vector, int* bow_vector_size) {
     if (!vocab || !vocab->is_built || !vocab->root || !descriptors || !bow_vector || !bow_vector_size) {
@@ -7974,7 +7985,7 @@ static int slam_vocabulary_compute_bow(InternalVocabulary* vocab, const float* d
     return 0;
 }
 
-static float slam_vocabulary_compute_similarity(const float* bow1, int size1,
+float slam_vocabulary_compute_similarity(const float* bow1, int size1,
                                                const float* bow2, int size2) {
     if (!bow1 || !bow2 || size1 <= 0 || size2 <= 0) return 0.0f;
     int min_size = (size1 < size2) ? size1 : size2;
@@ -7989,7 +8000,7 @@ static float slam_vocabulary_compute_similarity(const float* bow1, int size1,
     return (denom > 1e-10f) ? (dot / denom) : 0.0f;
 }
 
-static int slam_vocabulary_add_frame(InternalVocabulary* vocab, const float* descriptors,
+int slam_vocabulary_add_frame(InternalVocabulary* vocab, const float* descriptors,
                                     int num_descriptors, int descriptor_length) {
     if (!vocab || !descriptors || num_descriptors <= 0 || !vocab->is_built) return -1;
     VocabTreeNode* node = vocab->root;
@@ -8012,7 +8023,7 @@ static int slam_vocabulary_add_frame(InternalVocabulary* vocab, const float* des
     return 0;
 }
 
-static int slam_vocabulary_update_tfidf(InternalVocabulary* vocab) {
+int slam_vocabulary_update_tfidf(InternalVocabulary* vocab) {
     if (!vocab || !vocab->is_built || !vocab->leaf_words) return -1;
     int N = (vocab->num_trained_frames > 0) ? vocab->num_trained_frames : 1;
     int num_leaves = vocab->num_leaf_nodes;
@@ -8027,7 +8038,7 @@ static int slam_vocabulary_update_tfidf(InternalVocabulary* vocab) {
 
 /* ==================== MUL-06: 共视图函数实现 ==================== */
 
-static int slam_covisibility_init(InternalCovisibility* cov, int max_frames) {
+int slam_covisibility_init(InternalCovisibility* cov, int max_frames) {
     if (!cov) return -1;
     memset(cov, 0, sizeof(InternalCovisibility));
     cov->max_frames = max_frames;
@@ -8051,7 +8062,7 @@ static int slam_covisibility_init(InternalCovisibility* cov, int max_frames) {
     return 0;
 }
 
-static void slam_covisibility_free(InternalCovisibility* cov) {
+void slam_covisibility_free(InternalCovisibility* cov) {
     if (!cov) return;
     if (cov->adjacency_matrix) { slam_free(cov->adjacency_matrix); cov->adjacency_matrix = NULL; }
     if (cov->connected_frames) { slam_free(cov->connected_frames); cov->connected_frames = NULL; }
@@ -8064,7 +8075,7 @@ static void slam_covisibility_free(InternalCovisibility* cov) {
     cov->essential_graph_built = 0;
 }
 
-static int slam_covisibility_update(InternalCovisibility* cov, int frame_id,
+int slam_covisibility_update(InternalCovisibility* cov, int frame_id,
                                    int* landmark_ids, int num_landmarks,
                                    const KeyFrame* keyframes, int num_keyframes) {
     if (!cov || !landmark_ids || !keyframes || frame_id < 0 || frame_id >= cov->max_frames) {
@@ -8094,7 +8105,7 @@ static int slam_covisibility_update(InternalCovisibility* cov, int frame_id,
     return 0;
 }
 
-static int slam_covisibility_get_connected(InternalCovisibility* cov, int frame_id,
+int slam_covisibility_get_connected(InternalCovisibility* cov, int frame_id,
                                           int* connected_ids, int max_count) {
     if (!cov || !connected_ids || frame_id < 0 || frame_id >= cov->num_frames) return -1;
     int count = 0;
@@ -8110,13 +8121,13 @@ static int slam_covisibility_get_connected(InternalCovisibility* cov, int frame_
     return count;
 }
 
-static int slam_covisibility_get_weight(InternalCovisibility* cov, int frame_id1, int frame_id2) {
+int slam_covisibility_get_weight(InternalCovisibility* cov, int frame_id1, int frame_id2) {
     if (!cov || frame_id1 < 0 || frame_id1 >= cov->max_frames ||
         frame_id2 < 0 || frame_id2 >= cov->max_frames) return 0;
     return cov->adjacency_matrix[frame_id1 * cov->max_frames + frame_id2];
 }
 
-static int slam_covisibility_build_essential_graph(InternalCovisibility* cov,
+int slam_covisibility_build_essential_graph(InternalCovisibility* cov,
                                                   const KeyFrame* keyframes,
                                                   int num_keyframes) {
     UNUSED(num_keyframes);
@@ -8180,7 +8191,7 @@ static int slam_covisibility_build_essential_graph(InternalCovisibility* cov,
 
 /* ==================== MUL-06: 8点法基础矩阵估计 + RANSAC ==================== */
 
-static void slam_normalize_points(const float* points, int num_points,
+void slam_normalize_points(const float* points, int num_points,
                                  float* normalized, float* T) {
     float cx = 0.0f, cy = 0.0f;
     for (int i = 0; i < num_points; i++) {
@@ -8206,7 +8217,7 @@ static void slam_normalize_points(const float* points, int num_points,
     }
 }
 
-static void slam_build_design_matrix(const float* pts1, const float* pts2,
+void slam_build_design_matrix(const float* pts1, const float* pts2,
                                      int num_points, float* A) {
     for (int i = 0; i < num_points; i++) {
         float x1 = pts1[2 * i], y1 = pts1[2 * i + 1];
@@ -8226,7 +8237,7 @@ static void slam_build_design_matrix(const float* pts1, const float* pts2,
 
 /* 防止与slam_internal.h函数声明及slam_frontend.c定义冲突 */
 #ifndef SELFLNN_SLAM_INTERNAL_H
-static void slam_svd_3x3(const float* A, float* U, float* S, float* VT) {
+void slam_svd_3x3(const float* A, float* U, float* S, float* VT) {
     float AT[9];
     for (int i = 0; i < 3; i++) {
         for (int j = 0; j < 3; j++) {
@@ -8302,7 +8313,7 @@ static void slam_svd_3x3(const float* A, float* U, float* S, float* VT) {
 }
 #endif /* !SELFLNN_SLAM_INTERNAL_H */
 
-static int slam_compute_fundamental_matrix_8point(const float* points1, const float* points2,
+int slam_compute_fundamental_matrix_8point(const float* points1, const float* points2,
                                                   int num_points, float* F) {
     if (!points1 || !points2 || num_points < 8 || !F) return -1;
     float* pts1_n = (float*)slam_malloc(num_points * 2 * sizeof(float));
@@ -8365,7 +8376,7 @@ static int slam_compute_fundamental_matrix_8point(const float* points1, const fl
     return 0;
 }
 
-static float slam_compute_sampson_distance(const float* F, float x1, float y1,
+float slam_compute_sampson_distance(const float* F, float x1, float y1,
                                           float x2, float y2) {
     if (!F) return FLT_MAX;
     float epi_x = F[0] * x1 + F[1] * y1 + F[2];
@@ -8379,7 +8390,7 @@ static float slam_compute_sampson_distance(const float* F, float x1, float y1,
     return (denom > 1e-10f) ? (sq_error / denom) : FLT_MAX;
 }
 
-static int slam_ransac_fundamental_matrix(const float* points1, const float* points2,
+int slam_ransac_fundamental_matrix(const float* points1, const float* points2,
                                           int num_points, float* best_F,
                                           int* inliers, int* num_inliers) {
     if (!points1 || !points2 || num_points < 8 || !best_F || !inliers || !num_inliers) {
@@ -8455,7 +8466,7 @@ static int slam_ransac_fundamental_matrix(const float* points1, const float* poi
     return (best_inlier_count >= 8) ? 0 : -1;
 }
 
-static int slam_verify_loop_geometric_8point(SlamSystem* system, int frame_id,
+int slam_verify_loop_geometric_8point(SlamSystem* system, int frame_id,
                                             int candidate_id,
                                             int* num_inliers,
                                             float* inlier_ratio,
@@ -8539,7 +8550,7 @@ static int slam_verify_loop_geometric_8point(SlamSystem* system, int frame_id,
 
 /* ==================== MUL-06: 时间一致性验证 ==================== */
 
-static int slam_temporal_consistency_check(SlamSystem* system, int candidate_frame_id) {
+int slam_temporal_consistency_check(SlamSystem* system, int candidate_frame_id) {
     if (!system || candidate_frame_id < 0) return 0;
     InternalLoopClosure* ilc = &system->loop_closure_internal;
     if (!system->loop_closure_config.enable_temporal_consistency) {
@@ -8568,7 +8579,7 @@ static int slam_temporal_consistency_check(SlamSystem* system, int candidate_fra
 
 /* ==================== MUL-06: 闭环地图点融合 ==================== */
 
-static int slam_find_duplicate_landmarks(SlamSystem* system, int frame_id1,
+int slam_find_duplicate_landmarks(SlamSystem* system, int frame_id1,
                                         int frame_id2, int* fusion_map,
                                         int map_size) {
     if (!system || !fusion_map || map_size <= 0) return -1;
@@ -8611,7 +8622,7 @@ static int slam_find_duplicate_landmarks(SlamSystem* system, int frame_id1,
     return fusion_count;
 }
 
-static int slam_fuse_loop_closure_map(SlamSystem* system, int frame_id, int matched_frame_id) {
+int slam_fuse_loop_closure_map(SlamSystem* system, int frame_id, int matched_frame_id) {
     if (!system) return -1;
     if (frame_id < 0 || matched_frame_id < 0) return -1;
     InternalLoopClosure* ilc = &system->loop_closure_internal;
@@ -8645,7 +8656,7 @@ static int slam_fuse_loop_closure_map(SlamSystem* system, int frame_id, int matc
 
 /* 防止与slam_internal.h函数声明及slam_frontend.c定义冲突 */
 #ifndef SELFLNN_SLAM_INTERNAL_H
-static int slam_compute_relative_pose(const SlamPose* from, const SlamPose* to,
+int slam_compute_relative_pose(const SlamPose* from, const SlamPose* to,
                                      float* delta_pose) {
     if (!from || !to || !delta_pose) return -1;
     delta_pose[0] = to->position[0] - from->position[0];
@@ -8676,7 +8687,7 @@ static int slam_compute_relative_pose(const SlamPose* from, const SlamPose* to,
     return 0;
 }
 
-static int slam_apply_delta_to_pose(SlamPose* pose, const float* delta) {
+int slam_apply_delta_to_pose(SlamPose* pose, const float* delta) {
     if (!pose || !delta) return -1;
     pose->position[0] += delta[0];
     pose->position[1] += delta[1];
@@ -8698,7 +8709,7 @@ static int slam_apply_delta_to_pose(SlamPose* pose, const float* delta) {
 
 #endif /* !SELFLNN_SLAM_INTERNAL_H */
 
-static int slam_propagate_drift_correction(SlamSystem* system, int matched_frame_id,
+int slam_propagate_drift_correction(SlamSystem* system, int matched_frame_id,
                                           int current_frame_id,
                                           const float* corrected_poses,
                                           int num_corrected) {
@@ -8977,7 +8988,7 @@ int slam_get_vocabulary_stats(const SlamSystem* system, int* vocab_size, int* to
 
 /* ==================== 候选选择函数实现 ==================== */
 
-static int slam_compute_bow_vector(SlamSystem* system, int frame_id) {
+int slam_compute_bow_vector(SlamSystem* system, int frame_id) {
     if (!system || frame_id < 0 || frame_id >= system->local_map.num_keyframes) {
         return -1;
     }
@@ -9007,7 +9018,7 @@ static int slam_compute_bow_vector(SlamSystem* system, int frame_id) {
     return ret;
 }
 
-static int slam_select_candidates_by_bow(SlamSystem* system, int frame_id,
+int slam_select_candidates_by_bow(SlamSystem* system, int frame_id,
                                         int* candidates, int max_candidates,
                                         float* scores) {
     if (!system || !candidates || !scores || max_candidates <= 0) return -1;
@@ -9075,7 +9086,7 @@ static int slam_select_candidates_by_bow(SlamSystem* system, int frame_id,
     return selected;
 }
 
-static int slam_select_candidates_hybrid(SlamSystem* system, int frame_id,
+int slam_select_candidates_hybrid(SlamSystem* system, int frame_id,
                                         int* candidates, int max_candidates,
                                         float* scores) {
     if (!system || !candidates || !scores || max_candidates <= 0) return -1;
@@ -9467,7 +9478,7 @@ static float compute_ate(const float estimated_trajectory[][3], int est_length,
     return rmse;
 }
 
-static int slam_read_ppm_token(FILE* f, char* token, int max_len) {
+int slam_read_ppm_token(FILE* f, char* token, int max_len) {
     int pos = 0;
     int c;
     while ((c = fgetc(f)) != EOF) {
@@ -9758,7 +9769,7 @@ struct SlamFrameReader {
     char directory[1024];
 };
 
-static int slam_compare_frames(const void* a, const void* b)
+int slam_compare_frames(const void* a, const void* b)
 {
     int na = ((const int*)a)[0];
     int nb = ((const int*)b)[0];
@@ -10603,7 +10614,9 @@ void camera_input_free(CameraInput* camera)
     safe_free((void**)&camera);
 }
 
-/* SLAM系统内部重置 */
+#endif /* !SELFLNN_SLAM_ADVANCED */
+
+/* SLAM系统内部重置 — 高级SLAM模块(slam_frontend.c)也需要调用 */
 void slam_system_reset_internal(SlamSystem* system) {
     if (!system) return;
     slam_system_reset(system, 1);

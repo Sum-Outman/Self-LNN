@@ -1217,7 +1217,12 @@ typedef struct {
     int converged;             /* 是否已收敛 */
 } BoltzmannState;
 
-void* exploration_boltzmann_create(int num_actions, float T_max, float T_min, float lambda) {
+void* exploration_boltzmann_create(float temperature, float decay) {
+    /* 匹配头文件签名；内部使用默认action数和温度范围 */
+    int num_actions = 128;
+    float T_max = temperature;
+    float T_min = 0.1f;
+    float lambda = decay;
     BoltzmannState* s = (BoltzmannState*)safe_calloc(1, sizeof(BoltzmannState));
     if (!s || num_actions <= 0) { safe_free((void**)&s); return NULL; }
     s->num_actions = num_actions;

@@ -1610,7 +1610,7 @@ void* dialogue_memory_create(size_t capacity)
     return (void*)mem;
 }
 
-static void dialogue_memory_free(void* memory_handle)
+void dialogue_memory_free(void* memory_handle)
 {
     if (!memory_handle) return;
     dialogue_context_free((DialogueContext*)memory_handle);

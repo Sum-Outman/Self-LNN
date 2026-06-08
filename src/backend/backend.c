@@ -10,13 +10,9 @@
 #pragma warning(disable:4477 4313 4047 4702 4133 5286 4113)
 #endif
 
-/* 前向声明：JSON安全函数和API处理器 */
+/* 前向声明：JSON安全函数 */
 static char* json_escape_str(const char* src);
-static int handle_api_get_audio_spectrum(void* server, const char* json, char* buf, int len);
-static int handle_api_get_lnn_activation_heatmap(void* server, const char* json, char* buf, int len);
-static int handle_api_get_lnn_prediction_scatter(void* server, const char* json, char* buf, int len);
-static int handle_api_post_task_pause(void* server, const char* json, char* buf, int len);
-static int handle_api_post_task_cancel(void* server, const char* json, char* buf, int len);
+/* API处理器前向声明见文件尾部 init_handler_table 前 */
 
 #define ROS_ROBOT_CONNECTION_CONNECTED 1
 #define ROS_ROBOT_CONNECTION_ACTIVE 2
@@ -4136,7 +4132,7 @@ static void* server_thread_func(void* param) {
                 } else {
                     server->request_path[0] = '\0';
                 }
-#ifdef _WIN32
+#ifdef _MSC_VER
                 __try {
 #endif
                 response = backend_handle_request(server, request_type, request_body, content_length, client_ip);
@@ -4190,7 +4186,7 @@ static void* server_thread_func(void* param) {
 #else
                 __sync_fetch_and_sub(&server->connection_count, 1);
 #endif
-#ifdef _WIN32
+#ifdef _MSC_VER
                 } __except(EXCEPTION_EXECUTE_HANDLER) {
                     server->error_count++;
                     if (response) backend_response_free(response);
@@ -5612,7 +5608,12 @@ void backend_server_free(BackendServer* server) {
     }
     
     if (server->lnn_instance && server->lnn_owns) {
-        lnn_free(server->lnn_instance);
+        /* R2安全保护: 双重保险——释放前确认不等于共享LNN */
+        if (server->lnn_instance != (LNN*)selflnn_get_shared_lnn()) {
+            lnn_free(server->lnn_instance);
+        } else {
+            log_error("[后端] 安全拦截: 拒绝释放共享全局LNN");
+        }
     }
     
     if (server->skill_library) {
@@ -7695,12 +7696,19 @@ static int handle_api_post_reset(BackendServer* server,
         server->trainer = NULL;
     }
 
-    /* 重置LNN网络（重新初始化参数） */
+    /* 重置LNN网络（重新初始化参数）
+     * R2安全保护: 仅当 lnn_owns=1（后端自建LNN）且不等于共享LNN时才释放。
+     * 共享全局LNN (lnn_owns=0) 永远不可被后端释放。 */
     if (server->lnn_instance && server->lnn_owns) {
-        LNNConfig current_config;
-        if (lnn_get_config(server->lnn_instance, &current_config) == 0) {
-            lnn_free(server->lnn_instance);
-            server->lnn_instance = lnn_create(&current_config);
+        /* 双重保险: 与共享LNN指针比对，防止误配置导致的灾难性释放 */
+        if (server->lnn_instance == (LNN*)selflnn_get_shared_lnn()) {
+            log_error("[后端] 安全拦截: 拒绝释放共享全局LNN (lnn_owns与共享LNN状态不一致)");
+        } else {
+            LNNConfig current_config;
+            if (lnn_get_config(server->lnn_instance, &current_config) == 0) {
+                lnn_free(server->lnn_instance);
+                server->lnn_instance = lnn_create(&current_config);
+            }
         }
     }
 
@@ -9617,7 +9625,7 @@ static int handle_api_post_tts_synthesize(BackendServer* server,
             return 0;
         }
     }
-#ifdef _WIN32
+#ifdef _MSC_VER
     __try {
         audio = tts_synthesize(server->tts_engine, tts_text);
     } __except(EXCEPTION_EXECUTE_HANDLER) {
@@ -11168,7 +11176,7 @@ static int handle_api_post_device_command_v1(BackendServer* server,
     } else if (strcmp(device_type, "speaker") == 0 || strcmp(device_type, "扬声器") == 0) {
         if (server->tts_engine) {
             TTSAudio* audio = NULL;
-#ifdef _WIN32
+#ifdef _MSC_VER
             __try { audio = tts_synthesize(server->tts_engine, command); }
             __except(EXCEPTION_EXECUTE_HANDLER) { audio = NULL; }
 #else
@@ -16514,6 +16522,7 @@ static int handle_api_post_voice_synthesize(BackendServer* server,
                                    size_t request_length,
                                    ApiResponse* response) {
     char* json_data = NULL;
+    size_t hex_len = 0;
 
 /* 同步TTS修复 —— 连接到真实TTS引擎 */
     if (!server->multimodal_manager) {
@@ -16555,7 +16564,7 @@ static int handle_api_post_voice_synthesize(BackendServer* server,
 
     /* SEH保护TTS合成调用 —— 访问违例不会导致服务器崩溃 */
     TTSAudio* audio = NULL;
-#ifdef _WIN32
+#ifdef _MSC_VER
     __try {
         audio = tts_synthesize(server->tts_engine, tts_text);
     } __except(EXCEPTION_EXECUTE_HANDLER) {
@@ -16578,7 +16587,7 @@ static int handle_api_post_voice_synthesize(BackendServer* server,
     }
 
     /* 构建返回JSON，包含采样率、采样数和PCM数据 */
-    size_t hex_len = (size_t)audio->num_samples * 4 + 512;
+    hex_len = (size_t)audio->num_samples * 4 + 512;
     json_data = (char*)safe_malloc(hex_len);
     if (json_data) {
         int offset = snprintf(json_data, hex_len,
@@ -18758,7 +18767,7 @@ static int handle_api_post_gpu_benchmark(BackendServer* server,
                                    size_t request_length,
                                    ApiResponse* response) {
     (void)server; (void)request_type;
-    GpuBackend backend = gpu_get_current_backend;
+    GpuBackend backend = gpu_get_current_backend();
     int device_index = 0;
     char bench_backend_name[64] = "";
 
@@ -18935,7 +18944,7 @@ static int handle_api_post_dataset_create(BackendServer* server,
     if (output_dim <= 0) output_dim = 10;
 
     /* 使用真实TrainingDataset API创建数据集 */
-    TrainingDataset* ds = dataset_create((size_t)num_samples, (size_t)input_dim);
+    TrainingDataset* ds = dataset_create(ds_name, (size_t)num_samples, (size_t)input_dim, (size_t)output_dim);
     if (!ds) {
         snprintf(json_data, 1024, "{\"success\":false,\"error\":\"数据集内存分配失败\"}");
     } else {
@@ -20030,7 +20039,7 @@ static int handle_api_post_programming_generate(BackendServer* server,
         }
         return -1;
     }
-    CodeSpecification* spec = create_code_specification(func_name, description, TYPE_FLOAT);
+    CodeSpecification* spec = create_code_specification(func_name, description, (DataType)2);
     if (!spec) {
         json_data = (char*)safe_malloc(128);
         if (json_data) {
@@ -20045,7 +20054,7 @@ static int handle_api_post_programming_generate(BackendServer* server,
     for (int i = 0; i < param_count && i < 16; i++) {
         char pname[64];
         snprintf(pname, sizeof(pname), "param%d", i);
-        code_spec_add_parameter(spec, pname, TYPE_FLOAT);
+        code_spec_add_parameter(spec, pname, (DataType)2);
     }
     char* generated = synthesize_code(engine, spec);
     code_specification_destroy(spec);
@@ -20742,8 +20751,7 @@ static int handle_api_post_knowledge_import(BackendServer* server,
         {
             void* kg_ptr = selflnn_get_knowledge_graph();
             if (kg_ptr) {
-                extern int knowledge_graph_import_from_knowledge_base(void* graph, void* kb);
-                knowledge_graph_import_from_knowledge_base(kg_ptr, server->knowledge_base);
+                knowledge_graph_import_from_knowledge_base((KnowledgeGraph*)kg_ptr, server->knowledge_base);
             }
         }
         char* j = (char*)safe_malloc(512);
@@ -20892,8 +20900,7 @@ static int handle_api_post_knowledge_import(BackendServer* server,
     if (imported > 0) {
         void* kg_ptr = selflnn_get_knowledge_graph();
         if (kg_ptr) {
-            extern int knowledge_graph_import_from_knowledge_base(void* graph, void* kb);
-            knowledge_graph_import_from_knowledge_base(kg_ptr, server->knowledge_base);
+            knowledge_graph_import_from_knowledge_base((KnowledgeGraph*)kg_ptr, server->knowledge_base);
         }
     }
 
@@ -24674,7 +24681,7 @@ static int handle_api_post_multi_agent_task(BackendServer* s,
     CollaborativeTask* task = collaborative_task_create(task_id, 3);
     int result = -1;
     if (task) {
-        task->task_type = TASK_TYPE_COLLABORATION;
+        task->task_type = (TaskType)0; /* TASK_TYPE_COLLABORATION from multi_agent.h */
         result = multi_agent_execute_task((MultiAgentSystem*)ma_sys, task);
         collaborative_task_destroy(task);
     }
@@ -24764,6 +24771,13 @@ static int handle_api_post_command_send(BackendServer* s,
 }
 
 /* ========== Handler分发表初始化 ========== */
+/* 前端可视化实时数据源处理器前向声明 */
+static int handle_api_get_audio_spectrum(BackendServer* server, ApiRequestType request_type, const char* request_data, size_t request_length, ApiResponse* response);
+static int handle_api_get_lnn_activation_heatmap(BackendServer* server, ApiRequestType request_type, const char* request_data, size_t request_length, ApiResponse* response);
+static int handle_api_get_lnn_prediction_scatter(BackendServer* server, ApiRequestType request_type, const char* request_data, size_t request_length, ApiResponse* response);
+static int handle_api_post_task_pause(BackendServer* server, ApiRequestType request_type, const char* request_data, size_t request_length, ApiResponse* response);
+static int handle_api_post_task_cancel(BackendServer* server, ApiRequestType request_type, const char* request_data, size_t request_length, ApiResponse* response);
+
 static void init_handler_table(RequestHandler* table) {
 /* 先填充所有槽位为通用未实现处理器，消除竞态窗口
      * 后续真实处理器注册会覆盖对应槽位。确保任何时刻table[i]均非NULL。 */
@@ -25565,11 +25579,11 @@ ApiResponse* backend_handle_request(BackendServer* server,
             return response;
         }
 
-#ifdef _WIN32
+#ifdef _MSC_VER
         __try {
 #endif
         handler(server, request_type, request_data, request_length, response);
-#ifdef _WIN32
+#ifdef _MSC_VER
         } __except(EXCEPTION_EXECUTE_HANDLER) {
             char* crash_err = (char*)safe_malloc(256);
             if (crash_err) {

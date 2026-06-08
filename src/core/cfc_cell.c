@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file cfc_cell.c
  * @brief 封闭形式连续时间单元（CfC Cell）实现
  * 
@@ -509,7 +509,8 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
         safe_free((void**)&cell);
         return NULL;
     }
-    
+    memset(cell->state, 0, sizeof(CfCState)); /* F6修复: 零初始化防止cfc_cell_free读垃圾值 */
+
     size_t hidden_size = config->hidden_size;
     size_t input_size = config->input_size;
     
@@ -579,6 +580,8 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
     cell->liquid_tau_bias_grad = (float*)safe_calloc(hidden_size, sizeof(float));
     cell->computed_liquid_tau = (float*)safe_calloc(hidden_size, sizeof(float));
     cell->liquid_tau_workspace = (float*)safe_calloc(hidden_size, sizeof(float));
+    cell->adjoint_state = (float*)safe_calloc(hidden_size, sizeof(float));
+    cell->adjoint_workspace = (float*)safe_calloc(hidden_size, sizeof(float));
     cell->use_liquid_scaling = 1;  /* 默认启用液时域缩放（LNN核心特性） */
     cell->liquid_tau_min = CFC_DEFAULT_LIQUID_TAU_MIN;
     cell->liquid_tau_max = CFC_DEFAULT_LIQUID_TAU_MAX;
@@ -870,12 +873,10 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
     cell->adjoint_gradient_clip_norm = 5.0f; /* 伴随法梯度裁剪默认值，与训练主循环一致 */
     cell->adjoint_use_augmented_state = 0;
     cell->adjoint_interpolation_method = 1;
-    cell->adjoint_state = (float*)safe_calloc(hidden_size, sizeof(float));
     cell->adjoint_trajectory = NULL;
     cell->adjoint_timestamps = NULL;
     cell->adjoint_trajectory_capacity = 0;
     cell->adjoint_trajectory_count = 0;
-    cell->adjoint_workspace = (float*)safe_calloc(hidden_size, sizeof(float));
     cell->adjoint_forward_step = 0;
     cell->adjoint_param_grad_workspace = NULL;
     

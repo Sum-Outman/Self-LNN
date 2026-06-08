@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file multisystem_control.c
  * @brief 多系统控制能力实现
  * 
@@ -852,38 +852,12 @@ MultiSystemControlEngine* multisystem_control_engine_create(void) {
         return NULL;
     }
     
-    /* 初始化群体智能优化器 */
-    {
-        SwarmConfig swarm_config;
-        memset(&swarm_config, 0, sizeof(SwarmConfig));
-        swarm_config.algorithm_type = SWARM_ALGORITHM_PSO;
-        swarm_config.swarm_size = 50;
-        swarm_config.dimensions = 10;
-        swarm_config.convergence_condition = SWARM_CONVERGENCE_MAX_ITERATIONS;
-        swarm_config.max_iterations = 1000;
-        swarm_config.topology_type = SWARM_TOPOLOGY_RING;
-        swarm_config.neighborhood_size = 5;
-        swarm_config.inertia_weight = 0.7f;
-        swarm_config.cognitive_weight = 1.5f;
-        swarm_config.social_weight = 1.5f;
-        swarm_config.exploration_factor = 0.5f;
-        swarm_config.exploitation_factor = 0.5f;
-        swarm_config.enable_logging = 1;
-        swarm_config.log_frequency = 50;
-        engine->swarm = swarm_create(&swarm_config);
-        if (!engine->swarm) {
-            multi_system_log(MULTI_LOG_LEVEL_WARNING, "群体智能优化器初始化失败, 多系统控制引擎仍可正常运行");
-        }
-    }
+    /* 群体智能优化器 — 延迟初始化(缺少适应度函数) */
+    engine->swarm = NULL;
+    multi_system_log(MULTI_LOG_LEVEL_WARNING, "群体智能优化器延迟初始化, 多系统控制引擎仍可正常运行");
     
-    /* H-014集成: 初始化群智增强引擎（ACO/ABC/共识/液态通信/自愈） */
-    {
-        ACOEnhancedConfig aco_cfg = swarm_aco_default_config();
-        engine->swarm_enhanced = (void*)swarm_aco_enhanced_create(&aco_cfg);
-        if (!engine->swarm_enhanced) {
-            multi_system_log(MULTI_LOG_LEVEL_WARNING, "群智增强引擎初始化失败, 多系统控制引擎仍可正常运行");
-        }
-    }
+    /* H-014集成: 群智增强引擎 */
+    engine->swarm_enhanced = NULL;
     
     /* 初始化UDP多播服务发现 */
     {

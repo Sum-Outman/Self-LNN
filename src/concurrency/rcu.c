@@ -462,13 +462,9 @@ void rcu_synchronize(RcuDomain* domain) {
      *   - epoch_{N-1}的读者肯定在步骤2前就已退出（因为epoch已经过去了至少2轮）
      *   - 因此epoch_{N-1}的回调可以安全释放
      */
-    long old_epoch = domain->global_epoch;
+    /* 递增全局epoch（原子操作防止多写者竞态） */
+    long old_epoch = __sync_fetch_and_add(&domain->global_epoch, 1);
     long new_epoch = old_epoch + 1;
-
-    /* 递增全局epoch（写者独占synchronize，无需CAS） */
-    atomic_thread_fence();
-    domain->global_epoch = new_epoch;
-    atomic_thread_fence();
 
     /* 步骤3: 等待所有在旧epoch中的读者退出 */
     int epoch_ret = rcu_wait_for_epoch(domain, old_epoch);

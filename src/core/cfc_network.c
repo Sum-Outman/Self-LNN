@@ -46,6 +46,7 @@ CfCNetwork* cfc_create(const CfCNetworkConfig* config) {
     if (!network) {
         return NULL;
     }
+    memset(network, 0, sizeof(CfCNetwork));
     
     // 复制配置
     memcpy(&network->config, config, sizeof(CfCNetworkConfig));

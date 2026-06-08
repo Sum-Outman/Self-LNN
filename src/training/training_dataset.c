@@ -614,7 +614,7 @@ int augment_mixup(TrainingDataset* ds, float alpha) {
         return -1;
     }
 
-    static unsigned int rng = 987654321;
+    static __thread unsigned int rng = 987654321;
     size_t half = n / 2;
     for (size_t i = 0; i < half; i++) {
         rng = rng * 1103515245 + 12345;
@@ -660,7 +660,7 @@ int augment_cutmix(TrainingDataset* ds, float alpha) {
     size_t odim = ds->header.output_dim;
     if (n < 2 || idim < 4) return 0;
 
-    static unsigned int rng = 765432109;
+    static __thread unsigned int rng = 765432109;
     size_t half = n / 2;
     for (size_t i = 0; i < half; i++) {
         rng = rng * 1103515245 + 12345;
@@ -715,7 +715,7 @@ int augment_feature_dropout(TrainingDataset* ds, float drop_prob) {
 
     size_t n = ds->header.num_samples;
     size_t idim = ds->header.input_dim;
-    static unsigned int rng = 543210987;
+    static __thread unsigned int rng = 543210987;
 
     for (size_t i = 0; i < n; i++) {
         for (size_t d = 0; d < idim; d++) {
@@ -755,7 +755,7 @@ int augment_spectral(TrainingDataset* ds, float freq_mask_param, float time_mask
     size_t idim = ds->header.input_dim;
     if (idim < 4) return -1;
 
-    static unsigned int rng = 123456789;
+    static __thread unsigned int rng = 123456789;
 
     /* 为DFT分配临时缓冲区 */
     size_t fft_size = 1;

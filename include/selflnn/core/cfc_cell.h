@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file cfc_cell.h
  * @brief 封闭形式连续时间单元（CfC Cell）
  * 
@@ -196,6 +196,7 @@ struct CfCCell {
     float* weight_grad;
     float* bias_grad;
     int is_initialized;
+    int is_trained;             /**< 训练状态 — cfc_cell.c引用 */
     float avg_activation;
     float max_activation;
     float* time_constants;

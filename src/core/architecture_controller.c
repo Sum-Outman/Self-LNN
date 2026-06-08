@@ -485,10 +485,12 @@ LNN* arch_controller_rebuild_lnn(LNN* old_lnn, const LNNConfig* new_config) {
             new_lnn->memory_system           = old_lnn->memory_system;
             new_lnn->memory_context_strength = old_lnn->memory_context_strength;
             new_lnn->memory_context_top_k    = old_lnn->memory_context_top_k;
+            old_lnn->memory_system = NULL;  /* F7修复: 防止lnn_free双重释放 */
         }
         if (old_lnn->laplace_analyzer) {
             new_lnn->laplace_analyzer          = old_lnn->laplace_analyzer;
             new_lnn->laplace_gradient_strength = old_lnn->laplace_gradient_strength;
+            old_lnn->laplace_analyzer = NULL;  /* F7修复: 防止lnn_free双重释放 */
         }
     }
 
@@ -695,14 +697,20 @@ int arch_controller_submit_change(ArchitectureController* controller,
         return SELFLNN_ERROR_OPERATION_FAILED;
     }
 
-    /* 2. 自动存档（保存检查点） */
+    /* 2. 自动存档（保存真实检查点，支持安全回滚） */
     if (controller->config.enable_archive_backup) {
         time_t now = time(NULL);
         snprintf(local_result.archive_path, sizeof(local_result.archive_path),
                 "%s/arch_pre_change_%lld.slnn",
                 controller->config.archive_dir, (long long)now);
-        /* 检查点保存由外部 lnn_save 负责，此处仅记录路径 */
-        log_info("[架构控制器] 变更前存档路径: %s", local_result.archive_path);
+        /* P0-002修复: 实际调用lnn_save保存检查点，而非仅记录路径 */
+        if (lnn_save(old_lnn, local_result.archive_path) == 0) {
+            log_info("[架构控制器] 变更前检查点已保存: %s", local_result.archive_path);
+        } else {
+            log_warning("[架构控制器] 变更前检查点保存失败: %s（继续执行变更但无法回滚）",
+                       local_result.archive_path);
+            local_result.archive_path[0] = '\0'; /* 标记无可用回滚点 */
+        }
     }
 
     /* 3. 计算目标配置 */
@@ -945,4 +953,51 @@ int arch_controller_structural_mutate(ArchitectureController* controller,
         ? 0.65f : controller->config.min_confidence_threshold + 0.05f; /* 结构变异默认置信度略高于最低阈值 */
     log_info("[架构控制器] 结构变异: %s", req.reason);
     return arch_controller_submit_change(controller, lnn, &req, result);
+}
+
+/* ================================================================
+ * P0-002修复: 架构变更安全回滚机制
+ * 从变更前保存的检查点文件加载LNN，恢复到变更前状态。
+ * 调用者需确保archive_path指向有效的.slnn检查点文件。
+ * ================================================================ */
+
+int arch_controller_rollback(ArchitectureController* controller,
+                              LNN** lnn_ptr,
+                              const char* archive_path) {
+    if (!controller || !lnn_ptr || !*lnn_ptr) {
+        log_error("[架构控制器] 回滚失败: 无效参数");
+        return -1;
+    }
+
+    if (!archive_path || archive_path[0] == '\0') {
+        log_error("[架构控制器] 回滚失败: 存档路径为空（变更前检查点可能未成功保存）");
+        return -1;
+    }
+
+    log_warning("[架构控制器] 正在执行安全回滚，加载检查点: %s", archive_path);
+
+    /* 使用lnn_load_from_file加载检查点到当前LNN实例 */
+    int load_ret = lnn_load_from_file(*lnn_ptr, archive_path);
+    if (load_ret != 0) {
+        log_error("[架构控制器] 回滚失败: 检查点文件加载错误 (%s)", archive_path);
+        return -1;
+    }
+
+    /* 记录回滚历史 */
+    ArchitectureChangeHistoryEntry rollback_entry;
+    memset(&rollback_entry, 0, sizeof(rollback_entry));
+    snprintf(rollback_entry.timestamp_str, sizeof(rollback_entry.timestamp_str),
+            "rollback_%lld", (long long)time(NULL));
+    /* result中记录错误消息以标识这是一次回滚操作 */
+    ArchitectureChangeResult dummy_result;
+    memset(&dummy_result, 0, sizeof(dummy_result));
+    dummy_result.success = 1;
+    dummy_result.error_code = 0;
+    snprintf(dummy_result.error_message, sizeof(dummy_result.error_message),
+            "安全回滚: 从检查点 %s 恢复", archive_path);
+    memcpy(&rollback_entry.result, &dummy_result, sizeof(ArchitectureChangeResult));
+    arch_record_history(controller, NULL, &rollback_entry);
+
+    log_info("[架构控制器] 安全回滚成功: 已从 %s 恢复到变更前状态", archive_path);
+    return 0;
 }

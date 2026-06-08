@@ -3,7 +3,7 @@
 # 头文件目录
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../../include)
 
-if(ENABLE_GPU)
+if(ENABLE_GPU AND NOT MINGW)
     # 完整GPU后端源文件 + CPU后端（含完整SSE/AVX SIMD降级路径）
     # FIX-006修复: ENABLE_GPU=ON时仍包含gpu_cpu.c，确保无GPU时CPU降级路径完整
     set(GPU_SOURCES
@@ -27,10 +27,9 @@ if(ENABLE_GPU)
         gpu_cpu.c
     )
 else()
-    # GPU禁用时使用CPU计算后端（完整SSE/AVX SIMD实现）
-    # 添加gpu.c以提供统一的CPU硬件检测接口gpu_hardware_get_cpu_info
+    # GPU禁用时仅使用CPU计算后端（完整SSE/AVX SIMD实现）
+    # gpu_cpu.c已包含所有CPU降级路径，不编译gpu.c避免重复符号
     set(GPU_SOURCES
-        gpu.c
         gpu_cpu.c
     )
 endif()

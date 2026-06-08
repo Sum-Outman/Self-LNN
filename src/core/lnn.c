@@ -123,6 +123,7 @@ LNN* lnn_create(const LNNConfig* config) {
     if (!network) {
         return NULL;
     }
+    memset(network, 0, sizeof(LNN));
     
     // 复制配置
     memcpy(&network->config, config, sizeof(LNNConfig));

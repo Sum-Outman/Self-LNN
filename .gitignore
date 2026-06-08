@@ -111,4 +111,7 @@ build/
 data/
 tests/
 tools/
+plan.md
+PPP.md
+out/
 _temp_check*

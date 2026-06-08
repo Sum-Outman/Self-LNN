@@ -512,7 +512,7 @@ int nas_search_complete(NASSystem* system, int max_generations,
      * 通过架构控制器真正部署到生产LNN实例 */
     if (arch_ctrl && lnn && *lnn && system->best_architecture) {
         int deploy_ret = nas_deploy_best_architecture(
-            system, (ArchitectureController*)arch_ctrl, (LNN**)lnn, 0.05f, 0.7f);
+            system, arch_ctrl, lnn, 0.05f, 0.7f);
         if (deploy_ret == 0) {
             log_info("[NAS] 搜索完成并已自动部署最优架构到LNN");
         } else if (deploy_ret == -3) {
@@ -902,8 +902,8 @@ int nas_export_best_architecture(NASSystem* system, const char* filepath) {
  * @return 0=成功，非0=失败
  */
 int nas_deploy_best_architecture(NASSystem* system,
-                                  ArchitectureController* arch_ctrl,
-                                  LNN** lnn,
+                                  void* arch_ctrl,
+                                  void** lnn,
                                   float min_improvement,
                                   float confidence) {
     if (!system || !arch_ctrl || !lnn || !*lnn) {
@@ -964,7 +964,7 @@ int nas_deploy_best_architecture(NASSystem* system,
              best->fitness_score);
 
     ArchitectureChangeResult result;
-    int ret = arch_controller_deploy_architecture(arch_ctrl, lnn,
+    int ret = arch_controller_deploy_architecture((ArchitectureController*)arch_ctrl, (LNN**)lnn,
                                                    arch_data, sizeof(arch_data),
                                                    confidence, &result);
     if (ret == SELFLNN_SUCCESS) {

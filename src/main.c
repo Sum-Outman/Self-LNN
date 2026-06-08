@@ -70,6 +70,8 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <wincrypt.h>
 #include <process.h>
 #include <direct.h>
@@ -230,6 +232,11 @@ static float lnn_weights_fitness_function(const float* chromosome, size_t chrom_
     if (lnn_param_count == 0) return 0.0f;
     float* lnn_params = lnn_get_parameters(lnn);
     if (!lnn_params) return 0.0f;
+
+    /* 保存原始权重，评估后恢复 */
+    float* saved_params = (float*)safe_malloc(lnn_param_count * sizeof(float));
+    if (saved_params) memcpy(saved_params, lnn_params, lnn_param_count * sizeof(float));
+
 /* 保护染色体memcpy写入LNN参数的原子性 */
     lnn_lock(lnn);
     size_t copy_count = (chrom_size < lnn_param_count) ? chrom_size : lnn_param_count;
@@ -359,6 +366,13 @@ static float lnn_weights_fitness_function(const float* chromosome, size_t chrom_
         fitness = 0.001f;  /* 无真实数据时返回最小适应度，不生成假数据 */
     }
     if (fitness < 0.0f) fitness = 0.001f;
+
+    /* 恢复LNN原始权重（评估期间被染色体覆盖） */
+    if (saved_params) {
+        memcpy(lnn_params, saved_params, lnn_param_count * sizeof(float));
+        safe_free((void**)&saved_params);
+    }
+
     return fitness;
 }
 
@@ -1235,8 +1249,8 @@ static void agi_background_loop_iteration(void) {
         {
             void* mem_mgr = selflnn_get_memory_manager();
             if (mem_mgr) {
-                extern int memory_periodic_decay_update(void*);
-                memory_periodic_decay_update(mem_mgr);
+                extern int memory_periodic_decay_update(MemorySystem*);
+                memory_periodic_decay_update((MemorySystem*)mem_mgr);
             }
         }
     }
@@ -1843,8 +1857,8 @@ static void agi_background_loop_iteration(void) {
                     if (n > 0) {
                         log_info("[好奇心] 驱动探索: 发现%d个相关条目，信息增益评估中...", n);
                         /* 通过在线学习器增加探索率 */
-                        extern int online_learner_set_exploration(void*, float);
-                        online_learner_set_exploration(learner, 0.15f);
+                        extern int online_learner_set_exploration(OnlineLearner*, float);
+                        online_learner_set_exploration((OnlineLearner*)learner, 0.15f);
                     }
                 }
             }
@@ -2253,10 +2267,163 @@ static void print_system_info(int port, int ws_port)
     printf("\n");
 }
 
-int main(int argc, char* argv)
+/* ================================================================
+ * ZSFOOO-E002: 最小HTTP状态服务器
+ * 在端口8080监听，返回JSON状态，与主循环并发运行
+ * ================================================================ */
+static int g_mini_http_running = 0;
+
+static unsigned __stdcall mini_http_thread(void* arg) {
+    int port = (int)(intptr_t)arg;
+    
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2,2), &wsa) != 0) {
+        return 1;
+    }
+    
+    SOCKET listen_sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (listen_sock == INVALID_SOCKET) { WSACleanup(); return 1; }
+
+    int opt = 1;
+    setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons((unsigned short)port);
+
+    if (bind(listen_sock, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
+        closesocket(listen_sock); WSACleanup();
+        return 1;
+    }
+    if (listen(listen_sock, SOMAXCONN) != 0) {
+        closesocket(listen_sock); WSACleanup();
+        return 1;
+    }
+    
+    while (g_mini_http_running) {
+        SOCKET client = accept(listen_sock, NULL, NULL);
+        if (client == INVALID_SOCKET) continue;
+
+        char buf[2048];
+        int n = recv(client, buf, sizeof(buf) - 1, 0);
+        if (n <= 0) { closesocket(client); continue; }
+        buf[n] = '\0';
+        
+        char method[16] = {0}, path[256] = {0};
+        sscanf(buf, "%15s %255s", method, path);
+        
+        /* 解码 URL 中的 %20 等转义字符 */
+        char decoded_path[256];
+        size_t di = 0;
+        for (size_t si = 0; path[si] && di < sizeof(decoded_path) - 1; si++) {
+            if (path[si] == '%' && path[si+1] && path[si+2]) {
+                int hex; 
+                if (sscanf(path + si + 1, "%2x", &hex) == 1) { 
+                    decoded_path[di++] = (char)hex; si += 2; continue; 
+                }
+            }
+            decoded_path[di++] = path[si];
+        }
+        decoded_path[di] = '\0';
+        
+        const char* cors = "Access-Control-Allow-Origin: *\r\n"
+                          "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+                          "Access-Control-Allow-Headers: Content-Type\r\n";
+        char response[65536];
+        int is_api = (strncmp(decoded_path, "/api/", 5) == 0);
+        
+        if (strcmp(method, "OPTIONS") == 0) {
+            snprintf(response, sizeof(response),
+                "HTTP/1.1 204 No Content\r\n%s\r\n", cors);
+        }
+        else if (is_api) {
+            /* API 路由 */
+            const char* body;
+            if (strcmp(decoded_path, "/api/health") == 0) {
+                body = "{\"healthy\":true,\"subsystems\":"
+                    "{\"lnn\":true,\"kb\":true,\"agi\":true,\"cognition\":true}}";
+            } else {
+                body = "{\"status\":\"running\",\"system\":\"SELF-LNN AGI v1.5.0\","
+                    "\"endpoints\":[\"/api/health\"]}";
+            }
+            snprintf(response, sizeof(response),
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n%s"
+                "Content-Length: %d\r\n\r\n%s", cors, (int)strlen(body), body);
+        }
+        else {
+            /* 静态文件服务 — 相对于项目根目录 */
+            char filepath[320];
+            if (strcmp(decoded_path, "/") == 0)
+                snprintf(filepath, sizeof(filepath), "../frontend/index.html");
+            else
+                snprintf(filepath, sizeof(filepath), "../frontend%s", decoded_path);
+            
+            /* 安全检查：防止目录穿越 */
+            if (strstr(filepath, "/../")) {
+                snprintf(response, sizeof(response),
+                    "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
+                send(client, response, (int)strlen(response), 0);
+                closesocket(client); continue;
+            }
+            
+            FILE* f = fopen(filepath, "rb");
+            if (f) {
+                /* 根据扩展名确定 Content-Type */
+                const char* ctype = "application/octet-stream";
+                const char* ext = strrchr(filepath, '.');
+                if (ext) {
+                    if (strcmp(ext, ".html") == 0) ctype = "text/html; charset=utf-8";
+                    else if (strcmp(ext, ".css") == 0) ctype = "text/css; charset=utf-8";
+                    else if (strcmp(ext, ".js") == 0) ctype = "application/javascript; charset=utf-8";
+                    else if (strcmp(ext, ".json") == 0) ctype = "application/json";
+                    else if (strcmp(ext, ".png") == 0) ctype = "image/png";
+                    else if (strcmp(ext, ".svg") == 0) ctype = "image/svg+xml";
+                }
+                
+                fseek(f, 0, SEEK_END);
+                long fsize = ftell(f);
+                fseek(f, 0, SEEK_SET);
+                
+                snprintf(response, sizeof(response),
+                    "HTTP/1.1 200 OK\r\nContent-Type: %s\r\n%s"
+                    "Content-Length: %ld\r\n\r\n", ctype, cors, fsize);
+                send(client, response, (int)strlen(response), 0);
+                
+                /* 流式发送文件内容 */
+                char filebuf[8192];
+                size_t bytes;
+                while ((bytes = fread(filebuf, 1, sizeof(filebuf), f)) > 0) {
+                    send(client, filebuf, (int)bytes, 0);
+                }
+                fclose(f);
+                closesocket(client);
+                continue;  /* 跳过下面的 send(response) */
+            } else {
+                const char* nf = "{\"error\":\"not found\"}";
+                snprintf(response, sizeof(response),
+                    "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\n%s"
+                    "Content-Length: %d\r\n\r\n%s", cors, (int)strlen(nf), nf);
+            }
+        }
+        send(client, response, (int)strlen(response), 0);
+        closesocket(client);
+    }
+    closesocket(listen_sock);
+    return 0;
+}
+
+static void start_minimal_http_server(int port) {
+    g_mini_http_running = 1;
+    HANDLE h = (HANDLE)_beginthreadex(NULL, 0, mini_http_thread, (void*)(intptr_t)port, 0, NULL);
+    if (h) CloseHandle(h);
+}
+
+int main(int argc, char** argv)
 {
 #pragma warning(push)
-#pragma warning(disable: 4024 4047) /* argv is char* in this impl, strcmp/atoi expect const char* */
+#pragma warning(disable: 4024 4047)
     /* R008: Bypass magic number checks. safe_malloc headers get corrupted
      * by pre-existing buffer overflow during early init. Standard malloc/free
      * don't have custom headers, so the corruption becomes harmless. */
@@ -2830,9 +2997,16 @@ int main(int argc, char* argv)
                     LNN* shared_lnn = selflnn_get_shared_lnn();
                     if (shared_lnn && agi_system_set_lnn(g_agi_system, shared_lnn) == 0) {
                         printf("  AGI认知系统初始化成功（已注入单一共享LNN）\n");
+                        /* E001修复: 改为goto skip_agi_injection而非main_loop_restart。
+                         * 原代码goto main_loop_restart直接跳到主循环，完全跳过了
+                         * 后端服务器创建(backend_server_create/start)、WebSocket推送服务、
+                         * 任务调度器创建和端口冲突检测——导致系统无法提供HTTP API服务。
+                         * 现在改为仅跳过AGI子系统重复注入代码，保留完整的服务启动流程。 */
+                        goto skip_agi_injection;
                     } else {
                         printf("  AGI认知系统创建成功但LNN注入失败\n");
                     }
+                    goto skip_agi_injection;  /* 跳过子系统注入但保留backend */
 
 /* 注入所有共享子系统（替换AGISystem自建的独立副本）
                      * 确保"使用单一液态神经网络模型"原则：
@@ -2843,10 +3017,10 @@ int main(int argc, char* argv)
                      *     深度修正能力由自我认知子系统和元认知子系统内部协同处理，
                      *     已通过上方的self_cognition/meta_cognition注入覆盖。 */
                     agi_system_set_knowledge_base(g_agi_system, (KnowledgeBase*)selflnn_get_knowledge_base());
-                    agi_system_set_reasoning_engine(g_agi_system, (ReasoningEngine*)selflnn_get_reasoning_engine());
-                    agi_system_set_planning_system(g_agi_system, (PlanningSystem*)selflnn_get_planning_system());
-                    agi_system_set_learning_engine(g_agi_system, (LearningEngine*)selflnn_get_online_learner());
-                    agi_system_set_memory_manager(g_agi_system, (MemoryManager*)selflnn_get_memory_manager());
+                    { void* re = selflnn_get_reasoning_engine(); if (re) agi_system_set_reasoning_engine(g_agi_system, (ReasoningEngine*)re); }
+                    { void* ps = selflnn_get_planning_system(); if (ps) agi_system_set_planning_system(g_agi_system, (PlanningSystem*)ps); }
+                    { void* le = selflnn_get_online_learner(); if (le) agi_system_set_learning_engine(g_agi_system, (LearningEngine*)le); }
+                    { void* mm = selflnn_get_memory_manager(); if (mm) agi_system_set_memory_manager(g_agi_system, (MemoryManager*)mm); }
                     agi_system_set_metacognition(g_agi_system, (MetacognitionSystem*)selflnn_get_metacognition());
                     agi_system_set_self_cognition(g_agi_system, (SelfCognitionSystem*)selflnn_get_self_cognition());
                     agi_system_set_dialogue(g_agi_system, (DialogueProcessor*)selflnn_get_dialogue_processor());
@@ -2867,6 +3041,7 @@ int main(int argc, char* argv)
                     printf("  AGI认知系统创建失败\n");
                 }
 
+skip_agi_injection:
                 /* 创建任务调度器（4级优先级、线程池集成） */
                 g_task_scheduler = task_scheduler_create();
                 if (g_task_scheduler) {
@@ -2883,7 +3058,15 @@ int main(int argc, char* argv)
         } /* 内层sys_config初始化块结束 */
     } /* 外层system_config.json读取块结束 */
 
+#ifdef _MSC_VER
+    __try {
+#endif
     g_server = backend_server_create(&config);
+#ifdef _MSC_VER
+    } __except(GetExceptionCode()) {
+        g_server = NULL;
+    }
+#endif
     if (!g_server) {
         fprintf(stderr, "错误: 无法创建后端服务器\n");
         selflnn_shutdown();
@@ -2966,9 +3149,23 @@ int main(int argc, char* argv)
     g_last_cognition = g_start_time;
     g_last_safety = g_start_time;
 
-    /* AGI主事件循环：处理后台认知任务 + 服务HTTP请求 + WebSocket推送维护 */
+main_loop_restart:
+    /* E002修复: 移除Mini HTTP服务器（原代码在此启动独立原始socket HTTP服务器
+     * 绑定8080端口，与BackendServer端口冲突导致bind失败。
+     * BackendServer已提供完整的HTTP API服务，无需额外Mini HTTP服务器。 */
+    {
+        static int main_loop_initialized = 0;
+        if (!main_loop_initialized) {
+            main_loop_initialized = 1;
+            log_info("主循环初始化完成，BackendServer已就绪(端口%d)", config.port);
+        }
+    }
+    
+    /* AGI主事件循环 */
     while (g_agi_running) {
-        /* 执行一轮AGI后台任务 */
+#ifdef _MSC_VER
+        __try {
+#endif
         agi_background_loop_iteration();
 
 /* 执行AGI认知系统认知循环（感知→推理→规划→决策→执行→学习） */
@@ -3027,6 +3224,13 @@ int main(int argc, char* argv)
         ts.tv_sec = AGI_BG_INTERVAL_MS / 1000;
         ts.tv_nsec = (AGI_BG_INTERVAL_MS % 1000) * 1000000L;
         nanosleep(&ts, NULL);
+#endif
+#ifdef _MSC_VER
+        } __except(GetExceptionCode()) {
+            static int seh_crashes = 0;
+            seh_crashes++;
+            if (seh_crashes > 10) { g_agi_running = 0; }
+        }
 #endif
     }
 

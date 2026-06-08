@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file auto_learning.c
  * @brief 自主学习知识库系统完整实现
  */
@@ -1318,7 +1318,7 @@ int auto_learning_incremental_update(AutoLearningSystem* system, const char* top
 }
 
 int auto_learning_fuse_knowledge(AutoLearningSystem* system, const char* topic,
-                                  int source_indices[], int count,
+                                  int* source_indices, int count,
                                   AutoLearnFusionMode mode,
                                   AutoLearnFusionResult* result) {
     if (!system) {

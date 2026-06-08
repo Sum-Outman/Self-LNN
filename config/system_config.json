@@ -1,5 +1,5 @@
 {
-  "version": "1.5.0",
+  "version": "1.6.0",
   "state_dimension": 256,
   "multimodal_channels": 64,
   "memory_capacity": 10000,

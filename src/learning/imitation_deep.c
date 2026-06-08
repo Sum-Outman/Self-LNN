@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file imitation_deep.c
  * @brief 模仿学习深度增强完整实现
  *
@@ -377,12 +377,12 @@ int im_irl_infer_reward(ImitationDeepLearner* idl, const ImDemonstration* demo, 
                 float* grads  = lnn_get_gradients(idl->irl_network);
                 if (params && grads) {
                     size_t param_count = lnn_get_parameter_count(idl->irl_network);
-                    /* Adam参数 */
-                    static float beta1 = 0.9f, beta2 = 0.999f, eps = 1e-8f;
-                    static size_t adam_t = 0;
-                    static float* adam_m = NULL;
-                    static float* adam_v = NULL;
-                    static size_t adam_capacity = 0;
+                    /* Adam参数 (线程局部防多线程竞态) */
+                    static const float beta1 = 0.9f, beta2 = 0.999f, eps = 1e-8f;
+                    static __thread size_t adam_t = 0;
+                    static __thread float* adam_m = NULL;
+                    static __thread float* adam_v = NULL;
+                    static __thread size_t adam_capacity = 0;
                     float lr = irl_learning_rate * (1.0f - (float)iter / (float)irl_iterations);
                     if (lr < 1e-6f) lr = 1e-6f;
 

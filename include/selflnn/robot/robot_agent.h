@@ -1,4 +1,4 @@
-﻿#ifndef SELFLNN_ROBOT_AGENT_H
+#ifndef SELFLNN_ROBOT_AGENT_H
 #define SELFLNN_ROBOT_AGENT_H
 
 #include <stddef.h>
@@ -139,6 +139,7 @@ typedef struct {
     float curiosity_factor;
     int training_step_count; /* DQN策略网络训练步数，推理前验证 */
     void* ucb_explore_state; /* UCB探索策略状态 */
+    void* icm_state;         /* P2-009: ICM内在好奇心模块探索状态 */
 } RobotAgent;
 
 typedef struct {

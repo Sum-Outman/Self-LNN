@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file swarm_intelligence.c
  * @brief 群体智能系统实现
  * 
@@ -30,11 +30,10 @@
 /* ========== 停滞检测锁（保护函数内static变量） ========== */
 #ifdef _WIN32
 static CRITICAL_SECTION g_swarm_stag_lock;
-static int g_swarm_stag_lock_init = 0;
+static volatile LONG g_swarm_stag_lock_init = 0;
 static void swarm_stag_lock_init_func(void) {
-    if (!g_swarm_stag_lock_init) {
+    if (InterlockedCompareExchange(&g_swarm_stag_lock_init, 1, 0) == 0) {
         InitializeCriticalSection(&g_swarm_stag_lock);
-        g_swarm_stag_lock_init = 1;
     }
 }
 #define SWARM_STAG_LOCK() do { swarm_stag_lock_init_func(); EnterCriticalSection(&g_swarm_stag_lock); } while(0)
@@ -1298,7 +1297,7 @@ int swarm_update_individual_position(Swarm* swarm, int individual_id, const floa
 /**
  * @brief 获取最佳解
  */
-int swarm_get_best_solution(const Swarm* swarm, float* position, float* fitness) {
+int swarm_get_best_solution(Swarm* swarm, float* position, float* fitness) {
     if (swarm == NULL) {
         return -1;
     }

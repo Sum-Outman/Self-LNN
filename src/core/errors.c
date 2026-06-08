@@ -293,10 +293,11 @@ int selflnn_is_info(SelfLNNErrorCode error_code) {
  */
 #ifdef _WIN32
 static __declspec(thread) SelfLNNRecoveryContext* s_recovery_stack[16];
+static __declspec(thread) int s_recovery_depth = -1;
 #else
 static __thread SelfLNNRecoveryContext* s_recovery_stack[16];
+static __thread int s_recovery_depth = -1;
 #endif
-static int s_recovery_depth = -1;
 
 int selflnn_recovery_try(SelfLNNRecoveryContext* context) {
     if (!context) return SELFLNN_ERROR_INVALID_ARGUMENT;

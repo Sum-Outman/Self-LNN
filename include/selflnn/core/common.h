@@ -359,10 +359,10 @@ typedef struct {
 // 编译时依赖完整性检查
 // ============================================================
 // C11 _Static_assert 兼容层
-// 检测 _Static_assert 是否真正可用（MSVC C 模式需 /std:c11 才支持）
+// GCC -std=gnu11下static_assert需要<assert.h>，改用_Static_assert关键词
 #if (defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L && !defined(__STDC_NO_STATIC_ASSERT__)) \
     || (defined(__cplusplus) && __cplusplus >= 201103L)
-    #define SELFLNN_STATIC_ASSERT(cond, msg) static_assert(cond, msg)
+    #define SELFLNN_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
 #elif defined(__has_feature)
     #if __has_feature(c_static_assert)
         #define SELFLNN_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)

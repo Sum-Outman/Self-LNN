@@ -298,7 +298,7 @@ static JsonValue* json_parse_number(JsonParser* p) {
     if (isnan(v->data.number_val) || isinf(v->data.number_val)) {
         parser_error(p, "JSON不允许NaN或Infinity数字值");
         safe_free((void**)&num_str);
-        json_value_free(v);
+        json_free(v);
         return NULL;
     }
 /* 严格数字格式验证 — 拒绝前导零和空数字 */
@@ -309,7 +309,7 @@ static JsonValue* json_parse_number(JsonParser* p) {
             num_str[si+1] >= '0' && num_str[si+1] <= '9')) {
             parser_error(p, "JSON数字不允许前导零");
             safe_free((void**)&num_str);
-            json_value_free(v);
+            json_free(v);
             return NULL;
         }
     }

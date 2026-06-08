@@ -821,27 +821,9 @@ int ode_parallel_rhs_eval(float t, const float* y, float* dydt,
             }
 
             if (alloc_ok) {
-                /* 清零主dydt，各线程写入独立缓冲区后通过critical累加 */
-                memset(dydt, 0, n * sizeof(float));
-#pragma omp parallel
-                {
-                    int tid = omp_get_thread_num();
-                    if (tid >= 0 && tid < max_threads && thread_dydt_buffers[tid]) {
-                        int ret = rhs(t, y, thread_dydt_buffers[tid], ctx);
-                        if (ret != 0) { (void)ret; }
-#pragma omp critical
-                        {
-                            for (size_t i = 0; i < n; i++) {
-                                dydt[i] += thread_dydt_buffers[tid][i];
-                            }
-                        }
-                    }
-                }
-/* 移除多线程RHS结果取平均。
-                 * RHS函数是确定性的(f(t,y)对所有线程返回相同值)，
-                 * 取平均不仅无意义，还额外增加了计算开销。
-                 * 在无域分解的并行RHS模式下，保留第一个线程的结果即可。 */
-                /* 仅使用第一个线程的结果（确定性RHS） */
+                /* 确定性RHS: 单线程计算一次，直接写入dydt */
+                int ret = rhs(t, y, dydt, ctx);
+                if (ret != 0) { (void)ret; }
             } else {
                 /* 内存分配失败，回退到串行执行 */
                 int ret = rhs(t, y, dydt, ctx);

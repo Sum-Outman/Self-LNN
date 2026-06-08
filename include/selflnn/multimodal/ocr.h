@@ -42,6 +42,8 @@ typedef enum {
 /**
  * @brief 文本检测算法枚举
  */
+#ifndef SELFLNN_TEXT_DETECTION_ALGORITHM_DEFINED
+#define SELFLNN_TEXT_DETECTION_ALGORITHM_DEFINED
 typedef enum {
     TEXT_DETECTION_MSER = 0,           /**< MSER最大稳定极值区域算法 */
     TEXT_DETECTION_EAST = 1,           /**< EAST高效准确场景文本检测 */
@@ -49,6 +51,7 @@ typedef enum {
     TEXT_DETECTION_SWT = 3,            /**< SWT笔画宽度变换 */
     TEXT_DETECTION_CONTOUR = 4,        /**< 轮廓检测算法 */
 } TextDetectionAlgorithm;
+#endif /* SELFLNN_TEXT_DETECTION_ALGORITHM_DEFINED */
 
 /**
  * @brief 语言类型枚举

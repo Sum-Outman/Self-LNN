@@ -1596,14 +1596,14 @@ int dynamics_get_state(const DynamicsModel* model, DynamicsState* state)
     return 0;
 }
 
-int dynamics_get_config(const DynamicsModel* model, RobotDynamicsConfig* config)
+int robot_dynamics_get_config(const DynamicsModel* model, RobotDynamicsConfig* config)
 {
     if (!model || !config) return -1;
     *config = model->config;
     return 0;
 }
 
-int dynamics_set_config(DynamicsModel* model, const RobotDynamicsConfig* config)
+int robot_dynamics_set_config(DynamicsModel* model, const RobotDynamicsConfig* config)
 {
     if (!model || !config) return -1;
     model->config = *config;

@@ -752,9 +752,9 @@ int ws_push_server_poll(WSPushServer* srv, int timeout_ms)
                         if (!srv->clients[j].active) { found = j; break; }
                     }
                     if (found >= 0) {
+                        ws_client_init(&srv->clients[found], client);
                         srv->clients[found].active = 1;
                         mutex_unlock(srv->mutex);
-                        ws_client_init(&srv->clients[found], client);
                         /* 注册新客户端到epoll */
                         struct epoll_event ev;
                         ev.events = EPOLLIN | EPOLLRDHUP;
@@ -802,9 +802,9 @@ int ws_push_server_poll(WSPushServer* srv, int timeout_ms)
                         if (!srv->clients[j].active) { found = j; break; }
                     }
                     if (found >= 0) {
+                        ws_client_init(&srv->clients[found], client);
                         srv->clients[found].active = 1;
                         mutex_unlock(srv->mutex);
-                        ws_client_init(&srv->clients[found], client);
                         struct kevent ev;
                         EV_SET(&ev, client, EVFILT_READ, EV_ADD, 0, 0, (void*)(intptr_t)client);
                         kevent(srv->kqueue_fd, &ev, 1, NULL, 0, NULL);
@@ -865,10 +865,9 @@ int ws_push_server_poll(WSPushServer* srv, int timeout_ms)
                 if (!srv->clients[i].active) { found = i; break; }
             }
             if (found >= 0) {
+                ws_client_init(&srv->clients[found], client);
                 srv->clients[found].active = 1;
                 mutex_unlock(srv->mutex);
-                /* 统一使用ws_client_init初始化客户端槽位 */
-                ws_client_init(&srv->clients[found], client);
                 if (ws_do_handshake(client) != 0) {
                     ws_client_close(&srv->clients[found]);
                 }

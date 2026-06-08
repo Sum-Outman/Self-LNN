@@ -130,8 +130,8 @@ int dynamics_step(DynamicsModel* model,
 
 int dynamics_get_state(const DynamicsModel* model, DynamicsState* state);
 
-int dynamics_get_config(const DynamicsModel* model, RobotDynamicsConfig* config);
-int dynamics_set_config(DynamicsModel* model, const RobotDynamicsConfig* config);
+int robot_dynamics_get_config(const DynamicsModel* model, RobotDynamicsConfig* config);
+int robot_dynamics_set_config(DynamicsModel* model, const RobotDynamicsConfig* config);
 
 int dynamics_solve_linear_system(int n, const float* A, const float* b, float* x);
 

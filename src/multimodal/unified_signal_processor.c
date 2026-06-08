@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file unified_signal_processor.c
  * @brief 多模态统一信号处理器核心实现
  * 
@@ -635,7 +635,7 @@ static int init_temporal_aligner(TemporalAligner* aligner,
  * @param normalized_output 归一化输出缓冲区（调用者分配，大小为sensor_count）
  * @return int 成功返回0，失败返回-1
  */
-static int align_and_normalize_sensor_data(UnifiedSignalProcessor* processor,
+int align_and_normalize_sensor_data(UnifiedSignalProcessor* processor,
                                           const SensorInput* sensor_input,
                                           float* normalized_output) {
     if (!processor || !sensor_input || !normalized_output) {
@@ -1174,7 +1174,7 @@ int unified_signal_processor_encode(UnifiedSignalProcessor* processor,
  * @return int 成功返回LNN输出维度，失败返回-1
  */
 int unified_signal_processor_encode_to_lnn(UnifiedSignalProcessor* processor,
-                                           LNN* lnn,
+                                           void* lnn,
                                            const VisionInput* vision,
                                            const AudioInput* audio,
                                            const TextInput* text,

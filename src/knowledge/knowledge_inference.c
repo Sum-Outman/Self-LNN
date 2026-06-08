@@ -2466,7 +2466,8 @@ static Factor* factor_create(int* variables, int var_count, int* cardinalities) 
     return f;
 }
 
-void factor_free(Factor* f) {
+void factor_free(void* f_ptr) {
+    Factor* f = (Factor*)f_ptr;
     if (!f) return;
     safe_free((void**)&f->variables);
     safe_free((void**)&f->strides);

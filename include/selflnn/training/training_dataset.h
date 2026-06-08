@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file training_dataset.h
  * @brief 训练数据集管理系统
  *
@@ -42,7 +42,8 @@ extern "C" {
 /* DatasetSplit已被新的7参数dataset_split替代，移除此未使用的结构体 */
 
 /* 数据集生命周期管理 */
-TrainingDataset* dataset_create(size_t num_samples, size_t feature_dim);
+TrainingDataset* dataset_create(const char* name, size_t num_samples,
+                               size_t input_dim, size_t output_dim);
 void dataset_free(TrainingDataset* ds);
 
 /* 序列化和统计 */

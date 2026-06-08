@@ -4019,7 +4019,7 @@ int loop_invariant_hoisting(SelfProgrammingEngine* engine, ASTNode* ast) {
 
 /*: 结构简化 - 减少深层嵌套结构
  * 将嵌套超过3层的条件块提取为独立函数调用样式标记 */
-static int structure_simplification(SelfProgrammingEngine* engine, ASTNode* ast) {
+int structure_simplification(SelfProgrammingEngine* engine, ASTNode* ast) {
     (void)engine;
     if (!ast) return 0;
     int changes = 0;
@@ -4053,7 +4053,7 @@ static int structure_simplification(SelfProgrammingEngine* engine, ASTNode* ast)
 
 /*: 识别大函数体并标记为可提取的独立函数
  * 遍历AST中的函数定义，对超过50行的大函数标记内部逻辑块 */
-static int function_extraction(SelfProgrammingEngine* engine, ASTNode* ast) {
+int function_extraction(SelfProgrammingEngine* engine, ASTNode* ast) {
     (void)engine;
     if (!ast) return 0;
     int changes = 0;

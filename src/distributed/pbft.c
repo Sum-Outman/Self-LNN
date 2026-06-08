@@ -175,6 +175,12 @@ static void log_gc(PbftSystem* system, uint32_t up_to_seq) {
         if (system->log_entries[i].sequence_number > up_to_seq) {
             if (new_count != i) system->log_entries[new_count] = system->log_entries[i];
             new_count++;
+        } else {
+            /* 释放被移除条目的payload */
+            if (system->log_entries[i].payload) {
+                free(system->log_entries[i].payload);
+                system->log_entries[i].payload = NULL;
+            }
         }
     }
     system->log_count = new_count;
@@ -190,24 +196,24 @@ static void copy_digest(uint32_t dst[8], const uint32_t src[8]) {
 
 static int has_quorum_prepare(PbftSystem* system, uint32_t seq) {
     int count = 0;
-    uint32_t quorum = system->config.num_nodes - system->config.max_fault;
+    uint32_t quorum = 2 * system->config.max_fault + 1;
     for (int i = 0; i < system->log_count; i++) {
         if (system->log_entries[i].sequence_number == seq && system->log_entries[i].prepare_count > 0) {
             count += system->log_entries[i].prepare_count;
         }
     }
-    return count >= (int)(2 * quorum - 1);
+    return count >= (int)quorum;
 }
 
 static int has_quorum_commit(PbftSystem* system, uint32_t seq) {
     int count = 0;
-    uint32_t quorum = system->config.num_nodes - system->config.max_fault;
+    uint32_t quorum = 2 * system->config.max_fault + 1;
     for (int i = 0; i < system->log_count; i++) {
         if (system->log_entries[i].sequence_number == seq && system->log_entries[i].commit_count > 0) {
             count += system->log_entries[i].commit_count;
         }
     }
-    return count >= (int)(2 * quorum - 1);
+    return count >= (int)quorum;
 }
 
 static int pbft_send_message(PbftSystem* system, uint32_t target_id,
@@ -390,7 +396,12 @@ void pbft_system_destroy(PbftSystem* system) {
     if (system->pending_payload) free(system->pending_payload);
     /* result_buffer 是外部传入的指针，不由本模块分配，不能 free */
     system->result_buffer = NULL;
-    if (system->log_entries) free(system->log_entries);
+    if (system->log_entries) {
+        for (int i = 0; i < (int)system->log_capacity; i++) {
+            if (system->log_entries[i].payload) free(system->log_entries[i].payload);
+        }
+        free(system->log_entries);
+    }
     if (system->laplace_analyzer) {
         laplace_analyzer_free(system->laplace_analyzer);
         system->laplace_analyzer = NULL;
@@ -529,15 +540,11 @@ static int pbft_execute_request(PbftSystem* system, uint32_t seq) {
     entry->executed = 1;
     if (seq > system->last_executed_seq) system->last_executed_seq = seq;
 
-    /* 真实请求执行：调用注册的回调函数执行实际操作
-     * M-020修复：将pending_payload/pending_payload_size/pending_op_type
-     * 正确传递到execute_callback，而非固定传NULL和0。
-     * pending_payload在pbft_submit_request中分配并保存原始请求负载，
-     * 是共识达成后执行实际操作所必需的数据。 */
+    /* 请求执行: 使用per-entry负载 (避免并发提交覆盖全局pending_payload) */
     if (system->execute_callback) {
         int ret = system->execute_callback(
-            entry->client_id, entry->request_id, system->pending_op_type,
-            system->pending_payload, system->pending_payload_size,
+            entry->client_id, entry->request_id, entry->op_type,
+            entry->payload, entry->payload_size,
             system->execute_callback_user_data);
         if (ret != 0) {
             log_error("[PBFT] 请求执行回调失败: seq=%u client=%u req=%u ret=%d",
@@ -607,7 +614,16 @@ int pbft_submit_request(PbftSystem* system, uint32_t client_id,
             entry->client_id = client_id;
             entry->request_id = request_id;
             entry->request_timestamp = system->pending_timestamp;
+            entry->op_type = operation_type;
             copy_digest(entry->request_digest, pp.request_digest);
+            /* 拷贝负载到per-entry字段 (避免并发提交覆盖全局pending_payload) */
+            if (payload && payload_size > 0) {
+                entry->payload = (uint8_t*)malloc(payload_size);
+                if (entry->payload) {
+                    memcpy(entry->payload, payload, payload_size);
+                    entry->payload_size = payload_size;
+                }
+            }
         }
         system->last_prepared_seq = seq;
         pbft_broadcast(system, &pp, sizeof(pp));

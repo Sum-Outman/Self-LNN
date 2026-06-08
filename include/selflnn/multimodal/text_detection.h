@@ -19,6 +19,8 @@ extern "C" {
 /**
  * @brief 文本检测算法类型
  */
+#ifndef SELFLNN_TEXT_DETECTION_ALGORITHM_DEFINED
+#define SELFLNN_TEXT_DETECTION_ALGORITHM_DEFINED
 typedef enum {
     TEXT_DETECT_MSER = 0,          /**< 最大稳定极值区域 */
     TEXT_DETECT_SWT = 1,           /**< 笔画宽度变换 */
@@ -26,6 +28,7 @@ typedef enum {
     TEXT_DETECT_CNN = 3,           /**< 卷积神经网络 */
     TEXT_DETECT_EAST = 4           /**< EAST文本检测 */
 } TextDetectionAlgorithm;
+#endif /* SELFLNN_TEXT_DETECTION_ALGORITHM_DEFINED */
 
 /**
  * @brief 文本检测配置

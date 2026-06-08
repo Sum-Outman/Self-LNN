@@ -37,6 +37,9 @@ extern void* selflnn_get_lnn(void);
 #include <sys/stat.h>
 #endif
 
+/* 前向声明：文件尾部定义的辅助函数 */
+static uint32_t hd_compute_device_hash(const HDDetectionResult* result);
+
 static double hd_timestamp_ms(void) {
 #ifdef _WIN32
     LARGE_INTEGER freq, count;

@@ -48,8 +48,7 @@ target_include_directories(selflnn_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include
 )
 
-# quaternion_lnn.c、selflnn.c需要GPU函数，所以始终链接GPU桩库并传播给所有使用者
-# 移除matrix_ops.c双重编译，改为链接selflnn_math库
+# quaternion_lnn.c、selflnn.c需要GPU函数，始终链接GPU桩库
 target_link_libraries(selflnn_core PUBLIC selflnn_gpu selflnn_math utils)
 target_link_libraries(selflnn_core PRIVATE selflnn_multimodal)
 

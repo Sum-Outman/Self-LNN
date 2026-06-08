@@ -22,10 +22,11 @@ target_include_directories(utils PUBLIC
 )
 
 # Windows下需要链接Winsock库和版本信息库
-if(WIN32)
+if(MSVC)
     target_link_libraries(utils PUBLIC ws2_32 version)
-    # 全局/FImath.h已覆盖，此处为冗余（保留作为文档参考）
     set_source_files_properties(math_utils.c PROPERTIES COMPILE_FLAGS "/FImath.h")
+elseif(WIN32)
+    target_link_libraries(utils PUBLIC ws2_32 version)
 endif()
 
 # 为兼容性添加别名

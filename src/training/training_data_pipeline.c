@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file training_data_pipeline.c
  * @brief 多模态训练数据管线 - 桥接多模态CfC/LNN权重到训练器
  *
@@ -43,7 +43,7 @@ typedef struct {
     int actual_samples;                  /**< 实际使用的训练样本数 */
 } SubsystemWeightsCheckpoint;
 
-int training_pipeline_train_multimodal(LNN* network, const char* module_name,
+int training_pipeline_train_multimodal(void* network, const char* module_name,
                                         int input_dim, int output_dim,
                                         int num_samples, int epochs, float learning_rate) {
     if (!network || !module_name) return -1;
@@ -136,8 +136,8 @@ int training_pipeline_train_multimodal(LNN* network, const char* module_name,
     return result;
 }
 
-int training_pipeline_pretrain_all_vision(LNN* vision_net, LNN* deep_vision_net,
-                                           LNN* liquid_vision_net, LNN* image_recog_net) {
+int training_pipeline_pretrain_all_vision(void* vision_net, void* deep_vision_net,
+                                           void* liquid_vision_net, void* image_recog_net) {
     int ok = 0, fail = 0;
 
 /* 从LNN配置动态读取维度，替代硬编码值。
@@ -177,9 +177,10 @@ int training_pipeline_pretrain_all_vision(LNN* vision_net, LNN* deep_vision_net,
     return fail > 0 ? -1 : 0;
 }
 
-int training_pipeline_pretrain_all_audio(LNN* speech_net, LNN* audio_semantic_net,
-                                          LNN* vad_net) {
+int training_pipeline_pretrain_all_audio(void* speech_net, void* audio_semantic_net,
+                                          void* vad_net, void* sound_localize_net) {
     int ok = 0, fail = 0;
+    (void)sound_localize_net; /* 保留参数以匹配头文件声明 */
 
 /* 动态读取LNN维度 */
     if (speech_net) {
@@ -208,8 +209,8 @@ int training_pipeline_pretrain_all_audio(LNN* speech_net, LNN* audio_semantic_ne
     return fail > 0 ? -1 : 0;
 }
 
-int training_pipeline_pretrain_all_sensors(LNN* sensor_fusion_net, LNN* slam_net,
-                                            LNN* depth_net, LNN* ocr_net) {
+int training_pipeline_pretrain_all_sensors(void* sensor_fusion_net, void* slam_net,
+                                            void* depth_net, void* ocr_net) {
     int ok = 0, fail = 0;
 
 /* 动态读取LNN维度 */
@@ -630,7 +631,7 @@ int training_pipeline_pretrain_all_modules(void* system_context) {
  * @return int 成功返回0，失败返回-1
  */
 int training_pipeline_train_unified_processor(
-    UnifiedSignalProcessor* processor,
+    void* processor,
     size_t total_iterations,
     float learning_rate)
 {

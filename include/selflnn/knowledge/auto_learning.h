@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file auto_learning.h
  * @brief 自主学习知识库系统接口
  */
@@ -200,7 +200,7 @@ int auto_learning_incremental_update(AutoLearningSystem* system, const char* top
  * @return 成功返回0，失败返回-1
  */
 int auto_learning_fuse_knowledge(AutoLearningSystem* system, const char* topic,
-                                  int source_indices, int count,
+                                  int* source_indices, int count,
                                   AutoLearnFusionMode mode,
                                   AutoLearnFusionResult* result);
 

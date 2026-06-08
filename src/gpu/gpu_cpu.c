@@ -1282,6 +1282,7 @@ static float _fast_erf(float x) {
     return sign * (1.0f - poly);
 }
 
+__attribute__((unused))
 static float _fast_erfc(float x) {
     return 1.0f - _fast_erf(x);
 }
@@ -1410,7 +1411,7 @@ struct GpuMixedPrecisionContext {
  * CPU后端：后端名称和可用性检测
  * ============================================================================ */
 
-static const char* gpu_backend_name(GpuBackend backend) {
+const char* gpu_backend_name(GpuBackend backend) {
     if (backend == GPU_BACKEND_CPU) return "CPU(纯C计算)";
     switch (backend) {
         case GPU_BACKEND_CUDA:     return "CUDA(NVIDIA)";
@@ -1426,7 +1427,7 @@ static const char* gpu_backend_name(GpuBackend backend) {
     }
 }
 
-static int gpu_probe_backend(GpuBackend backend, GpuBackendAvailability* info) {
+int gpu_probe_backend(GpuBackend backend, GpuBackendAvailability* info) {
     if (backend != GPU_BACKEND_CPU) {
         if (info) {
             memset(info, 0, sizeof(*info));
@@ -1469,6 +1470,9 @@ GpuBackend gpu_auto_select(void) {
  * CPU后端：初始化和清理
  * =========================================================================== */
 
+#ifndef ENABLE_GPU
+/* 以下函数仅在ENABLE_GPU=OFF时提供CPU降级实现。
+ * 当ENABLE_GPU=ON时，这些函数由gpu.c提供完整GPU后端实现。 */
 int gpu_init(GpuBackend backend) {
     if (backend != GPU_BACKEND_CPU && backend != 0) {
         selflnn_set_last_error(SELFLNN_ERROR_GPU_NOT_AVAILABLE, __func__, __FILE__, __LINE__,
@@ -1477,6 +1481,7 @@ int gpu_init(GpuBackend backend) {
     }
     return 0;
 }
+#endif /* !ENABLE_GPU */
 
 void gpu_cleanup(void) {
     /* CPU后端无需特殊清理 */
@@ -1522,7 +1527,7 @@ GpuContext* gpu_cpu_context_create(GpuBackend backend, int device_index) {
     _cpu_detect_hardware(&dev_info);
     ctx->total_memory = dev_info.total_memory;
     ctx->free_memory = dev_info.free_memory;
-    strncpy(ctx->device_name, dev_info.name, sizeof(ctx->device_name) - 1);
+    memcpy(ctx->device_name, dev_info.name, sizeof(ctx->device_name));
 
     /* D-004: 一次性总结日志 —— 列出CPU后端的SIMD能力与潜在回退点 */
     if (!g_fallback_summary_logged) {
@@ -1572,6 +1577,7 @@ void auto_kernel_optimizer_destroy(AutoKernelOptimizer* optimizer) {
 }
 #endif
 
+#ifndef ENABLE_GPU
 void gpu_context_free(GpuContext* context) {
     if (!context) return;
     struct GpuContext* ctx = (struct GpuContext*)context;
@@ -1605,6 +1611,7 @@ void gpu_context_free(GpuContext* context) {
     }
     safe_free((void**)&ctx);
 }
+#endif /* !ENABLE_GPU */
 
 /* ============================================================================
  * CPU后端：内存管理（真实malloc/free/memcpy）
@@ -1633,6 +1640,7 @@ GpuMemory* gpu_memory_alloc(GpuContext* context, size_t size, GpuMemoryType memo
     return mem;
 }
 
+#ifndef ENABLE_GPU
 void gpu_memory_free(GpuMemory* memory) {
     if (!memory) return;
     if (memory->data) {
@@ -1641,6 +1649,7 @@ void gpu_memory_free(GpuMemory* memory) {
     memory->size = 0;
     safe_free((void**)&memory);
 }
+#endif /* !ENABLE_GPU */
 
 int gpu_memory_copy_to_device(GpuMemory* dst, const void* src, size_t size) {
     CPU_CHECK_NULL(dst);
@@ -2332,6 +2341,7 @@ GpuKernel* gpu_kernel_create(GpuContext* context, const char* kernel_source, con
     return (GpuKernel*)k;
 }
 
+#ifndef ENABLE_GPU
 void gpu_kernel_free(GpuKernel* kernel) {
     if (!kernel) return;
     struct GpuKernel* k = (struct GpuKernel*)kernel;
@@ -2346,6 +2356,7 @@ void gpu_kernel_free(GpuKernel* kernel) {
     if (k->arg_sizes) safe_free((void**)&k->arg_sizes);
     safe_free((void**)&k);
 }
+#endif /* !ENABLE_GPU */
 
 int gpu_kernel_set_arg(GpuKernel* kernel, int arg_index, size_t arg_size, const void* arg_value) {
     CPU_CHECK_NULL(kernel);
@@ -2458,10 +2469,12 @@ GpuStream* gpu_stream_create(GpuContext* context) {
     return (GpuStream*)stream;
 }
 
+#ifndef ENABLE_GPU
 void gpu_stream_free(GpuStream* stream) {
     if (!stream) return;
     safe_free((void**)&stream);
 }
+#endif /* !ENABLE_GPU */
 
 int gpu_stream_synchronize(GpuStream* stream) {
     CPU_CHECK_NULL(stream);
@@ -3045,6 +3058,7 @@ int gpu_multi_gpu_all_reduce(GpuMultiGpuContext* mg_ctx,
     return 0;
 }
 
+#ifdef ENABLE_GPU
 int gpu_multi_gpu_broadcast(GpuMultiGpuContext* mg_ctx,
                             int src_device,
                             float* data,
@@ -3059,6 +3073,7 @@ int gpu_multi_gpu_broadcast(GpuMultiGpuContext* mg_ctx,
     ctx->total_bytes_transferred += size;
     return 0;
 }
+#endif /* ENABLE_GPU */
 
 /*修复: 多GPU同步函数——启用完整编译
  * 对于CPU后端，多GPU同步即线程并行任务的同步。
@@ -3513,6 +3528,7 @@ int gpu_matmul_train(GpuContext* context,
  * CPU后端：完整训练步骤（前向+损失+反向+更新）
  * =========================================================================== */
 
+#ifdef ENABLE_GPU
 int gpu_train_step(GpuContext* context,
                    float** weights, float** biases,
                    const float* inputs, const float* targets,
@@ -3585,6 +3601,7 @@ int gpu_train_step(GpuContext* context,
     safe_free((void**)&output);
     return 0;
 }
+#endif /* ENABLE_GPU */
 
 /* ============================================================================
  * CPU后端：BatchNorm配置和LR配置（默认值）
@@ -4040,6 +4057,7 @@ float gpu_lr_scheduler_step(int current_step, const GpuLRConfig* config) {
     return lr;
 }
 
+#ifdef ENABLE_GPU
 int gpu_forward_dense(GpuContext* context,
                       const float* input, const float* weights,
                       const float* bias, float* output,
@@ -4065,6 +4083,7 @@ int gpu_forward_dense(GpuContext* context,
                                      batch_size * output_size, act_type, alpha);
     return ret;
 }
+#endif /* ENABLE_GPU */
 
 /* ============================================================================
  * CPU后端：NPU神经处理单元（CPU真实推理实现）
@@ -4106,11 +4125,13 @@ struct CpuNpuModel {
     int async_batch_size;
 };
 
+#ifndef ENABLE_GPU
 int gpu_npu_init(GpuContext* context) {
     if (!context) return -1;
     /* CPU模式下NPU推理就绪，使用纯C计算 */
     return 0;
 }
+#endif /* !ENABLE_GPU */
 
 void gpu_npu_cleanup(GpuContext* context) {
     if (!context) return;
@@ -4359,8 +4380,8 @@ int gpu_npu_get_model_info(NpuModel* model, NpuModelInfo* info) {
     if (!model || !info) return -1;
     struct CpuNpuModel* m = (struct CpuNpuModel*)model;
     memset(info, 0, sizeof(*info));
-    strncpy(info->model_name, m->model_name, sizeof(info->model_name) - 1);
-    strncpy(info->model_path, m->model_path, sizeof(info->model_path) - 1);
+    memcpy(info->model_name, m->model_name, sizeof(info->model_name));
+    memcpy(info->model_path, m->model_path, sizeof(info->model_path));
     info->is_loaded = m->is_loaded;
     info->model_size_bytes = m->model_size_bytes;
     info->input_count = m->input_count;
@@ -4378,3 +4399,74 @@ int gpu_npu_get_device_count(GpuContext* context) {
 const char* gpu_npu_get_backend_name(GpuContext* context) {
     return "CPU-NPU(纯C推理计算)";
 }
+
+/* ENABLE_GPU=OFF时的桩函数：gpu.c被排除编译，这些函数由CPU后端提供 */
+#ifndef ENABLE_GPU
+
+int gpu_is_available(void) {
+    /* CPU总是可用的 */
+    return 1;
+}
+
+int gpu_hardware_get_cpu_info(GpuDeviceInfo* info) {
+    if (!info) return -1;
+    memset(info, 0, sizeof(*info));
+    info->type = GPU_DEVICE_TYPE_CPU;
+    snprintf(info->name, sizeof(info->name), "CPU (%s)",
+#ifdef __x86_64__
+             "x86_64 SSE/AVX");
+#elif defined(__aarch64__)
+             "ARM64 NEON");
+#else
+             "Generic");
+#endif
+    info->compute_units = 1;
+    info->total_memory = 0;
+    info->free_memory = 0;
+    return 0;
+}
+
+GpuContext* gpu_context_create(GpuBackend backend, int device_index) {
+    (void)device_index;
+    if (backend != GPU_BACKEND_CPU && backend != 0) return NULL;
+    GpuContext* ctx = (GpuContext*)safe_calloc(1, sizeof(GpuContext));
+    if (!ctx) return NULL;
+    ctx->backend = GPU_BACKEND_CPU;
+    ctx->device_index = 0;
+    ctx->is_initialized = 1;
+    return ctx;
+}
+
+int gpu_auto_init(GpuBackend* backend_out) {
+    if (backend_out) *backend_out = GPU_BACKEND_CPU;
+    return 0;
+}
+
+size_t gpu_memory_pool_defragment(void* pool) {
+    (void)pool;
+    return 0; /* CPU后端无需显存碎片整理 */
+}
+
+/* gpu_forward_dense的桩实现（匹配gpu.h签名，仅CPU计算） */
+int gpu_forward_dense(GpuContext* context,
+                      const float* input, float* output,
+                      const float* weights, const float* bias,
+                      size_t batch_size, size_t input_size, size_t output_size,
+                      GpuActivationType act_type, float alpha) {
+    (void)context;
+    if (!input || !output || !weights) return -1;
+    /* 简单的CPU矩阵乘法: output = input * weights + bias */
+    for (size_t b = 0; b < batch_size; b++) {
+        for (size_t o = 0; o < output_size; o++) {
+            float sum = bias ? bias[o] : 0.0f;
+            for (size_t i = 0; i < input_size; i++) {
+                sum += input[b * input_size + i] * weights[o * input_size + i];
+            }
+            output[b * output_size + o] = sum;
+        }
+    }
+    (void)act_type; (void)alpha;
+    return 0;
+}
+
+#endif /* !ENABLE_GPU */

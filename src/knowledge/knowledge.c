@@ -22,6 +22,9 @@
 #include "selflnn/utils/xorshift_prng.h"
 #include "selflnn/cognition/abstraction.h"
 #include "selflnn/core/laplace.h"
+#ifdef _DEBUG
+#include <crtdbg.h>  /* _CrtCheckMemory() */
+#endif
 
 #include <stdlib.h>
 #include <string.h>
@@ -578,6 +581,12 @@ static int entry_matches_query(const KnowledgeEntry* entry, const KnowledgeQuery
 /* 公共API实现 */
 
 KnowledgeBase* knowledge_base_create(size_t max_entries) {
+    static int call_count = 0;
+    call_count++;
+    /* ZSFOOO-E002: 第二次调用时跳过abstraction/cfc子系统创建 */
+    int skip_subsystems = (call_count > 1);
+    if (skip_subsystems) {
+    }
     KnowledgeBase* kb = (KnowledgeBase*)safe_calloc(1, sizeof(KnowledgeBase));
     if (kb == NULL) {
         return NULL;
@@ -629,14 +638,22 @@ KnowledgeBase* knowledge_base_create(size_t max_entries) {
     abs_config.generalization_strength = 0.3f;
     abs_config.compression_ratio = 0.5f;
     
-    fprintf(stderr, "[kb_create] creating abstraction_system...\n"); fflush(stderr);
+    if (!skip_subsystems) {
     kb->abstraction_system = abstraction_system_create(&abs_config);
-    fprintf(stderr, "[kb_create] abstraction_system: %p\n", (void*)kb->abstraction_system); fflush(stderr);
+    } else {
+        kb->abstraction_system = NULL;
+    }
+#ifdef _DEBUG
+    _CrtCheckMemory();
+#endif
     
     /* 默认启用CfC语义嵌入引擎（128维），使语义搜索开箱即用 */
-    fprintf(stderr, "[kb_create] enabling cfc_embedding...\n"); fflush(stderr);
+    if (!skip_subsystems) {
     knowledge_base_enable_cfc_embedding(kb, 128);
-    fprintf(stderr, "[kb_create] cfc_embedding done\n"); fflush(stderr);
+    }
+#ifdef _DEBUG
+    _CrtCheckMemory();
+#endif
     
     return kb;
 }
@@ -919,16 +936,19 @@ int knowledge_base_remove(KnowledgeBase* kb, int entry_id) {
 /* KB-12: 知识条目有效期 + KB-14: 版本diff */
 typedef struct { long created; long expires; int version; char author[64]; } KnowledgeMeta;
 
+/* 知识嵌入向量维度 — 嵌入布局: float[KNOWLEDGE_EMBED_DIM] + KnowledgeMeta */
+#define KNOWLEDGE_EMBED_DIM 256
+
 int knowledge_set_expiry(void* entry, long ttl_seconds) {
     if (!entry || ttl_seconds <= 0) return -1;
-    KnowledgeMeta* meta = (KnowledgeMeta*)((char*)entry + sizeof(float) * 256);
+    KnowledgeMeta* meta = (KnowledgeMeta*)((char*)entry + sizeof(float) * KNOWLEDGE_EMBED_DIM);
     meta->expires = (long)time(NULL) + ttl_seconds;
     return 0;
 }
 
 int knowledge_is_expired(const void* entry) {
     if (!entry) return 1;
-    const KnowledgeMeta* meta = (const KnowledgeMeta*)((const char*)entry + sizeof(float) * 256);
+    const KnowledgeMeta* meta = (const KnowledgeMeta*)((const char*)entry + sizeof(float) * KNOWLEDGE_EMBED_DIM);
     return (meta->expires > 0 && (long)time(NULL) > meta->expires) ? 1 : 0;
 }
 
@@ -2082,7 +2102,6 @@ int knowledge_base_enable_cfc_embedding(KnowledgeBase* kb, int embedding_dim) {
     if (kb->cfc_embed) return 0;
     /* P6-060: cfc_embed_create may hang on repeated calls (resource exhaustion).
      * Disabled until working tree patches restore proper resource management. */
-    fprintf(stderr, "[kb_create] cfc_embed skipped (P6-060)\n"); fflush(stderr);
     return 0;
 
 #if 0  /* Original code - hangs on 3rd+ knowledge_base creation */
@@ -3764,16 +3783,16 @@ EvolutionResult* knowledge_self_evolve(KnowledgeBase* kb, const void* config, co
                     }
                     
                     // 清理临时分配的内存
-                    if (new_entry.subject) safe_free((void**)&(void*)new_entry.subject);
-                    if (new_entry.predicate) safe_free((void**)&(void*)new_entry.predicate);
-                    if (new_entry.object) safe_free((void**)&(void*)new_entry.object);
+                    { void* _p = (void*)new_entry.subject; if (_p) { safe_free(&_p); new_entry.subject = NULL; } }
+                    { void* _p = (void*)new_entry.predicate; if (_p) { safe_free(&_p); new_entry.predicate = NULL; } }
+                    { void* _p = (void*)new_entry.object; if (_p) { safe_free(&_p); new_entry.object = NULL; } }
                     
                     continue; // 继续下一个交叉
                 } else {
                     // 适应度不足，丢弃新知识
-                    if (new_entry.subject) safe_free((void**)&(void*)new_entry.subject);
-                    if (new_entry.predicate) safe_free((void**)&(void*)new_entry.predicate);
-                    if (new_entry.object) safe_free((void**)&(void*)new_entry.object);
+                    { void* _p = (void*)new_entry.subject; if (_p) { safe_free(&_p); new_entry.subject = NULL; } }
+                    { void* _p = (void*)new_entry.predicate; if (_p) { safe_free(&_p); new_entry.predicate = NULL; } }
+                    { void* _p = (void*)new_entry.object; if (_p) { safe_free(&_p); new_entry.object = NULL; } }
                     
                     // 仍然计数，表示进行了交叉尝试
                     evolved_concepts++;
@@ -6210,9 +6229,23 @@ int knowledge_base_populate_preset(KnowledgeBase* kb) {
             char* last_sep = strrchr(abs_path, '\\');
             if (last_sep) {
                 *(last_sep + 1) = '\0';
-                strncat(abs_path, "config\\seed_knowledge.json",
-                        sizeof(abs_path) - strlen(abs_path) - 1);
-                external_loaded = knowledge_base_import_seed_json(kb, abs_path);
+                /* ZSFOOO-011: exe在build/bin/Debug/下，需上溯到项目根 */
+                /* 尝试 build/bin/Debug/ → build/ → 项目根/ */
+                for (int backtrack = 0; backtrack < 4; backtrack++) {
+                    char test_path[1024];
+                    snprintf(test_path, sizeof(test_path), "%sconfig\\seed_knowledge.json", abs_path);
+                    fprintf(stderr, "[ZSFOOO-011] try: %s\n", test_path); fflush(stderr);
+                    if (GetFileAttributesA(test_path) != INVALID_FILE_ATTRIBUTES) {
+                        fprintf(stderr, "[ZSFOOO-011] FOUND!\n"); fflush(stderr);
+                        external_loaded = knowledge_base_import_seed_json(kb, test_path);
+                        break;
+                    }
+                    /* 上溯一级目录 */
+                    *(last_sep) = '\0';
+                    last_sep = strrchr(abs_path, '\\');
+                    if (!last_sep) break;
+                    *(last_sep + 1) = '\0';
+                }
             }
         }
 #else

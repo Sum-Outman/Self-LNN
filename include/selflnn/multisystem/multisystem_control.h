@@ -60,6 +60,8 @@ typedef struct {
 /**
  * @brief 任务类型枚举
  */
+#ifndef SELFLNN_TASK_TYPE_DEFINED
+#define SELFLNN_TASK_TYPE_DEFINED
 typedef enum {
     TASK_TYPE_COMPUTE = 0,       /**< 计算任务 */
     TASK_TYPE_MOVE = 1,          /**< 移动任务 */
@@ -69,6 +71,7 @@ typedef enum {
     TASK_TYPE_MONITOR = 5,       /**< 监控任务 */
     TASK_TYPE_CUSTOM = 6         /**< 自定义任务 */
 } TaskType;
+#endif /* SELFLNN_TASK_TYPE_DEFINED */
 
 /**
  * @brief 任务结构体

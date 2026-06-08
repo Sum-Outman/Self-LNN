@@ -59,8 +59,9 @@ static int _training_parse_url(const char* url, char* host, size_t host_size,
 /* ========== 训练模块全局锁（使用跨平台mutex，支持可重入） ========== */
 #include "selflnn/utils/platform.h"
 static MutexHandle g_train_lr_mutex = NULL;
+static volatile int g_train_lr_mutex_done = 0;
 #define TRAIN_LR_LOCK() do { \
-    if (!g_train_lr_mutex) g_train_lr_mutex = mutex_create(); \
+    if (!g_train_lr_mutex_done) { g_train_lr_mutex = mutex_create(); g_train_lr_mutex_done = 1; } \
     mutex_lock(g_train_lr_mutex); \
 } while(0)
 #define TRAIN_LR_UNLOCK() mutex_unlock(g_train_lr_mutex)
@@ -862,7 +863,7 @@ static int optimizer_init(OptimizerState* optimizer, const TrainingConfig* confi
                           size_t num_parameters);
 static void optimizer_update(OptimizerState* optimizer, float* parameters,
                             const float* gradients, size_t num_parameters);
-static void optimizer_free(OptimizerState* optimizer);
+static void optimizer_state_free(OptimizerState* optimizer);
 
 static LearningRateScheduler* scheduler_create_internal(
     const LearningRateSchedulerConfig* config, size_t total_steps);
@@ -1006,7 +1007,7 @@ typedef struct RingAllReduceTask {
     int sync_mode;                       /**< 同步模式：0=屏障同步, 1=忙等待 */
 } RingAllReduceTask;
 
-static void ring_allreduce_task(void* arg);
+static int ring_allreduce_task(void* arg);
 static void gradient_topk_compress(float* gradients, size_t num_params,
                                    float compression_ratio,
                                    int* indices_out, float* values_out,
@@ -2137,16 +2138,16 @@ static int distributed_should_sync_gradients(Trainer* trainer) {
  *
  * @param arg RingAllReduceTask指针
  */
-static void ring_allreduce_task(void* arg) {
+static int ring_allreduce_task(void* arg) {
     RingAllReduceTask* task = (RingAllReduceTask*)arg;
-    if (!task || !task->node_chunks || !task->send_buffer || !task->recv_buffer) return;
+    if (!task || !task->node_chunks || !task->send_buffer || !task->recv_buffer) return -1;
 
     int N = task->total_nodes;
     int rank = task->node_id;
     size_t chunk = task->chunk_size;
     float** chunks = task->node_chunks;
 
-    if (N <= 1 || chunk == 0) return;
+    if (N <= 1 || chunk == 0) return -1;
 
     /* Phase 1: Scatter-Reduce (N-1步) */
     for (int step = 0; step < N - 1; step++) {
@@ -2185,7 +2186,7 @@ static void ring_allreduce_task(void* arg) {
                 /* 超时: 标记barrier失败，恢复计数器继续 */
                 *task->barrier_generation = expected_gen + 1;
                 *task->barrier_counter = 0;
-                return; /* barrier超时 - void函数不能返回值 */
+                return -1; /* barrier超时 */
             }
         }
 
@@ -2318,6 +2319,7 @@ static void ring_allreduce_task(void* arg) {
     for (int n = 0; n < N; n++) {
         memcpy(&task->result_buffer[n * chunk], chunks[n], chunk * sizeof(float));
     }
+    return 0;
 }
 
 /**
@@ -4890,7 +4892,7 @@ void trainer_free(Trainer* trainer) {
     }
 
     // 释放优化器状态
-    optimizer_free(&trainer->optimizer);
+    optimizer_state_free(&trainer->optimizer);
     
     // 释放学习率调度器
     if (trainer->scheduler) {
@@ -7357,7 +7359,7 @@ static void optimizer_update(OptimizerState* optimizer, float* parameters,
 /**
  * @brief 释放优化器资源
  */
-static void optimizer_free(OptimizerState* optimizer) {
+static void optimizer_state_free(OptimizerState* optimizer) {
     if (!optimizer) {
         return;
     }

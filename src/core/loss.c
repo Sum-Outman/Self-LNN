@@ -688,7 +688,7 @@ LossType loss_get_default_for_modality(ModalityType modality)
  * @brief 验证多模态段描述的完整性
  * @return 0=有效, -1=有越界段, -2=有重叠段
  */
-static int validate_multimodal_segments(const MultimodalLossSegment* segments,
+int validate_multimodal_segments(const MultimodalLossSegment* segments,
                                          int num_segments, int total_length)
 {
     if (!segments || num_segments <= 0) return -1;

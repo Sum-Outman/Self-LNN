@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
@@ -49,7 +49,8 @@
         /* 前端配置 - 可在此处修改服务器地址和端口 */
         window.SELFLNN_CONFIG = window.SELFLNN_CONFIG || {
             host: window.location.hostname || 'localhost',
-            port: 8080         /* 统一端口，WebSocket通过HTTP Upgrade共用8080 */
+            port: 8080,        /* HTTP API端口 */
+            wsPort: 8081       /* WebSocket独立端口（与port_config.h中SELFLNN_WEBSOCKET_PORT=8081一致） */
         };
         /* 全局保护：合并页面中hidden section的DOM引用安全 */
         window._e = function(id,fn) { var el=document.getElementById(id); if(el) try{fn(el)}catch(e){} };
@@ -4309,7 +4310,7 @@ response = requests.get(
         async function pollSafety() {
             try {
                 /* 使用已验证的 getSecurityStatus API */
-                var data = await window.SelfLnnApi.getSecurityStatus;
+                var data = await window.SelfLnnApi.getSecurityStatus();
                 if (!data || !data.success) return;
                 updateSafetyUI(data.data || data);
             } catch(e) { console.warn('安全状态轮询失败:', e.message); }
@@ -4413,7 +4414,7 @@ response = requests.get(
         /* safety区独立checkConnection→checkSafetyConnection */
         async function checkSafetyConnection() {
             try {
-                var status = await window.SelfLnnApi.checkConnection;
+                var status = await window.SelfLnnApi.checkConnection();
                 var badge = document.getElementById('safety-conn-status');
                 if (!badge) return;
                 badge.style.display = 'inline-block';
@@ -5323,6 +5324,7 @@ response = requests.get(
                 <button class="tab-btn active" onclick="switchKnowledgeTab('add')">添加知识</button>
                 <button class="tab-btn" onclick="switchKnowledgeTab('list')">知识列表</button>
                 <button class="tab-btn" onclick="switchKnowledgeTab('graph')">图谱控制</button>
+                <button class="tab-btn" onclick="switchKnowledgeTab('advanced')">高级分析</button>
             </div>
             <div class="tab-content active" id="tab-add">
                 <div class="form-group">
@@ -5406,6 +5408,61 @@ response = requests.get(
                 <div class="btn-row">
                     <button class="btn" onclick="resetGraphView()">重置视图</button>
                     <button class="btn btn-danger" onclick="clearGraph()">清空图谱</button>
+                </div>
+            </div>
+            <div class="tab-content" id="tab-advanced">
+                <div class="form-group">
+                    <label>高级图谱查询与分析</label>
+                    <p style="font-size:0.7rem;color:rgba(255,255,255,0.5);margin:4px 0;">使用图算法和语义查询深入分析知识图谱结构</p>
+                </div>
+
+                <!-- SPARQL查询 -->
+                <div class="form-group">
+                    <label>SPARQL语义查询</label>
+                    <div style="display:flex;gap:0.4rem;">
+                        <input type="text" id="kg-sparql-query" placeholder="输入SPARQL查询语句..." style="flex:1;font-size:0.75rem;">
+                        <button class="btn btn-sm btn-primary" onclick="kgSparqlQuery()">执行</button>
+                    </div>
+                </div>
+
+                <!-- PageRank分析 -->
+                <div class="form-group">
+                    <label>PageRank节点重要性分析</label>
+                    <div style="display:flex;gap:0.4rem;">
+                        <input type="number" id="kg-pagerank-topk" value="10" min="1" max="100" style="width:60px;font-size:0.75rem;" title="返回Top-K节点">
+                        <button class="btn btn-sm btn-primary" onclick="kgPageRank()">计算PageRank</button>
+                    </div>
+                </div>
+
+                <!-- 社区检测 -->
+                <div class="form-group">
+                    <label>社区检测（Louvain算法）</label>
+                    <button class="btn btn-sm btn-primary" onclick="kgCommunityDetect()">检测社区结构</button>
+                </div>
+
+                <!-- 语义搜索 -->
+                <div class="form-group">
+                    <label>语义搜索</label>
+                    <div style="display:flex;gap:0.4rem;">
+                        <input type="text" id="kg-semantic-query" placeholder="输入语义搜索关键词..." style="flex:1;font-size:0.75rem;">
+                        <button class="btn btn-sm btn-primary" onclick="kgSemanticSearch()">搜索</button>
+                    </div>
+                </div>
+
+                <!-- 实体路径查询 -->
+                <div class="form-group">
+                    <label>实体间路径查询</label>
+                    <div style="display:flex;gap:0.4rem;flex-wrap:wrap;">
+                        <input type="text" id="kg-path-from" placeholder="起始实体" style="flex:1;min-width:80px;font-size:0.75rem;">
+                        <span style="color:#888;line-height:28px;">→</span>
+                        <input type="text" id="kg-path-to" placeholder="目标实体" style="flex:1;min-width:80px;font-size:0.75rem;">
+                        <button class="btn btn-sm btn-primary" onclick="kgFindPath()">查询路径</button>
+                    </div>
+                </div>
+
+                <!-- 分析结果显示区域 -->
+                <div id="kg-advanced-result" style="margin-top:8px;padding:8px;background:rgba(0,0,0,0.3);border-radius:4px;font-size:0.7rem;color:#ccc;min-height:40px;max-height:280px;overflow-y:auto;display:none;">
+                    <pre id="kg-advanced-result-content" style="margin:0;white-space:pre-wrap;word-break:break-all;font-family:'Consolas','Courier New',monospace;font-size:0.7rem;">等待查询结果...</pre>
                 </div>
             </div>
         </div>
@@ -5560,7 +5617,7 @@ response = requests.get(
 
         async function pollMultimodal() {
             try {
-                var data = await window.SelfLnnApi.multimodalStatus;
+                var data = await window.SelfLnnApi.multimodalStatus();
                 document.getElementById('contrast-loss').textContent = data.contrast_loss != null ? data.contrast_loss.toFixed(4) : '-';
                 document.getElementById('align-loss').textContent = data.align_loss != null ? data.align_loss.toFixed(4) : '-';
                 document.getElementById('cross-accuracy').textContent = data.cross_accuracy != null ? (data.cross_accuracy*100).toFixed(1)+'%' : '-';
@@ -5571,7 +5628,7 @@ response = requests.get(
 
         async function loadStatus() {
             try {
-                var data = await window.SelfLnnApi.multimodalStatus;
+                var data = await window.SelfLnnApi.multimodalStatus();
                 document.getElementById('vis-status').textContent = data.vision_ready ? '就绪' : '未就绪';
                 document.getElementById('mm-audio-status').textContent = data.audio_ready ? '就绪' : '未就绪';
                 document.getElementById('mm-text-status').textContent = data.text_ready ? '就绪' : '未就绪';
@@ -6100,7 +6157,7 @@ response = requests.get(
         async function loadLogs() {
             try {
                 /* 使用系统状态API和API统计接口获取使用日志 */
-                var resp = await window.SelfLnnApi.getServerStats;
+                var resp = await window.SelfLnnApi.getServerStats();
                 var data = resp.success ? resp.data : null;
                 var stats = (data && data.system) ? data.system : {};
                 document.getElementById('today-total').textContent = (stats.requests && stats.requests.total) ? stats.requests.total : '-';
@@ -6432,7 +6489,7 @@ response = requests.get(
         document.addEventListener('DOMContentLoaded', function() {
             /* 浏览器媒体设备检测 */
             if (navigator.mediaDevices) {
-                navigator.mediaDevices.enumerateDevices.then(function(devs){
+                navigator.mediaDevices.enumerateDevices().then(function(devs){
                     devs.forEach(function(d){
                         if (d.kind === 'videoinput') document.getElementById('cam-status').textContent = '浏览器已检测';
                         if (d.kind === 'audioinput') document.getElementById('hw-mic-status').textContent = '浏览器已检测';
@@ -7077,7 +7134,8 @@ response = requests.get(
             createReconnectToast();
             
             // 检查连接状态
-            apiService.checkConnection().then(status => {
+            if (apiService && typeof apiService.checkConnection === 'function') {
+                apiService.checkConnection().then(status => {
                 if (status.connected) {
                     console.log('后端服务器连接成功:', status.message);
                     updateConnectionStatus(true);
@@ -7087,10 +7145,16 @@ response = requests.get(
                     updateConnectionStatus(false);
                     startConnectionTimeout();
                 }
+            }).catch(function(e) {
+                console.warn('连接检查失败:', e.message);
+                updateConnectionStatus(false);
             });
-            
-            // 启动连接监控
+        }
+        
+        // 启动连接监控（需要apiService）
+        if (apiService && typeof apiService.startConnectionMonitor === 'function') {
             apiService.startConnectionMonitor();
+        }
             
             // 监听连接状态变化
             document.addEventListener('backend-connection-status', (event) => {
@@ -7111,7 +7175,9 @@ response = requests.get(
             initStatusIndicators();
             
             // 初始数据加载
-            refreshDashboard();
+            if (typeof refreshDashboard === 'function') {
+                refreshDashboard();
+            }
         });
         
         // ---- 状态变量 ----
@@ -7426,7 +7492,7 @@ response = requests.get(
             updateStatusIndicators(false);
             
             try {
-                const status = await apiService.checkConnection;
+                const status = await apiService.checkConnection();
                 if (status.connected) {
                     updateConnectionStatus(true);
                     clearConnectionTimeout;
@@ -7584,7 +7650,7 @@ response = requests.get(
 
         async function fetchCognitionStatus() {
             try {
-                const result = await apiService.getCognitionStatus;
+                const result = await apiService.getCognitionStatus();
                 return result && result.success ? result.data : null;
             } catch (err) {
                 console.warn('获取认知状态异常:', err.message);

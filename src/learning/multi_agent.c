@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file multi_agent.c
  * @brief 多智能体协作框架完整算法实现
  * 
@@ -174,7 +174,8 @@ static int system_mutex_init(SystemMutex* mutex) {
 #endif
 }
 
-static void system_mutex_destroy(SystemMutex* mutex) {
+static void ma_mutex_destroy(void* mutex_ptr) {
+    SystemMutex* mutex = (SystemMutex*)mutex_ptr;
 #ifdef _WIN32
     DeleteCriticalSection(mutex);
 #else
@@ -1456,7 +1457,7 @@ void multi_agent_system_destroy(MultiAgentSystem* system) {
     safe_free((void**)&system->consensus_values);
     
     // 销毁系统互斥锁
-    system_mutex_destroy(&system->system_mutex);
+    ma_mutex_destroy(&system->system_mutex);
     
     // 释放CfC多智能体私有数据
     if (system->cfc_private_data) {

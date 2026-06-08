@@ -233,7 +233,63 @@ extern int tpu_matmul_train(GpuContext* context, const float* a, const float* b,
                             float* c, size_t m, size_t n, size_t k,
                             int transpose_a, int transpose_b);
 
-/* CUDA后端与OpenCL后端：基础接口通过GpuBackendInterface函数指针表调度 */
+/* P0-001修复: CUDA后端外部函数声明 */
+extern int cuda_forward_dense(GpuContext* ctx, const float* input, const float* weights,
+                              const float* bias, float* output, size_t batch_size,
+                              size_t input_size, size_t output_size, GpuActivationType act, float alpha);
+extern int cuda_matmul_train(GpuContext* ctx, const float* A, const float* B, float* C,
+                             size_t M, size_t N, size_t K, int transA, int transB, float alpha, float beta);
+extern int cuda_activation_forward(GpuContext* ctx, const float* input, float* output,
+                                   size_t n, GpuActivationType act, float alpha);
+extern int cuda_activation_backward(GpuContext* ctx, const float* input, const float* grad_output,
+                                    float* grad_input, size_t n, GpuActivationType act, float alpha);
+extern int cuda_batch_norm_forward(GpuContext* ctx, const float* input, float* output,
+    const float* gamma, const float* beta, float* running_mean, float* running_var,
+    float* batch_mean, float* batch_var, size_t num_elements, size_t num_features,
+    const GpuBatchNormConfig* config, int is_training);
+extern int cuda_batch_norm_backward(GpuContext* ctx, const float* input, const float* grad_output,
+    float* grad_input, float* grad_gamma, float* grad_beta,
+    const float* mean, const float* var, const float* gamma,
+    size_t num_elements, size_t num_features, const GpuBatchNormConfig* config);
+extern int cuda_dropout_forward(GpuContext* ctx, const float* input, float* output,
+                                float* mask, size_t n, float rate, int training);
+extern int cuda_dropout_backward(GpuContext* ctx, const float* grad_output, float* grad_input,
+                                 const float* mask, size_t n, float rate);
+extern int cuda_rmsprop_update(GpuContext* ctx, float* weights, const float* gradients,
+                               float* square_avg, size_t size, float lr, float beta,
+                               float eps, float wd);
+extern int cuda_cross_entropy_loss_gradient(GpuContext* ctx, const float* logits,
+    const float* targets, float* loss, float* grads, size_t batch_size, size_t num_classes);
+
+/* P0-001修复: OpenCL后端外部函数声明 */
+extern int opencl_forward_dense(GpuContext* ctx, const float* input, const float* weights,
+                                const float* bias, float* output, size_t batch_size,
+                                size_t input_size, size_t output_size, GpuActivationType act, float alpha);
+extern int opencl_matmul_train(GpuContext* ctx, const float* A, const float* B, float* C,
+                               size_t M, size_t N, size_t K, int transA, int transB, float alpha, float beta);
+extern int opencl_activation_forward(GpuContext* ctx, const float* input, float* output,
+                                     size_t n, GpuActivationType act, float alpha);
+extern int opencl_activation_backward(GpuContext* ctx, const float* input, const float* grad_output,
+                                      float* grad_input, size_t n, GpuActivationType act, float alpha);
+extern int opencl_batch_norm_forward(GpuContext* ctx, const float* input, float* output,
+    const float* gamma, const float* beta, float* running_mean, float* running_var,
+    float* batch_mean, float* batch_var, size_t num_elements, size_t num_features,
+    const GpuBatchNormConfig* config, int is_training);
+extern int opencl_batch_norm_backward(GpuContext* ctx, const float* input, const float* grad_output,
+    float* grad_input, float* grad_gamma, float* grad_beta,
+    const float* mean, const float* var, const float* gamma,
+    size_t num_elements, size_t num_features, const GpuBatchNormConfig* config);
+extern int opencl_dropout_forward(GpuContext* ctx, const float* input, float* output,
+                                  float* mask, size_t n, float rate, int training);
+extern int opencl_dropout_backward(GpuContext* ctx, const float* grad_output, float* grad_input,
+                                   const float* mask, size_t n, float rate);
+extern int opencl_rmsprop_update(GpuContext* ctx, float* weights, const float* gradients,
+                                 float* square_avg, size_t size, float lr, float beta,
+                                 float eps, float wd);
+extern int opencl_cross_entropy_loss_gradient(GpuContext* ctx, const float* logits,
+    const float* targets, float* loss, float* grads, size_t batch_size, size_t num_classes);
+
+/* P0-001修复完成：CUDA/OpenCL接口现通过显式extern声明连接dispatch */
 
 /* ============================================================================
  * 全局状态定义
@@ -1775,17 +1831,16 @@ int gpu_init(GpuBackend backend) {
     };
     static const int kDetectionCount = sizeof(kDetectionOrder) / sizeof(kDetectionOrder[0]);
 
-    /* 释放锁后再执行可能耗时的后端初始化操作 */
-    GPU_STATE_UNLOCK();
-
+    /* 保持锁遍历后端确保无并发初始化 */
     if (backend == GPU_BACKEND_CPU) {
         /* 自动模式：依次检测每个后端，使用首个可用的后端 */
         for (int i = 0; i < kDetectionCount; i++) {
             const GpuBackendInterface* iface = gpu_get_backend_interface(kDetectionOrder[i]);
             if (!iface) continue;
-            if (iface->init() == 0) {
-                GPU_STATE_LOCK();
-                /* 再次检查：防止在初始化期间另一线程已设置 */
+            GPU_STATE_UNLOCK();
+            int init_ret = iface->init();
+            GPU_STATE_LOCK();
+            if (init_ret == 0) {
                 if (!g_gpu_global_initialized) {
                     g_active_backend = kDetectionOrder[i];
                     g_gpu_global_initialized = 1;
@@ -1793,7 +1848,6 @@ int gpu_init(GpuBackend backend) {
                 GPU_STATE_UNLOCK();
                 return 0;
             }
-            /* 初始化失败时清理可能分配的部分资源 */
             iface->cleanup();
         }
         gpu_set_error_string("所有GPU后端均不可用，无可用计算后端");
@@ -1802,17 +1856,20 @@ int gpu_init(GpuBackend backend) {
 
     /* 指定后端模式：仅初始化指定的后端，失败直接返回错误 */
     const GpuBackendInterface* iface = gpu_get_backend_interface(backend);
-    if (iface && iface->init() == 0) {
-        GPU_STATE_LOCK();
-        if (!g_gpu_global_initialized) {
-            g_active_backend = backend;
-            g_gpu_global_initialized = 1;
-        }
+    if (iface) {
         GPU_STATE_UNLOCK();
-        return 0;
+        int init_ret = iface->init();
+        GPU_STATE_LOCK();
+        if (init_ret == 0) {
+            if (!g_gpu_global_initialized) {
+                g_active_backend = backend;
+                g_gpu_global_initialized = 1;
+            }
+            GPU_STATE_UNLOCK();
+            return 0;
+        }
+        iface->cleanup();
     }
-
-    if (iface) iface->cleanup();
     gpu_set_error_string("指定的后端初始化失败: %d", (int)backend);
     return -1;
 }
@@ -3303,10 +3360,20 @@ int gpu_rmsprop_update(GpuContext* context, float* weights, const float* gradien
                                              epsilon, weight_decay);
             break;
         case GPU_BACKEND_CUDA:
+            /* P0-001: CUDA dispatch */
+            if (cuda_rmsprop_update != NULL)
+                return cuda_rmsprop_update(context, weights, gradients, square_avg,
+                                           size, learning_rate, beta,
+                                           epsilon, weight_decay);
             break;
         case GPU_BACKEND_ROCM:
             break;
         case GPU_BACKEND_OPENCL:
+            /* P0-001: OpenCL dispatch */
+            if (opencl_rmsprop_update != NULL)
+                return opencl_rmsprop_update(context, weights, gradients, square_avg,
+                                             size, learning_rate, beta,
+                                             epsilon, weight_decay);
             break;
         case GPU_BACKEND_INTEL:
             break;
@@ -3358,10 +3425,18 @@ int gpu_cross_entropy_loss_gradient(GpuContext* context, const float* prediction
                                                           (size_t)num_classes);
             break;
         case GPU_BACKEND_CUDA:
+            /* P0-001: CUDA交叉熵损失dispatch */
+            if (cuda_cross_entropy_loss_gradient != NULL)
+                return cuda_cross_entropy_loss_gradient(context, predictions, targets,
+                    NULL, gradient, size / (size_t)num_classes, (size_t)num_classes);
             break;
         case GPU_BACKEND_ROCM:
             break;
         case GPU_BACKEND_OPENCL:
+            /* P0-001: OpenCL交叉熵损失dispatch */
+            if (opencl_cross_entropy_loss_gradient != NULL)
+                return opencl_cross_entropy_loss_gradient(context, predictions, targets,
+                    NULL, gradient, size / (size_t)num_classes, (size_t)num_classes);
             break;
         case GPU_BACKEND_INTEL:
             break;
@@ -3397,12 +3472,18 @@ int gpu_matmul_train(GpuContext* context, const float* a, const float* b,
                                            1.0f, 0.0f, transpose_a, transpose_b);
             break;
         case GPU_BACKEND_CUDA:
+            /* P0-001: CUDA matmul dispatch */
+            if (cuda_matmul_train != NULL)
+                return cuda_matmul_train(context, a, b, c, m, n, k, transpose_a, transpose_b, 1.0f, 0.0f);
             break;
         case GPU_BACKEND_ROCM:
             if (rocm_matmul_train != NULL)
                 return rocm_matmul_train(context, a, b, c, m, n, k, 1.0f, 0.0f);
             break;
         case GPU_BACKEND_OPENCL:
+            /* P0-001: OpenCL matmul dispatch */
+            if (opencl_matmul_train != NULL)
+                return opencl_matmul_train(context, a, b, c, m, n, k, transpose_a, transpose_b, 1.0f, 0.0f);
             break;
         case GPU_BACKEND_INTEL:
             if (intel_matmul_train != NULL)
@@ -3474,6 +3555,11 @@ int gpu_forward_dense(GpuContext* context, const float* input, float* output,
                                             act_type, alpha);
             break;
         case GPU_BACKEND_CUDA:
+            /* P0-001修复: CUDA dispatch——调用真实GPU内核 */
+            if (cuda_forward_dense != NULL)
+                return cuda_forward_dense(context, input, weights, bias, output,
+                                          batch_size, input_size, output_size,
+                                          act_type, alpha);
             break;
         case GPU_BACKEND_ROCM:
             if (rocm_forward_dense != NULL)
@@ -3482,6 +3568,11 @@ int gpu_forward_dense(GpuContext* context, const float* input, float* output,
                                           act_type, alpha);
             break;
         case GPU_BACKEND_OPENCL:
+            /* P0-001修复: OpenCL dispatch——调用真实GPU内核 */
+            if (opencl_forward_dense != NULL)
+                return opencl_forward_dense(context, input, weights, bias, output,
+                                            batch_size, input_size, output_size,
+                                            act_type, alpha);
             break;
         case GPU_BACKEND_INTEL:
             if (intel_forward_dense != NULL)
@@ -3776,6 +3867,22 @@ int gpu_batch_norm_forward(GpuContext* context, const float* input, float* outpu
                                                  epsilon, is_training);
             break;
         case GPU_BACKEND_CUDA:
+            /* P0-001: CUDA batch_norm_forward dispatch */
+            if (cuda_batch_norm_forward != NULL) {
+                GpuBatchNormConfig bn_cfg;
+                memset(&bn_cfg, 0, sizeof(bn_cfg));
+                bn_cfg.epsilon = epsilon;
+                bn_cfg.momentum = momentum;
+                bn_cfg.affine = (gamma && beta) ? 1 : 0;
+                bn_cfg.track_running_stats = (running_mean && running_var) ? 1 : 0;
+                size_t num_elements = (size_t)batch_size * (size_t)channels * (size_t)spatial_size;
+                return cuda_batch_norm_forward(context, input, output,
+                                               gamma, beta,
+                                               (float*)running_mean, (float*)running_var,
+                                               NULL, NULL,
+                                               num_elements, (size_t)channels,
+                                               &bn_cfg, is_training);
+            }
             break;
         case GPU_BACKEND_ROCM:
             if (rocm_batch_norm_forward != NULL) {
@@ -3795,6 +3902,22 @@ int gpu_batch_norm_forward(GpuContext* context, const float* input, float* outpu
             }
             break;
         case GPU_BACKEND_OPENCL:
+            /* P0-001: OpenCL batch_norm_forward dispatch */
+            if (opencl_batch_norm_forward != NULL) {
+                GpuBatchNormConfig bn_cfg;
+                memset(&bn_cfg, 0, sizeof(bn_cfg));
+                bn_cfg.epsilon = epsilon;
+                bn_cfg.momentum = momentum;
+                bn_cfg.affine = (gamma && beta) ? 1 : 0;
+                bn_cfg.track_running_stats = (running_mean && running_var) ? 1 : 0;
+                size_t num_elements = (size_t)batch_size * (size_t)channels * (size_t)spatial_size;
+                return opencl_batch_norm_forward(context, input, output,
+                                                  gamma, beta,
+                                                  (float*)running_mean, (float*)running_var,
+                                                  NULL, NULL,
+                                                  num_elements, (size_t)channels,
+                                                  &bn_cfg, is_training);
+            }
             break;
         case GPU_BACKEND_INTEL:
             break;
@@ -3907,6 +4030,20 @@ int gpu_batch_norm_backward(GpuContext* context, const float* input,
             }
             break;
         case GPU_BACKEND_CUDA:
+            /* P0-001: CUDA batch_norm_backward dispatch */
+            if (cuda_batch_norm_backward != NULL) {
+                GpuBatchNormConfig bn_cfg;
+                memset(&bn_cfg, 0, sizeof(bn_cfg));
+                bn_cfg.epsilon = epsilon;
+                bn_cfg.momentum = 0.1f;
+                bn_cfg.affine = (gamma) ? 1 : 0;
+                bn_cfg.track_running_stats = 0;
+                size_t num_elements = batch_size * channels * spatial_size;
+                return cuda_batch_norm_backward(context, input, grad_output,
+                    grad_input, grad_gamma, grad_beta,
+                    NULL, NULL, gamma,
+                    num_elements, channels, &bn_cfg);
+            }
             break;
         case GPU_BACKEND_ROCM:
             if (rocm_batch_norm_backward != NULL) {
@@ -3932,6 +4069,20 @@ int gpu_batch_norm_backward(GpuContext* context, const float* input,
             }
             break;
         case GPU_BACKEND_OPENCL:
+            /* P0-001: OpenCL batch_norm_backward dispatch */
+            if (opencl_batch_norm_backward != NULL) {
+                GpuBatchNormConfig bn_cfg;
+                memset(&bn_cfg, 0, sizeof(bn_cfg));
+                bn_cfg.epsilon = epsilon;
+                bn_cfg.momentum = 0.1f;
+                bn_cfg.affine = (gamma) ? 1 : 0;
+                bn_cfg.track_running_stats = 0;
+                size_t num_elements = batch_size * channels * spatial_size;
+                return opencl_batch_norm_backward(context, input, grad_output,
+                    grad_input, grad_gamma, grad_beta,
+                    NULL, NULL, gamma,
+                    num_elements, channels, &bn_cfg);
+            }
             break;
         case GPU_BACKEND_INTEL:
             break;
@@ -4039,12 +4190,18 @@ int gpu_activation_forward(GpuContext* context, const float* input, float* outpu
                 return vulkan_activation_forward(context, input, output, size, act_type, alpha);
             break;
         case GPU_BACKEND_CUDA:
+            /* P0-001: CUDA activation_forward dispatch */
+            if (cuda_activation_forward != NULL)
+                return cuda_activation_forward(context, input, output, size, act_type, alpha);
             break;
         case GPU_BACKEND_ROCM:
             if (rocm_activation_forward != NULL)
                 return rocm_activation_forward(context, input, output, size, act_type, alpha);
             break;
         case GPU_BACKEND_OPENCL:
+            /* P0-001: OpenCL activation_forward dispatch */
+            if (opencl_activation_forward != NULL)
+                return opencl_activation_forward(context, input, output, size, act_type, alpha);
             break;
         case GPU_BACKEND_INTEL:
             break;
@@ -4079,6 +4236,10 @@ int gpu_activation_backward(GpuContext* context, const float* input,
                                                    size, act_type, alpha);
             break;
         case GPU_BACKEND_CUDA:
+            /* P0-001: CUDA activation_backward dispatch */
+            if (cuda_activation_backward != NULL)
+                return cuda_activation_backward(context, input, grad_output, grad_input,
+                                                 size, act_type, alpha);
             break;
         case GPU_BACKEND_ROCM:
             if (rocm_activation_backward != NULL)
@@ -4086,6 +4247,10 @@ int gpu_activation_backward(GpuContext* context, const float* input,
                                                  size, act_type, alpha);
             break;
         case GPU_BACKEND_OPENCL:
+            /* P0-001: OpenCL activation_backward dispatch */
+            if (opencl_activation_backward != NULL)
+                return opencl_activation_backward(context, input, grad_output, grad_input,
+                                                   size, act_type, alpha);
             break;
         case GPU_BACKEND_INTEL:
             break;
@@ -4121,6 +4286,10 @@ int gpu_dropout_forward(GpuContext* context, const float* input, float* output,
                                               is_training);
             break;
         case GPU_BACKEND_CUDA:
+            /* P0-001: CUDA dropout_forward dispatch */
+            if (cuda_dropout_forward != NULL)
+                return cuda_dropout_forward(context, input, output, NULL, size,
+                                            dropout_rate, is_training);
             break;
         case GPU_BACKEND_ROCM:
             if (rocm_dropout_forward != NULL)
@@ -4128,6 +4297,10 @@ int gpu_dropout_forward(GpuContext* context, const float* input, float* output,
                                             dropout_rate, is_training);
             break;
         case GPU_BACKEND_OPENCL:
+            /* P0-001: OpenCL dropout_forward dispatch */
+            if (opencl_dropout_forward != NULL)
+                return opencl_dropout_forward(context, input, output, NULL, size,
+                                              dropout_rate, is_training);
             break;
         case GPU_BACKEND_INTEL:
             break;
@@ -4168,6 +4341,10 @@ int gpu_dropout_backward(GpuContext* context, const float* grad_output,
                                                NULL, size, dropout_rate);
             break;
         case GPU_BACKEND_CUDA:
+            /* P0-001: CUDA dropout_backward dispatch */
+            if (cuda_dropout_backward != NULL)
+                return cuda_dropout_backward(context, grad_output, grad_input,
+                                             NULL, size, dropout_rate);
             break;
         case GPU_BACKEND_ROCM:
             if (rocm_dropout_backward != NULL)
@@ -4175,6 +4352,10 @@ int gpu_dropout_backward(GpuContext* context, const float* grad_output,
                                              NULL, size, dropout_rate);
             break;
         case GPU_BACKEND_OPENCL:
+            /* P0-001: OpenCL dropout_backward dispatch */
+            if (opencl_dropout_backward != NULL)
+                return opencl_dropout_backward(context, grad_output, grad_input,
+                                               NULL, size, dropout_rate);
             break;
         case GPU_BACKEND_INTEL:
             break;

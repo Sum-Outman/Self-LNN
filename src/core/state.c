@@ -360,10 +360,14 @@ typedef struct {
 static StateSnapshot g_snapshots[MAX_SNAPSHOTS];
 static int g_snapshot_count = 0;
 static MutexHandle g_snapshot_mutex = NULL;
+static volatile int g_snapshot_mutex_init_done = 0;
 
 int network_state_snapshot_save(NetworkState* state, const char* label, int instance_id) {
     if (!state || !state->current_state) return -1;
-    if (!g_snapshot_mutex) g_snapshot_mutex = mutex_create();
+    if (!g_snapshot_mutex_init_done) {
+        g_snapshot_mutex = mutex_create();
+        g_snapshot_mutex_init_done = 1;
+    }
     mutex_lock(g_snapshot_mutex);
 
 /* ZSF-010修复：使用instance_id偏移隔离不同LNN实例的快照 */

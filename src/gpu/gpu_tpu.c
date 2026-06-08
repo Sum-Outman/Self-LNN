@@ -111,7 +111,7 @@ static void tpu_unload(void) {
 
 static int tpu_load_library(void) {
     if (g_tpu.loaded) return 1;
-    if (!tpu_detect_hardware) {
+    if (!tpu_detect_hardware()) {
         LOG_INFO("Google TPU硬件未检测到");
         return 0;
     }

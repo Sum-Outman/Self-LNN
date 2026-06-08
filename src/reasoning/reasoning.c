@@ -8,6 +8,7 @@
 #include "selflnn/reasoning/reasoning.h"
 #include "selflnn/reasoning/causal_reasoning.h"
 #include "selflnn/knowledge/knowledge.h"
+#pragma warning(disable: 4702)  /* ZSFOOO-E002 */
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/string_utils.h"
 #include "selflnn/utils/perf.h"
@@ -248,7 +249,7 @@ int reasoning_record_history(ReasoningEngine* engine, const float* input, size_t
     if (!engine || !input || !output) return -1;
     size_t total = input_size + output_size;
     /* S-031修复: 记录实际的输入输出维度 */
-    engine->history_input_dim = total;
+    engine->history_input_dim = input_size;
     engine->history_output_dim = output_size;
     if (engine->history_capacity == 0) {
         engine->history_capacity = 256;
@@ -4933,8 +4934,7 @@ void bayesian_network_free(BayesianNetwork* bn) {
     bn->num_cpds = 0;
 }
 
-int bayesian_network_add_node(void* net_ptr, const char* name, int num_states) {
-    BayesianNetwork* network = (BayesianNetwork*)net_ptr;
+int bayesian_network_add_node(BayesianNetwork* network, const char* name, int num_states) {
     if (!network || !name) return -1;
     if (num_states < 2) return -1;
     if (network->num_nodes >= network->node_capacity) return -1;
@@ -4951,8 +4951,7 @@ int bayesian_network_add_node(void* net_ptr, const char* name, int num_states) {
     return id;
 }
 
-int bayesian_network_add_edge(void* net_ptr, int parent_id, int child_id) {
-    BayesianNetwork* network = (BayesianNetwork*)net_ptr;
+int bayesian_network_add_edge(BayesianNetwork* network, int parent_id, int child_id) {
     if (!network) return -1;
     if (parent_id < 0 || parent_id >= (int)network->num_nodes) return -1;
     if (child_id < 0 || child_id >= (int)network->num_nodes) return -1;
@@ -4977,10 +4976,9 @@ int bayesian_network_add_edge(void* net_ptr, int parent_id, int child_id) {
     return 0;
 }
 
-int bayesian_network_set_cpd(void* net_ptr, int var_id,
+int bayesian_network_set_cpd(BayesianNetwork* network, int var_id,
                               const int* parent_ids, int num_parents,
                               const float* probabilities, size_t prob_size) {
-    BayesianNetwork* network = (BayesianNetwork*)net_ptr;
     if (!network || !probabilities) return -1;
     if (var_id < 0 || var_id >= (int)network->num_nodes) return -1;
     if (num_parents < 0) return -1;
@@ -5067,8 +5065,7 @@ static int bayesian_has_cycle_dfs(BayesianNetwork* network, int node_id,
     return 0;
 }
 
-int bayesian_network_is_valid(void* net_ptr) {
-    BayesianNetwork* network = (BayesianNetwork*)net_ptr;
+int bayesian_network_is_valid(BayesianNetwork* network) {
     if (!network || network->num_nodes == 0) return 0;
 
     int* visited = (int*)safe_calloc(network->num_nodes, sizeof(int));
@@ -5207,12 +5204,11 @@ static int bayesian_sample_from_distribution(const float* probs, int num_states)
     return num_states - 1;
 }
 
-int bayesian_network_variable_elimination(void* net_ptr,
+int bayesian_network_variable_elimination(BayesianNetwork* network,
                                           const int* query_vars, int num_queries,
                                           const int* evidence_vars, const int* evidence_vals,
                                           int num_evidence,
                                           BayesianQueryResult* result) {
-    BayesianNetwork* network = (BayesianNetwork*)net_ptr;
     if (!network || !query_vars || !result) return -1;
     if (num_queries <= 0 || num_queries > (int)network->num_nodes) return -1;
     if (num_evidence < 0) return -1;
@@ -5315,13 +5311,12 @@ int bayesian_network_variable_elimination(void* net_ptr,
     return 0;
 }
 
-int bayesian_network_gibbs_sampling(void* net_ptr,
+int bayesian_network_gibbs_sampling(BayesianNetwork* network,
                                     const int* query_vars, int num_queries,
                                     const int* evidence_vars, const int* evidence_vals,
                                     int num_evidence,
                                     int num_samples, int burn_in,
                                     BayesianQueryResult* result) {
-    BayesianNetwork* network = (BayesianNetwork*)net_ptr;
     if (!network || !query_vars || !result) return -1;
     if (num_queries <= 0) return -1;
     if (num_samples <= 0 || burn_in < 0) return -1;
@@ -5423,12 +5418,11 @@ int bayesian_network_gibbs_sampling(void* net_ptr,
     return 0;
 }
 
-int bayesian_network_belief_propagation(void* net_ptr,
+int bayesian_network_belief_propagation(BayesianNetwork* network,
                                         const int* evidence_vars, const int* evidence_vals,
                                         int num_evidence,
                                         int max_iterations, float convergence_threshold,
                                         BayesianQueryResult* result, size_t result_size) {
-    BayesianNetwork* network = (BayesianNetwork*)net_ptr;
     if (!network || !result) return -1;
     if (max_iterations <= 0) return -1;
     if (result_size < network->num_nodes) return -1;

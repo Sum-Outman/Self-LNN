@@ -53,7 +53,7 @@ void teaching_loop_free(TeachingLoopSystem* tls) {
 }
 
 /* 绑定外部LNN网络（外部管理生命周期） */
-int teaching_loop_bind_lnn(TeachingLoopSystem* tls, LNN* external_lnn) {
+int teaching_loop_bind_lnn(TeachingLoopSystem* tls, void* external_lnn) {
     if (!tls || !external_lnn) return -1;
     /* 释放自身创建的LNN */
     if (tls->lnn_owned && tls->lnn) {

@@ -366,7 +366,7 @@ void* _safe_malloc(size_t size, const char* file, int line) {
     header->alloc_id = ++g_allocation_counter;
     MEM_UNLOCK();
     // 记录调用者返回地址（用于调试堆损坏问题）
-#ifdef _WIN32
+#ifdef _MSC_VER
     header->caller_address = _ReturnAddress();
 #else
     header->caller_address = __builtin_return_address(0);
@@ -522,6 +522,10 @@ int selflnn_validate_all_allocations(void) {
  * @brief 安全内存释放：释放内存并置空指针
  */
 void safe_free(void** ptr) {
+#ifdef USE_STANDARD_ALLOC
+    if (ptr && *ptr) { free(*ptr); *ptr = NULL; }
+    return;
+#else
     if (g_bypass_safe_alloc) {
         if (ptr && *ptr) { free(*ptr); *ptr = NULL; }
         return;
@@ -642,19 +646,21 @@ void safe_free(void** ptr) {
     // 释放内存
     free(header);
     *ptr = NULL;
+#endif /* USE_STANDARD_ALLOC */
 }
 
 /**
  * @brief 安全内存重新分配
  */
 void* safe_realloc(void* ptr, size_t size) {
+    /* ZSFOOO-E002: bypass模式下跳过魔法数字检查，直接使用标准realloc */
+    if (g_bypass_safe_alloc) {
+        if (!ptr) return malloc(size);
+        if (size == 0) { free(ptr); return NULL; }
+        return realloc(ptr, size);
+    }
     if (!ptr) {
         return _safe_malloc(size, __FILE__, __LINE__);
-    }
-    
-    if (size == 0) {
-        safe_free(&ptr);
-        return NULL;
     }
     
     // 获取原始头部

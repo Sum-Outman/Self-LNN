@@ -976,6 +976,138 @@
         refreshGraph();
     }
 
+    /* ==================== P2修复: 知识图谱高级分析API集成 ==================== */
+
+    /**
+     * @brief 显示高级分析结果到UI面板
+     * @param {string} title 标题
+     * @param {Object} data 结果数据(自动JSON格式化)
+     */
+    function showAdvancedResult(title, data) {
+        var panel = document.getElementById('kg-advanced-result');
+        var content = document.getElementById('kg-advanced-result-content');
+        if (!panel || !content) return;
+        panel.style.display = 'block';
+        try {
+            content.textContent = '【' + title + '】\n' + JSON.stringify(data, null, 2);
+        } catch(e) {
+            content.textContent = '【' + title + '】\n' + String(data);
+        }
+    }
+
+    /**
+     * @brief SPARQL语义查询
+     * POST /api/kg/sparql → body: { query: "..." }
+     */
+    async function kgSparqlQuery() {
+        var queryEl = document.getElementById('kg-sparql-query');
+        if (!queryEl || !queryEl.value.trim()) {
+            showAdvancedResult('SPARQL查询', { error: '请输入SPARQL查询语句' });
+            return;
+        }
+        try {
+            var resp = await window.SelfLnnApi.request('/api/kg/sparql', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ query: queryEl.value.trim() })
+            });
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            var data = await resp.json();
+            showAdvancedResult('SPARQL查询结果', data);
+        } catch(e) {
+            showAdvancedResult('SPARQL查询失败', { error: e.message });
+        }
+    }
+
+    /**
+     * @brief PageRank节点重要性分析
+     * POST /api/kg/pagerank → body: { top_k: N }
+     */
+    async function kgPageRank() {
+        var topkEl = document.getElementById('kg-pagerank-topk');
+        var topk = topkEl ? parseInt(topkEl.value) || 10 : 10;
+        try {
+            var resp = await window.SelfLnnApi.request('/api/kg/pagerank', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ top_k: topk })
+            });
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            var data = await resp.json();
+            showAdvancedResult('PageRank分析（Top-' + topk + '节点）', data);
+        } catch(e) {
+            showAdvancedResult('PageRank分析失败', { error: e.message });
+        }
+    }
+
+    /**
+     * @brief 社区检测（Louvain）
+     * GET /api/kg/communities
+     */
+    async function kgCommunityDetect() {
+        try {
+            var resp = await window.SelfLnnApi.request('/api/kg/communities', {
+                method: 'GET'
+            });
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            var data = await resp.json();
+            showAdvancedResult('社区检测结果（Louvain算法）', data);
+        } catch(e) {
+            showAdvancedResult('社区检测失败', { error: e.message });
+        }
+    }
+
+    /**
+     * @brief 语义搜索
+     * POST /api/kg/search → body: { query: "...", top_k: N }
+     */
+    async function kgSemanticSearch() {
+        var queryEl = document.getElementById('kg-semantic-query');
+        if (!queryEl || !queryEl.value.trim()) {
+            showAdvancedResult('语义搜索', { error: '请输入搜索关键词' });
+            return;
+        }
+        try {
+            var resp = await window.SelfLnnApi.request('/api/kg/search', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ query: queryEl.value.trim(), top_k: 20 })
+            });
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            var data = await resp.json();
+            showAdvancedResult('语义搜索结果', data);
+        } catch(e) {
+            showAdvancedResult('语义搜索失败', { error: e.message });
+        }
+    }
+
+    /**
+     * @brief 实体间路径查询
+     * POST /api/kg/path → body: { from: "...", to: "...", max_depth: N }
+     */
+    async function kgFindPath() {
+        var fromEl = document.getElementById('kg-path-from');
+        var toEl = document.getElementById('kg-path-to');
+        var fromVal = fromEl ? fromEl.value.trim() : '';
+        var toVal = toEl ? toEl.value.trim() : '';
+        if (!fromVal || !toVal) {
+            showAdvancedResult('路径查询', { error: '请输入起始实体和目标实体' });
+            return;
+        }
+        try {
+            var resp = await window.SelfLnnApi.request('/api/kg/path', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ from: fromVal, to: toVal, max_depth: 5 })
+            });
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            var data = await resp.json();
+            showAdvancedResult('路径查询: ' + fromVal + ' → ' + toVal, data);
+        } catch(e) {
+            showAdvancedResult('路径查询失败', { error: e.message });
+        }
+    }
+
     /* ==================== 暴露给全局window的函数（供onclick调用） ==================== */
     window.switchKnowledgeTab = switchKnowledgeTab;
     window.fillExample = fillExample;
@@ -992,6 +1124,12 @@
     window.refreshGraph = refreshGraph;
     window.start3DView = start3DView;
     window.stop3DView = stop3DView;
+    /* P2修复: 知识图谱高级分析 */
+    window.kgSparqlQuery = kgSparqlQuery;
+    window.kgPageRank = kgPageRank;
+    window.kgCommunityDetect = kgCommunityDetect;
+    window.kgSemanticSearch = kgSemanticSearch;
+    window.kgFindPath = kgFindPath;
 
     /* ==================== 自动初始化（延迟加载） ==================== */
     document.addEventListener('DOMContentLoaded', function() {

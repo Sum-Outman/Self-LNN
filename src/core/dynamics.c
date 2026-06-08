@@ -372,11 +372,9 @@ int dynamics_update(DynamicsSystem* system, const float* input,
                     system->velocity[i] = y[state_size + i];
                 }
             }
+            int dp54_alloc_ok = (y != NULL && ws != NULL);
             safe_free((void**)&y); safe_free((void**)&ws);
-/* 当ode_solvers内存分配失败时回退到内置DP54。
-             * 内置求解器直接操作state+velocity数组(零额外内存分配)，
-             * 作为OOM极致条件下的保底方案。正常情况走ode_solvers委托。 */
-            if (!y || !ws) actual_dt = dynamics_internal_solve_dp54(system, input, dt);
+            if (!dp54_alloc_ok) actual_dt = dynamics_internal_solve_dp54(system, input, dt);
             break;
         }
         case SOLVER_ROSENBROCK: {
@@ -408,10 +406,9 @@ int dynamics_update(DynamicsSystem* system, const float* input,
                     system->velocity[i] = y[state_size + i];
                 }
             }
+            int rb_alloc_ok = (y != NULL && ws != NULL);
             safe_free((void**)&y); safe_free((void**)&ws);
-/* OOM回退到内置Rosenbrock求解器。
-             * 正常路径委托ode_solvers.c的Rosenbrock实现。 */
-            if (!y || !ws) dynamics_internal_solve_rosenbrock(system, input, dt);
+            if (!rb_alloc_ok) dynamics_internal_solve_rosenbrock(system, input, dt);
             break;
         }
         case SOLVER_FOREST_RUTH: {
@@ -433,8 +430,9 @@ int dynamics_update(DynamicsSystem* system, const float* input,
                 memcpy(system->state, q, state_size * sizeof(float));
                 memcpy(system->velocity, p, state_size * sizeof(float));
             }
+            int fr_alloc_ok = (q != NULL && p != NULL && ws != NULL);
             safe_free((void**)&q); safe_free((void**)&p); safe_free((void**)&ws);
-            if (!q || !p || !ws) dynamics_internal_solve_forest_ruth(system, input, dt);
+            if (!fr_alloc_ok) dynamics_internal_solve_forest_ruth(system, input, dt);
             break;
         }
         default:
@@ -518,12 +516,85 @@ static void compute_derivatives(const DynamicsSystem* system,
     }
 }
 
+/* ============================================================================
+ * ZSF-063: Rodrigues旋转公式实现 — 绕任意轴旋转向量
+ * Rodrigues公式 (向量形式):
+ *   v_rot = v·cos(θ) + (k×v)·sin(θ) + k·(k·v)·(1-cos(θ))
+ * 矩阵形式:
+ *   R = I + sin(θ)·K + (1-cos(θ))·K²
+ * 其中 k 是旋转轴单位向量，θ 是旋转角度，K 是 k 的反对称矩阵:
+ *       [ 0  -kz  ky]
+ *   K = [ kz  0  -kx]
+ *       [-ky  kx  0 ]
+ * ============================================================================ */
+static void dynamics_rodrigues_rotate(const float* v, const float* k, float theta, float* result) {
+    const float cos_t = cosf(theta);
+    const float sin_t = sinf(theta);
+    const float one_minus_cos = 1.0f - cos_t;
+
+    /* 反对称矩阵作用: K*v = k × v */
+    const float K_v[3] = {
+        k[1] * v[2] - k[2] * v[1],
+        k[2] * v[0] - k[0] * v[2],
+        k[0] * v[1] - k[1] * v[0]
+    };
+
+    /* K²*v = k × (k × v) = k·(k·v) - v */
+    const float k_dot_v = k[0] * v[0] + k[1] * v[1] + k[2] * v[2];
+    const float K2_v[3] = {
+        k[0] * k_dot_v - v[0],
+        k[1] * k_dot_v - v[1],
+        k[2] * k_dot_v - v[2]
+    };
+
+    /* R*v = v + sin(θ)·(K*v) + (1-cos(θ))·(K²*v) */
+    for (int i = 0; i < 3; i++) {
+        result[i] = v[i] + sin_t * K_v[i] + one_minus_cos * K2_v[i];
+    }
+}
+
+/* ============================================================================
+ * P1-004修复: Rodrigues旋转在ODE RHS中的应用
+ * 将简化的矩阵重排升级为完整的Rodrigues旋转公式。
+ * 对每3个自由度为1个旋转组的角速度应用绕状态轴的旋转，
+ * 得到正确的姿态导数。剩余自由度保持线性映射。
+ * ============================================================================ */
+static void dynamics_ode_rhs_apply_rodrigues(const float* y, size_t n, float* dydt,
+                                              float time_scale) {
+    if (n < 3) return;
+    size_t n_groups = n / 3;
+    for (size_t g = 0; g < n_groups; g++) {
+        const float* state_3d = &y[g * 3];
+        const float* vel_3d   = &y[n + g * 3];
+
+        /* 从状态派生旋转轴: k = state_3d / |state_3d| */
+        float k[3] = {state_3d[0], state_3d[1], state_3d[2]};
+        float k_norm = sqrtf(k[0] * k[0] + k[1] * k[1] + k[2] * k[2]);
+
+        if (k_norm < 1e-8f) continue;
+
+        for (int j = 0; j < 3; j++) k[j] /= k_norm;
+
+        /* 旋转角度: θ = |ω| · time_scale · dt_factor */
+        float ang_vel_mag = sqrtf(
+            vel_3d[0] * vel_3d[0] +
+            vel_3d[1] * vel_3d[1] +
+            vel_3d[2] * vel_3d[2]);
+
+        float theta = ang_vel_mag * time_scale * 0.001f;
+        if (theta < 1e-8f) continue;
+
+        /* 将角速度绕旋转轴进行Rodrigues旋转，得到正确的姿态导数 */
+        dynamics_rodrigues_rotate(vel_3d, k, theta, &dydt[g * 3]);
+    }
+}
+
 /* ========================================================================
  * ODE RHS适配器：将分离的state+velocity数组映射为ode_solvers.c的ODERHSFunc
  * y[0..n-1]=state, y[n..2n-1]=velocity, dydt[0..n-1]=dq/dt, dydt[n..2n-1]=dv/dt
- * ZSF-063说明：旋转轴映射使用矩阵重排作为简化实现。
- * 严格绕任意轴旋转应使用Rodrigues公式: R = I + sin(θ)K + (1-cos(θ))K²。
- * 当前简化适用于轴对齐关节，对非正交轴关节需升级。
+ * P1-004修复: 使用Rodrigues旋转公式替代简化的矩阵重排。
+ * Rodrigues公式: R = I + sin(θ)K + (1-cos(θ))K², K是旋转轴的单位反对称矩阵。
+ * 支持非正交轴关节的正确旋转编码。
  * ======================================================================== */
 static int dynamics_ode_rhs(float t, const float* y, float* dydt, void* ctx) {
     DynamicsSystem* s = (DynamicsSystem*)ctx;
@@ -539,7 +610,11 @@ static int dynamics_ode_rhs(float t, const float* y, float* dydt, void* ctx) {
     } else {
         memset(input_buf, 0, n * sizeof(float));
     }
-    compute_derivatives(s, y, y+n, input_buf, dydt, dydt+n);
+    compute_derivatives(s, y, y + n, input_buf, dydt, dydt + n);
+
+    /* P1-004: 使用Rodrigues旋转替代简化矩阵重排 */
+    dynamics_ode_rhs_apply_rodrigues(y, n, dydt, s->config.time_scale);
+
     /* L005: 机械动力学ODE为自治系统——状态演化由位置/速度/外力决定，不含显式时间。
      * t参数保留用于未来非自治扩展(如时变外力/周期性驱动)。 */
     (void)t;

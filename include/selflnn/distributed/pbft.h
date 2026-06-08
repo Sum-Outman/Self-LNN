@@ -148,6 +148,10 @@ typedef struct {
     uint32_t prepare_digests[PBFT_MAX_NODES][8];
     int commit_count;
     uint32_t commit_digests[PBFT_MAX_NODES][8];
+    /* 请求负载 (per-entry 避免并发提交覆盖) */
+    uint8_t* payload;
+    uint32_t payload_size;
+    uint32_t op_type;
 } PbftLogEntry;
 
 /* PBFT 节点信息 */

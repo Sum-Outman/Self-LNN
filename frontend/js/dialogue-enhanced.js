@@ -427,9 +427,11 @@ class DialogueEnhanced {
             return true;
         }
         if (!wsUrl) {
-            var host = (window.SELFLNN_CONFIG && window.SELFLNN_CONFIG.host) || 'localhost';
-            /* WebSocket与HTTP共用8080端口，通过HTTP Upgrade升级连接 */
-            wsUrl = 'ws://' + host + ':8080/ws';
+            /* ZSFOOO-001修复: WebSocket使用独立端口8081，与port_config.h中SELFLNN_WEBSOCKET_PORT一致 */
+            var cfg2 = window.SELFLNN_CONFIG || { host: 'localhost', wsPort: 8081 };
+            var host = cfg2.host || 'localhost';
+            var wport = cfg2.wsPort || (cfg2.port ? (cfg2.port + 1) : 8081);
+            wsUrl = 'ws://' + host + ':' + wport + '/ws';
         }
         this.wsUrl = wsUrl;
         this.wsReconnectAttempts = 0;
@@ -460,8 +462,10 @@ class DialogueEnhanced {
             wsElement.addEventListener('close', this._wsCloseHandler);
         }
         /* 使用全局SelfLnnWebSocket的connect方法，设置URL后连接 */
-        var cfg = window.SELFLNN_CONFIG || { host: 'localhost' };
-        var defaultUrl = 'ws://' + cfg.host + ':8080/ws';
+        /* ZSFOOO-001修复: 动态获取WebSocket端口，与port_config.h中SELFLNN_WEBSOCKET_PORT=8081一致 */
+        var cfg = window.SELFLNN_CONFIG || { host: 'localhost', wsPort: 8081 };
+        var wport2 = cfg.wsPort || (cfg.port ? (cfg.port + 1) : 8081);
+        var defaultUrl = 'ws://' + cfg.host + ':' + wport2 + '/ws';
         if (wsUrl && gws.url !== wsUrl) {
             gws.url = wsUrl;
         } else if (!gws.url) {

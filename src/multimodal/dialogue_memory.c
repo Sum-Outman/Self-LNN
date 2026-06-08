@@ -36,7 +36,8 @@ DialogueMemoryManager* dlg_memory_create(void) {
     return dmm;
 }
 
-void dialogue_memory_free(DialogueMemoryManager* dmm) {
+void dialogue_memory_free(void* memory_handle) {
+    DialogueMemoryManager* dmm = (DialogueMemoryManager*)memory_handle;
     if (!dmm) return;
     if (dmm->session.turns) {
         for (int i = 0; i < dmm->session.turn_count; i++) {

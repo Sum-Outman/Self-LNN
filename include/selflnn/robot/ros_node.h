@@ -20,7 +20,7 @@ extern "C" {
 #endif
 typedef struct RosNode RosNode;
 
-typedef void (*RosMessageCallback)(const void* data, size_t size, void* user_data);
+/* RosMessageCallback 定义在 ros_protocol.h 中（已通过第4行include导入），此处不再重复定义 */
 
 typedef struct {
     char master_host[256];

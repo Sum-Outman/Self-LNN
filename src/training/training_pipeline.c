@@ -19,6 +19,7 @@
 #include "selflnn/core/loss.h"
 #include "selflnn/gpu/gpu.h"
 #include "selflnn/training/distributed_training.h" /* 分布式梯度同步 */
+#include "selflnn/evolution/evolution_engine.h" /* 结构变异 */
 
 extern void* selflnn_get_speech_recognizer(void);
 /* selflnn_get_distributed_context 已在 selflnn.h 中声明（M-031修复，不再使用extern绕过） */
@@ -293,8 +294,6 @@ static int pipeline_convergence_check(TrainingPipeline* pipeline,
          * 触发架构控制器进行结构变异（增长/修剪/层数调整）。
          * 这实现了真正的"自我演化进化能力"在训练中的闭环。 */
         if (pipeline->plateau_decay_count >= 2) {
-            extern void* selflnn_get_evolution_engine(void);
-            extern int evolution_engine_structural_mutate(void*, void*, const void*, int);
             void* evo = selflnn_get_evolution_engine();
             if (evo) {
                 log_info("[训练收敛] %s | 连续%d次学习率衰减, 触发结构变异探索",
@@ -1311,9 +1310,28 @@ TrainingPipeline* training_pipeline_create(const TrainingPipelineConfig* config)
 
 /* EMA权重管理 */
     tp->ema_manager = (EMAWeightManager*)safe_calloc(1, sizeof(EMAWeightManager));
-/* WarmupCosineScheduler创建即从未被任何训练阶段使用，
-     * 改为NULL赋值释放僵尸内存，学习率预热已通过training_warmup_lr在各阶段实现 */
-    tp->lr_scheduler = NULL;
+/* P0-003修复: 创建WarmupCosine学习率调度器
+     * 使用配置中的默认epoch和batch_size预计算总步数。
+     * 学习率调度器将在首次training_pipeline_step调用时完成预热和余弦退火。 */
+    {
+        float base_lr = tp->config.pretrain_lr > 0 ? tp->config.pretrain_lr : 0.001f;
+        size_t total_steps = (size_t)(tp->config.pretrain_epochs > 0 ? tp->config.pretrain_epochs : 30)
+                           * 100;
+        size_t warmup = total_steps / 10;
+        if (warmup < 1) warmup = 1;
+        tp->lr_scheduler = (void*)warmup_cosine_scheduler_create(
+            base_lr,   /* base_lr */
+            1e-6f,     /* min_lr */
+            warmup,    /* warmup_steps (10% of total) */
+            total_steps /* total_steps */
+        );
+        if (tp->lr_scheduler) {
+            log_info("WarmupCosineScheduler已集成: base_lr=%.6f, warmup=%zu, total=%zu",
+                     (double)base_lr, warmup, total_steps);
+        } else {
+            log_warning("WarmupCosineScheduler创建失败，回退到简单线性预热");
+        }
+    }
     if (tp->ema_manager) {
         ((EMAWeightManager*)tp->ema_manager)->decay = 0.9999f;
         log_info("EMA权重管理器已集成到训练流水线");
@@ -1427,12 +1445,14 @@ int training_pipeline_start(TrainingPipeline* pipeline) {
         lnn_free(pipeline->network);
     }
 /* 使用共享LNN替代管道独立LNN。
-     * 之前 ln_create 创建独立LNN，训练其权重但系统推理使用
-     * selflnn的共享LNN —— 两个LNN实例权重分离，训练完全无效! */
+     * 之前 lnn_create 创建独立LNN，训练其权重但系统推理使用
+     * selflnn的共享LNN —— 两个LNN实例权重分离，训练完全无效!
+     * R1修复: 共享LNN不可用时直接返回错误，绝不创建独立LNN绕过单一LNN原则。 */
     pipeline->network = (LNN*)selflnn_get_shared_lnn();
     if (!pipeline->network) {
-        pipeline->network = lnn_create(&lnn_cfg);
-        log_warning("[训练管道] 共享LNN不可用，创建独立LNN（训练结果不会影响系统推理）");
+        log_error("[训练管道] 共享LNN不可用，无法初始化训练管线。"
+                   "请确保selflnn_init()已完成且单一LNN已创建。");
+        return -1;
     }
     if (!pipeline->network) return -1;
     pipeline->network->config.learning_rate = lnn_cfg.learning_rate;
@@ -1721,12 +1741,26 @@ int training_pipeline_step(TrainingPipeline* pipeline) {
             cfc_zero_cell_gradients(pipeline->network->cfc_network);
         }
 
-        /* P1-001: 当前batch的学习率预热调整 */
+        /* P0-003修复: 使用WarmupCosine调度器替代简单线性预热
+         * WarmupCosineScheduler提供warmup+余弦退火曲线：
+         * - warmup阶段：学习率从min_lr线性增长到base_lr
+         * - cosine阶段：学习率按余弦曲线从base_lr平滑降至min_lr
+         * 调度器的总步数跟踪跨epoch，确保课程学习的一致性 */
         float effective_lr = pipeline->network->config.learning_rate;
-        if (current_step_in_epoch < warmup_steps) {
-            float warmup_ratio = (float)(current_step_in_epoch + 1) / (float)warmup_steps;
-            effective_lr = 1e-6f + (pipeline->network->config.learning_rate - 1e-6f) * warmup_ratio;
-            pipeline->network->config.learning_rate = effective_lr;
+        {
+            WarmupCosineScheduler* sched = (WarmupCosineScheduler*)pipeline->lr_scheduler;
+            if (sched) {
+                /* P0-003: 使用WarmupCosine调度器获取当前步的学习率 */
+                effective_lr = warmup_cosine_scheduler_step(sched);
+                pipeline->network->config.learning_rate = effective_lr;
+            } else {
+                /* 回退: 简单线性预热（pipeline->lr_scheduler为NULL时使用） */
+                if (current_step_in_epoch < warmup_steps) {
+                    float warmup_ratio = (float)(current_step_in_epoch + 1) / (float)warmup_steps;
+                    effective_lr = 1e-6f + (pipeline->network->config.learning_rate - 1e-6f) * warmup_ratio;
+                    pipeline->network->config.learning_rate = effective_lr;
+                }
+            }
         }
         current_step_in_epoch += actual_batch;
 

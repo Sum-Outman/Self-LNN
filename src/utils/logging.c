@@ -20,8 +20,8 @@
 #ifdef _WIN32
 #include <windows.h>
 static CRITICAL_SECTION g_log_lock;
-static int g_log_lock_initialized = 0;
-#define LOG_LOCK_INIT() do { if (!g_log_lock_initialized) { InitializeCriticalSection(&g_log_lock); g_log_lock_initialized = 1; } } while(0)
+static volatile LONG g_log_lock_initialized = 0;
+#define LOG_LOCK_INIT() do { if (InterlockedCompareExchange(&g_log_lock_initialized, 1, 0) == 0) { InitializeCriticalSection(&g_log_lock); } } while(0)
 #define LOG_LOCK() do { LOG_LOCK_INIT(); EnterCriticalSection(&g_log_lock); } while(0)
 #define LOG_UNLOCK() LeaveCriticalSection(&g_log_lock)
 #else

@@ -65,7 +65,7 @@ typedef struct {
 typedef struct DialogueMemoryManager DialogueMemoryManager;
 
 DialogueMemoryManager* dlg_memory_create(void);
-void dialogue_memory_free(DialogueMemoryManager* dmm);
+void dialogue_memory_free(void* memory_handle);
 
 int dm_add_turn(DialogueMemoryManager* dmm, const char* speaker, const char* text, float importance);
 int dm_add_entity_to_turn(DialogueMemoryManager* dmm, int turn_id, const char* entity);

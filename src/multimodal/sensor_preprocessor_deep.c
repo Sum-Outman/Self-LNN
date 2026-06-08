@@ -282,7 +282,7 @@ struct EKFFilter {
     float* innovation_buf;   /* innovation缓冲区 [obs_dim] */
 };
 
-static EKFFilter* ekf_create(const EKFConfig* config) {
+EKFFilter* ekf_create(const EKFConfig* config) {
     if (!config) return NULL;
     EKFFilter* ekf = (EKFFilter*)safe_calloc(1, sizeof(EKFFilter));
     if (!ekf) return NULL;
@@ -338,7 +338,7 @@ static EKFFilter* ekf_create(const EKFConfig* config) {
     return ekf;
 }
 
-static void ekf_free(EKFFilter* ekf) {
+void ekf_free(EKFFilter* ekf) {
     if (!ekf) return;
     safe_free((void**)&ekf->state);
     safe_free((void**)&ekf->covariance);
@@ -357,7 +357,7 @@ static void ekf_free(EKFFilter* ekf) {
     safe_free((void**)&ekf);
 }
 
-static int ekf_predict(EKFFilter* ekf, const float* control, float dt) {
+int ekf_predict(EKFFilter* ekf, const float* control, float dt) {
     if (!ekf || dt <= 0.0f) return -1;
     int s = ekf->config.state_dim;
     int c = ekf->config.control_dim;
@@ -432,7 +432,7 @@ static int ekf_predict(EKFFilter* ekf, const float* control, float dt) {
     return 0;
 }
 
-static int ekf_update(EKFFilter* ekf, const float* observation) {
+int ekf_update(EKFFilter* ekf, const float* observation) {
     if (!ekf || !observation) return -1;
     int s = ekf->config.state_dim;
     int o = ekf->config.obs_dim;
@@ -489,7 +489,7 @@ static int ekf_update(EKFFilter* ekf, const float* observation) {
     return 0;
 }
 
-static int ekf_get_state(const EKFFilter* ekf, float* state, float* covariance) {
+int ekf_get_state(const EKFFilter* ekf, float* state, float* covariance) {
     if (!ekf || !state) return -1;
     int s = ekf->config.state_dim;
     memcpy(state, ekf->state, s * sizeof(float));
@@ -498,7 +498,7 @@ static int ekf_get_state(const EKFFilter* ekf, float* state, float* covariance) 
     return 0;
 }
 
-static void ekf_reset(EKFFilter* ekf, const float* state, const float* covariance) {
+void ekf_reset(EKFFilter* ekf, const float* state, const float* covariance) {
     if (!ekf) return;
     int s = ekf->config.state_dim;
     if (state) memcpy(ekf->state, state, s * sizeof(float));
@@ -533,7 +533,7 @@ struct UKFFilter {
     float* buffer;
 };
 
-static UKFFilter* ukf_create(const UKFConfig* config) {
+UKFFilter* ukf_create(const UKFConfig* config) {
     if (!config) return NULL;
     UKFFilter* ukf = (UKFFilter*)safe_calloc(1, sizeof(UKFFilter));
     if (!ukf) return NULL;
@@ -599,7 +599,7 @@ static UKFFilter* ukf_create(const UKFConfig* config) {
     return ukf;
 }
 
-static void ukf_free(UKFFilter* ukf) {
+void ukf_free(UKFFilter* ukf) {
     if (!ukf) return;
     safe_free((void**)&ukf->state);
     safe_free((void**)&ukf->covariance);
@@ -617,7 +617,7 @@ static void ukf_free(UKFFilter* ukf) {
     safe_free((void**)&ukf);
 }
 
-static int ukf_predict(UKFFilter* ukf, const float* control, float dt) {
+int ukf_predict(UKFFilter* ukf, const float* control, float dt) {
     (void)control;
     if (!ukf || dt <= 0.0f) return -1;
     int s = ukf->config.state_dim;
@@ -686,7 +686,7 @@ static int ukf_predict(UKFFilter* ukf, const float* control, float dt) {
     return 0;
 }
 
-static int ukf_update(UKFFilter* ukf, const float* observation) {
+int ukf_update(UKFFilter* ukf, const float* observation) {
     if (!ukf || !observation) return -1;
     int s = ukf->config.state_dim;
     int o = ukf->config.obs_dim;
@@ -807,7 +807,7 @@ static int ukf_update(UKFFilter* ukf, const float* observation) {
     return 0;
 }
 
-static int ukf_get_state(const UKFFilter* ukf, float* state, float* covariance) {
+int ukf_get_state(const UKFFilter* ukf, float* state, float* covariance) {
     if (!ukf || !state) return -1;
     int s = ukf->config.state_dim;
     memcpy(state, ukf->state, s * sizeof(float));
@@ -816,7 +816,7 @@ static int ukf_get_state(const UKFFilter* ukf, float* state, float* covariance) 
     return 0;
 }
 
-static void ukf_reset(UKFFilter* ukf, const float* state, const float* covariance) {
+void ukf_reset(UKFFilter* ukf, const float* state, const float* covariance) {
     if (!ukf) return;
     int s = ukf->config.state_dim;
     if (state) memcpy(ukf->state, state, s * sizeof(float));
@@ -900,7 +900,7 @@ ESKFFilter* eskf_create(const ESKFConfig* config) {
     return eskf;
 }
 
-static void eskf_free(ESKFFilter* eskf) {
+void eskf_free(ESKFFilter* eskf) {
     if (!eskf) return;
     safe_free((void**)&eskf->nom_state);
     safe_free((void**)&eskf->error_state);
@@ -917,7 +917,7 @@ static void eskf_free(ESKFFilter* eskf) {
     safe_free((void**)&eskf);
 }
 
-static int eskf_predict_nominal(ESKFFilter* eskf, const float gyro[3], const float acc[3], float dt) {
+int eskf_predict_nominal(ESKFFilter* eskf, const float gyro[3], const float acc[3], float dt) {
     if (!eskf || !gyro || !acc || dt <= 0.0f) return -1;
     int ns = eskf->config.nom_state_dim;
     /* 名义状态结构: [px, py, pz, vx, vy, vz, qw, qx, qy, qz, bgx, bgy, bgz, bax, bay, baz, ...] */
@@ -986,7 +986,7 @@ static int eskf_predict_nominal(ESKFFilter* eskf, const float gyro[3], const flo
     return 0;
 }
 
-static int eskf_predict_error(ESKFFilter* eskf, float dt) {
+int eskf_predict_error(ESKFFilter* eskf, float dt) {
     if (!eskf || dt <= 0.0f) return -1;
     int es = eskf->config.error_state_dim;
     /* 构建误差状态转移矩阵 F_error (15维标准ESKF: δp, δv, δθ, δbg, δba) */
@@ -1043,7 +1043,7 @@ static int eskf_predict_error(ESKFFilter* eskf, float dt) {
     return 0;
 }
 
-static int eskf_update(ESKFFilter* eskf, const float* observation, int obs_model_type) {
+int eskf_update(ESKFFilter* eskf, const float* observation, int obs_model_type) {
     if (!eskf || !observation) return -1;
     int es = eskf->config.error_state_dim;
     int o  = eskf->config.obs_dim;
@@ -1151,7 +1151,7 @@ static int deep_eskf_get_state(const ESKFFilter* eskf, float* nom_state, float* 
     return 0;
 }
 
-static void eskf_reset(ESKFFilter* eskf, const float* init_nom_state) {
+void eskf_reset(ESKFFilter* eskf, const float* init_nom_state) {
     if (!eskf) return;
     int ns = eskf->config.nom_state_dim;
     int es = eskf->config.error_state_dim;
@@ -1298,7 +1298,7 @@ static int deep_particle_filter_update(DeepParticleFilter* pf, const float* obse
     return 0;
 }
 
-static int deep_particle_filter_resample(DeepParticleFilter* pf) {
+int deep_particle_filter_resample(DeepParticleFilter* pf) {
     if (!pf) return -1;
     int s = pf->config.state_dim;
     int n = pf->config.num_particles;

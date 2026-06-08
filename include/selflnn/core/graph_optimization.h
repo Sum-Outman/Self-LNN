@@ -52,6 +52,8 @@ typedef enum {
 /**
  * @brief 张量数据类型
  */
+#ifndef SELFLNN_DATA_TYPE_DEFINED
+#define SELFLNN_DATA_TYPE_DEFINED
 typedef enum {
     DATA_TYPE_FLOAT16 = 0,       /**< 半精度浮点（16位） */
     DATA_TYPE_FLOAT32,           /**< 单精度浮点（32位） */
@@ -66,6 +68,7 @@ typedef enum {
     DATA_TYPE_UINT64,            /**< 64位无符号整数 */
     DATA_TYPE_BOOL               /**< 布尔类型 */
 } DataType;
+#endif /* SELFLNN_DATA_TYPE_DEFINED */
 
 /**
  * @brief 张量形状
