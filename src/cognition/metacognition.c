@@ -24,6 +24,7 @@
 #include "selflnn/selflnn.h"
 #include "selflnn/cognition/deep_reflection.h"
 #include "selflnn/cognition/deep_thought_chain.h"
+#include "selflnn/knowledge/knowledge.h"           /* KG持久化: 元认知监控结果→知识库 */
 
 #include <stdlib.h>
 #include <string.h>
@@ -485,7 +486,35 @@ int metacognition_monitor(MetacognitionSystem* system,
     system->total_monitoring_count++;
     system->average_monitoring_confidence = (system->average_monitoring_confidence * (system->total_monitoring_count - 1) + result->confidence) / system->total_monitoring_count;
     system->last_monitoring_time = result->timestamp;
-    
+
+    /* KG集成: 将元认知监控结果写入知识库 */
+    {
+        static KnowledgeBase* meta_kg = NULL;
+        if (!meta_kg) {
+            meta_kg = knowledge_base_create(1024);
+            if (meta_kg) knowledge_base_populate_preset(meta_kg);
+        }
+        if (meta_kg && result->requires_action) {
+            char subj[64], pred[64], obj[256];
+            KnowledgeEntry entry;
+            memset(&entry, 0, sizeof(entry));
+            snprintf(subj, sizeof(subj), "metacognition");
+            entry.subject = subj;
+            snprintf(pred, sizeof(pred), "monitors");
+            entry.predicate = pred;
+            snprintf(obj, sizeof(obj),
+                    "val=%.3f conf=%.3f trend=%.3f action=%s",
+                    result->current_value, result->confidence,
+                    result->trend, result->action_recommendation);
+            entry.object = obj;
+            entry.confidence = result->confidence > 0.7f ? CONFIDENCE_HIGH :
+                               result->confidence > 0.4f ? CONFIDENCE_MEDIUM :
+                                                           CONFIDENCE_LOW;
+            entry.timestamp = (long)result->timestamp;
+            knowledge_base_add(meta_kg, &entry);
+        }
+    }
+
     return 0;
 }
 

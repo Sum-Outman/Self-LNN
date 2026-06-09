@@ -756,6 +756,40 @@ int self_cognition_generate_improvement_plan(SelfCognitionSystem* system,
                                             size_t max_plan_size);
 
 /**
+ * @brief 【自我编程闭环】认知评估能力缺口后委托编程模块生成代码
+ *
+ * 桥接 cognitive→programming 的完整闭环:
+ *   Intent → synthesize_code → compile → sandbox_execute → self_improve_code
+ *
+ * 调用后系统元模型根据 learning_signal 更新能力评分。
+ *
+ * @param system 认知系统句柄
+ * @param intent 编程意图(需求描述+函数签名+I/O示例)
+ * @param result 输出编程闭环结果(调用者用 programming_closure_free 释放)
+ * @return 0=成功, -1=失败
+ */
+int self_cognition_delegate_programming(SelfCognitionSystem* system,
+                                        void* intent,
+                                        void* result);
+
+/**
+ * @brief 检测"需要代码生成"的认知状态并自主触发
+ *
+ * 扫描当前能力评分，如果某个维度低于阈值，
+ * 自动创建 ProgrammingIntent 并执行整个闭环。
+ *
+ * @param system 认知系统句柄
+ * @param trigger_threshold 触发阈值(0.0-1.0, 能力评分低于此值触发)
+ * @param plan_output 输出的改进计划文本
+ * @param plan_size 计划缓冲区大小
+ * @return 0=无触发, >0=触发的闭环数量, -1=失败
+ */
+int self_cognition_autonomous_code_generation(SelfCognitionSystem* system,
+                                              float trigger_threshold,
+                                              char* plan_output,
+                                              size_t plan_size);
+
+/**
  * @brief 评估自我认知准确性
  * 
  * @param system 自我认知系统句柄

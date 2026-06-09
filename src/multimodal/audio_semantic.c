@@ -5732,7 +5732,8 @@ static float audio_semantic_calculate_coherence(const AudioSemanticResult* resul
                 int has_special_char = 0;
                 for (int c = 0; keyword[c] != '\0'; c++) {
                     if (keyword[c] >= '0' && keyword[c] <= '9') has_digit = 1;
-                    if (keyword[c] == '·' || keyword[c] == '-' || keyword[c] == '_') has_special_char = 1;
+                    if ((keyword[c] == '\xC2' && keyword[c+1] == '\xB7') /* U+00B7 · */
+                        || keyword[c] == '-' || keyword[c] == '_') has_special_char = 1;
                 }
                 if (has_digit || has_special_char || keyword_length >= 4) {
                     is_entity_word = 1;
@@ -5859,9 +5860,13 @@ static float audio_semantic_calculate_coherence(const AudioSemanticResult* resul
         }
         
         // 检查句子完整性（是否有结束标点）
-        if (text_len > 0) {
-            char last_char = result->recognized_text[text_len - 1];
-            if (last_char == '。' || last_char == '！' || last_char == '？') {
+        if (text_len >= 3) {
+            const char* t = result->recognized_text;
+            /* Check last 3 bytes for Chinese sentence-ending punctuation:
+             * U+3002 。(E3 80 82), U+FF01 ！(EF BC 81), U+FF1F ？(EF BC 9F) */
+            if ((t[text_len-3] == '\xE3' && t[text_len-2] == '\x80' && t[text_len-1] == '\x82') ||
+                (t[text_len-3] == '\xEF' && t[text_len-2] == '\xBC' &&
+                 (t[text_len-1] == '\x81' || t[text_len-1] == '\x9F'))) {
                 text_structure_score += 0.1f;
             }
         }

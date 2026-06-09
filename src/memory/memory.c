@@ -210,15 +210,21 @@ MemorySystem* memory_create(const MemoryConfig* config) {
     if (system->ep_capacity > 1000) system->ep_capacity = 1000;
     system->se_capacity = system->ep_capacity;
     
-    // 分配记忆数组
-    system->short_term_mem = (MemoryItem**)safe_calloc(system->st_capacity, sizeof(MemoryItem*));
-    system->long_term_mem = (MemoryItem**)safe_calloc(system->lt_capacity, sizeof(MemoryItem*));
-    system->episodic_mem = (MemoryItem**)safe_calloc(system->ep_capacity, sizeof(MemoryItem*));
-    system->semantic_mem = (MemoryItem**)safe_calloc(system->se_capacity, sizeof(MemoryItem*));
+    // 分配记忆数组（零容量时跳过分配，指针保持NULL是合法的）
+    system->short_term_mem = system->st_capacity > 0 
+        ? (MemoryItem**)safe_calloc(system->st_capacity, sizeof(MemoryItem*)) : NULL;
+    system->long_term_mem = system->lt_capacity > 0
+        ? (MemoryItem**)safe_calloc(system->lt_capacity, sizeof(MemoryItem*)) : NULL;
+    system->episodic_mem = system->ep_capacity > 0
+        ? (MemoryItem**)safe_calloc(system->ep_capacity, sizeof(MemoryItem*)) : NULL;
+    system->semantic_mem = system->se_capacity > 0
+        ? (MemoryItem**)safe_calloc(system->se_capacity, sizeof(MemoryItem*)) : NULL;
     
-    // 检查内存分配
-    if (!system->short_term_mem || !system->long_term_mem ||
-        !system->episodic_mem || !system->semantic_mem) {
+    // 检查内存分配：仅非零容量分配返回NULL才是真失败
+    if ((system->st_capacity > 0 && !system->short_term_mem) ||
+        (system->lt_capacity > 0 && !system->long_term_mem) ||
+        (system->ep_capacity > 0 && !system->episodic_mem) ||
+        (system->se_capacity > 0 && !system->semantic_mem)) {
         memory_free(system);
         return NULL;
     }

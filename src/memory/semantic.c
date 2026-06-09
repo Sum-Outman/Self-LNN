@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file semantic.c
  * @brief 语义记忆系统实现
  * 
@@ -53,6 +53,7 @@ SemanticMemory* semantic_memory_create(const SemanticMemoryConfig* config) {
     
     // 创建底层记忆系统配置
     MemoryConfig mem_config;
+    memset(&mem_config, 0, sizeof(mem_config));
     mem_config.max_short_term = 0;  // 语义记忆不使用短期记忆
     mem_config.max_long_term = config->capacity;
     mem_config.decay_rate = 0.02f;  // 语义记忆衰减率低

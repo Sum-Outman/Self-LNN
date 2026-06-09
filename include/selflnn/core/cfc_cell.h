@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file cfc_cell.h
  * @brief 封闭形式连续时间单元（CfC Cell）
  * 
@@ -331,6 +331,26 @@ int cfc_cell_forward_with_dt(CfCCell* cell, const float* input, float delta_t, f
  * @return int 成功返回0，失败返回-1
  */
 int cfc_cell_backward(CfCCell* cell, const float* gradient, float* input_gradient);
+
+/**
+ * @brief 前向+反向传播自测 — 全程在cfc_cell.c同一TU内执行
+ *
+ * 创建临时CfC单元 → forward → zero grad → backward → 验证梯度非零 → free
+ * 绕过GCC 15.1/MinGW跨编译单元内存访问崩溃。
+ *
+ * @return int 0=成功，-1=失败
+ */
+int cfc_cell_backward_self_test(void);
+
+/**
+ * @brief 清零所有梯度缓冲区 — 在反向传播前调用
+ *
+ * 在 cfc_cell.c (梯度缓冲区所属编译单元) 内清零，
+ * 避免 GCC 15.1/MinGW 跨编译单元 memset 崩溃。
+ *
+ * @param cell CfC单元
+ */
+void cfc_cell_zero_gradients(CfCCell* cell);
 
 /**
  * @brief 时间梯度反向传播 — 计算梯度通过CfC状态转移矩阵的回传

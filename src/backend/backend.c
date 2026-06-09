@@ -12633,7 +12633,10 @@ static int handle_api_post_audio_command(BackendServer* server,
                     char* pos = strstr(command_text, close_markers[i]);
                     if (pos) {
                         char* rest = pos + strlen(close_markers[i]);
-                        while (*rest == ' ' || *rest == '　') rest++;
+                        /* Skip ASCII space and U+3000 fullwidth space */
+                        while (*rest == ' ' || (rest[0] == '\xE3' && rest[1] == '\x80' && rest[2] == '\x80')) {
+                            if (*rest == ' ') rest++; else rest += 3; /* fullwidth space = 3 bytes */
+                        }
                         if (strlen(rest) > 0 && strlen(rest) < 100) {
                             strncpy(app_name, rest, sizeof(app_name) - 1);
                         }

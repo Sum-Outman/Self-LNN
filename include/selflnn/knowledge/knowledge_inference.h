@@ -7,6 +7,7 @@
 #define SELFLNN_KNOWLEDGE_INFERENCE_H
 
 #include <stddef.h>
+#include <time.h>
 
 #ifdef __cplusplus
 extern "C" {

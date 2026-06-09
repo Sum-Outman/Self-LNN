@@ -26,6 +26,7 @@
 #include "selflnn/selflnn.h" /* selflnn_get_shared_lnn */
 #include "selflnn/knowledge/knowledge.h" /* 知识库检索回退 */
 #include "selflnn/knowledge/knowledge_graph.h" /* R002: KG图推理检索 */
+#include "selflnn/programming/programming_bridge.h" /* 对话→编程: 用户编程需求委托 */
 #include "selflnn/knowledge/graph_reasoning.h" /* P1/P4: 链路预测+图推理引擎 */
 #include "selflnn/backend/websocket_push.h"
 #include "selflnn/core/errors.h"
@@ -1171,6 +1172,34 @@ DialogueResponse* dialogue_process_input_ext(DialogueProcessor* processor,
     }
 
     safe_free((void**)&features);
+
+    /* 对话→编程闭环: 检测用户输入中的编程关键词, 委托代码生成 */
+    if (user_input && (strstr(user_input, "code") || strstr(user_input, "function") ||
+                       strstr(user_input, "program") || strstr(user_input, "write"))) {
+        ProgrammingClosure closure;
+        ProgrammingIntent intent;
+        memset(&intent, 0, sizeof(intent));
+        snprintf(intent.description, sizeof(intent.description),
+                "对话编程委托: %.200s", user_input);
+        snprintf(intent.function_name, sizeof(intent.function_name), "dialogue_fn");
+        intent.input_count = 2;
+        intent.output_count = 1;
+        intent.example_count = 0;
+        intent.priority = 0;
+        intent.max_iterations = 2;
+
+        static SelfProgrammingEngine* cached_prog = NULL;
+        if (!cached_prog) cached_prog = self_programming_engine_create(LANG_C);
+        if (cached_prog) {
+            int bridge_ret = programming_bridge_intent_to_code(cached_prog, &intent, &closure);
+            if (bridge_ret == 0 && closure.learning_signal > 0.3f) {
+                log_info("对话→编程闭环: '%s' → quality=%d",
+                        intent.function_name, closure.quality_score);
+            }
+            programming_closure_free(&closure);
+        }
+    }
+
     return response;
 }
 

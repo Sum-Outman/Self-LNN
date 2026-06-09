@@ -237,10 +237,7 @@ mkdir build && cd build
 cmake .. -G "Visual Studio 17 2022" -A x64
 cmake --build . --config Release
 
-# ⚠️ VS 2026 /O2 已知问题: safe_alloc魔法数字损坏导致启动失败。
-# 如必须使用VS 2026, 请将CMakeLists.txt中/Od扩展到memory_utils.c。
-# ⚠️ VS 2026 /O2 known issue: magic number corruption in safe_alloc.
-# If using VS 2026, extend /Od to memory_utils.c in CMakeLists.txt.
+
 
 # 或使用根目录脚本 / or use root scripts
 build.bat
@@ -262,10 +259,6 @@ mkdir build && cd build
 cmake .. -G "Visual Studio 17 2022" -A x64
 cmake --build . --config Release
 
-# ⚠️ VS 2026 /O2 known issue: magic number corruption in safe_alloc at startup.
-# If using VS 2026, extend /Od to memory_utils.c in CMakeLists.txt.
-
-# Or use root scripts: build.bat
 
 # Linux (GCC/Clang)
 mkdir build && cd build
@@ -712,7 +705,6 @@ cmake .. -DCMAKE_BUILD_TYPE=Debug
 - Windows: `build/bin/Release/selflnn.exe`
 - Linux/macOS: `build/bin/Release/selflnn`
 
-> ⚠️ **VS 2026 /O2 已知问题 / Known Issue**: VS 2026的/O2优化导致safe_alloc魔法数字非确定性损坏，系统启动失败。推荐使用 VS 2022 编译（已验证100%稳定）。如必须使用VS 2026，请在CMakeLists.txt中将 `memory_utils.c` 的编译选项设为 `/Od`。
 
 ### 部署到生产目录 / Deploy to Production Directory
 
@@ -2127,7 +2119,6 @@ brew install cmake
 | `ENABLE_GPU` | OFF | 启用GPU支持 / Enable GPU support |
 | `CMAKE_BUILD_TYPE` | Release | Debug/Release |
 
-> ⚠️ **VS 2026 /O2 已知问题 / Known Issue**: VS 2026的/O2优化导致safe_alloc魔法数字非确定性损坏，系统启动失败。
 > 推荐使用 VS 2022 编译（已验证100%稳定）。如必须使用VS 2026，请在CMakeLists.txt中将 `memory_utils.c`的编译选项设为`/Od`。
 
 ### 代码规范 / Code Standards

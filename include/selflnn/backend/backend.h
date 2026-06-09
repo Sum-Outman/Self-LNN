@@ -9,6 +9,7 @@
 #define SELFLNN_BACKEND_H
 
 #include <stddef.h>
+#include <time.h>
 #include "selflnn/core/port_config.h"
 #include "selflnn/cognition/self_cognition.h"
 

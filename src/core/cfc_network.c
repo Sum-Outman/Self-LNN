@@ -673,7 +673,6 @@ int cfc_apply_cell_gradients_adam(CfCNetwork* network, float learning_rate,
  */
 void cfc_zero_cell_gradients(CfCNetwork* network) {
     if (!network || !network->layers) return;
-    /* P0-014修复: 清零输出投影梯度（与cell梯度同步清零） */
     if (network->W_out_gradients) {
         memset(network->W_out_gradients, 0, 
                network->config.output_size * network->config.hidden_size * sizeof(float));
@@ -681,23 +680,11 @@ void cfc_zero_cell_gradients(CfCNetwork* network) {
     if (network->b_out_gradients) {
         memset(network->b_out_gradients, 0, network->config.output_size * sizeof(float));
     }
+    /* 委托给cfc_cell单元内的清零函数(同编译单元, 避免GCC 15.1跨TU崩溃) */
     for (int cl = 0; cl < network->config.num_layers; cl++) {
         CfCCell* cell = network->layers[cl];
         if (!cell) continue;
-        size_t lw = (cl == 0 ? network->config.input_size : network->config.hidden_size)
-                   * network->config.hidden_size;
-        size_t hh = network->config.hidden_size * network->config.hidden_size;
-        if (cell->weight_grad) memset(cell->weight_grad, 0, lw * sizeof(float));
-        if (cell->bias_grad) memset(cell->bias_grad, 0, network->config.hidden_size * sizeof(float));
-        if (cell->input_gate_weight_grad) memset(cell->input_gate_weight_grad, 0, lw * sizeof(float));
-        if (cell->forget_gate_weight_grad) memset(cell->forget_gate_weight_grad, 0, lw * sizeof(float));
-        if (cell->output_gate_weight_grad) memset(cell->output_gate_weight_grad, 0, lw * sizeof(float));
-        if (cell->hidden_to_input_gate_weight_grad) memset(cell->hidden_to_input_gate_weight_grad, 0, hh * sizeof(float));
-        if (cell->hidden_to_forget_gate_weight_grad) memset(cell->hidden_to_forget_gate_weight_grad, 0, hh * sizeof(float));
-        if (cell->hidden_to_output_gate_weight_grad) memset(cell->hidden_to_output_gate_weight_grad, 0, hh * sizeof(float));
-        if (cell->hidden_to_activation_weight_grad) memset(cell->hidden_to_activation_weight_grad, 0, hh * sizeof(float));
-        if (cell->gate_bias_grad) memset(cell->gate_bias_grad, 0, network->config.hidden_size * 3 * sizeof(float));
-        if (cell->time_constant_grad) memset(cell->time_constant_grad, 0, network->config.hidden_size * sizeof(float));
+        cfc_cell_zero_gradients(cell);
     }
 }
 

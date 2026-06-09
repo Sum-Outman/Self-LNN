@@ -1,9 +1,10 @@
-﻿/**
+/**
  * @file model_registry.c
  * @brief 模型版本注册管理系统完整实现
  */
 #include "selflnn/training/model_registry.h"
 #include "selflnn/utils/memory_utils.h"
+#include "selflnn/knowledge/knowledge.h"         /* KG持久化: 模型版本→知识库 */
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -82,6 +83,31 @@ int mr_add_version(ModelRegistry* mr, int model_id, const char* file_path, const
     e->version_count++;
     e->current_version = vid;
     *version_id = vid;
+
+    /* KG持久化: 模型版本注册到知识库 */
+    {
+        static KnowledgeBase* mr_kg = NULL;
+        if (!mr_kg) mr_kg = knowledge_base_create(512);
+        if (mr_kg) {
+            char subj[128], pred[64], obj[256];
+            KnowledgeEntry entry;
+            memset(&entry, 0, sizeof(entry));
+            snprintf(subj, sizeof(subj), "model:%s_v%d", e->name, vid);
+            entry.subject = subj;
+            snprintf(pred, sizeof(pred), "has_version");
+            entry.predicate = pred;
+            snprintf(obj, sizeof(obj),
+                    "loss=%.6f val_loss=%.6f acc=%.4f f1=%.4f params=%zu path=%s",
+                    ver->train_loss, ver->val_loss, ver->accuracy, ver->f1_score,
+                    ver->parameter_count, file_path ? file_path : "");
+            entry.object = obj;
+            entry.confidence = ver->accuracy > 0.9f ? CONFIDENCE_HIGH :
+                               ver->accuracy > 0.7f ? CONFIDENCE_MEDIUM : CONFIDENCE_LOW;
+            entry.timestamp = (long)time(NULL);
+            knowledge_base_add(mr_kg, &entry);
+        }
+    }
+
     return 0;
 }
 

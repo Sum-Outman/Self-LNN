@@ -1,5 +1,6 @@
 #include "selflnn/training/training_monitor.h"
 #include "selflnn/utils/memory_utils.h"
+#include "selflnn/knowledge/knowledge.h"          /* KG持久化: 训练指标→知识库 */
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -77,6 +78,27 @@ int training_monitor_log_metric(TrainingMonitor* tm, MetricType type,
     rec->timestamp_sec = (double)time(NULL);
     rec->custom_name[0] = '\0';
     if (epoch >= 0) tm->current_epoch = epoch;
+
+    /* KG持久化: 重要指标写入知识库 (每10 epoch的loss + 所有accuracy变化) */
+    if (epoch >= 0 && (epoch % 10 == 0 || type == TM_ACCURACY || type == TM_LOSS)) {
+        static KnowledgeBase* mon_kg = NULL;
+        if (!mon_kg) mon_kg = knowledge_base_create(1024);
+        if (mon_kg) {
+            char subj[128], pred[64], obj[128];
+            KnowledgeEntry entry;
+            memset(&entry, 0, sizeof(entry));
+            snprintf(subj, sizeof(subj), "training_monitor");
+            entry.subject = subj;
+            snprintf(pred, sizeof(pred), "epoch_%d_metric_%d", epoch, (int)type);
+            entry.predicate = pred;
+            snprintf(obj, sizeof(obj), "value=%.6f step=%d", value, step);
+            entry.object = obj;
+            entry.confidence = value > 0.8f ? CONFIDENCE_HIGH : CONFIDENCE_MEDIUM;
+            entry.timestamp = (long)time(NULL);
+            knowledge_base_add(mon_kg, &entry);
+        }
+    }
+
     return 0;
 }
 

@@ -20,7 +20,7 @@ target_include_directories(selflnn_learning PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include
 )
 
-target_link_libraries(selflnn_learning PRIVATE selflnn_core selflnn_memory selflnn_reasoning)
+target_link_libraries(selflnn_learning PRIVATE selflnn_core selflnn_memory selflnn_reasoning selflnn_evolution)
 
 if(MSVC)
     target_compile_options(selflnn_learning PRIVATE /FImath.h)

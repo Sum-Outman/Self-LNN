@@ -3208,8 +3208,84 @@ static char infer_operation_from_examples(const CodeSpecification* spec) {
     if (all_sub) return '-';
     if (all_mul) return '*';
     if (all_div) return '/';
-    
-    double avg = 0.0;
+
+    /* 检测 min/max 模式 */
+    if (spec->param_count >= 2) {
+        int all_min = 1, all_max = 1;
+        for (size_t i = 0; i < spec->example_count; i++) {
+            double in0 = spec->examples[i].inputs[0];
+            double in1 = spec->examples[i].inputs[1];
+            double out = spec->examples[i].expected_output;
+            double expected_min = in0 < in1 ? in0 : in1;
+            double expected_max = in0 > in1 ? in0 : in1;
+            if (fabs(expected_min - out) > 0.001) all_min = 0;
+            if (fabs(expected_max - out) > 0.001) all_max = 0;
+        }
+        if (all_min) return 'm';  /* min */
+        if (all_max) return 'M';  /* max */
+    }
+
+    /* 检测 sum/product of all inputs */
+    if (spec->param_count >= 2) {
+        int all_sum = 1;
+        for (size_t i = 0; i < spec->example_count; i++) {
+            double sum_val = 0.0;
+            for (size_t j = 0; j < spec->examples[i].input_count; j++)
+                sum_val += spec->examples[i].inputs[j];
+            if (fabs(sum_val - spec->examples[i].expected_output) > 0.001)
+                { all_sum = 0; break; }
+        }
+        if (all_sum) return 's';  /* sum of all inputs */
+    }
+
+    /* 单输入模式: 平方/绝对值/倍数 */
+     if (spec->param_count == 1) {
+         int all_square = 1, all_abs = 1;
+         for (size_t i = 0; i < spec->example_count; i++) {
+             double in = spec->examples[i].inputs[0];
+             double out = spec->examples[i].expected_output;
+             if (fabs((in * in) - out) > 0.001) all_square = 0;
+             if (fabs((in < 0 ? -in : in) - out) > 0.001) all_abs = 0;
+         }
+         if (all_square) return 'S';  /* square */
+         if (all_abs) return 'a';     /* abs */
+     }
+
+     /* 检测 mean/average 模式: output = (a+b+...)/n */
+     if (spec->param_count >= 2) {
+         int all_mean = 1;
+         for (size_t i = 0; i < spec->example_count; i++) {
+             double sum_val = 0.0;
+             for (size_t j = 0; j < spec->examples[i].input_count; j++)
+                 sum_val += spec->examples[i].inputs[j];
+             double expected = sum_val / (double)spec->examples[i].input_count;
+             if (fabs(expected - spec->examples[i].expected_output) > 0.001)
+                 { all_mean = 0; break; }
+         }
+         if (all_mean) return 'n';  /* mean/average */
+     }
+
+     /* 检测线性映射模式: output = scale * input[0] + offset */
+     if (spec->param_count >= 1 && spec->example_count >= 2) {
+         double x0 = spec->examples[0].inputs[0];
+         double y0 = spec->examples[0].expected_output;
+         double x1 = spec->examples[1].inputs[0];
+         double y1 = spec->examples[1].expected_output;
+         double dx = x1 - x0;
+         if (fabs(dx) > 0.0001) {
+             double scale = (y1 - y0) / dx;
+             double offset = y0 - scale * x0;
+             int all_linear = 1;
+             for (size_t i = 2; i < spec->example_count; i++) {
+                 double pred = scale * spec->examples[i].inputs[0] + offset;
+                 if (fabs(pred - spec->examples[i].expected_output) > 0.01)
+                     { all_linear = 0; break; }
+             }
+             if (all_linear && spec->example_count >= 2) return 'l';  /* linear */
+         }
+     }
+
+     double avg = 0.0;
     for (size_t i = 0; i < spec->example_count; i++) {
         avg += spec->examples[i].expected_output / (double)spec->example_count;
     }
@@ -3273,13 +3349,65 @@ char* synthesize_code(SelfProgrammingEngine* engine, const CodeSpecification* sp
         }
         
         if (spec->param_count >= 2 && op != '?') {
-            pos += snprintf(result + pos, sizeof(result) - pos,
-                            "    result = %s %c %s;\n\n",
-                            spec->param_names[0], op, spec->param_names[1]);
+            if (op == 'm') {
+                /* min 模式 */
+                pos += snprintf(result + pos, sizeof(result) - pos,
+                        "    result = (%s < %s) ? %s : %s;\n\n",
+                        spec->param_names[0], spec->param_names[1],
+                        spec->param_names[0], spec->param_names[1]);
+            } else if (op == 'M') {
+                /* max 模式 */
+                pos += snprintf(result + pos, sizeof(result) - pos,
+                        "    result = (%s > %s) ? %s : %s;\n\n",
+                        spec->param_names[0], spec->param_names[1],
+                        spec->param_names[0], spec->param_names[1]);
+            } else if (op == 's') {
+                 /* sum of all inputs */
+                 pos += snprintf(result + pos, sizeof(result) - pos,
+                         "    result = 0;\n");
+                 for (size_t pi = 0; pi < spec->param_count; pi++)
+                     pos += snprintf(result + pos, sizeof(result) - pos,
+                             "    result += %s;\n", spec->param_names[pi]);
+             } else if (op == 'n') {
+                 /* mean/average of all inputs */
+                 pos += snprintf(result + pos, sizeof(result) - pos,
+                         "    result = 0;\n");
+                 for (size_t pi = 0; pi < spec->param_count; pi++)
+                     pos += snprintf(result + pos, sizeof(result) - pos,
+                             "    result += %s;\n", spec->param_names[pi]);
+                 pos += snprintf(result + pos, sizeof(result) - pos,
+                         "    result /= (float)(%zu);\n\n", spec->param_count);
+             } else {
+                /* 标准算术 */
+                pos += snprintf(result + pos, sizeof(result) - pos,
+                        "    result = %s %c %s;\n\n",
+                        spec->param_names[0], op, spec->param_names[1]);
+            }
         } else if (spec->param_count >= 1 && op != '?' && op != '/' && op != '-') {
-            pos += snprintf(result + pos, sizeof(result) - pos,
-                            "    result = %s %c 1.0;\n\n",
-                            spec->param_names[0], op);
+            if (op == 'S') {
+                pos += snprintf(result + pos, sizeof(result) - pos,
+                        "    result = %s * %s;\n\n",
+                        spec->param_names[0], spec->param_names[0]);
+            } else if (op == 'a') {
+                pos += snprintf(result + pos, sizeof(result) - pos,
+                        "    result = (%s < 0) ? -%s : %s;\n\n",
+                        spec->param_names[0], spec->param_names[0], spec->param_names[0]);
+            } else if (op == 'l' && spec->example_count >= 2) {
+                /* linear: y = scale * x + offset, compute from examples */
+                double x0 = spec->examples[0].inputs[0];
+                double y0 = spec->examples[0].expected_output;
+                double x1 = spec->examples[1].inputs[0];
+                double y1 = spec->examples[1].expected_output;
+                double scale = (x1 != x0) ? (y1 - y0) / (x1 - x0) : 1.0;
+                double offset = y0 - scale * x0;
+                pos += snprintf(result + pos, sizeof(result) - pos,
+                        "    result = %.6ff * %s + %.6ff;\n\n",
+                        scale, spec->param_names[0], offset);
+            } else {
+                pos += snprintf(result + pos, sizeof(result) - pos,
+                        "    result = %s %c 1.0;\n\n",
+                        spec->param_names[0], op);
+            }
         } else if (spec->param_count >= 1) {
             if (fabs(spec->examples[0].expected_output - spec->examples[0].inputs[0]) < 0.001) {
                 pos += snprintf(result + pos, sizeof(result) - pos,

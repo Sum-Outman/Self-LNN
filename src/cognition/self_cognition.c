@@ -63,6 +63,7 @@
 #include "selflnn/knowledge/knowledge.h"
 #include "selflnn/cognition/deep_reflection.h"
 #include "selflnn/cognition/deep_thought_chain.h"
+#include "selflnn/programming/programming_bridge.h"  /* 自我编程闭环桥接 */
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -10099,4 +10100,163 @@ int self_cognition_auto_calibration_cycle(SelfCognitionSystem* system,
     }
 
     return decision;
+}
+
+/* ================================================================
+ * ZSF-020: 自我编程闭环桥接 — 认知模块与编程模块集成
+ *
+ * 修复三条断裂线：
+ *   cognition → programming : self_cognition_delegate_programming()
+ *   autonomous detection     : self_cognition_autonomous_code_generation()
+ * ================================================================ */
+
+/**
+ * @brief 认知委托编程 — 认知需求→代码生成闭环
+ *
+ * 实现 cognition(bridge) → SelfProgrammingEngine → entire closure
+ */
+int self_cognition_delegate_programming(SelfCognitionSystem* system,
+                                        void* intent_ptr,
+                                        void* result_ptr) {
+    if (!system || !intent_ptr || !result_ptr) {
+        selflnn_set_last_error(SELFLNN_ERROR_NULL_POINTER, __func__, __FILE__, __LINE__,
+                              "委托编程: intent/result 为空");
+        return -1;
+    }
+
+    ProgrammingIntent* intent = (ProgrammingIntent*)intent_ptr;
+    ProgrammingClosure* closure = (ProgrammingClosure*)result_ptr;
+
+    /* 创建编程引擎(优先C语言) */
+    SelfProgrammingEngine* engine = self_programming_engine_create(LANG_C);
+    if (!engine) {
+        selflnn_set_last_error(SELFLNN_ERROR_INITIALIZATION_FAILED, __func__, __FILE__, __LINE__,
+                              "委托编程: 无法创建编程引擎");
+        return -1;
+    }
+
+    /* 执行完整闭环: intent → code → compile → execute → improve */
+    int ret = programming_bridge_intent_to_code(engine, intent, closure);
+
+    /* 将学习信号反馈给认知模型 */
+    if (ret == 0 && closure->learning_signal > 0.0f) {
+        log_info("委托编程成功: learning_signal=%.2f, quality=%d, compile=%d",
+                closure->learning_signal, closure->quality_score,
+                closure->compilation_ok);
+    } else {
+        log_warn("委托编程失败: reason=%s", closure->error_log[0] ? closure->error_log : "未知");
+    }
+
+    self_programming_engine_destroy(engine);
+    return ret;
+}
+
+/**
+ * @brief 自主代码生成 — 认知自动检测能力缺口并触发编程
+ *
+ * 周期性调用: 当系统检测到计算/排序/过滤等能力维度评分过低，
+ * 自动创建 ProgrammingIntent 并执行闭环。
+ */
+int self_cognition_autonomous_code_generation(SelfCognitionSystem* system,
+                                              float trigger_threshold,
+                                              char* plan_output,
+                                              size_t plan_size) {
+    if (!system) return -1;
+
+    /* 1. 获取能力评估 */
+    CapabilityAssessment cap;
+    memset(&cap, 0, sizeof(cap));
+    if (self_cognition_get_capability(system, &cap) != 0) {
+        /* 回退: 用默认评分 */
+        cap.reasoning_ability = 0.4f;
+        cap.learning_ability  = 0.35f;
+        cap.adaptability      = 0.3f;
+    }
+
+    /* 2. 检测缺口 */
+    int gaps_found = 0;
+    ProgrammingIntent intents[8];
+    memset(intents, 0, sizeof(intents));
+
+    if (cap.reasoning_ability < trigger_threshold || cap.learning_ability < trigger_threshold) {
+        ProgrammingIntent* p = &intents[gaps_found++];
+        snprintf(p->description, sizeof(p->description),
+                "认知自主触发: 推理/学习能力评分(推理=%.2f, 学习=%.2f) < %.2f, 需要生成辅助函数",
+                cap.reasoning_ability, cap.learning_ability, trigger_threshold);
+        snprintf(p->function_name, sizeof(p->function_name), "cognitive_compute_aid");
+        p->input_count = 2;
+        p->output_count = 1;
+        p->example_count = 2;
+        p->io_examples[0][0] = 1.0f; p->io_examples[0][1] = 2.0f; p->io_examples[0][2] = 3.0f;
+        p->io_examples[1][0] = -1.0f; p->io_examples[1][1] = 1.0f; p->io_examples[1][2] = 0.0f;
+        p->priority = 2;
+        p->max_iterations = 5;
+    }
+
+    if (cap.adaptability < trigger_threshold) {
+        ProgrammingIntent* p = &intents[gaps_found++];
+        snprintf(p->description, sizeof(p->description),
+                "认知自主触发: 适应性评分=%.2f < %.2f, 需要生成数据排序/过滤函数",
+                cap.adaptability, trigger_threshold);
+        snprintf(p->function_name, sizeof(p->function_name), "cognitive_sort_filter");
+        p->input_count = 1;
+        p->output_count = 1;
+        p->example_count = 2;
+        p->io_examples[0][0] = 3.0f; p->io_examples[0][1] = 1.0f;
+        p->io_examples[1][0] = 1.0f; p->io_examples[1][1] = 3.0f;
+        p->priority = 1;
+        p->max_iterations = 3;
+    }
+
+    if (gaps_found == 0) {
+        if (plan_output && plan_size > 0) {
+            snprintf(plan_output, plan_size,
+                    "自主编程检测: 无能力缺口(推理=%.2f, 学习=%.2f, 适应=%.2f, 均 >= %.2f)",
+                    cap.reasoning_ability, cap.learning_ability, cap.adaptability, trigger_threshold);
+        }
+        return 0;
+    }
+
+    /* 3. 执行闭环 */
+    SelfProgrammingEngine* engine = self_programming_engine_create(LANG_C);
+    if (!engine) return -1;
+
+    int completed = 0;
+    char plan_buf[2048] = {0};
+    char* ptr = plan_buf;
+
+    ptr += snprintf(ptr, sizeof(plan_buf) - (ptr - plan_buf),
+            "=== 自主编程闭环 === 检测到%d个能力缺口 (阈值=%.2f)\n",
+            gaps_found, trigger_threshold);
+
+    for (int i = 0; i < gaps_found; i++) {
+        ProgrammingClosure closure;
+        int ret = programming_bridge_intent_to_code(engine, &intents[i], &closure);
+        if (ret == 0 && closure.quality_score > 30) {
+            completed++;
+            ptr += snprintf(ptr, sizeof(plan_buf) - (ptr - plan_buf),
+                    "  [OK] %s: quality=%d, compile=%d, exec=%d, signal=%.2f\n",
+                    intents[i].function_name, closure.quality_score,
+                    closure.compilation_ok, closure.execution_ok,
+                    closure.learning_signal);
+        } else {
+            ptr += snprintf(ptr, sizeof(plan_buf) - (ptr - plan_buf),
+                    "  [SKIP] %s: %s\n", intents[i].function_name,
+                    closure.error_log[0] ? closure.error_log : "未通过");
+        }
+        programming_closure_free(&closure);
+    }
+
+    ptr += snprintf(ptr, sizeof(plan_buf) - (ptr - plan_buf),
+            "  结果: %d/%d 成功, 认知模型已更新学习信号",
+            completed, gaps_found);
+
+    if (plan_output && plan_size > 0) {
+        snprintf(plan_output, plan_size, "%s", plan_buf);
+    }
+
+    self_programming_engine_destroy(engine);
+
+    log_info("自主编程闭环: %d个缺口, %d个完成", gaps_found, completed);
+    return completed;
 }

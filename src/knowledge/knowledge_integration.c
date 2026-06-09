@@ -307,8 +307,13 @@ static int entries_directly_contradict(const KnowledgeEntry* a, const KnowledgeE
         if (a_neg == b_neg) return 0;
         const char* a_base = a_neg ? a->predicate + strlen("非") : a->predicate;
         const char* b_base = b_neg ? b->predicate + strlen("非") : b->predicate;
-        while (*a_base && (*a_base == '不' || *a_base == '无' || *a_base == '未')) a_base++;
-        while (*b_base && (*b_base == '不' || *b_base == '无' || *b_base == '未')) b_base++;
+        /* 跳过否定前缀: 不(E4B88D) 无(E697A0) 未(E69CAA) */
+        while (*a_base && ((strncmp(a_base, "\xE4\xB8\x8D", 3) == 0) || 
+                           (strncmp(a_base, "\xE6\x97\xA0", 3) == 0) ||
+                           (strncmp(a_base, "\xE6\x9C\xAA", 3) == 0))) a_base += 3;
+        while (*b_base && ((strncmp(b_base, "\xE4\xB8\x8D", 3) == 0) ||
+                           (strncmp(b_base, "\xE6\x97\xA0", 3) == 0) ||
+                           (strncmp(b_base, "\xE6\x9C\xAA", 3) == 0))) b_base += 3;
         if (strcmp(a_base, b_base) != 0) return 0;
     }
     if (!a->object || !b->object) return 0;

@@ -316,7 +316,7 @@ static int extract_relations(const char* text, char*** relations, int* relation_
 
             const char* after = found + strlen(patterns[i]);
             int after_count = 0;
-            while (*after && after_count < 30 && *after != '\n' && *after != '.' && *after != '。') {
+            while (*after && after_count < 30 && *after != '\n' && *after != '.' && (*after != '\xE3' || after[1] != '\x80' || after[2] != '\x82')) {
                 after++;
                 after_count++;
             }

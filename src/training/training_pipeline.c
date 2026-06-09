@@ -28,6 +28,7 @@ extern void* selflnn_get_speech_recognizer(void);
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/secure_random.h"
 #include "selflnn/utils/logging.h"
+#include "selflnn/knowledge/knowledge.h"      /* KG持久化: 训练结果→知识库 */
 #include "selflnn/concurrency/thread_pool.h"
 #include "selflnn/multimodal/speech_recognition.h"
 #include "selflnn/multimodal/multimodal_unified_input.h"
@@ -3777,6 +3778,36 @@ int pipeline_run_full_training(TrainingPipeline* pipeline, float* final_loss) {
         float final_val = loss;
         lnn_save(pipeline->network, "model/trained_lnn.bin");
         log_info("[训练完成] 最终损失=%.6f, 模型已保存至 model/trained_lnn.bin", final_val);
+    }
+
+    /* KG持久化: 将训练结果写入知识库 */
+    {
+        static KnowledgeBase* train_kg = NULL;
+        if (!train_kg) {
+            train_kg = knowledge_base_create(1024);
+        }
+        if (train_kg) {
+            char subj[64], pred[64], obj[256];
+            KnowledgeEntry entry;
+            memset(&entry, 0, sizeof(entry));
+            snprintf(subj, sizeof(subj), "training_pipeline");
+            entry.subject = subj;
+            snprintf(pred, sizeof(pred), "completed");
+            entry.predicate = pred;
+            snprintf(obj, sizeof(obj),
+                    "final_loss=%.6f total_epochs=%d",
+                    loss, (int)pipeline->config.pretrain_epochs +
+                    (int)pipeline->config.deep_train_epochs +
+                    (int)pipeline->config.multimodal_epochs +
+                    (int)pipeline->config.fine_tune_epochs +
+                    (int)pipeline->config.local_epochs +
+                    (int)pipeline->config.speech_epochs);
+            entry.object = obj;
+            entry.confidence = loss < 1.0f ? CONFIDENCE_HIGH :
+                               loss < 5.0f ? CONFIDENCE_MEDIUM : CONFIDENCE_LOW;
+            entry.timestamp = (long)time(NULL);
+            knowledge_base_add(train_kg, &entry);
+        }
     }
 
     pipeline->state.stage = TRAIN_STAGE_IDLE;

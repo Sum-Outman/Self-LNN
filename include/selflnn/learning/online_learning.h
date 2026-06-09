@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file online_learning.h
  * @brief 在线学习系统接口
  * 
@@ -10,6 +10,7 @@
 #define SELFLNN_ONLINE_LEARNING_H
 
 #include <stddef.h>
+#include <time.h>
 
 /* 前向声明LNN类型，用于 online_learner_attach_lnn() */
 typedef struct LNN LNN;

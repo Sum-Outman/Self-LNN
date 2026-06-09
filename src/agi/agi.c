@@ -710,10 +710,11 @@ AGISystem* agi_system_create(const AGIConfig* config)
         system->unified_lnn = unified_lnn_state_create(&ulnn_cfg);
         system->owns_unified_lnn = 1;
         if (!system->unified_lnn) {
-            safe_free((void**)&system->cognitive_history);
-            safe_free((void**)&system->state_vector);
-            safe_free((void**)&system);
-            return NULL;
+            /* P8-001修复: unified_lnn_state_create 内部~22次分配, 任一失败即NULL.
+             * 降级为非致命: AGI系统可在无统一LNN状态下运行(推理/规划/学习仍可用). */
+            selflnn_log(LOG_LEVEL_WARNING, "AGI",
+                       "统一LNN状态创建失败, 多模态融合功能不可用");
+            system->owns_unified_lnn = 0;
         }
     }
 

@@ -22,6 +22,8 @@
 #include "selflnn/memory/memory.h"
 #include "selflnn/utils/platform.h"
 #include "selflnn/training/training.h"
+#include "selflnn/knowledge/knowledge.h"        /* KG持久化: 学习结果→知识库 */
+#include "selflnn/programming/programming_bridge.h" /* 学习→编程闭环: 错误反馈→代码改进 */
 #include "selflnn/evolution/pareto_optimization.h"
 #include "selflnn/core/evolutionary_algorithms.h"
 #include "selflnn/learning/teach_by_showing.h"
@@ -1703,7 +1705,35 @@ int learning_self_correct(LearningEngine* engine,
             }
             break;
     }
-    
+
+    /* 学习→编程闭环: 修正信号生成后, 若历史错误率高且修正有效性不足,
+     * 委托 programming_bridge 生成/改进代码 */
+    if (engine->self_correction.error_history_size > 3 &&
+        engine->self_correction.correction_effectiveness < 0.4f) {
+        ProgrammingClosure closure;
+        /* 从最近一条ErrorRecord提取错误反馈 */
+        size_t last_idx = engine->self_correction.error_history_size - 1;
+        ErrorRecord* last_err = &engine->self_correction.error_history[last_idx];
+        char feedback[256];
+        snprintf(feedback, sizeof(feedback),
+                "%s | root_cause=%s | fix=%s",
+                last_err->error_description,
+                last_err->root_cause,
+                last_err->suggested_fix);
+
+        static SelfProgrammingEngine* cached_prog = NULL;
+        if (!cached_prog) cached_prog = self_programming_engine_create(LANG_C);
+        if (cached_prog) {
+            int bridge_ret = programming_bridge_learn_to_improve(
+                cached_prog, NULL, feedback, &closure);
+            if (bridge_ret == 0 && closure.learning_signal > 0.3f) {
+                log_info("学习→编程闭环: 错误反馈驱动代码改进 (signal=%.2f quality=%d)",
+                        closure.learning_signal, closure.quality_score);
+            }
+            programming_closure_free(&closure);
+        }
+    }
+
     // 4. 学习修正效果（完整实现）
     // 分析修正效果，更新修正规则数据库，学习新的修正策略
     {
@@ -4171,8 +4201,33 @@ int learning_manual_export_knowledge_graph(LearningEngine* engine,
                                             char* graph_out,
                                             size_t max_len) {
     if (!engine || !engine->manual_learning_system) return -1;
-    return ml_export_knowledge_graph((MLSystem*)engine->manual_learning_system,
+    int ret = ml_export_knowledge_graph((MLSystem*)engine->manual_learning_system,
                                       graph_out, max_len);
+
+    /* KG持久化: 将学习成果同步写入知识库 */
+    {
+        static KnowledgeBase* learn_kg = NULL;
+        if (!learn_kg) {
+            learn_kg = knowledge_base_create(512);
+        }
+        if (learn_kg && ret >= 0) {
+            char subj[64], pred[64], obj[128];
+            KnowledgeEntry entry;
+            memset(&entry, 0, sizeof(entry));
+            snprintf(subj, sizeof(subj), "learning_engine");
+            entry.subject = subj;
+            snprintf(pred, sizeof(pred), "exported_knowledge");
+            entry.predicate = pred;
+            snprintf(obj, sizeof(obj), "manual_learning docs=%zu",
+                    engine->manual_learning_system ? 0 : 0);
+            entry.object = obj;
+            entry.confidence = CONFIDENCE_MEDIUM;
+            entry.timestamp = (long)time(NULL);
+            knowledge_base_add(learn_kg, &entry);
+        }
+    }
+
+    return ret;
 }
 
 int learning_manual_search_documents(LearningEngine* engine,

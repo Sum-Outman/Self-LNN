@@ -8,6 +8,7 @@
 #include "selflnn/reasoning/reasoning.h"
 #include "selflnn/reasoning/causal_reasoning.h"
 #include "selflnn/knowledge/knowledge.h"
+#include "selflnn/programming/programming_bridge.h" /* 推理→编程闭环: 推理结论委托代码生成 */
 #pragma warning(disable: 4702)  /* ZSFOOO-E002 */
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/string_utils.h"
@@ -4059,7 +4060,44 @@ int reasoning_infer(ReasoningEngine* engine,
     /* MIN-003: 无引擎上下文时记录到局部缓存，实际使用见其他函数 */
     static size_t global_timing_cache = 0;
     global_timing_cache = (size_t)elapsed_ns > 0 ? (size_t)elapsed_ns : global_timing_cache;
-    
+
+    /* 推理→编程闭环: 推理完成且结论涵盖数值计算时, 委托代码生成
+     * 仅当结论长度超过阈值且引擎关联了知识库时触发 */
+    if (result == 0 && max_conclusion_size > 16 && reasoning_engine_get_knowledge_base(engine)) {
+        ProgrammingClosure closure;
+        /* 构造推理驱动的代码需求描述 */
+        ProgrammingIntent intent;
+        memset(&intent, 0, sizeof(intent));
+        snprintf(intent.description, sizeof(intent.description),
+                "推理引擎推导的计算函数: mode=%d premises=%zu conclusion_size=%zu",
+                (int)mode, num_premises, max_conclusion_size);
+        snprintf(intent.function_name, sizeof(intent.function_name),
+                "reasoning_derived_fn");
+
+        /* 设置简单的I/O示例(以推理的首尾元素为示例) */
+        intent.input_count = (int)(num_premises > 3 ? 3 : num_premises);
+        intent.output_count = (int)(max_conclusion_size > 3 ? 3 : max_conclusion_size);
+        intent.example_count = 1;
+        for (size_t i = 0; i < intent.input_count && i < num_premises; i++)
+            intent.io_examples[0][i] = premises[i];
+        for (size_t i = 0; i < intent.output_count && i < max_conclusion_size; i++)
+            intent.io_examples[0][intent.input_count + i] = conclusion[i];
+        intent.priority = 0;  /* 低优先级, 不抢占推理主流程 */
+        intent.max_iterations = 2;
+
+        static SelfProgrammingEngine* cached_prog = NULL;
+        if (!cached_prog) cached_prog = self_programming_engine_create(LANG_C);
+        if (cached_prog) {
+            int bridge_ret = programming_bridge_intent_to_code(cached_prog, &intent, &closure);
+            if (bridge_ret == 0 && closure.learning_signal > 0.3f) {
+                log_info("推理→编程闭环: %s (quality=%d signal=%.2f)",
+                        intent.function_name, closure.quality_score,
+                        closure.learning_signal);
+            }
+            programming_closure_free(&closure);
+        }
+    }
+
     return result;
 }
 

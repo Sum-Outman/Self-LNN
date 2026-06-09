@@ -18,6 +18,7 @@
 #include "selflnn/utils/platform.h"
 #include "selflnn/utils/secure_random.h" /* 统一随机数生成 */
 #include "selflnn/concurrency/thread_pool.h" /* 岛模型并行演化 */
+#include "selflnn/programming/programming_bridge.h" /* 演化→编程: 演化结果委托代码生成 */
 
 #include <stdlib.h>
 #include <string.h>
@@ -1130,6 +1131,43 @@ int evolution_step(EvolutionEngine* engine) {
         if (engine->migration_counter >= engine->config.migration_interval) {
             engine->migration_counter = 0;
             evolution_island_migrate(engine);
+        }
+    }
+
+    /* 演化→编程闭环: 演化完成后, 最佳个体染色体可作为代码生成的知识输入
+     * 仅在演化结果有显著改进时触发(fitness > 初始best的1.5倍) */
+    const EvolutionIndividual* best = evolution_get_best(engine);
+    if (best && best->chromosome_size > 4 &&
+        best->fitness > engine->stats.initial_best_fitness * 1.5f) {
+        ProgrammingClosure closure;
+        ProgrammingIntent intent;
+        memset(&intent, 0, sizeof(intent));
+        snprintf(intent.description, sizeof(intent.description),
+                "演化引擎最优个体: fitness=%.4f genes=%zu gen_count=%d",
+                best->fitness, best->chromosome_size, engine->generation_counter);
+        snprintf(intent.function_name, sizeof(intent.function_name),
+                "evolved_model_gen%d", engine->generation_counter);
+        /* 以染色体前4个基因为I/O示例 */
+        intent.input_count = 2;
+        intent.output_count = 2;
+        intent.example_count = 1;
+        for (size_t i = 0; i < 2 && i < best->chromosome_size; i++) {
+            intent.io_examples[0][i] = best->chromosome[i];
+            intent.io_examples[0][i + 2] = best->chromosome[i + 2];
+        }
+        intent.priority = 0;
+        intent.max_iterations = 2;
+
+        static SelfProgrammingEngine* cached_prog = NULL;
+        if (!cached_prog) cached_prog = self_programming_engine_create(LANG_C);
+        if (cached_prog) {
+            int bridge_ret = programming_bridge_intent_to_code(cached_prog, &intent, &closure);
+            if (bridge_ret == 0 && closure.learning_signal > 0.3f) {
+                log_info("演化→编程闭环: fitness=%.4f→%.4f (quality=%d signal=%.2f)",
+                        engine->stats.initial_best_fitness, best->fitness,
+                        closure.quality_score, closure.learning_signal);
+            }
+            programming_closure_free(&closure);
         }
     }
 

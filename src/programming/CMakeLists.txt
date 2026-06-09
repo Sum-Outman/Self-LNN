@@ -5,6 +5,7 @@ set(SELF_PROGRAMMING_SOURCES
     self_programming.c
     programming_enhanced.c
     c_interpreter.c
+    programming_bridge.c
 )
 
 message(STATUS "自我编程库源文件: ${SELF_PROGRAMMING_SOURCES}")

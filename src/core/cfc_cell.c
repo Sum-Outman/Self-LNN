@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file cfc_cell.c
  * @brief 封闭形式连续时间单元（CfC Cell）实现
  * 
@@ -2963,6 +2963,69 @@ static int cfc_cell_backward_multiscale(CfCCell* cell, const float* gradient, fl
 /**
  * @brief 反向传播（训练）
  */
+
+/* ================================================================
+ * cfc_cell_backward_self_test — 同TU全流程自测, 绕过GCC 15.1跨TU崩溃
+ * ================================================================ */
+int cfc_cell_backward_self_test(void) {
+    CfCCellConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.input_size = 4;
+    cfg.hidden_size = 8;
+    cfg.time_constant = 1.0f;
+    cfg.delta_t = 0.1f;
+
+    CfCCell* cell = cfc_cell_create(&cfg);
+    if (!cell) return -1;
+
+    float input[4] = {0.1f, 0.2f, 0.3f, 0.4f};
+    float output[8] = {0};
+
+    int fwd_ok = cfc_cell_forward(cell, input, output);
+    if (fwd_ok != 0) { cfc_cell_free(cell); return -2; }
+
+    /* 同TU清零 */
+    cfc_cell_zero_gradients(cell);
+
+    float grad[8] = {0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f};
+    float igrad[4] = {0};
+
+    /* 同TU反向传播 */
+    int bw_ok = cfc_cell_backward(cell, grad, igrad);
+    if (bw_ok != 0) { cfc_cell_free(cell); return -3; }
+
+    /* 验证梯度非零 */
+    float grad_sum = 0.0f;
+    for (int i = 0; i < 4; i++) grad_sum += (igrad[i] > 0 ? igrad[i] : -igrad[i]);
+    if (grad_sum < 1e-8f) { cfc_cell_free(cell); return -4; }
+
+    cfc_cell_free(cell);
+    return 0;
+}
+
+/* ================================================================
+ * cfc_cell_zero_gradients — 同编译单元清零，绕过GCC 15.1跨TU崩溃
+ * ================================================================ */
+void cfc_cell_zero_gradients(CfCCell* cell) {
+    if (!cell) return;
+    size_t is = cell->config.input_size;
+    size_t hs = cell->config.hidden_size;
+    size_t ws = is * hs;   /* weight size */
+    size_t hws = hs * hs;  /* hidden weight size */
+
+    if (cell->weight_grad)                 memset(cell->weight_grad, 0, ws * sizeof(float));
+    if (cell->bias_grad)                   memset(cell->bias_grad, 0, hs * sizeof(float));
+    if (cell->input_gate_weight_grad)      memset(cell->input_gate_weight_grad, 0, ws * sizeof(float));
+    if (cell->forget_gate_weight_grad)     memset(cell->forget_gate_weight_grad, 0, ws * sizeof(float));
+    if (cell->output_gate_weight_grad)     memset(cell->output_gate_weight_grad, 0, ws * sizeof(float));
+    if (cell->hidden_to_input_gate_weight_grad)     memset(cell->hidden_to_input_gate_weight_grad, 0, hws * sizeof(float));
+    if (cell->hidden_to_forget_gate_weight_grad)    memset(cell->hidden_to_forget_gate_weight_grad, 0, hws * sizeof(float));
+    if (cell->hidden_to_output_gate_weight_grad)    memset(cell->hidden_to_output_gate_weight_grad, 0, hws * sizeof(float));
+    if (cell->hidden_to_activation_weight_grad)    memset(cell->hidden_to_activation_weight_grad, 0, hws * sizeof(float));
+    if (cell->gate_bias_grad)              memset(cell->gate_bias_grad, 0, hs * 3 * sizeof(float));
+    if (cell->time_constant_grad)          memset(cell->time_constant_grad, 0, hs * sizeof(float));
+}
+
 int cfc_cell_backward(CfCCell* cell, const float* gradient, float* input_gradient) {
     SELFLNN_CHECK_NULL(cell, "CfC单元句柄为空");
     SELFLNN_CHECK_NULL(gradient, "梯度向量为空");

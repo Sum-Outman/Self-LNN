@@ -1,6 +1,16 @@
 cmake_minimum_required(VERSION 3.10)
 project(selflnn VERSION 1.5.0 LANGUAGES C)
 
+# Clang 自动检测 (Windows): Clang 无 __chkstk 栈探测问题
+# 如 CMAKE_C_COMPILER 未显式指定且 clang 可用，优先使用 clang
+if(WIN32 AND NOT CMAKE_C_COMPILER AND NOT DEFINED ENV{CC})
+    find_program(SELFLNN_CLANG clang PATHS "C:/msys64/mingw64/bin" NO_DEFAULT_PATH)
+    if(SELFLNN_CLANG)
+        set(CMAKE_C_COMPILER "${SELFLNN_CLANG}" CACHE STRING "Auto-detected Clang" FORCE)
+        message(STATUS "Clang auto-detected: ${CMAKE_C_COMPILER}")
+    endif()
+endif()
+
 # 禁用 vcpkg applocal 复制步骤（本系统无 pwsh.exe，该步骤仅为噪音）
 if(MSVC)
     if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.19)

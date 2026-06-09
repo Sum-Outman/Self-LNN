@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file episodic.c
  * @brief 情景记忆系统实现
  * 
@@ -83,6 +83,7 @@ EpisodicMemory* episodic_memory_create(const EpisodicMemoryConfig* config) {
     
     // 创建底层记忆系统配置
     MemoryConfig mem_config;
+    memset(&mem_config, 0, sizeof(mem_config));
     mem_config.max_short_term = 0;  // 情景记忆不使用短期记忆
     mem_config.max_long_term = config->capacity;
     mem_config.decay_rate = 0.05f;  // 情景记忆衰减率中等

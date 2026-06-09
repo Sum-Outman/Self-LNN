@@ -13,6 +13,7 @@
 #include "selflnn/learning/learning.h"
 #include "selflnn/core/common.h"
 #include <stddef.h>
+#include <time.h>
 
 #ifdef __cplusplus
 extern "C" {

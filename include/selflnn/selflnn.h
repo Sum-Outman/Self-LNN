@@ -23,6 +23,9 @@
 #include "selflnn/core/errors.h"
 #include "selflnn/core/cfc.h"
 
+/* 标准库：Clang 要求显式声明 time_t */
+#include <time.h>
+
 /* 补充核心液态神经网络模块头文件 */
 #include "selflnn/core/cfc_network.h"
 #include "selflnn/core/cfc_enhanced.h"
