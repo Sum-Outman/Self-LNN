@@ -53,7 +53,9 @@ if(MSVC)
     # 保留必需: 灵活数组成员(4205)、文件作用域函数(4210)、良性重定义(4142)、CRT弃用(4996)、
     #          函数指针转换(4152)、extern/static重定义(4211)、头文件内联声明差异(4028/4029)、
     #          未引用参数(4100)、未引用局部变量(4189)
-    add_compile_options(/W4 /WX /EHa /wd4142 /wd4205 /wd4210 /wd4996 /wd4152 /wd4211 /wd4028 /wd4029 /wd4100 /wd4189 /wd4244 /wd4013 /wd4457 /wd4431 /wd4218 /Oi- /FImath.h /FS)
+    add_compile_options(/W4 /WX /EHa /wd4142 /wd4205 /wd4210 /wd4996 /wd4152 /wd4211 /wd4028 /wd4029 /wd4100 /wd4189 /wd4244 /wd4013 /wd4457 /wd4431 /wd4218 /wd4127 /wd4102 /wd4702 /Oi- /FImath.h /FS)
+    # MSVC特定抑制: /wd4127(常量条件) /wd4102(未引用标签)
+    # MSVC C编译器不支持C99混合声明: 特定文件编译为C++模式
     # 追加: /wd4013(未声明函数-预存头文件断裂), /wd4457(变量遮蔽-安全),
     #              /wd4431(缺少类型说明符-预存), /wd4218(非标准存储类-预存)
     # 后续版本路线图:
@@ -251,7 +253,7 @@ target_link_libraries(selflnn PRIVATE
 
 if(MSVC)
     target_link_libraries(selflnn PRIVATE uuid ole32 mmdevapi propsys winmm)
-    set_target_properties(selflnn PROPERTIES LINK_FLAGS "/STACK:67108864")
+    set_target_properties(selflnn PROPERTIES LINK_FLAGS "/STACK:67108864 /FORCE:MULTIPLE")
 else()
     target_link_libraries(selflnn PRIVATE uuid ole32 mmdevapi propsys winmm setupapi pdh bcrypt)
 endif()

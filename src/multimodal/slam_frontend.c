@@ -68,7 +68,7 @@ void slam_quaternion_to_rotation_matrix(const float* q, float* R) {
     R[8] = 1.0f - 2.0f*(xx + yy);
 }
 
-void slam_rotation_matrix_to_quaternion(const float* R, float* q) {
+static void slam_rotation_matrix_to_quaternion(const float* R, float* q) {
     float trace = R[0] + R[4] + R[8];
     if (trace > 0.0f) {
         float s = 0.5f / sqrtf(trace + 1.0f);

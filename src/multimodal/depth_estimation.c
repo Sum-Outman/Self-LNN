@@ -7,6 +7,10 @@
  * 100% 纯 C 实现，不依赖任何第三方库。
  */
 
+#ifdef _MSC_VER
+#pragma warning(disable: 4456)
+#endif
+
 #include "selflnn/multimodal/depth_estimation.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/memory_utils.h"

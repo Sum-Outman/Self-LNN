@@ -398,7 +398,11 @@ static int work_steal(ThreadPool* pool, int current_thread, ThreadPoolTask* task
     }
     
     // 随机选择起始窃取位置（线程局部避免竞态）
+#if defined(_MSC_VER)
+    static __declspec(thread) unsigned int steal_seed = 0;
+#else
     static __thread unsigned int steal_seed = 0;
+#endif
     int start = (steal_seed++ % (pool->config.num_threads - 1));
     
     // 尝试窃取所有其他线程的任务

@@ -412,10 +412,6 @@ int slam_update_from_optimization(SlamSystem* system,
 void slam_free_optimization_problem(OptimizationProblem* problem);
 #endif /* _MSC_VER */
 
-#ifdef _MSC_VER
-#pragma warning(pop)
-#endif
-
 /* MUL-06: 视觉词汇表内部函数 */
 int slam_vocabulary_init(InternalVocabulary* vocab, const VisualVocabularyConfig* config);
 void slam_vocabulary_free(InternalVocabulary* vocab);
@@ -504,7 +500,7 @@ inline void slam_quaternion_to_rotation_matrix(const float* q, float* R) {
     R[8] = 1.0f - 2.0f*qx*qx - 2.0f*qy*qy;
 }
 
-inline void slam_rotation_matrix_to_quaternion(const float* R, float* q) {
+inline static void slam_rotation_matrix_to_quaternion(const float* R, float* q) {
     float trace = R[0] + R[4] + R[8];
     
     if (trace > 0.0f) {

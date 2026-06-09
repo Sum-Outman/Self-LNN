@@ -3,7 +3,11 @@
  * @brief 动态架构控制器实现 —— 运行时安全地修改液态神经网络结构
  *
  * 解决架构动态演化能力深度审计报告中确认的所有 P0/P1/P2 缺陷。
- */
+*/
+
+#ifdef _MSC_VER
+#pragma warning(disable: 4133)  /* const type mismatch in history record */
+#endif
 
 #define SELFLNN_IMPLEMENTATION
 #define SELFLNN_CORE_INTERNAL

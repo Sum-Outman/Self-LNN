@@ -4219,7 +4219,7 @@ int learning_manual_export_knowledge_graph(LearningEngine* engine,
             snprintf(pred, sizeof(pred), "exported_knowledge");
             entry.predicate = pred;
             snprintf(obj, sizeof(obj), "manual_learning docs=%zu",
-                    engine->manual_learning_system ? 0 : 0);
+                    (size_t)(engine->manual_learning_system ? 0 : 0));
             entry.object = obj;
             entry.confidence = CONFIDENCE_MEDIUM;
             entry.timestamp = (long)time(NULL);

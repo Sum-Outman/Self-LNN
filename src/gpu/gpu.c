@@ -3362,7 +3362,7 @@ int gpu_rmsprop_update(GpuContext* context, float* weights, const float* gradien
         case GPU_BACKEND_CUDA:
             /* P0-001: CUDA dispatch */
             if (cuda_rmsprop_update != NULL)
-                return cuda_rmsprop_update(context, weights, gradients, square_avg,
+                return cuda_rmsprop_update(context, weights, gradients, cache,
                                            size, learning_rate, beta,
                                            epsilon, weight_decay);
             break;
@@ -3371,7 +3371,7 @@ int gpu_rmsprop_update(GpuContext* context, float* weights, const float* gradien
         case GPU_BACKEND_OPENCL:
             /* P0-001: OpenCL dispatch */
             if (opencl_rmsprop_update != NULL)
-                return opencl_rmsprop_update(context, weights, gradients, square_avg,
+                return opencl_rmsprop_update(context, weights, gradients, cache,
                                              size, learning_rate, beta,
                                              epsilon, weight_decay);
             break;

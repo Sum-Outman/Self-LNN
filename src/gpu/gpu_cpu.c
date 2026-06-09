@@ -1282,7 +1282,9 @@ static float _fast_erf(float x) {
     return sign * (1.0f - poly);
 }
 
+#if !defined(_MSC_VER)
 __attribute__((unused))
+#endif
 static float _fast_erfc(float x) {
     return 1.0f - _fast_erf(x);
 }

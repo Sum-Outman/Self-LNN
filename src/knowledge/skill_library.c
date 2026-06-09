@@ -66,7 +66,6 @@ static void generate_embedding_impl(const SkillRecord* record, float* embedding,
      * 替代缺失的selflnn_shared_lnn_encode_text函数。文本→bigram特征→LNN前向。 */
     {
         extern void* selflnn_get_shared_lnn(void);
-        int lnn_forward_result;
         void* shared_lnn = selflnn_get_shared_lnn();
         if (shared_lnn) {
             char text_buf[2048];

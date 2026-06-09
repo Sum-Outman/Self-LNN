@@ -82,6 +82,7 @@ Desktop.ini
 
 # ====== 编辑器 ======
 .vscode/
+.vs/
 .idea/
 *.iml
 

@@ -7,6 +7,13 @@
 #ifndef SELFLNN_CORE_COMMON_H
 #define SELFLNN_CORE_COMMON_H
 
+/* MSVC C编译器不支持 __thread GCC关键字, 映射到 __declspec(thread) */
+#ifdef _MSC_VER
+  #ifndef __thread
+    #define __thread __declspec(thread)
+  #endif
+#endif
+
 /* 跨编译器兼容：MSVC 默认不定义 M_PI */
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -152,7 +159,13 @@ typedef enum {
 #endif
 
 // 对齐宏
-#define SELFLNN_ALIGN(n) __attribute__((aligned(n)))
+#if defined(__GNUC__) || defined(__clang__)
+  #define SELFLNN_ALIGN(n) __attribute__((aligned(n)))
+#elif defined(_MSC_VER)
+  #define SELFLNN_ALIGN(n) __declspec(align(n))
+#else
+  #define SELFLNN_ALIGN(n)
+#endif
 #define SELFLNN_CACHE_ALIGN SELFLNN_ALIGN(64)
 
 // 内联函数宏

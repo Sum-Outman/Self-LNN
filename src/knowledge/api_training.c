@@ -876,6 +876,10 @@ static int parse_api_url(const char* url, char* host, size_t host_size,
  * @param response 输出响应缓冲区（调用者负责free）
  * @return int 成功返回0，失败返回-1
  */
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 6262)  /* 16KB栈缓冲对HTTP请求合理 */
+#endif
 static int http_request(const char* method, const char* host, unsigned short port,
                         const char* path, const char* headers,
                         const char* body, size_t body_len,
@@ -1072,6 +1076,9 @@ static int http_request(const char* method, const char* host, unsigned short por
 #undef HTTP_RECV
 #undef HTTP_CLOSE
 }
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 
 /* ---------- 指数退避重试辅助 ---------- */
 

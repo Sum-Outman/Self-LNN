@@ -3149,7 +3149,9 @@ skip_agi_injection:
     g_last_cognition = g_start_time;
     g_last_safety = g_start_time;
 
+#ifndef _MSC_VER
 main_loop_restart:
+#endif
     /* E002修复: 移除Mini HTTP服务器（原代码在此启动独立原始socket HTTP服务器
      * 绑定8080端口，与BackendServer端口冲突导致bind失败。
      * BackendServer已提供完整的HTTP API服务，无需额外Mini HTTP服务器。 */

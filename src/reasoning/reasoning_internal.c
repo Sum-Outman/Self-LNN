@@ -1081,4 +1081,28 @@ void* reasoning_engine_get_causal_engine(ReasoningEngine* engine) {
     return (void*)engine->causal_engine;
 }
 
+/* ================================================================
+ * MSVC缺少的因果模型函数 (原在reasoning.c中, 该文件MSVC不编译)
+ * ================================================================ */
+StructuralCausalModel* causal_model_create(size_t max_variables) {
+    if (max_variables == 0 || max_variables > 10000) return NULL;
+    StructuralCausalModel* model = (StructuralCausalModel*)safe_malloc(sizeof(*model));
+    if (!model) return NULL;
+    memset(model, 0, sizeof(*model));
+    model->variable_capacity = max_variables;
+    model->variables = (CausalVariable*)safe_calloc(max_variables, sizeof(CausalVariable));
+    if (!model->variables) { safe_free((void**)&model); return NULL; }
+    return model;
+}
+
+void causal_model_free(StructuralCausalModel* model) {
+    if (!model) return;
+    for (size_t i = 0; i < model->num_variables; i++) {
+        safe_free((void**)&model->variables[i].parent_weights);
+        safe_free((void**)&model->variables[i].parent_ids);
+    }
+    safe_free((void**)&model->variables);
+    safe_free((void**)&model);
+}
+
 #endif /* _MSC_VER —— MSVC平台推理引擎实现结束 */

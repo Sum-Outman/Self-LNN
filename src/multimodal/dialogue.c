@@ -1639,7 +1639,11 @@ void* dialogue_memory_create(size_t capacity)
     return (void*)mem;
 }
 
+#ifndef _MSC_VER
 void dialogue_memory_free(void* memory_handle)
+#else
+static void dialogue_memory_free_msvc_stub(void* memory_handle)
+#endif
 {
     if (!memory_handle) return;
     dialogue_context_free((DialogueContext*)memory_handle);
