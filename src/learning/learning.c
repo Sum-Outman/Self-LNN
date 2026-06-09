@@ -1721,7 +1721,7 @@ int learning_self_correct(LearningEngine* engine,
                 last_err->root_cause,
                 last_err->suggested_fix);
 
-        static SelfProgrammingEngine* cached_prog = NULL;
+        static __thread SelfProgrammingEngine* cached_prog = NULL;
         if (!cached_prog) cached_prog = self_programming_engine_create(LANG_C);
         if (cached_prog) {
             int bridge_ret = programming_bridge_learn_to_improve(
@@ -4206,7 +4206,7 @@ int learning_manual_export_knowledge_graph(LearningEngine* engine,
 
     /* KG持久化: 将学习成果同步写入知识库 */
     {
-        static KnowledgeBase* learn_kg = NULL;
+        static __thread KnowledgeBase* learn_kg = NULL;
         if (!learn_kg) {
             learn_kg = knowledge_base_create(512);
         }

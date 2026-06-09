@@ -500,7 +500,7 @@ inline void slam_quaternion_to_rotation_matrix(const float* q, float* R) {
     R[8] = 1.0f - 2.0f*qx*qx - 2.0f*qy*qy;
 }
 
-inline static void slam_rotation_matrix_to_quaternion(const float* R, float* q) {
+inline void slam_rotation_matrix_to_quaternion(const float* R, float* q) {
     float trace = R[0] + R[4] + R[8];
     
     if (trace > 0.0f) {

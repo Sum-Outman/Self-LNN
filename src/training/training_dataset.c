@@ -614,11 +614,7 @@ int augment_mixup(TrainingDataset* ds, float alpha) {
         return -1;
     }
 
-#ifdef _MSC_VER
-    static unsigned int rng = 987654321;
-#else
     static __thread unsigned int rng = 987654321;
-#endif
     size_t half = n / 2;
     for (size_t i = 0; i < half; i++) {
         rng = rng * 1103515245 + 12345;

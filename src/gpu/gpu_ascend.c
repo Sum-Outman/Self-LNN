@@ -404,7 +404,7 @@ static void ascend_backend_cleanup(void) {
             }
         }
         if (g_ascend_cl.aclFinalize) {
-            g_ascend_cl.aclFinalize;
+            g_ascend_cl.aclFinalize();
         }
         ascend_cl_unload();
     }

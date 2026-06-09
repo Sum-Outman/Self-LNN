@@ -3920,7 +3920,7 @@ static int compute_evaluation_metrics(TrainingPipeline* pipeline) {
 /* ============================================================================
  * 简单线性同余随机数生成器（不依赖外部库）
  * ============================================================================ */
-static unsigned int aug_rng_state = 123456789u;
+static __thread unsigned int aug_rng_state = 123456789u;
 static float aug_rand_float(float min, float max) {
     aug_rng_state = aug_rng_state * 1103515245u + 12345u;
     float r = (float)(aug_rng_state & 0x7FFFFFFFu) / 2147483648.0f;

@@ -1,4 +1,4 @@
-﻿#include "selflnn/gpu/gpu.h"
+#include "selflnn/gpu/gpu.h"
 #include "selflnn/gpu/gpu_hardware_detect.h"
 #include "selflnn/core/common.h"
 #include "selflnn/utils/memory_utils.h"
@@ -541,12 +541,18 @@ static void cambricon_backend_stream_free(GpuStream* stream) {
 }
 
 static int cambricon_backend_stream_synchronize(GpuStream* stream) {
+    /* STUB-02: 寒武纪 MLU 流同步 — 无物理硬件, 同步操作无实际等待
+     * 调用者期望: MLU 上所有异步操作完成后返回。实际: 所有MLU操作均为同步, 无需等待 */
     if (!stream) return -1;
+    (void)stream;
     return 0;
 }
 
 static int cambricon_backend_stream_query(GpuStream* stream) {
+    /* STUB-02: 寒武纪 MLU 流查询 — 无物理硬件, 始终返回完成
+     * 调用者期望: 返回 MLU 流状态。实际: 所有操作同步完成, 流始终空闲 */
     if (!stream) return -1;
+    (void)stream;
     return 1;
 }
 

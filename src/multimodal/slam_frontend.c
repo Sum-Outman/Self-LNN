@@ -68,7 +68,10 @@ void slam_quaternion_to_rotation_matrix(const float* q, float* R) {
     R[8] = 1.0f - 2.0f*(xx + yy);
 }
 
-static void slam_rotation_matrix_to_quaternion(const float* R, float* q) {
+#ifdef _MSC_VER
+/* MSVC: 与slam.c重复定义, 该函数已由slam.c提供 */
+#else
+void slam_rotation_matrix_to_quaternion(const float* R, float* q) {
     float trace = R[0] + R[4] + R[8];
     if (trace > 0.0f) {
         float s = 0.5f / sqrtf(trace + 1.0f);
@@ -100,6 +103,7 @@ static void slam_rotation_matrix_to_quaternion(const float* R, float* q) {
         q[0] /= norm; q[1] /= norm; q[2] /= norm; q[3] /= norm;
     }
 }
+#endif /* _MSC_VER */
 
 void slam_project_point(const float* point3d, const float* R, const float* t,
                         const float* camera_params, float* u, float* v) {

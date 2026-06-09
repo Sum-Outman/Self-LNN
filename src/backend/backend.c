@@ -25401,14 +25401,14 @@ ApiResponse* backend_handle_request(BackendServer* server,
     static int null_handler_warned[API_HANDLER_COUNT] = {0};
     if (!table_initialized) {
         init_handler_table(handler_table);
-        /* R003: Register KG API handlers (slots 300-306) */
-        handler_table[300] = handle_api_kg_endpoint;
-        handler_table[301] = handle_api_kg_endpoint;
-        handler_table[302] = handle_api_kg_endpoint;
-        handler_table[303] = handle_api_kg_endpoint;
-        handler_table[304] = handle_api_kg_endpoint;
-        handler_table[305] = handle_api_kg_endpoint;
-        handler_table[306] = handle_api_kg_endpoint;
+        /* R003: Register KG API handlers (slots 307-313, 避开300/301产品端点) */
+        handler_table[307] = handle_api_kg_endpoint;
+        handler_table[308] = handle_api_kg_endpoint;
+        handler_table[309] = handle_api_kg_endpoint;
+        handler_table[310] = handle_api_kg_endpoint;
+        handler_table[311] = handle_api_kg_endpoint;
+        handler_table[312] = handle_api_kg_endpoint;
+        handler_table[313] = handle_api_kg_endpoint;
         table_initialized = 1;
 /* 验证所有槽位均非NULL（init_handler_table已用fill初始化）
          * 剩余NULL仅可能出现在的未被覆盖的槽位（理论上应为0） */

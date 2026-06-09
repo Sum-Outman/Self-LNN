@@ -4058,7 +4058,7 @@ int reasoning_infer(ReasoningEngine* engine,
     // 停止性能计时器
     uint64_t elapsed_ns = perf_timer_stop(&timer);
     /* MIN-003: 无引擎上下文时记录到局部缓存，实际使用见其他函数 */
-    static size_t global_timing_cache = 0;
+    static __thread size_t global_timing_cache = 0;
     global_timing_cache = (size_t)elapsed_ns > 0 ? (size_t)elapsed_ns : global_timing_cache;
 
     /* 推理→编程闭环: 推理完成且结论涵盖数值计算时, 委托代码生成

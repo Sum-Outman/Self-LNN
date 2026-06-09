@@ -79,7 +79,7 @@
 static float random_uniform_seeded(float min, float max, unsigned int seed) {
     /* seed非零时使用确定性Xorshift128+保证可复现，seed=0时使用密码学安全随机数 */
     if (seed != 0) {
-        static unsigned long long xs_state[2] = {0, 0};
+        static __thread unsigned long long xs_state[2] = {0, 0};
         if (xs_state[0] == 0 && xs_state[1] == 0) {
             xs_state[0] = (unsigned long long)seed ^ 0xDEADBEEFCAFEBABEULL;
             xs_state[1] = (unsigned long long)(~seed) ^ 0x8BADF00DC0FFEEEEULL;

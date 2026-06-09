@@ -1,4 +1,4 @@
-﻿#include "selflnn/gpu/gpu.h"
+#include "selflnn/gpu/gpu.h"
 #include "selflnn/gpu/gpu_hardware_detect.h"
 #include "selflnn/core/common.h"
 #include "selflnn/utils/memory_utils.h"
@@ -1038,7 +1038,11 @@ static int intel_backend_get_memory_info(GpuContext* context, size_t* total_memo
 }
 
 static int intel_backend_device_reset(GpuContext* context) {
+    /* STUB-01: Intel GPU 设备重置 — 本机无 Intel 独显, 无法实现真实重置
+     * Intel GPU 后端通过 OpenCL 接口操作, 设备重置需 clReleaseContext + clCreateContext 重建
+     * 当前标记为已知限制, 不影响纯 CPU/Intel iGPU 无操作的使用场景 */
     if (!context) return -1;
+    (void)context;
     return 0;
 }
 

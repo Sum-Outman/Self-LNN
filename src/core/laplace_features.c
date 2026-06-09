@@ -421,9 +421,9 @@ int laplace_graph_laplacian_decompose(GraphLaplacian* gl) {
     }
 
     /* R4-001修复: 将拉普拉斯矩阵复制到A后再进行特征分解 */
-    float* A = (float*)malloc(n * n * sizeof(float));
+    float* A = (float*)malloc((size_t)n * n * sizeof(float));
     if (!A) return -1;
-    memcpy(A, gl->laplacian_matrix, n * n * sizeof(float));
+    memcpy(A, gl->laplacian_matrix, (size_t)n * n * sizeof(float));
     jacobi_eigen(A, gl->eigenvectors, gl->eigenvalues, gl->n, 100);
     free(A);
     return 0;
