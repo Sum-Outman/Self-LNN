@@ -5207,7 +5207,7 @@ BackendServer* backend_server_create(const BackendConfig* config) {
     }
     
     // 初始化安全监控系统
-    server->safety_monitor = safety_monitor_create;
+    server->safety_monitor = safety_monitor_create();
     if (!server->safety_monitor) {
         selflnn_set_last_error(SELFLNN_ERROR_INITIALIZATION_FAILED, __func__, __FILE__, __LINE__,
                               "创建安全监控失败");
@@ -5246,7 +5246,7 @@ BackendServer* backend_server_create(const BackendConfig* config) {
     }
 
     // 初始化内容安全过滤器
-    server->content_filter = content_filter_create;
+    server->content_filter = content_filter_create();
     
 /* 绑定LNN语义分析层到content_filter，启用语义级内容过滤 */
     if (server->content_filter) {
@@ -12188,7 +12188,7 @@ static DeviceProtocolManager* g_device_manager = NULL;
 
 static void ensure_device_manager(void) {
     if (!g_device_manager) {
-        g_device_manager = device_protocol_create;
+        g_device_manager = device_protocol_create();
     }
 }
 
@@ -15876,7 +15876,7 @@ static int handle_api_get_hardware_resources(BackendServer* server,
                                    size_t request_length,
                                    ApiResponse* response) {
     char* json_data = NULL;
-    HardwareResourceManager* hrm = hrm_create;
+    HardwareResourceManager* hrm = hrm_create();
     int scanned = 0;
     if (hrm) {
         hrm_scan_devices(hrm);
@@ -15914,7 +15914,7 @@ static int handle_api_post_hardware_resources_allocate(BackendServer* server,
                                    size_t request_length,
                                    ApiResponse* response) {
     char* json_data = NULL;
-    HardwareResourceManager* hrm = hrm_create;
+    HardwareResourceManager* hrm = hrm_create();
     if (!hrm) {
         json_data = (char*)safe_malloc(128);
         if (json_data) {
