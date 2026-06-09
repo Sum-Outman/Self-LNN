@@ -12,6 +12,7 @@ add_library(selflnn_training
     training_dataset.c
     training_enhanced.c
     data_loaders.c
+    dataset_mnist.c
     training_data_pipeline.c
     # dataset_api.c已删除(20个重复定义+0有效代码,垃圾文件)
 )

@@ -522,8 +522,12 @@ int selflnn_validate_all_allocations(void) {
  * @brief 安全内存释放：释放内存并置空指针
  */
 void safe_free(void** ptr) {
-    /* P0-FIX: ptr本身可能被ODR/堆损坏污染,先校验 */
+    /* P0-FIX: ptr本身校验 — NULL/低地址/未对齐/MSVC调试填充 */
     if (!ptr || (uintptr_t)ptr < 0x1000 || ((uintptr_t)ptr & 7) != 0) return;
+    {   uint32_t lo = (uint32_t)((uintptr_t)ptr & 0xFFFFFFFF);
+        uint32_t hi = (uint32_t)((uintptr_t)ptr >> 32);
+        if (lo == hi && lo >= 0xCCCCCCCC) return; /* MSVC debug pattern */
+    }
 #ifdef USE_STANDARD_ALLOC
     if (*ptr) {
 #ifdef _MSC_VER

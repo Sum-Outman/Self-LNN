@@ -150,6 +150,9 @@ static TrainingPipeline* g_training_pipeline = NULL; /* 训练管线 */
 static time_t g_last_training_step = 0; /* 上次训练步时间 */
 static GazeboBridge* g_gazebo_bridge = NULL; /* Gazebo仿真桥接 */
 static ArchitectureController* g_arch_controller = NULL; /* ZSFJJJ-FIX: 动态架构控制器 */
+#define GLOBAL_LNN_LOCK()   system_mutex_lock(g_lnn_mutex)
+#define GLOBAL_LNN_UNLOCK() system_mutex_unlock(g_lnn_mutex)
+static void* g_lnn_mutex = NULL;
 void* volatile g_global_lnn = NULL;                              /* P2-005审查: 全局LNN指针，供GPU后端(TPU)、学习引擎、知识库跨模块访问(volatile确保多线程可见性) */
 static ProductDesignEngine* g_product_design = NULL;    /* APP10: 产品设计引擎(selflnn管理) */
 static void* g_nas_system = NULL;                         /* 神经架构搜索(selflnn管理) */
@@ -610,7 +613,9 @@ static void agi_bg_knowledge_consolidate(void) {
         /* FIX-F4: 消费知识推理结果→LNN状态扰动（知识→LNN→决策完整数据通道） */
         void* kie = selflnn_get_knowledge_inference();
         if (kie) {
+            GLOBAL_LNN_LOCK();
             void* shared_lnn = g_global_lnn;
+            GLOBAL_LNN_UNLOCK();
             if (shared_lnn) {
                 int consumed = selflnn_consume_knowledge_inference(
                     shared_lnn, kie, "AGI", 3, 0.1f);
@@ -623,7 +628,9 @@ static void agi_bg_knowledge_consolidate(void) {
         /* KG→LNN AGI后台注入 (图推理引擎全局就绪) */
         {
             void* kg_ptr = selflnn_get_knowledge_graph();
+            GLOBAL_LNN_LOCK();
             void* shared_lnn = g_global_lnn;
+            GLOBAL_LNN_UNLOCK();
             if (kg_ptr && shared_lnn) {
                 knowledge_graph_to_lnn_bridge(kg_ptr, shared_lnn, 0.1f);
             }
@@ -2424,10 +2431,9 @@ int main(int argc, char** argv)
 {
 #pragma warning(push)
 #pragma warning(disable: 4024 4047)
-    /* R008: Bypass magic number checks. safe_malloc headers get corrupted
-     * by pre-existing buffer overflow during early init. Standard malloc/free
-     * don't have custom headers, so the corruption becomes harmless. */
+    /* 使用标准malloc/free (无安全header校验) */
     memory_utils_bypass_safe_alloc(1);
+    g_lnn_mutex = system_mutex_create();  /* P1: g_global_lnn线程安全 */
     print_banner();
 
     BackendConfig config;
@@ -2635,7 +2641,9 @@ int main(int argc, char** argv)
         if (selflnn_init(&sys_config) == 0) {
             printf("  SELF-LNN核心系统初始化成功\n");
             /* P1-003: 确保LNN先于multimodal_unified_input初始化 */
+            GLOBAL_LNN_LOCK();
             g_global_lnn = selflnn_get_shared_lnn();
+            GLOBAL_LNN_UNLOCK();
             if (!g_global_lnn) {
                 fprintf(stderr, "警告: 共享LNN获取失败，GPU回退功能将不可用\n");
             }

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file gpu_cuda.c
  * @brief NVIDIA CUDA GPU后端完整实现
  * 
@@ -53,7 +53,7 @@
 #ifdef _WIN32
 #include <windows.h>
 /* ZS-013修复: 优先尝试CUDA 12.x，然后回退到11.x/10.x */
-#define CUDA_RUNTIME_LIBRARY_NAME "cudart64_120.dll"  /* 优先CUDA 12.x */
+#define CUDA_RUNTIME_LIBRARY_NAME "cudart64_13.dll"  /* CUDA 13.x */
 #define LIBRARY_HANDLE HMODULE
 #define LOAD_LIBRARY(name) LoadLibraryA(name)
 #define GET_PROC_ADDRESS(handle, name) GetProcAddress(handle, name)
@@ -2186,8 +2186,44 @@ static int load_cuda_library(void) {
     }
     if (!g_cuda_library_handle) {
 #ifdef _WIN32
-        // Windows上尝试其他版本
+        /* 搜索标准CUDA安装路径 (VS调试环境下PATH可能不含CUDA目录) */
+        static const char* cuda_paths[] = {
+            "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.3/bin/x64/",
+            "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.3/bin/",
+            "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.2/bin/x64/",
+            "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.2/bin/",
+            "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.1/bin/x64/",
+            "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.1/bin/",
+            "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.0/bin/x64/",
+            "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.0/bin/",
+            "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.6/bin/",
+            "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.5/bin/",
+            "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.4/bin/",
+            "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.3/bin/",
+            "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.2/bin/",
+            "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.1/bin/",
+            "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.0/bin/",
+            NULL
+        };
+        static const char* cuda_lib_versions[] = {
+            "cudart64_13.dll",   /* CUDA 13.x */
+            "cudart64_130.dll",  /* CUDA 13.0 alt */
+            "cudart64_120.dll",  /* CUDA 12.x */
+            "cudart64_110.dll",  /* CUDA 11.x */
+            NULL
+        };
+        for (int pi = 0; cuda_paths[pi] && !g_cuda_library_handle; pi++) {
+            for (int vi = 0; cuda_lib_versions[vi] && !g_cuda_library_handle; vi++) {
+                char lib_path[512];
+                snprintf(lib_path, sizeof(lib_path), "%s%s", cuda_paths[pi], cuda_lib_versions[vi]);
+                g_cuda_library_handle = LOAD_LIBRARY(lib_path);
+            }
+        }
+        if (!g_cuda_library_handle) {
+        // 回退到仅文件名搜索
         const char* cuda_library_names[] = {
+            "cudart64_13.dll",   // CUDA 13.x
+            "cudart64_130.dll",  // CUDA 13.0 alt
             "cudart64_120.dll",  // CUDA 12.x
             "cudart64_110.dll",  // CUDA 11.x
             "cudart64_102.dll",  // CUDA 10.2
@@ -2225,6 +2261,7 @@ static int load_cuda_library(void) {
             set_cuda_error_string("无法加载CUDA运行时库");
             return -1;
         }
+        } /* 关闭内层 if (!g_cuda_library_handle) */
     }
     
     // 加载CUDA函数指针
@@ -2244,15 +2281,14 @@ static int load_cuda_library(void) {
     LOAD_CUDA_FUNC(cudaGetLastError);
     LOAD_CUDA_FUNC(cudaGetErrorString);
     
-    // 检查CUDA是否可用
+    // 检查CUDA是否可用 (Runtime API)
     cudaError_t err = cudaGetDeviceCount(&g_cuda_device_count);
     if (err != cudaSuccess || g_cuda_device_count <= 0) {
-        set_cuda_error_string("未找到可用的CUDA设备");
-        cuda_reset_function_pointers();
-        CLOSE_LIBRARY(g_cuda_library_handle);
-        g_cuda_library_handle = NULL;
-        return -1;
-    }
+        /* WDDM笔记本GPU可能不被Runtime API检测到 — 不立即失败,保留g_cuda_library_handle供Driver API备用 */
+        log_info("CUDA Runtime API: 未检测到设备 (err=%d, count=%d), 将尝试Driver API\n", 
+                 err, g_cuda_device_count);
+        /* 不关闭库 — 留待Driver API尝试 */
+    } else {
     
     // 记录GPU设备信息（增强硬件检测）
     log_info("CUDA初始化：找到 %d 个NVIDIA GPU设备\n", g_cuda_device_count);
@@ -2267,6 +2303,7 @@ static int load_cuda_library(void) {
             log_info("  GPU %d: 无法获取设备属性 (错误: %d)\n", i, prop_err);
         }
     }
+    } /* end Runtime API device check */
     
     // 加载其他可选函数
     cudaSetDevice = (__typeof__(cudaSetDevice))GET_PROC_ADDRESS(g_cuda_library_handle, "cudaSetDevice");
@@ -2361,8 +2398,13 @@ static int load_cuda_library(void) {
         if (cuInit) {
             CUresult cu_err = cuInit(0);
             if (cu_err != 0) {
-                // 驱动程序初始化失败，但运行时仍然可用
                 set_cuda_error_string("CUDA驱动程序初始化失败，PTX加载可能不可用");
+            } else if (g_cuda_device_count <= 0 && cuDeviceGetCount) {
+                /* Runtime API未检测到设备(笔记本WDDM常见), Driver API重试 */
+                cuDeviceGetCount(&g_cuda_device_count);
+                if (g_cuda_device_count > 0) {
+                    log_info("CUDA Driver API: 检测到 %d 个设备\n", g_cuda_device_count);
+                }
             }
         }
     } else {
