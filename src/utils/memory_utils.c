@@ -542,11 +542,7 @@ void safe_free(void** ptr) {
     if (g_bypass_safe_alloc) {
         if (*ptr) {
 #ifdef _MSC_VER
-            { /* 重定向CRT断言防__debugbreak, 仍用free保持同堆 */
-              int _oldMode = _CrtSetReportMode(_CRT_ERROR, _CRTDBG_MODE_FILE);
-              _CrtSetReportFile(_CRT_ERROR, _CRTDBG_FILE_STDERR);
-              __try { free(*ptr); } __except(EXCEPTION_EXECUTE_HANDLER) {}
-              _CrtSetReportMode(_CRT_ERROR, _oldMode); }
+            __try { free(*ptr); } __except(EXCEPTION_EXECUTE_HANDLER) {}
 #else
             free(*ptr);
 #endif

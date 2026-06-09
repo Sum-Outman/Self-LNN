@@ -1494,8 +1494,9 @@ void gpu_cleanup(void) {
  * =========================================================================== */
 
 int gpu_get_device_count(GpuBackend backend) {
-    if (backend != GPU_BACKEND_CPU) return -1;
-    return 1;
+    if (backend == GPU_BACKEND_CPU) return 1;
+    /* 调度: gpu.c中已有完整版, MSVC下/FORCE:MULTIPLE选gpu.c版 */
+    return 0;
 }
 
 int gpu_get_device_info(GpuBackend backend, int device_index, GpuDeviceInfo* info) {
