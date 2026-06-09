@@ -4235,8 +4235,8 @@ Trainer* trainer_create(const TrainingConfig* config, LNN* network) {
         return NULL;
     }
     
-    // 分配训练器
-    Trainer* trainer = (Trainer*)safe_malloc(sizeof(Trainer));
+    // 分配训练器（calloc清零,避免未初始化字段被safe_free误释）
+    Trainer* trainer = (Trainer*)safe_calloc(1, sizeof(Trainer));
     if (!trainer) {
         selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
                               "创建训练器：内存分配失败");

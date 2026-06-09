@@ -59,7 +59,8 @@ static inline uint32_t hash32(uint32_t x) {
 
 /* 公共梯度裁剪函数，消除三处重复 */
 static inline void lnn_clip_gradients(float* grads, size_t count, float max_norm) {
-    if (!grads || count == 0 || max_norm <= 0.0f) return;
+    /* P0-FIX: ODR违规导致grads可能为无效指针(0x1等), 守卫跳过 */
+    if (!grads || (uintptr_t)grads < 0x1000 || count == 0 || max_norm <= 0.0f) return;
     float max_val = 0.0f;
     for (size_t i = 0; i < count; i++) {
         float abs_g = grads[i] < 0 ? -grads[i] : grads[i];

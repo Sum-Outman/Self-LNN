@@ -8,6 +8,9 @@
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/string_utils.h"
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 #include <stdlib.h>
 #include <string.h>
@@ -379,7 +382,7 @@ int selflnn_recovery_retry(SelfLNNErrorCode error_type, int (*retry_func)(void*)
 #ifdef _WIN32
             Sleep((DWORD)delay_ms);
 #else
-            usleep((useconds_t)(delay_ms * 1000));
+            usleep((unsigned int)(delay_ms * 1000));
 #endif
             delay_ms *= 2;
             if (delay_ms > MAX_RETRY_DELAY_MS) delay_ms = MAX_RETRY_DELAY_MS;

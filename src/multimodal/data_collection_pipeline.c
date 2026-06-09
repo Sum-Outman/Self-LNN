@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file data_collection_pipeline.c
  * @brief 多模态真实数据采集流水线实现
  *

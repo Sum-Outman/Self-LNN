@@ -78,6 +78,10 @@
 #include "selflnn/training/training_pipeline.h"
 #include <string.h>
 #include <time.h>
+#ifndef _WIN32
+#include <sys/time.h>
+#include <sys/stat.h>
+#endif
 #include <stdlib.h>
 #ifdef _DEBUG
 #include <crtdbg.h>
@@ -4291,7 +4295,11 @@ SELFLNN_API int selflnn_save_checkpoint(const char* filepath) {
         return -1;
     }
     /* 确保checkpoints目录存在 */
-    (void)mkdir("checkpoints");
+#ifdef _WIN32
+    (void)_mkdir("checkpoints");
+#else
+    (void)mkdir("checkpoints", 0755);
+#endif
     log_info("[selflnn] 正在保存检查点到: %s", filepath);
     return lnn_save(lnn, filepath);
 }

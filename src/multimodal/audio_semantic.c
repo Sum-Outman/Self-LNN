@@ -5963,7 +5963,8 @@ static float audio_semantic_calculate_contextual_fit(const AudioSemanticResult* 
     float emotion_change_score = 0.5f;
     
     // 计算情感类别变化
-    int emotion_category_diff = abs(result->emotion.category - prev_result->emotion.category);
+    int emotion_category_diff = (int)(result->emotion.category - prev_result->emotion.category);
+    if (emotion_category_diff < 0) emotion_category_diff = -emotion_category_diff;
     
     // 情感类别变化评分
     if (emotion_category_diff == 0) {

@@ -664,7 +664,7 @@ static void wasapi_capture_free(void* ctx_ptr) {
 
 #ifdef __linux__
 
-#include <alsa/asound.h>
+#include <alsa/asoundlib.h>
 
 /**
  * @brief Linux ALSA音频采集设备结构体

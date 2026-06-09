@@ -301,7 +301,7 @@ typedef struct {
 
 static int slam_frame_reader_open(const char* source, int width, int height) {
     if (!source) return -1;
-
+#ifdef _WIN32
     FrameReader* reader = (FrameReader*)slam_malloc(sizeof(FrameReader));
     if (!reader) return -1;
     memset(reader, 0, sizeof(FrameReader));
@@ -336,6 +336,10 @@ static int slam_frame_reader_open(const char* source, int width, int height) {
     reader->current_index = 0;
 
     return (int)(intptr_t)reader;
+#else
+    (void)width; (void)height;
+    return -1;
+#endif
 }
 
 static int slam_frame_reader_read(int reader_handle, float* image_data) {

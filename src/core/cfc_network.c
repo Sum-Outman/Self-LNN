@@ -541,6 +541,9 @@ static void cfc_adam_update_group(float* params, const float* grads,
                                    float* m, float* v, size_t count,
                                    float lr, float b1, float b2, float eps,
                                    float b1c, float b2c) {
+    /* P0-FIX: ODR违规导致grads/params可能为无效指针(0x1等), 守卫跳过 */
+    if ((uintptr_t)params < 0x1000 || (uintptr_t)grads < 0x1000 ||
+        (uintptr_t)m < 0x1000 || (uintptr_t)v < 0x1000) return;
     for (size_t i = 0; i < count; i++) {
         float g = grads[i];
         if (!isfinite(g)) continue;

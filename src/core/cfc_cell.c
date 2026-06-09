@@ -14,8 +14,9 @@
 /* SELFLNN_CORE_INTERNAL intentionally NOT defined here.
  * This allows #ifndef SELFLNN_CORE_INTERNAL below to include
  * both the local struct CfCCell definition AND all function implementations.
- * The header cfc_cell.h provides opaque typedef when flag is not defined.
- */
+ * P0-FIX: 定义SELFLNN_CORE_INTERNAL使用header统一struct
+ * #ifndef仅包裹本地struct,函数实现不受影响 */
+#define SELFLNN_CORE_INTERNAL
 
 #include "selflnn/core/cfc_cell.h"
 #include "selflnn/core/cfc_enhanced.h"
@@ -163,6 +164,7 @@ static float compute_init_limit(int use_xavier, int use_kaiming,
 /**
  * @brief CfC单元内部状态
  */
+#ifndef SELFLNN_CORE_INTERNAL
 typedef struct {
     float* state;           /**< 单元状态向量 */
     float* adapted_params;  /**< 自适应参数 */
@@ -210,6 +212,7 @@ typedef struct {
 /* 保存前向传播的output_gate用于CTBP反向传播 */
     float* saved_output_gate;      /**< 保存前向传播的output_gate [hidden_size] */
 } CfCState;
+#endif /* SELFLNN_CORE_INTERNAL */
 
 /**
  * @brief CfC单元内部结构体
@@ -329,6 +332,7 @@ struct CfCCell {
     float laplace_stability_score;            /**< 拉普拉斯分析器稳定性评分 [0,1] */
     void* liquid_scaling_mutex;              /**< 液时域缩放递归防护互斥锁（多线程安全） */
 };
+#endif /* P0-FIX: 仅包裹本地struct,函数在#endif之外 */
 
 /* ============ 门控CfC变体内部数据结构 ============ */
 
@@ -914,8 +918,9 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
     }
     cell->config.use_auto_solver = (cell->config.use_auto_solver != 0) ? 1 : 0;
     if (cell->config.use_auto_solver) {
-        cell->enhanced_config = cfc_enhanced_default_config();
-        cell->enhanced_config.enable_auto_solver = 1;
+        cell->enhanced_config = safe_malloc(sizeof(CfcEnhancedConfig));
+        *(CfcEnhancedConfig*)cell->enhanced_config = cfc_enhanced_default_config();
+        ((CfcEnhancedConfig*)cell->enhanced_config)->enable_auto_solver = 1;
         cell->enhanced_state = cfc_enhanced_state_create();
         if (!cell->enhanced_state) {
             cfc_cell_free(cell);
@@ -1112,6 +1117,7 @@ void cfc_cell_free(CfCCell* cell) {
         cfc_enhanced_state_free(cell->enhanced_state);
         cell->enhanced_state = NULL;
     }
+    safe_free((void**)&cell->enhanced_config);
 
     // 释放四元数CfC缓冲区（P2.4）
     safe_free((void**)&cell->quaternion_weights);
@@ -2270,7 +2276,7 @@ int cfc_cell_forward(CfCCell* cell, const float* input, float* hidden_state) {
         cfc_select_solver_by_stiffness(cell,
                                        cell->state->input_buffer,
                                        cell->state->state,
-                                       &cell->enhanced_config.auto_solver,
+                                       cell->enhanced_config ? &((CfcEnhancedConfig*)cell->enhanced_config)->auto_solver : NULL,
                                        cell->enhanced_state);
     }
 
@@ -6484,4 +6490,3 @@ int cfc_liquid_layernorm(float* tau_projection, size_t hidden_size) {
     for (size_t i = 0; i < hidden_size; i++) tau_projection[i] = (tau_projection[i] - mean) / var;
     return 0;
 }
-#endif /* SELFLNN_CORE_INTERNAL */

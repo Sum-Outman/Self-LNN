@@ -5,6 +5,9 @@
 #include <string.h>
 #include <math.h>
 #include <float.h>
+#ifndef _WIN32
+#define _POSIX_C_SOURCE 199309L
+#endif
 #include <time.h>
 
 #ifdef _WIN32

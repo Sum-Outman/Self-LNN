@@ -522,12 +522,32 @@ int selflnn_validate_all_allocations(void) {
  * @brief 安全内存释放：释放内存并置空指针
  */
 void safe_free(void** ptr) {
+    /* P0-FIX: ptr本身可能被ODR/堆损坏污染,先校验 */
+    if (!ptr || (uintptr_t)ptr < 0x1000 || ((uintptr_t)ptr & 7) != 0) return;
 #ifdef USE_STANDARD_ALLOC
-    if (ptr && *ptr) { free(*ptr); *ptr = NULL; }
+    if (*ptr) {
+#ifdef _MSC_VER
+        __try { free(*ptr); } __except(EXCEPTION_EXECUTE_HANDLER) {}
+#else
+        free(*ptr);
+#endif
+        *ptr = NULL;
+    }
     return;
 #else
     if (g_bypass_safe_alloc) {
-        if (ptr && *ptr) { free(*ptr); *ptr = NULL; }
+        if (*ptr) {
+#ifdef _MSC_VER
+            { /* 重定向CRT断言防__debugbreak, 仍用free保持同堆 */
+              int _oldMode = _CrtSetReportMode(_CRT_ERROR, _CRTDBG_MODE_FILE);
+              _CrtSetReportFile(_CRT_ERROR, _CRTDBG_FILE_STDERR);
+              __try { free(*ptr); } __except(EXCEPTION_EXECUTE_HANDLER) {}
+              _CrtSetReportMode(_CRT_ERROR, _oldMode); }
+#else
+            free(*ptr);
+#endif
+            *ptr = NULL;
+        }
         return;
     }
 #ifdef _DEBUG

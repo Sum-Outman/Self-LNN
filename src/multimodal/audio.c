@@ -1447,7 +1447,7 @@ static OSStatus audio_capture_render_cb(void* inRefCon,
     return status;
 }
 
-static int audio_capture_enumerate_devices(AudioCaptureDeviceInfo* devices, int max_devices) {
+int audio_capture_enumerate_devices(AudioCaptureDeviceInfo* devices, int max_devices) {
     if (!devices || max_devices <= 0) return 0;
 
     AudioObjectPropertyAddress propAddr = {
@@ -1508,7 +1508,7 @@ static int audio_capture_enumerate_devices(AudioCaptureDeviceInfo* devices, int 
     return actual;
 }
 
-static AudioCaptureContext* audio_capture_create(const char* device_id,
+AudioCaptureContext* audio_capture_create(const char* device_id,
                                            int sample_rate,
                                            int channels,
                                            int bits_per_sample) {
@@ -1571,7 +1571,7 @@ static AudioCaptureContext* audio_capture_create(const char* device_id,
     return ctx;
 }
 
-static int audio_capture_start(AudioCaptureContext* ctx,
+int audio_capture_start(AudioCaptureContext* ctx,
                          void (*callback)(const float*, size_t, void*),
                          void* user_data) {
     if (!ctx || !callback) return -1;
@@ -1585,7 +1585,7 @@ static int audio_capture_start(AudioCaptureContext* ctx,
     return 0;
 }
 
-static int audio_capture_process(AudioCaptureContext* ctx) {
+int audio_capture_process(AudioCaptureContext* ctx) {
     if (!ctx || !ctx->is_capturing || !ctx->audioUnit) return 0;
 
     /* 非阻塞轮询：从AudioUnit渲染一帧音频数据并通过回调传递 */
@@ -1608,7 +1608,7 @@ static int audio_capture_process(AudioCaptureContext* ctx) {
     return 0;
 }
 
-static int audio_capture_stop(AudioCaptureContext* ctx) {
+int audio_capture_stop(AudioCaptureContext* ctx) {
     if (!ctx) return -1;
     if (ctx->is_capturing) {
         AudioOutputUnitStop(ctx->audioUnit);
@@ -1617,7 +1617,7 @@ static int audio_capture_stop(AudioCaptureContext* ctx) {
     return 0;
 }
 
-static void audio_capture_free(AudioCaptureContext* ctx) {
+void audio_capture_free(AudioCaptureContext* ctx) {
     if (!ctx) return;
     audio_capture_stop(ctx);
     AudioUnitUninitialize(ctx->audioUnit);
@@ -1697,7 +1697,7 @@ static void* audio_capture_thread_func(void* arg) {
     return NULL;
 }
 
-static int audio_capture_enumerate_devices(AudioCaptureDeviceInfo* devices, int max_devices) {
+int audio_capture_enumerate_devices(AudioCaptureDeviceInfo* devices, int max_devices) {
     if (!devices || max_devices <= 0) return 0;
 
     char** hints;
@@ -1723,8 +1723,7 @@ static int audio_capture_enumerate_devices(AudioCaptureDeviceInfo* devices, int 
                 memset(info, 0, sizeof(AudioCaptureDeviceInfo));
                 snprintf(info->device_id, sizeof(info->device_id), "%s", name);
                 if (desc) {
-                    const char* nl = strchr(desc, '
-');
+                    const char* nl = strchr(desc, '\n');
                     size_t len = nl ? (size_t)(nl - desc) : strlen(desc);
                     if (len >= sizeof(info->name)) len = sizeof(info->name) - 1;
                     memcpy(info->name, desc, len);
@@ -1747,7 +1746,7 @@ static int audio_capture_enumerate_devices(AudioCaptureDeviceInfo* devices, int 
     return actual;
 }
 
-static AudioCaptureContext* audio_capture_create(const char* device_id,
+AudioCaptureContext* audio_capture_create(const char* device_id,
                                            int sample_rate,
                                            int channels,
                                            int bits_per_sample) {
@@ -1793,7 +1792,7 @@ static AudioCaptureContext* audio_capture_create(const char* device_id,
     return ctx;
 }
 
-static int audio_capture_start(AudioCaptureContext* ctx,
+int audio_capture_start(AudioCaptureContext* ctx,
                          void (*callback)(const float*, size_t, void*),
                          void* user_data) {
     if (!ctx || !callback) return -1;
@@ -1808,7 +1807,7 @@ static int audio_capture_start(AudioCaptureContext* ctx,
     return 0;
 }
 
-static int audio_capture_process(AudioCaptureContext* ctx) {
+int audio_capture_process(AudioCaptureContext* ctx) {
     if (!ctx || !ctx->is_capturing || !ctx->handle) return 0;
 
     /* 非阻塞轮询：检查ALSA可用帧数并读取 */
@@ -1865,7 +1864,7 @@ static int audio_capture_process(AudioCaptureContext* ctx) {
     return total_samples;
 }
 
-static int audio_capture_stop(AudioCaptureContext* ctx) {
+int audio_capture_stop(AudioCaptureContext* ctx) {
     if (!ctx) return -1;
     if (ctx->is_capturing) {
         ctx->thread_running = 0;
@@ -1875,7 +1874,7 @@ static int audio_capture_stop(AudioCaptureContext* ctx) {
     return 0;
 }
 
-static void audio_capture_free(AudioCaptureContext* ctx) {
+void audio_capture_free(AudioCaptureContext* ctx) {
     if (!ctx) return;
     audio_capture_stop(ctx);
     if (ctx->handle) {

@@ -7,6 +7,10 @@
 #include <math.h>
 #include <float.h>
 
+#ifndef _TRUNCATE
+#define _TRUNCATE ((size_t)-1)
+#endif
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846f
 #endif

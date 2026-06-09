@@ -186,6 +186,7 @@ typedef struct CfCState {
     float* symplectic_dpdt;        /**< 辛dp/dt */
     int symplectic_initialized;    /**< 辛积分器是否已初始化 */
     int symplectic_current_steps;   /**< 辛求解器当前步数 */
+    float* saved_state;             /**< 前向状态快照 (ODR fix) */
 } CfCState;
 
 struct CfCCell {
@@ -282,7 +283,20 @@ struct CfCCell {
      * cfc_closed_form_solution据此动态调整有效时间常数。
      * use_laplace_modulation和laplace_stability_alpha来自CfCCellConfig。 */
     float laplace_stability_score;
-    void* liquid_scaling_mutex;      /**< 液时域缩放递归防护互斥锁（多线程安全） */
+    void* liquid_scaling_mutex;      /**< 液时域缩放递归防护互斥锁 */
+    /* ODR fix: cfc_cell.c本地字段合并到header */
+    int use_quaternion;
+    float* quaternion_weights;
+    float* quaternion_biases;
+    float* quaternion_weight_grad;
+    float* quaternion_bias_grad;
+    float* quaternion_hidden_weights;
+    float* quaternion_hidden_weight_grad;
+    float* quaternion_time_constants;
+    float* quaternion_workspace;
+    void* cell_layer_norm;           /* LayerNorm* */
+    void* enhanced_state;            /* CfcEnhancedState* */
+    void* enhanced_config;           /* CfcEnhancedConfig* (曾为值类型) */
 };
 #endif
 

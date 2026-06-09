@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file model_version.c
  * @brief 模型版本管理模块实现
  *
@@ -328,9 +328,12 @@ ModelVersionManager* model_version_manager_create(const char* versions_dir, size
     mgr->capacity = 0;
 
     if (ensure_directory_exists(mgr->versions_dir) != 0) {
+        char dir_buf[512];
+        strncpy(dir_buf, mgr->versions_dir, sizeof(dir_buf)-1);
+        dir_buf[sizeof(dir_buf)-1] = '\0';
         safe_free((void**)&mgr);
         selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                              "创建版本存储目录失败：%s", mgr->versions_dir);
+                              "创建版本存储目录失败：%s", dir_buf);
         return NULL;
     }
 

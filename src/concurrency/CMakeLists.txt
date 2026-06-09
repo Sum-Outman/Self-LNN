@@ -17,10 +17,8 @@ add_library(selflnn_concurrency ${CONCURRENCY_SOURCES})
 # 链接库
 # S-NEW-3修复: 明确PRIVATE防止循环依赖传染传播
 target_link_libraries(selflnn_concurrency PRIVATE selflnn_core)
-if(WIN32)
-    target_link_libraries(selflnn_concurrency)
-else()
-    target_link_libraries(selflnn_concurrency pthread)
+if(NOT WIN32)
+    target_link_libraries(selflnn_concurrency PRIVATE pthread)
 endif()
 
 # 安装规则
