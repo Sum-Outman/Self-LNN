@@ -501,7 +501,7 @@ static int pipeline_save_checkpoint(TrainingPipeline* pipeline,
     {
 #ifdef _WIN32
         struct _stat st;
-        if (_stat("model", &st) != 0) _mkdir("model");
+        if (_stat("model", &st) != 0) (void)_mkdir("model");
 #else
         struct stat st;
         if (stat("model", &st) != 0) mkdir("model", 0755);
@@ -1096,6 +1096,10 @@ static int try_load_text_dataset(const char* filepath, float** data_out, size_t*
     return 0;
 }
 
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 6262)  /* 131KB栈: 数据加载需要大缓冲区 */
+#endif
 static int load_real_data_from_directory(TrainingPipeline* pipeline) {
     if (!pipeline) return -1;
 
@@ -1557,6 +1561,9 @@ int training_pipeline_load_data(TrainingPipeline* pipeline, const char* data_pat
     strncpy(pipeline->state.dataset_path, data_path, sizeof(pipeline->state.dataset_path) - 1);
     return 0;
 }
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 
 /* 前向声明 */
 static int compute_evaluation_metrics(TrainingPipeline* pipeline);

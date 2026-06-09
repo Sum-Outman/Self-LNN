@@ -759,6 +759,10 @@ int lnn_forward_state_sync_back(LNN* network, LNNForwardState* state) {
  * @param skip_cell_update 1=跳过cell参数更新（批量梯度累积模式）
  */
 int _lnn_backward_internal_ex(LNN* network, const float* target, float* loss, int skip_cell_update) {
+    fprintf(stderr, "[BWD] enter: os=%zu hs=%zu is=%zu layers=%d\n",
+            network->config.output_size, network->config.hidden_size,
+            network->config.input_size, network->config.num_layers);
+    fflush(stderr);
     clock_t start_time = clock();
     size_t output_size = network->config.output_size;
     size_t input_size = network->config.input_size;
@@ -809,11 +813,16 @@ int _lnn_backward_internal_ex(LNN* network, const float* target, float* loss, in
      *   4. 恢复LNN状态
      * 当前单样本模式(skip_cell_update=0)在批量训练时梯度方差大，
      * 如需批量训练建议启用此路径。 */
+    fprintf(stderr, "[BWD] before cfc_backward_ex: hs=%zu lr=%.6f skip=%d\n",
+            hidden_size, network->config.learning_rate, skip_cell_update);
+    fflush(stderr);
     int result = cfc_backward_ex(network->cfc_network,
                             error_gradient,
                             network->gradient_buffer,
                             network->config.learning_rate,
                             skip_cell_update);
+    fprintf(stderr, "[BWD] after cfc_backward_ex: result=%d\n", result);
+    fflush(stderr);
     SELFLNN_CHECK(result == 0, SELFLNN_ERROR_NETWORK_CONFIG,
                  "CfC网络反向传播失败");
 /* 公共梯度裁剪替代内联循环 */
@@ -3073,20 +3082,22 @@ int lnn_shard_allreduce_gradients(LNN* net, float** shard_gradients,
 
     memset(global_gradients, 0, grad_size * sizeof(float));
     int active_shards = 0;
+    int last_valid_shard = -1;
 
     for (int s = 0; s < num_shards; s++) {
         if (!shard_gradients[s]) continue;
         active_shards++;
         for (size_t i = 0; i < grad_size; i++)
             global_gradients[i] += shard_gradients[s][i];
+        last_valid_shard = s;
     }
 
     if (active_shards > 1) {
         float inv = 1.0f / (float)active_shards;
         for (size_t i = 0; i < grad_size; i++)
             global_gradients[i] *= inv;
-    } else if (active_shards == 1) {
-        memcpy(global_gradients, shard_gradients[0], grad_size * sizeof(float));
+    } else if (active_shards == 1 && last_valid_shard >= 0) {
+        memcpy(global_gradients, shard_gradients[last_valid_shard], grad_size * sizeof(float));
     }
 
     return active_shards;

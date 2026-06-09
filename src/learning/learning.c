@@ -1940,12 +1940,13 @@ int learning_self_correct(LearningEngine* engine,
                 
                 // 记录学习事件
                 // printf("学习新修正规则：%s，质量=%.3f\n", pattern, correction_quality);
-            } else {
+            } else if (engine->self_correction.correction_rules && 
+                       engine->self_correction.correction_rules_size > 0) {
                 // 规则库已满，替换最不常用的规则
                 // 查找使用次数最少且置信度最低的规则
                 size_t worst_rule_idx = 0;
-                float worst_score = 1000.0f; // 高分表示差
-                
+                float worst_score = 1000.0f;
+
                 for (size_t i = 0; i < engine->self_correction.correction_rules_size; i++) {
                     CorrectionRule* rule = &engine->self_correction.correction_rules[i];
                     

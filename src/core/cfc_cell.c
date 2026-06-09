@@ -2010,19 +2010,32 @@ static int cfc_cell_rosenbrock_parallel(CfCCell* cell, const float* input,
                 float y_save = prev_state[col];
                 float h_var = eps * (float)fmax(1.0, (double)fabs(y_save));
 
+#ifdef _MSC_VER
+                float* y_pert = (float*)_malloca(n * sizeof(float));
+                if (!y_pert) continue;
+#else
                 float* y_pert = (float*)alloca(n * sizeof(float));
+#endif
                 memcpy(y_pert, prev_state, n * sizeof(float));
                 y_pert[col] += h_var;
 
+#ifdef _MSC_VER
+                float* f_pert = (float*)_malloca(n * sizeof(float));
+                float* f_base = (float*)_malloca(n * sizeof(float));
+                if (!f_pert || !f_base) { _freea(y_pert); _freea(f_pert); _freea(f_base); continue; }
+#else
                 float* f_pert = (float*)alloca(n * sizeof(float));
-                cfc_cell_compute_rhs(cell, input, y_pert, f_pert);
-
                 float* f_base = (float*)alloca(n * sizeof(float));
+#endif
+                cfc_cell_compute_rhs(cell, input, y_pert, f_pert);
                 cfc_cell_compute_rhs(cell, input, prev_state, f_base);
 
                 for (size_t i = 0; i < n; i++) {
                     J_local[j * (int)n + i] = (f_pert[i] - f_base[i]) / h_var;
                 }
+#ifdef _MSC_VER
+                _freea(y_pert); _freea(f_pert); _freea(f_base);
+#endif
             }
         }
     }
@@ -4042,7 +4055,7 @@ int cfc_cell_backward_ctbp(CfCCell* cell, const float* input,
     int has_trajectory = (traj_size > 0 && cell->state->ctbp_state_trajectory != NULL);
     
     /* 如果没有轨迹缓存，使用当前状态作为h_{t+Δt} */
-    const float* h_next = cell->state->activation;
+    const float* h_next = cell->state ? cell->state->activation : NULL;
     
     float delta_t = cell->config.delta_t;
     if (time_span > 0.0f) delta_t = time_span;
@@ -4057,6 +4070,7 @@ int cfc_cell_backward_ctbp(CfCCell* cell, const float* input,
          * 通过逆时间求解伴随方程计算梯度。更节省内存，
          * 但需要在前向传播时存储或重新计算状态。
          * P0-002深度修复: 移除内部梯度清零，由调用方统一清零。 */
+        if (!h_next) return -1;
         
         /* 如果有轨迹缓存，从轨迹中获取h_next */
         if (has_trajectory && traj_size >= (int)hidden_size) {
@@ -5260,9 +5274,9 @@ int cfc_cell_backward_adjoint(CfCCell* cell, const float* output_gradient, float
             float fg_sum = cell->gate_biases[i * 3 + 1];
             float og_sum = cell->gate_biases[i * 3 + 2];
             float activation_input_sum = cell->bias_vector[i];
-            const float* fwd_input = cell->state->input_buffer;
-            const float* h_next = cell->state->activation;
-
+            const float* fwd_input = cell->state ? cell->state->input_buffer : NULL;
+            const float* h_next = cell->state ? cell->state->activation : NULL;
+            if (!fwd_input || !h_next) return -1;
             for (size_t j = 0; j < input_size; j++) {
                 size_t idx = i * input_size + j;
                 ig_sum += cell->input_gate_weights[idx] * fwd_input[j];

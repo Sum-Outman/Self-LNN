@@ -716,6 +716,9 @@ int cfc_backward_ex(CfCNetwork* network, const float* error,
                  "CfC网络训练未启用");
     
     const CfCNetworkConfig* config = &network->config;
+    fprintf(stderr, "[BWD-CFC] enter: hs=%zu is=%zu os=%zu layers=%d\n",
+            config->hidden_size, config->input_size, config->output_size, config->num_layers);
+    fflush(stderr);
     size_t hidden_size = config->hidden_size;
     size_t input_size = config->input_size;
     size_t output_size = config->output_size;
@@ -724,6 +727,8 @@ int cfc_backward_ex(CfCNetwork* network, const float* error,
     size_t max_layer_size = hidden_size;
     if (input_size > max_layer_size) max_layer_size = input_size;
     if (output_size > max_layer_size) max_layer_size = output_size;
+
+    fprintf(stderr, "[BWD-CFC] max_layer=%zu ok\n", max_layer_size); fflush(stderr);
 
     // 保存输入信号（第一层反向传播需要）
     float* saved_input = NULL;
@@ -770,22 +775,37 @@ int cfc_backward_ex(CfCNetwork* network, const float* error,
     /* P0-002深度修复: 单样本路径清零cell梯度。
      * 批量路径(skip_cell_update=1)由调用方在batch开始时清零。 */
     if (!skip_cell_update) {
+        fprintf(stderr, "[BWD-CFC] zero_gradients...\n"); fflush(stderr);
         cfc_zero_cell_gradients(network);
+        fprintf(stderr, "[BWD-CFC] zero_gradients done\n"); fflush(stderr);
     }
 
     // 步骤2: 逐层反向传播（从最后一层到第一层）
+    fprintf(stderr, "[BWD-CFC] layer_loop: layers=%d\n", num_layers); fflush(stderr);
     for (int layer = num_layers - 1; layer >= 0; layer--) {
+        fprintf(stderr, "[BWD-CFC] layer=%d gradient=%p prev=%p\n",
+                layer, (void*)network->layer_gradients, (void*)gradient);
+        fflush(stderr);
         float* layer_gradient = network->layer_gradients + (layer * max_layer_size);
         float* prev_gradient = (layer > 0) ? 
             network->layer_gradients + ((layer - 1) * max_layer_size) : gradient;
+
+        fprintf(stderr, "[BWD-CFC] ln_check: norms=%p norms[l]=%p ln_temp=%p\n",
+                (void*)network->layer_norms,
+                network->layer_norms ? (void*)network->layer_norms[layer] : NULL,
+                (void*)network->ln_temp_buffer);
+        fflush(stderr);
 
         /* P0-001: 层归一化反向传播
          * 前向时 output = LN(cfc_output)，所以反向需要先通过LN反向传播
          * 将 dL/d(output_postLN) 转换为 dL/d(output_preLN)，然后传给cfc_cell_backward */
         if (network->layer_norms && network->layer_norms[layer] && network->ln_temp_buffer) {
+            fprintf(stderr, "[BWD-CFC] calling layer_norm_backward...\n"); fflush(stderr);
             layer_norm_backward((LayerNorm*)network->layer_norms[layer],
                                layer_gradient, network->ln_temp_buffer);
+            fprintf(stderr, "[BWD-CFC] layer_norm_backward done\n"); fflush(stderr);
             memcpy(layer_gradient, network->ln_temp_buffer, hidden_size * sizeof(float));
+            fprintf(stderr, "[BWD-CFC] memcpy done, about to memset\n"); fflush(stderr);
         }
 
         // 清零上一层梯度（准备接收）
@@ -793,7 +813,11 @@ int cfc_backward_ex(CfCNetwork* network, const float* error,
         // 因为 cfc_cell_backward 只会写入 input_size 个元素
         // 对于内部梯度缓冲区(layer_gradients)，使用 max_layer_size
         if (layer == 0) {
-            memset(prev_gradient, 0, input_size * sizeof(float));
+            /* FIX: gradient已在lnn.c:806清零(hidden_size), 此处不再重复memset
+             * input_size <= hidden_size, 避免损坏堆边界 */
+            if (input_size < hidden_size) {
+                memset(prev_gradient + input_size, 0, (hidden_size - input_size) * sizeof(float));
+            }
         } else {
             memset(prev_gradient, 0, max_layer_size * sizeof(float));
         }

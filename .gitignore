@@ -45,6 +45,7 @@ test_*.trx
 # ====== 日志 ======
 *.log
 logs/
+debug_log.txt
 
 # ====== 系统文件 ======
 .DS_Store
