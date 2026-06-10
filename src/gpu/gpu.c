@@ -1924,6 +1924,11 @@ GpuContext* gpu_context_create(GpuBackend backend, int device_index) {
         return NULL;
     }
     struct GpuContext* ctx = GPU_TO_INTERNAL(context);
+    /* 后端已初始化则跳过二次设置(如CUDA用自定义CudaContextInternal布局) */
+    if (!ctx->is_initialized) {
+        ctx->backend = backend;
+        ctx->device_index = device_index;
+    }
     AutoKernelOptimizer* opt = auto_kernel_optimizer_create(device_index, ctx->device_name);
     if (opt) {
         ctx->kernel_optimizer = opt;

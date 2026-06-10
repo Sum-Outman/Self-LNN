@@ -1134,17 +1134,17 @@ static const char* CUDA_CFC_ODE_STEP_SIMPLE_KERNEL =
 /* 矩阵乘法PTX (SM 5.0+, 64位地址空间, 简单平铺实现)
  * 参数: A[m×n], B[n×k], C[m×k], m, n, k */
 static const char* PTX_MATMUL_KERNEL =
-".version 5.0\n"
-".target sm_50\n"
+".version 7.0\n"
+".target sm_89\n"
 ".address_size 64\n"
 "\n"
-".visible .entry matmul_embedded(\n"
-"    .param .u64 matmul_embedded_param_0,\n"
-"    .param .u64 matmul_embedded_param_1,\n"
-"    .param .u64 matmul_embedded_param_2,\n"
-"    .param .u32 matmul_embedded_param_3,\n"
-"    .param .u32 matmul_embedded_param_4,\n"
-"    .param .u32 matmul_embedded_param_5\n"
+".visible .entry matmul_train(\n"
+"    .param .u64 matmul_train_param_0,\n"
+"    .param .u64 matmul_train_param_1,\n"
+"    .param .u64 matmul_train_param_2,\n"
+"    .param .u32 matmul_train_param_3,\n"
+"    .param .u32 matmul_train_param_4,\n"
+"    .param .u32 matmul_train_param_5\n"
 ")\n"
 "{\n"
 "    .reg .f32   %f<8>;\n"
@@ -1212,8 +1212,8 @@ static const char* PTX_MATMUL_KERNEL =
 /* 2D卷积PTX (SM 5.0+)
  * 参数: input[N×C×H×W], kernel[K×C×KH×KW], output[N×K×OH×OW] */
 static const char* PTX_CONV2D_KERNEL =
-".version 5.0\n"
-".target sm_50\n"
+".version 7.0\n"
+".target sm_89\n"
 ".address_size 64\n"
 "\n"
 ".visible .entry conv2d_embedded(\n"
@@ -1320,8 +1320,8 @@ static const char* PTX_CONV2D_KERNEL =
  * 参数: h[hidden], x[input], W[hidden*(hidden+input)], b[hidden], hidden, input
  * 计算: h[i] = tanh(b[i] + W[i,:]*h + W[:,i+hidden]*x) */
 static const char* PTX_CFC_STEP_KERNEL =
-".version 5.0\n"
-".target sm_50\n"
+".version 7.0\n"
+".target sm_89\n"
 ".address_size 64\n"
 "\n"
 ".visible .entry cfc_step_embedded(\n"
@@ -1732,18 +1732,19 @@ typedef struct {
  * @brief CUDA上下文内部结构
  */
 typedef struct {
-    int device_id;                // 设备ID
-    CUcontext driver_context;     // CUDA驱动程序上下文
-    cudaDevicePropCompat prop;    // 设备属性
-    cudaStream_t default_stream;  // 默认流（运行时API）
-    CUstream driver_stream;       // 驱动程序API流（可选）
-    int initialized;              // 是否已初始化
+    GpuContext header;             /**< 通用GPU上下文(与gpu_context_create兼容) */
+    int device_id;                 /**< 设备ID */
+    CUcontext driver_context;      /**< CUDA驱动程序上下文 */
+    cudaDevicePropCompat prop;     /**< 设备属性 */
+    cudaStream_t default_stream;   /**< 默认流（运行时API） */
+    CUstream driver_stream;        /**< 驱动程序API流（可选） */
+    int initialized;               /**< 是否已初始化 */
     
-    // 内核编译缓存
+    /** 内核编译缓存 */
     CudaCacheEntry kernel_cache[CUDA_CACHE_MAX_ENTRIES];
-    int cache_count;              // 当前缓存条目数
-    int cache_hits;               // 缓存命中次数
-    int cache_misses;             // 缓存未命中次数
+    int cache_count;               /**< 当前缓存条目数 */
+    int cache_hits;                /**< 缓存命中次数 */
+    int cache_misses;              /**< 缓存未命中次数 */
 } CudaContextInternal;
 
 /**
@@ -2592,13 +2593,13 @@ static char* compile_cuda_to_ptx(const char* cuda_source, size_t* ptx_size) {
             return NULL;
         }
         snprintf(command, command_needed,
-                 "\"%s\" -ptx -arch=sm_50 -o \"%s\" \"%s\"",
+                 "cmd /c \"\"%s\" -ptx -arch=sm_89 -o \"%s\" \"%s\"\"",
                  nvcc_path, temp_ptx_path, temp_cu_path);
     } else {
         char command_stack[2048];
         command = command_stack;
         snprintf(command, 2048,
-                 "\"%s\" -ptx -arch=sm_50 -o \"%s\" \"%s\"",
+                 "cmd /c \"\"%s\" -ptx -arch=sm_89 -o \"%s\" \"%s\"\"",
                  nvcc_path, temp_ptx_path, temp_cu_path);
     }
 
@@ -2908,6 +2909,12 @@ static GpuContext* cuda_backend_context_create(int device_index) {
         return NULL;
     }
     
+    /* 填充 GpuContext header (gpu_context_create 兼容) */
+    ctx->header.backend = GPU_BACKEND_CUDA;
+    ctx->header.device_index = device_index;
+    ctx->header.is_initialized = 1;
+    snprintf(ctx->header.device_name, sizeof(ctx->header.device_name),
+             "CUDA Device %d", device_index);
     ctx->device_id = device_index;
     
     // 获取设备属性
@@ -4146,7 +4153,7 @@ int cuda_forward_dense(GpuContext* ctx, const float* input, const float* weights
     const float* bias, float* output, size_t batch_size,
     size_t input_size, size_t output_size, GpuActivationType act, float alpha) {
     if (!ctx || !input || !weights || !output || batch_size == 0 || input_size == 0 || output_size == 0) {
-        set_cuda_error_string("cuda_forward_dense: 参数无效");
+        set_cuda_error_string("cuda_forward_dense: param null");
         return -1;
     }
     if (!g_cuda_available) {
@@ -4157,13 +4164,15 @@ int cuda_forward_dense(GpuContext* ctx, const float* input, const float* weights
     size_t input_bytes = batch_size * input_size * sizeof(float);
     size_t weight_bytes = output_size * input_size * sizeof(float);
     size_t output_bytes = batch_size * output_size * sizeof(float);
-
     float* d_input = NULL, *d_weights = NULL, *d_temp = NULL, *d_output = NULL;
     float* d_bias = NULL;
     cudaError_t err;
 
+    /* WDDM笔记本: cudaSetDevice可能在上下文切换后失效, 每次操作前重设 */
+    if (cudaSetDevice) cudaSetDevice(0);
+    if (!cudaMalloc) return -1;
     err = cudaMalloc((void**)&d_input, input_bytes);
-    if (err != cudaSuccess) { set_cuda_error_string("cuda_forward_dense: cudaMalloc(input) 失败"); return -1; }
+    if (err != cudaSuccess) { return -1; }
     err = cudaMalloc((void**)&d_weights, weight_bytes);
     if (err != cudaSuccess) { set_cuda_error_string("cuda_forward_dense: cudaMalloc(weights) 失败"); cudaFree(d_input); return -1; }
     err = cudaMalloc((void**)&d_temp, output_bytes);
@@ -4283,7 +4292,10 @@ int cuda_forward_dense(GpuContext* ctx, const float* input, const float* weights
     }
 
     /* 拷贝结果回主机 */
-    cudaMemcpy(output, d_output, output_bytes, cudaMemcpyDeviceToHost);
+    if (cudaDeviceSynchronize) cudaDeviceSynchronize();
+    if (cudaSetDevice) cudaSetDevice(0);
+    cudaError_t copy_err = cudaMemcpy(output, d_output, output_bytes, cudaMemcpyDeviceToHost);
+    (void)copy_err;
 
     cudaFree(d_input);
     cudaFree(d_weights);

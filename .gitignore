@@ -117,4 +117,8 @@ plan.md
 PPP.md
 工程落地计划.md
 out/
+build.bat
+build.sh
+start.bat
+start.sh
 _temp_check*
