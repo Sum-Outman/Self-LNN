@@ -1834,58 +1834,30 @@ int audio_semantic_process_text(AudioSemanticProcessor* processor,
                 safe_free((void**)&logits);
                 audio_semantic_free(features);
             } else {
-                // 内存分配失败，使用启发式方法
+                /* 内存分配失败 — 无法执行情感分析，返回零值（不使用启发式） */
                 if (features) {
                     audio_semantic_free(features);
                 }
-                goto heuristic_emotion;
+                result->emotion.category = EMOTION_NEUTRAL;
+                result->emotion.intensity = 0.0f;
+                result->emotion.valence = 0.0f;
+                result->emotion.arousal = 0.0f;
+                result->emotion.dominance = 0.0f;
+                for (int i = 0; i < 10; i++) {
+                    result->emotion.probabilities[i] = 0.0f;
+                }
             }
         } else {
-            // 模型未训练，使用启发式方法
-heuristic_emotion:
-            log_info("[音频语义] 情感分析进入启发式回退模式（模型未训练或资源不足），使用基于规则的启发式分析");
-            if (result->recognized_text) {
-                char* txt = result->recognized_text;
-                int has_question = (strstr(txt, "?") != NULL || strstr(txt, "什么") != NULL);
-                int has_exclamation = (strstr(txt, "!") != NULL || strstr(txt, "！") != NULL);
-                
-                if (has_exclamation) {
-                    result->emotion.category = EMOTION_SURPRISE;
-                    result->emotion.intensity = 0.8f;
-                    result->emotion.valence = 0.6f;
-                    result->emotion.arousal = 0.9f;
-                    result->emotion.dominance = 0.5f;
-                } else if (has_question) {
-                    result->emotion.category = EMOTION_CURIOUS;
-                    result->emotion.intensity = 0.6f;
-                    result->emotion.valence = 0.5f;
-                    result->emotion.arousal = 0.7f;
-                    result->emotion.dominance = 0.4f;
-                } else {
-                    result->emotion.category = EMOTION_NEUTRAL;
-                    result->emotion.intensity = 0.5f;
-                    result->emotion.valence = 0.0f;
-                    result->emotion.arousal = 0.5f;
-                    result->emotion.dominance = 0.5f;
-                }
-                
-                // 设置概率（最高概率给当前类别）
-                for (int i = 0; i < 10; i++) {
-                    result->emotion.probabilities[i] = 0.0f;
-                }
-                result->emotion.probabilities[result->emotion.category] = 0.8f;
-            } else {
-                // 无文本，使用中性情感
-                result->emotion.category = EMOTION_NEUTRAL;
-                result->emotion.intensity = 0.5f;
-                result->emotion.valence = 0.0f;
-                result->emotion.arousal = 0.5f;
-                result->emotion.dominance = 0.5f;
-                
-                for (int i = 0; i < 10; i++) {
-                    result->emotion.probabilities[i] = 0.0f;
-                }
-                result->emotion.probabilities[EMOTION_NEUTRAL] = 0.8f;
+            /* P1-003修复: 模型未训练，拒绝启发式回退
+             * 需求明确禁止使用任何情感功能，此处不生成任何情感数据。
+             * 当模型未训练时返回中性占位符（非情感判断），不生成虚假情感标签。 */
+            result->emotion.category = EMOTION_NEUTRAL;
+            result->emotion.intensity = 0.0f;
+            result->emotion.valence = 0.0f;
+            result->emotion.arousal = 0.0f;
+            result->emotion.dominance = 0.0f;
+            for (int i = 0; i < 10; i++) {
+                result->emotion.probabilities[i] = 0.0f;
             }
         }
     }
@@ -2001,74 +1973,26 @@ heuristic_emotion:
                 
                 safe_free((void**)&logits);
             } else {
-                // 内存分配失败，使用启发式方法
-                goto heuristic_intent;
+                /* 内存分配失败 — 无法执行意图识别，返回零值（不使用启发式） */
+                result->intent.category = AUDIO_INTENT_STATEMENT;
+                result->intent.intent_name = audio_semanticstring_duplicate("未知");
+                result->intent.intent_description = audio_semanticstring_duplicate("意图识别不可用");
+                result->intent.confidence = 0.0f;
+                for (int i = 0; i < 13; i++) {
+                    result->intent.probabilities[i] = 0.0f;
+                }
             }
         } else {
-            // 模型未训练，使用启发式方法
-heuristic_intent:
-            log_info("[音频语义] 意图识别进入启发式回退模式（模型未训练或资源不足），使用基于关键词规则的启发式分析");
-            if (strstr(text, "?") != NULL || 
-                strstr(text, "什么") != NULL ||
-                strstr(text, "如何") != NULL ||
-                strstr(text, "为什么") != NULL ||
-                strstr(text, "吗") != NULL ||
-                strstr(text, "呢") != NULL) {
-                result->intent.category = AUDIO_INTENT_QUESTION;
-                result->intent.intent_name = audio_semanticstring_duplicate("提问");
-                result->intent.intent_description = audio_semanticstring_duplicate("用户正在提出问题");
-                result->intent.confidence = 0.7f;
-            } else if (strstr(text, "请") != NULL ||
-                       strstr(text, "帮我") != NULL ||
-                       strstr(text, "想要") != NULL ||
-                       strstr(text, "需要") != NULL ||
-                       strstr(text, "希望") != NULL) {
-                result->intent.category = AUDIO_INTENT_REQUEST;
-                result->intent.intent_name = audio_semanticstring_duplicate("请求");
-                result->intent.intent_description = audio_semanticstring_duplicate("用户正在提出请求");
-                result->intent.confidence = 0.6f;
-            } else if (strstr(text, "你好") != NULL ||
-                       strstr(text, "您好") != NULL ||
-                       strstr(text, "早上好") != NULL ||
-                       strstr(text, "晚上好") != NULL ||
-                       strstr(text, "嗨") != NULL) {
-                result->intent.category = AUDIO_INTENT_GREETING;
-                result->intent.intent_name = audio_semanticstring_duplicate("问候");
-                result->intent.intent_description = audio_semanticstring_duplicate("用户正在打招呼");
-                result->intent.confidence = 0.9f;
-            } else if (strstr(text, "再见") != NULL ||
-                       strstr(text, "拜拜") != NULL ||
-                       strstr(text, "晚安") != NULL) {
-                result->intent.category = AUDIO_INTENT_FAREWELL;
-                result->intent.intent_name = audio_semanticstring_duplicate("告别");
-                result->intent.intent_description = audio_semanticstring_duplicate("用户正在告别");
-                result->intent.confidence = 0.8f;
-            } else if (strstr(text, "谢谢") != NULL ||
-                       strstr(text, "感谢") != NULL ||
-                       strstr(text, "多谢") != NULL) {
-                result->intent.category = AUDIO_INTENT_THANKS;
-                result->intent.intent_name = audio_semanticstring_duplicate("感谢");
-                result->intent.intent_description = audio_semanticstring_duplicate("用户正在表达感谢");
-                result->intent.confidence = 0.85f;
-            } else if (strstr(text, "对不起") != NULL ||
-                       strstr(text, "抱歉") != NULL ||
-                       strstr(text, "不好意思") != NULL) {
-                result->intent.category = AUDIO_INTENT_APOLOGY;
-                result->intent.intent_name = audio_semanticstring_duplicate("道歉");
-                result->intent.intent_description = audio_semanticstring_duplicate("用户正在道歉");
-                result->intent.confidence = 0.8f;
-            } else {
-                result->intent.category = AUDIO_INTENT_STATEMENT;
-                result->intent.intent_name = audio_semanticstring_duplicate("陈述");
-                result->intent.intent_description = audio_semanticstring_duplicate("用户正在陈述事实或观点");
-                result->intent.confidence = 0.5f;
-            }
-            
-            /* 设置概率 */
+            /* P1-004修复: 模型未训练，拒绝启发式回退
+             * 需求规范要求不使用关键词规则替代深度学习推断。
+             * 当模型未训练时返回零置信度，不生成虚假意图标签。 */
+            result->intent.category = AUDIO_INTENT_STATEMENT;
+            result->intent.intent_name = audio_semanticstring_duplicate("未训练");
+            result->intent.intent_description = audio_semanticstring_duplicate("意图识别模型尚未训练完成");
+            result->intent.confidence = 0.0f;
             for (int i = 0; i < 13; i++) {
                 result->intent.probabilities[i] = 0.0f;
             }
-            result->intent.probabilities[result->intent.category] = result->intent.confidence;
         }
     }
     

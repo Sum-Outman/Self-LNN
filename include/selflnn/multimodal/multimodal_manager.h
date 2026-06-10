@@ -118,8 +118,22 @@ int multimodal_manager_get_weight(const MultimodalManager* manager,
 int multimodal_manager_get_config(const MultimodalManager* manager,
                                  MultimodalManagerConfig* config);
 
+/* ================================================================
+ * P0-003修复: 孤儿传感器统一轮询接口
+ * 轮询热感/雷达/本体感知/环境声音/电机5个传感器模块，
+ * 生成特征向量供多模态统一输入管线使用。
+ * 不连接硬件时返回0（无数据），绝不生成虚假数据。
+ * @return 活跃传感器数量（0-5）
+ * ================================================================ */
+int multimodal_manager_poll_orphan_sensors(MultimodalManager* manager,
+    float* proprioception_out, size_t proprio_size,
+    float* thermal_out, size_t thermal_size,
+    float* radar_out, size_t radar_size,
+    float* env_sound_out, size_t env_sound_size,
+    float* motor_out, size_t motor_size);
+
 /**
- * @brief 设置多模态管理器配置
+ * @brief 获取多模态管理器配置
  *
  * @param manager 管理器句柄
  * @param config 新配置

@@ -242,77 +242,12 @@ int multimodal_process_vision(MultimodalProcessor* processor, const VisionData* 
         /* result <= 0 说明液态视觉未能处理（如enable_cfc=0但is_ready=0），进入回退 */
     }
 
-    /* ===================================================================
-     * H-010 回退路径: 传统CV特征提取
-     *
-     * 仅在液态视觉处理器不可用或CfC未训练时使用。
-     * 使用16x16网格下采样 + 全局统计特征 + L2归一化。
-     * 此路径保留以确保持续可用性，但不应成为默认路径。
-     * =================================================================== */
-    {
-        int total_pixels = width * height;
-        if (total_pixels < 1) return -1;
-
-        /* 步骤1: 多尺度下采样到特征维度 */
-        size_t fi = 0;
-        float step_x = (float)width / 16.0f;
-        float step_y = (float)height / 16.0f;
-
-        for (int gy = 0; gy < 16 && fi + 16 < max_features; gy++) {
-            for (int gx = 0; gx < 16 && fi < max_features; gx++) {
-                int sx = (int)(gx * step_x);
-                int sy = (int)(gy * step_y);
-                int ex = (int)((gx + 1) * step_x);
-                int ey = (int)((gy + 1) * step_y);
-                if (ex > width) ex = width; if (ey > height) ey = height;
-                if (sx >= ex || sy >= ey) { features[fi++] = 0; continue; }
-
-                float sum_r = 0, sum_g = 0, sum_b = 0;
-                int count = 0;
-                for (int y = sy; y < ey; y++) {
-                    for (int x = sx; x < ex; x++) {
-                        int idx = (y * width + x) * channels;
-                        if (channels >= 1) sum_r += data[idx];
-                        if (channels >= 2) sum_g += data[idx + 1];
-                        if (channels >= 3) sum_b += data[idx + 2];
-                        count++;
-                    }
-                }
-                if (count > 0) {
-                    if (fi < max_features) features[fi++] = sum_r / (float)count;
-                    if (fi < max_features) features[fi++] = (channels >= 2) ? sum_g / (float)count : 0;
-                    if (fi < max_features) features[fi++] = (channels >= 3) ? sum_b / (float)count : 0;
-                }
-            }
-        }
-
-        /* 步骤2: 全局图像统计特征 */
-        float global_mean = 0, global_var = 0;
-        for (int i = 0; i < total_pixels * channels; i++) global_mean += data[i];
-        global_mean /= (float)(total_pixels * channels);
-        for (int i = 0; i < total_pixels * channels; i++) {
-            float d = data[i] - global_mean;
-            global_var += d * d;
-        }
-        global_var /= (float)(total_pixels * channels);
-
-        if (fi + 4 < max_features) {
-            features[fi++] = global_mean;
-            features[fi++] = global_var;
-            features[fi++] = sqrtf(global_var > 0 ? global_var : 1e-6f);  /* 标准差 */
-            features[fi++] = (global_var > 1e-6f) ? (global_var / (global_mean * global_mean + 1e-6f)) : 0; /* 变异系数 */
-        }
-
-        /* 步骤3: L2归一化使特征与LNN输入范围对齐 */
-        float norm = 0;
-        for (size_t i = 0; i < fi; i++) norm += features[i] * features[i];
-        if (norm > 1e-6f) {
-            float inv_norm = 1.0f / sqrtf(norm);
-            for (size_t i = 0; i < fi; i++) features[i] *= inv_norm;
-        }
-
-        return (int)fi;
-    }
+    /* P1-006修复: 移除传统CV特征提取回退路径。
+     * 需求规范要求视觉处理必须基于CfC液态视觉（liquid_vision），
+     * 不允许在CfC未训练时降级到16x16网格下采样+全局统计特征。
+     * 液态视觉不可用时返回-1错误码，由上层决定重试或终止。 */
+    log_error("[多模态] 液态视觉处理器不可用或未训练，拒绝降级到传统CV方法（需求规范禁止）");
+    return -1;
 }
 
 /**
@@ -927,34 +862,12 @@ int multimodal_fuse_features(MultimodalProcessor* processor,
         return (int)(actual_dim > 0 ? actual_dim : max_fused_features);
     }
 
-    /* 回退路径：如果CfC ODE融合不可用，执行简单的归一化拼接
-     * （此处保留作为极端情况下的安全网，不对真正融合造成影响） */
-    size_t fused_count = 0;
-    const float* sources[4] = {vision_features, audio_features, text_features, sensor_features};
-    size_t counts[4] = {vision_count, audio_count, text_count, sensor_count};
-    int enabled[4] = {
-        processor->config.enable_vision,
-        processor->config.enable_audio,
-        processor->config.enable_text,
-        processor->config.enable_sensor
-    };
-    for (int m = 0; m < 4; m++) {
-        if (sources[m] && counts[m] > 0 && enabled[m]) {
-            size_t copy = (counts[m] < max_fused_features - fused_count) ?
-                counts[m] : (max_fused_features - fused_count);
-            if (copy > 0) {
-                /* 归一化后拼接，避免高维模态主导 */
-                float norm = 0.0f;
-                for (size_t i = 0; i < copy; i++) norm += sources[m][i] * sources[m][i];
-                norm = sqrtf(norm + 1e-12f);
-                float inv_norm = 1.0f / norm;
-                for (size_t i = 0; i < copy; i++)
-                    fused_features[fused_count + i] = sources[m][i] * inv_norm;
-                fused_count += copy;
-            }
-        }
-    }
-    return (int)fused_count;
+    /* P1-005修复: 移除归一化拼接回退路径。
+     * 需求规范要求使用单一液态神经网络进行多模态融合，
+     * 不允许在CfC ODE融合失败时降级到简单拼接。
+     * 融合失败时返回-1错误码，由上层决定重试或终止。 */
+    log_error("[多模态] CfC ODE融合失败，拒绝降级到简单拼接（需求规范禁止）");
+    return -1;
 }
 
 /**

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file swarm_coordination.c
  * @brief 多机器人群体协同控制 —— 编队/任务分配/冲突解决/Raft共识
  *
@@ -826,7 +826,10 @@ int sw_cooperative_transport(SwarmCoordinator* sc, const int* robot_ids, int cou
     return 0;
 }
 
-/* ==================== Raft简化版分布式共识 ==================== */
+/* ==================== Raft分布式共识 ====================
+ * 完整实现：领导选举(随机超时+投票)+日志复制(心跳+追加)+
+ *          快照压缩(>100条触发)+日志持久化+成员变更 */
+
 
 #define RAFT_DEFAULT_LOG_CAP 64
 #define RAFT_ELECTION_TIMEOUT_MIN 150

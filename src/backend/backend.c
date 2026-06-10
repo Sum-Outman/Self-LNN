@@ -5230,18 +5230,33 @@ BackendServer* backend_server_create(const BackendConfig* config) {
     }
 
     if (server->emergency_stop_sys) {
-/* 注册紧急停止回调链路
-         * 原emergency_stop_register_*函数已定义但从未调用，导致紧急停止执行时
-         * 因回调缺失返回-1错误(emergency_stop.c:299-304)。现在注册核心回调链。 */
+        /* ZSF-023 修复: 紧急停止回调必须注册真实函数指针，此前注册NULL
+         * 导致所有5个紧急停止级别(SOFT/PAUSE/HARD/KILL/PHYSICAL_CUT)
+         * 全部因为"关键回调未注册"而静默失败(emergency_stop.c:315-340)。
+         * 
+         * 修复策略:
+         * 1. 注册真实硬件停止回调 → 调用 robot_emergency_stop
+         * 2. 注册真实任务调度器回调 → 调用 task_scheduler_pause
+         * 3. 线程池回调和物理断电回调: 当前无实现，保持NULL但
+         *    KILL/PHYSICAL_CUT级别可通过已注册的task_scheduler_pause兜底 */
         void* ts = (void*)server->task_scheduler;
+        
+        /* 硬件停止回调: 使用robot_emergency_stop包装函数 */
+        extern int robot_emergency_stop(void* robot);
+        if (server->robot_instance) {
+            emergency_stop_register_hardware_callback(server->emergency_stop_sys,
+                (void(*)(void*))robot_emergency_stop, server->robot_instance);
+            log_info("[后端] 紧急停止: 硬件停止回调已注册 → robot_emergency_stop");
+        }
+        
+        /* 任务调度器回调: 使用真实函数指针 */
         if (ts) {
+            extern void task_scheduler_pause(void* s);
             emergency_stop_register_task_scheduler(server->emergency_stop_sys,
-                ts, NULL, NULL, NULL);
-            log_info("[后端] 紧急停止: 任务调度器回调已注册");
+                ts, (void(*)(void*))task_scheduler_pause, NULL, NULL);
+            log_info("[后端] 紧急停止: 任务调度器暂停回调已注册 → task_scheduler_pause");
         } else {
-            /* 无任务调度器时注册最小硬件停止回调，确保紧急停止至少能
-             * 标记状态和执行基本清理（而非返回-1什么都不做） */
-            log_warning("[后端] 任务调度器未就绪，紧急停止使用基本回调模式");
+            log_warning("[后端] 任务调度器未就绪，紧急停止仅依赖硬件停止回调");
         }
     }
 

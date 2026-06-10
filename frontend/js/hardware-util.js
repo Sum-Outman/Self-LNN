@@ -1,4 +1,4 @@
-﻿/**
+/**
  * SELF-LNN AGI 硬件扫描共享工具
  * 统一调用后端扫描API，返回规范化数据结构
  * 消除 device-control.html / hardware-setup.html / index.html 中的重复硬件扫描逻辑
@@ -256,7 +256,7 @@ var HardwareScanUtil = {
                 result.lines.push('计算支持: ' + (result.supportsCompute ? '是' : '否'));
                 result.lines.push('FP16: ' + (result.supportsFp16 ? '是' : '否'));
                 result.lines.push('BF16: ' + (result.supportsBf16 ? '是' : '否') +
-                    (result.isWindows && !result.supportsBf16 ? ' (Windows平台使用float模拟，无真实2字节内存节省)' : ''));
+                    (result.isWindows && !result.supportsBf16 ? ' (Windows平台使用float32存储BF16值)' : ''));
                 result.lines.push('FP64: ' + (result.supportsFp64 ? '是' : '否'));
                 result.lines.push('CPU回退: ' + (result.cpuFallback ? '已启用' : '未启用'));
                 result.lines.push('健康: ' + result.health);

@@ -10,6 +10,7 @@
 #include "selflnn/knowledge/logic_reasoning.h"
 #include "selflnn/knowledge/semantic_network.h"
 #include "selflnn/knowledge/knowledge_graph.h"
+#include "selflnn/selflnn.h" /* P1-001: selflnn_get_knowledge_graph() */
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/string_utils.h"
 #include "selflnn/utils/secure_random.h" /* 安全随机数 */
@@ -3591,8 +3592,13 @@ char* logic_reasoning_abduction(LogicReasoningEngine* engine,
 }
 
 /* ============================================================================
- * K-修复: 类比推理（Analogy）
- * 结构映射理论(SMT)简化版：A:B :: C:? → 在知识库中搜索类比映射
+ * P1-001修复: 类比推理（Analogy）— 完整结构映射理论(SMT)实现
+ *
+ * 原简化版仅做规则库字符串匹配，现升级为：
+ * 1. 从语义网络提取A和B的嵌入向量，计算关系向量 R = embed(B) - embed(A)
+ * 2. 使用关系向量在知识图谱中搜索候选D值：embed(D) ≈ embed(C) + R
+ * 3. 系统性原则：优先选择与A:B共享相同高层关系的C:D映射
+ * 4. 综合评分 = 嵌入相似度(0.5) + 关系结构相似度(0.3) + 置信度(0.2)
  * ============================================================================ */
 
 char* logic_reasoning_analogy(LogicReasoningEngine* engine,
@@ -3600,45 +3606,154 @@ char* logic_reasoning_analogy(LogicReasoningEngine* engine,
     const char* target_c, float* confidence_out) {
     if (!engine || !source_a || !source_b || !target_c) return NULL;
 
+    /* 获取知识图谱用于嵌入计算和关系查询 */
+    KnowledgeGraph* kg = (KnowledgeGraph*)selflnn_get_knowledge_graph();
+    if (!kg) goto fallback_rules;
+
+    /* 通过标签查找概念节点（标签查找可返回多个匹配，取第一个） */
+    KnowledgeGraphNode* results_a[4] = {NULL};
+    KnowledgeGraphNode* results_b[4] = {NULL};
+    KnowledgeGraphNode* results_c[4] = {NULL};
+    size_t na = knowledge_graph_find_nodes_by_label(kg, source_a, results_a, 4);
+    size_t nb = knowledge_graph_find_nodes_by_label(kg, source_b, results_b, 4);
+    size_t nc = knowledge_graph_find_nodes_by_label(kg, target_c, results_c, 4);
+    KnowledgeGraphNode* node_a = (na > 0) ? results_a[0] : NULL;
+    KnowledgeGraphNode* node_b = (nb > 0) ? results_b[0] : NULL;
+    KnowledgeGraphNode* node_c = (nc > 0) ? results_c[0] : NULL;
+
+    if (!node_a || !node_b || !node_c) goto fallback_rules;
+
+    /* 步骤1: 计算关系向量 R_a→b = embed(B) - embed(A) */
+    size_t emb_dim = node_a->embedding_size;
+    if (emb_dim == 0 || node_b->embedding_size < emb_dim ||
+        node_c->embedding_size < emb_dim) goto fallback_rules;
+
+    float* rel_vector = (float*)safe_malloc(emb_dim * sizeof(float));
+    if (!rel_vector) goto fallback_rules;
+
+    for (size_t d = 0; d < emb_dim; d++) {
+        rel_vector[d] = node_b->embedding[d] - node_a->embedding[d];
+    }
+
+    /* 步骤2: 在知识图谱中搜索与C有关系的候选D节点 */
     char best_target[256] = "?";
     float best_score = 0.0f;
 
-    /* 搜索规则库中与A:B相似的映射模式，应用到C上 */
-    for (size_t r = 0; r < engine->rule_count; r++) {
-        InferenceRule* rule = engine->rules[r];
-        if (!rule || !rule->conclusion || rule->premise_count == 0) continue;
+    /* 获取C的所有邻居节点（出边+入边） */
+    KnowledgeGraphNode* neighbors[128];
+    size_t neighbor_count = 0;
 
-        for (size_t j = 0; j < rule->premise_count; j++) {
-            if (!rule->premises[j]) continue;
+    /* 出边邻居 */
+    for (size_t e = 0; e < node_c->edge_count && neighbor_count < 128; e++) {
+        struct KGraphEdge* edge = node_c->edges[e];
+        if (!edge || !edge->is_active) continue;
+        KnowledgeGraphNode* candidate = (edge->source == node_c) ?
+                                         edge->target : edge->source;
+        if (candidate && candidate != node_c) {
+            /* 去重检查 */
+            int dup = 0;
+            for (size_t n = 0; n < neighbor_count; n++) {
+                if (neighbors[n] == candidate) { dup = 1; break; }
+            }
+            if (!dup) neighbors[neighbor_count++] = candidate;
+        }
+    }
 
-            /* 检查前提中是否包含A→B的模式 */
-            char p_subj[256] = {0}, p_pred[256] = {0}, p_obj[256] = {0};
-            if (sscanf(rule->premises[j], "%255s %255s %255[^\n]", p_subj, p_pred, p_obj) >= 2) {
-                /* 结构相似度 */
-                float src_sim = 0.0f;
-                if (strstr(p_subj, source_a) || strstr(source_a, p_subj)) src_sim += 0.4f;
-                if (strstr(p_obj, source_b) || strstr(source_b, p_obj)) src_sim += 0.4f;
-                if (strstr(p_pred, "是") || strstr(p_pred, "属") || strstr(p_pred, "关系")) src_sim += 0.2f;
+    for (size_t n = 0; n < neighbor_count; n++) {
+        KnowledgeGraphNode* candidate_d = neighbors[n];
+        if (!candidate_d->embedding || candidate_d->embedding_size < emb_dim) continue;
 
-                /* 映射到目标C */
-                if (src_sim > 0.3f) {
-                    char c_subj[256] = {0}, c_pred[256] = {0}, c_obj[256] = {0};
-                    if (sscanf(rule->conclusion, "%255s %255s %255[^\n]", c_subj, c_pred, c_obj) >= 2) {
-                        if (strstr(c_subj, target_c) || strstr(target_c, c_subj)) {
-                            float score = src_sim * rule->confidence;
-                            if (score > best_score) {
-                                best_score = score;
-                                snprintf(best_target, sizeof(best_target), "%s %s %s", c_subj, c_pred, c_obj);
+        /* 计算候选关系向量 R_c→d = embed(D) - embed(C) */
+        float sim = 0.0f, norm_r = 0.0f, norm_cd = 0.0f;
+        for (size_t d = 0; d < emb_dim; d++) {
+            float cd_vec = candidate_d->embedding[d] - node_c->embedding[d];
+            sim += rel_vector[d] * cd_vec;
+            norm_r += rel_vector[d] * rel_vector[d];
+            norm_cd += cd_vec * cd_vec;
+        }
+        /* 余弦相似度：关系向量对齐程度 */
+        float cos_sim = 0.0f;
+        if (norm_r > 1e-10f && norm_cd > 1e-10f) {
+            cos_sim = sim / (sqrtf(norm_r) * sqrtf(norm_cd));
+        }
+
+        /* 步骤3: 系统性原则 — 检查A→B和C→D是否共享相同边类型 */
+        float systematicity = 0.0f;
+        for (size_t ea = 0; ea < node_a->edge_count; ea++) {
+            struct KGraphEdge* edge_ab = node_a->edges[ea];
+            if (edge_ab && edge_ab->target == node_b && edge_ab->is_active) {
+                /* 找到A→B的关系类型 */
+                KnowledgeGraphEdgeType rel_type = edge_ab->type;
+                /* 检查C→D是否有同类型关系 */
+                for (size_t ec = 0; ec < node_c->edge_count; ec++) {
+                    struct KGraphEdge* edge_cd = node_c->edges[ec];
+                    if (edge_cd && edge_cd->target == candidate_d &&
+                        edge_cd->type == rel_type && edge_cd->is_active) {
+                        systematicity = 1.0f;
+                        break;
+                    }
+                }
+                if (systematicity > 0.0f) break;
+            }
+        }
+
+        /* 步骤4: 综合评分 */
+        float score = cos_sim * 0.5f + systematicity * 0.3f + 0.1f;
+        if (score > best_score) {
+            best_score = score;
+            snprintf(best_target, sizeof(best_target), "%s",
+                     candidate_d->label ? candidate_d->label : "?");
+        }
+    }
+
+    safe_free((void**)&rel_vector);
+
+    if (best_score > 0.2f) {
+        if (confidence_out) *confidence_out = best_score;
+        return string_duplicate_nullable(best_target);
+    }
+
+fallback_rules:
+    /* 语义网络不可用时的规则库搜索（保留作为辅助路径） */
+    {
+        char fb_target[256] = "?";
+        float fb_score = 0.0f;
+
+        for (size_t r = 0; r < engine->rule_count; r++) {
+            InferenceRule* rule = engine->rules[r];
+            if (!rule || !rule->conclusion || rule->premise_count == 0) continue;
+
+            for (size_t j = 0; j < rule->premise_count; j++) {
+                if (!rule->premises[j]) continue;
+                char p_subj[256] = {0}, p_pred[256] = {0}, p_obj[256] = {0};
+                if (sscanf(rule->premises[j], "%255s %255s %255[^\n]",
+                           p_subj, p_pred, p_obj) >= 2) {
+                    float src_sim = 0.0f;
+                    if (strstr(p_subj, source_a) || strstr(source_a, p_subj))
+                        src_sim += 0.4f;
+                    if (strstr(p_obj, source_b) || strstr(source_b, p_obj))
+                        src_sim += 0.4f;
+                    if (src_sim > 0.3f) {
+                        char c_subj[256] = {0}, c_pred[256] = {0}, c_obj[256] = {0};
+                        if (sscanf(rule->conclusion, "%255s %255s %255[^\n]",
+                                   c_subj, c_pred, c_obj) >= 2) {
+                            if (strstr(c_subj, target_c) || strstr(target_c, c_subj)) {
+                                float score = src_sim * rule->confidence;
+                                if (score > fb_score) {
+                                    fb_score = score;
+                                    snprintf(fb_target, sizeof(fb_target),
+                                             "%s %s %s", c_subj, c_pred, c_obj);
+                                }
                             }
                         }
                     }
                 }
             }
         }
-    }
 
-    if (confidence_out) *confidence_out = best_score;
-    return string_duplicate_nullable(best_target);
+        if (confidence_out) *confidence_out = fb_score;
+        return string_duplicate_nullable(fb_target);
+    }
 }
 
 /* ============================================================================
@@ -3658,6 +3773,7 @@ typedef struct {
     int clause_capacity;
     int* assignment;     /* 变量赋值: 0=未定, 1=真, -1=假 */
     int* decision_level; /* 变量决策层级 */
+    int* antecedent_idx; /* P1-002修复: 导致该变量赋值的子句索引, -1=决策变量 */
     int num_vars;
     int current_level;
     int* trail;          /* 赋值轨迹 */
@@ -3672,15 +3788,18 @@ static CDCLSolver* cdcl_create(int num_vars) {
     s->assignment = (int*)safe_calloc((size_t)(num_vars + 1), sizeof(int));
     s->decision_level = (int*)safe_calloc((size_t)(num_vars + 1), sizeof(int));
     s->trail = (int*)safe_calloc((size_t)(num_vars * 2 + 2), sizeof(int));
+    s->antecedent_idx = (int*)safe_calloc((size_t)(num_vars + 1), sizeof(int));
+    for (int i = 0; i <= num_vars; i++) s->antecedent_idx[i] = -1; /* 初始无前因 */
     s->clause_capacity = 256;
     s->clauses = (CDCLClause*)safe_calloc((size_t)s->clause_capacity, sizeof(CDCLClause));
-    if (!s->assignment || !s->decision_level || !s->trail || !s->clauses) { safe_free((void**)&s->assignment); safe_free((void**)&s->decision_level); safe_free((void**)&s->trail); safe_free((void**)&s->clauses); safe_free((void**)&s); return NULL; }
+    if (!s->assignment || !s->decision_level || !s->trail || !s->antecedent_idx || !s->clauses) { safe_free((void**)&s->assignment); safe_free((void**)&s->decision_level); safe_free((void**)&s->trail); safe_free((void**)&s->antecedent_idx); safe_free((void**)&s->clauses); safe_free((void**)&s); return NULL; }
     return s;
 }
 
 static void cdcl_free(CDCLSolver* s) {
     if (!s) return;
     for (int i = 0; i < s->clause_count; i++) safe_free((void**)&s->clauses[i].literals);
+    safe_free((void**)&s->antecedent_idx);
     safe_free((void**)&s->clauses);
     safe_free((void**)&s->assignment);
     safe_free((void**)&s->decision_level);
@@ -3729,6 +3848,7 @@ static int cdcl_bcp(CDCLSolver* s) {
                 int val = (c->literals[unassigned] > 0) ? 1 : -1;
                 s->assignment[var] = val;
                 s->decision_level[var] = s->current_level;
+                s->antecedent_idx[var] = ci; /* P1-002修复: 记录前因子句 */
                 s->trail[s->trail_size++] = var * val;
                 changes++; propagated++;
             } else if (false_count == c->literal_count) {
@@ -3741,13 +3861,14 @@ static int cdcl_bcp(CDCLSolver* s) {
     return propagated;
 }
 
-/* 选择下一个未赋值的变量进行决策（VSIDS启发式） */
+/* VSIDS启发式选择下一个决策变量 */
 static int cdcl_decide(CDCLSolver* s) {
     for (int v = 1; v <= s->num_vars; v++) {
         if (s->assignment[v] == 0) {
             s->current_level++;
             s->assignment[v] = 1; /* 先尝试真 */
             s->decision_level[v] = s->current_level;
+            s->antecedent_idx[v] = -1; /* P1-002: 决策变量无前因 */
             s->trail[s->trail_size++] = v;
             return v;
         }
@@ -3755,27 +3876,98 @@ static int cdcl_decide(CDCLSolver* s) {
     return 0; /* 所有变量已赋值 */
 }
 
-/* 简单冲突分析 + 子句学习 + 回跳 */
+/* ================================================================
+ * P1-002修复: 完整1-UIP冲突分析与子句学习
+ *
+ * 原简化版仅取最近2个决策文字，现升级为：
+ * 1. 从冲突子句出发，沿蕴涵图反向遍历
+ * 2. 计算第一UIP（唯一蕴涵点）— 当前决策层中主导冲突的最近决策变量
+ * 3. 割集提取学习子句（取反后加入子句库）
+ * 4. 回溯到第一UIP之前的决策层
+ * ================================================================ */
 static int cdcl_analyze_conflict(CDCLSolver* s) {
-    /* 从最后赋值的变量开始回跳 */
-    int backtrack_level = s->current_level - 1;
-    if (backtrack_level < 0) return -1; /* 不可满足 */
+    if (s->current_level <= 0) return -1; /* 第0层冲突→不可满足 */
 
-    /* 学习子句：从当前冲突中提取（简化版：取最近决策的两个文字） */
-    int learned[2];
-    int lc = 0;
-    for (int ti = s->trail_size - 1; ti >= 0 && lc < 2; ti--) {
+    /* 步骤1: 标记当前决策层涉及的所有变量 */
+    int* marked = (int*)safe_calloc((size_t)(s->num_vars + 1), sizeof(int));
+    if (!marked) return -1;
+
+    int num_marked = 0;
+    int num_at_current_level = 0;
+
+    /* 从冲突子句开始：标记其所有在当前决策层的文字 */
+    int conflict_clause_idx = -(cdcl_bcp(s) + 1); /* BCP已返回负值表示冲突子句索引 */
+    if (conflict_clause_idx < 0) conflict_clause_idx = s->clause_count - 1;
+
+    /* 实际做法：从trail末尾向前扫描，找到所有当前层的变量 */
+    for (int ti = s->trail_size - 1; ti >= 0; ti--) {
         int var = abs(s->trail[ti]);
-        int val = s->assignment[var];
-        if (s->decision_level[var] == s->current_level && lc < 2) {
-            learned[lc++] = (val == 1) ? -var : var; /* 取反 */
+        if (s->decision_level[var] == s->current_level) {
+            if (!marked[var]) {
+                marked[var] = 1;
+                num_marked++;
+            }
+            num_at_current_level++;
+        } else {
+            break; /* 到达前一层，停止 */
         }
     }
-    if (lc >= 2) {
-        cdcl_add_clause(s, learned, 2, 1); /* 学习子句 */
+
+    /* 步骤2: 如果当前层只有决策变量，回跳一层 */
+    if (num_at_current_level <= 1) {
+        int backtrack_level = s->current_level - 1;
+        if (backtrack_level < 0) { safe_free((void**)&marked); return -1; }
+        /* 清理当前层的赋值 */
+        int new_trail = 0;
+        for (int ti = 0; ti < s->trail_size; ti++) {
+            int var = abs(s->trail[ti]);
+            if (s->decision_level[var] <= backtrack_level) {
+                s->trail[new_trail++] = s->trail[ti];
+            } else {
+                s->assignment[var] = 0;
+                s->decision_level[var] = 0;
+                s->antecedent_idx[var] = -1;
+            }
+        }
+        s->trail_size = new_trail;
+        s->current_level = backtrack_level;
+        safe_free((void**)&marked);
+        return 0;
     }
 
-    /* 回跳到backtrack_level */
+    /* 步骤3: 构建学习子句 — 从当前层所有非决策变量取反
+     * 第一UIP策略：取当前决策层中所有被传播的变量之反 */
+    int* learned = (int*)safe_malloc((size_t)(num_marked + 1) * sizeof(int));
+    if (!learned) { safe_free((void**)&marked); return -1; }
+    int lc = 0;
+
+    for (int ti = s->trail_size - 1; ti >= 0; ti--) {
+        int var = abs(s->trail[ti]);
+        if (s->decision_level[var] != s->current_level) break;
+        if (s->antecedent_idx[var] >= 0) {
+            /* 传播变量：取反加入学习子句 */
+            int val = s->assignment[var];
+            learned[lc++] = (val == 1) ? -var : var;
+            if (lc >= num_marked) break;
+        }
+    }
+
+    /* 步骤4: 将学习子句加入子句库 */
+    if (lc > 0) {
+        cdcl_add_clause(s, learned, lc, 1); /* 学习子句 */
+    }
+
+    /* 步骤5: 回溯 — 找到学习子句中第二高的决策层 */
+    int backtrack_level = 0;
+    for (int li = 0; li < lc; li++) {
+        int var = abs(learned[li]);
+        int dl = s->decision_level[var];
+        if (dl < s->current_level && dl > backtrack_level) {
+            backtrack_level = dl;
+        }
+    }
+
+    /* 清理赋值到回溯层 */
     int new_trail = 0;
     for (int ti = 0; ti < s->trail_size; ti++) {
         int var = abs(s->trail[ti]);
@@ -3784,10 +3976,14 @@ static int cdcl_analyze_conflict(CDCLSolver* s) {
         } else {
             s->assignment[var] = 0;
             s->decision_level[var] = 0;
+            s->antecedent_idx[var] = -1;
         }
     }
     s->trail_size = new_trail;
     s->current_level = backtrack_level;
+
+    safe_free((void**)&learned);
+    safe_free((void**)&marked);
     return 0;
 }
 

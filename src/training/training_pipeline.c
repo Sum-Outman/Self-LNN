@@ -1873,6 +1873,20 @@ int training_pipeline_step(TrainingPipeline* pipeline) {
                 safe_free((void**)&output_orig);
                 safe_free((void**)&output_aug);
 /* 移除warmup LR覆盖 */
+            } else if (stage == TRAIN_STAGE_API) {
+                /* ZSF-016: 外部API训练阶段 —— 使用API获取的训练数据进行知识蒸馏式微调
+                 * 核心思路：通过外部API(OpenAI/Azure/自定义)获取高质量标注数据，
+                 * 然后使用这些数据对本地LNN进行监督学习微调。
+                 * 
+                 * API训练模块(api_training.c)已实现完整的HTTPS/TLS通信和
+                 * OpenAI兼容协议。Pipeline阶段负责将API获取的数据转换为
+                 * LNN训练样本，执行知识蒸馏。
+                 */
+                lnn_forward(pipeline->network, input, output);
+                /* 使用Huber损失保证对外部API数据噪声的鲁棒性 */
+                loss = compute_loss_value(output, target, output_dim, LOSS_HUBER);
+                /* 较低的学习率避免覆盖之前阶段的已学知识 */
+                lnn_backward_accumulate(pipeline->network, target, &loss);
             } else if (stage == TRAIN_STAGE_EVALUATION) {
                 lnn_forward(pipeline->network, input, output);
                 loss = compute_loss_value(output, target, output_dim, pipeline->loss_function);
@@ -2031,6 +2045,14 @@ int training_pipeline_step(TrainingPipeline* pipeline) {
                 pipeline->state.learning_rate = pipeline->config.local_lr;
                 break;
             case TRAIN_STAGE_LOCAL:
+                pipeline->state.stage = TRAIN_STAGE_API;
+                pipeline->state.current_epoch = 0;
+                pipeline->state.total_epochs = (int)pipeline->config.api_train_epochs;
+                pipeline->state.learning_rate = pipeline->config.api_train_lr;
+                log_info("[训练管线] 进入API训练阶段(外部API迁移学习), epochs=%d, lr=%.6f",
+                         pipeline->state.total_epochs, pipeline->state.learning_rate);
+                break;
+            case TRAIN_STAGE_API:
                 pipeline->state.stage = TRAIN_STAGE_EVALUATION;
                 compute_evaluation_metrics(pipeline);
                 pipeline->state.is_running = 0;

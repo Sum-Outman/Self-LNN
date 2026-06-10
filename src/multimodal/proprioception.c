@@ -308,26 +308,137 @@ int proprioception_decode_imu(ProprioceptionProcessor* pp,
     out_imu->mag[0] = raw_imu_data[6];
     out_imu->mag[1] = raw_imu_data[7];
     out_imu->mag[2] = raw_imu_data[8];
-    /* Mahony互补滤波器姿态估计（简化版）
-     * 使用加速度计和磁力计估计初始姿态四元数 */
+    /* P2-008修复: 完整Mahony互补滤波器姿态估计
+     * 原理：陀螺仪积分 + PI控制器校正（加速度计/磁力计误差补偿）
+     *
+     * 方程：
+     *   q̇ = 0.5 * q ⊗ (0, ω_x + e_x, ω_y + e_y, ω_z + e_z)
+     *   其中 e = Kp * e_cross + Ki * ∫e_cross·dt
+     *   e_cross = a_norm × v_est (加速度计误差) + m_norm × w_est (磁力计误差)
+     *
+     * 参数：
+     *   Kp = 2.0f (比例增益，加速收敛)
+     *   Ki = 0.005f (积分增益，消除陀螺仪漂移)
+     *   sampleFreq = 100.0f (假设100Hz采样率)
+     */
     {
-        float ax = out_imu->accel[0], ay = out_imu->accel[1], az = out_imu->accel[2];
-        float norm = sqrtf(ax*ax + ay*ay + az*az);
-        if (norm > 1e-6f) {
-            ax /= norm; ay /= norm; az /= norm;
-            /* 从加速度矢量计算俯仰角和横滚角 */
-            float pitch = asinf(-ax);
-            float roll = atan2f(ay, az);
-            /* 简化为四元数 */
-            float cp = cosf(pitch * 0.5f), sp = sinf(pitch * 0.5f);
-            float cr = cosf(roll * 0.5f), sr = sinf(roll * 0.5f);
-            out_imu->orientation[0] = cp * cr;  /* w */
-            out_imu->orientation[1] = sp * cr;  /* x */
-            out_imu->orientation[2] = cp * sr;  /* y */
-            out_imu->orientation[3] = -sp * sr; /* z */
-        } else {
-            out_imu->orientation[0] = 1.0f;
+        /* 保存上一帧四元数，初始化为单位四元数 */
+        static float q0 = 1.0f, q1 = 0.0f, q2 = 0.0f, q3 = 0.0f;
+        static float integral_fbx = 0.0f, integral_fby = 0.0f, integral_fbz = 0.0f;
+        static int mahony_initialized = 0;
+
+        if (!mahony_initialized) {
+            /* 初始对准：加速度计+磁力计确定初始姿态 */
+            float ax = out_imu->accel[0], ay = out_imu->accel[1], az = out_imu->accel[2];
+            float mx = out_imu->mag[0], my = out_imu->mag[1], mz = out_imu->mag[2];
+            float a_norm = sqrtf(ax*ax + ay*ay + az*az);
+            if (a_norm > 1e-6f) {
+                ax /= a_norm; ay /= a_norm; az /= a_norm;
+                float pitch = asinf(-ax);
+                float roll = atan2f(ay, az);
+                /* 从磁力计计算偏航 */
+                float mag_x = mx * cosf(pitch) + mz * sinf(pitch);
+                float mag_y = mx * sinf(roll) * sinf(pitch) +
+                              my * cosf(roll) - mz * sinf(roll) * cosf(pitch);
+                float yaw = atan2f(-mag_y, mag_x);
+                /* 欧拉角→四元数 */
+                float cy = cosf(yaw * 0.5f), sy = sinf(yaw * 0.5f);
+                float cp = cosf(pitch * 0.5f), sp = sinf(pitch * 0.5f);
+                float cr = cosf(roll * 0.5f), sr = sinf(roll * 0.5f);
+                q0 = cr * cp * cy + sr * sp * sy;
+                q1 = sr * cp * cy - cr * sp * sy;
+                q2 = cr * sp * cy + sr * cp * sy;
+                q3 = cr * cp * sy - sr * sp * cy;
+            }
+            mahony_initialized = 1;
         }
+
+        /* Mahony滤波器常量 */
+        float twoKp = 4.0f;    /* 2 * 比例增益 */
+        float twoKi = 0.01f;   /* 2 * 积分增益 */
+        float sampleFreq = 100.0f;
+        float dt = 1.0f / sampleFreq;
+
+        /* 读取陀螺仪数据 (度/秒 → 弧度/秒) */
+        float gx = out_imu->gyro[0] * 0.0174533f;
+        float gy = out_imu->gyro[1] * 0.0174533f;
+        float gz = out_imu->gyro[2] * 0.0174533f;
+
+        /* 加速度计归一化 */
+        float ax = out_imu->accel[0], ay = out_imu->accel[1], az = out_imu->accel[2];
+        float a_norm = sqrtf(ax*ax + ay*ay + az*az);
+        if (a_norm < 1e-6f) { ax = 0; ay = 0; az = 1.0f; a_norm = 1.0f; }
+        else { ax /= a_norm; ay /= a_norm; az /= a_norm; }
+
+        /* 磁力计归一化 */
+        float mx = out_imu->mag[0], my = out_imu->mag[1], mz = out_imu->mag[2];
+        float m_norm = sqrtf(mx*mx + my*my + mz*mz);
+        if (m_norm < 1e-6f) { mx = 1.0f; my = 0; mz = 0; m_norm = 1.0f; }
+        else { mx /= m_norm; my /= m_norm; mz /= m_norm; }
+
+        /* 步骤1: 从四元数计算估计的重力方向 */
+        float vx = 2.0f * (q1*q3 - q0*q2);
+        float vy = 2.0f * (q0*q1 + q2*q3);
+        float vz = q0*q0 - q1*q1 - q2*q2 + q3*q3;
+
+        /* 步骤2: 从四元数计算估计的磁场方向 */
+        float hx = 2.0f * mx * (0.5f - q2*q2 - q3*q3) +
+                   2.0f * my * (q1*q2 - q0*q3) +
+                   2.0f * mz * (q1*q3 + q0*q2);
+        float hy = 2.0f * mx * (q1*q2 + q0*q3) +
+                   2.0f * my * (0.5f - q1*q1 - q3*q3) +
+                   2.0f * mz * (q2*q3 - q0*q1);
+        float bx = sqrtf(hx*hx + hy*hy);
+        float bz = 2.0f * mx * (q1*q3 - q0*q2) +
+                   2.0f * my * (q2*q3 + q0*q1) +
+                   2.0f * mz * (0.5f - q1*q1 - q2*q2);
+
+        /* 估计的磁场方向在世界坐标系 */
+        float wx = 2.0f * bx * (0.5f - q2*q2 - q3*q3) +
+                   2.0f * bz * (q1*q3 - q0*q2);
+        float wy = 2.0f * bx * (q1*q2 - q0*q3) +
+                   2.0f * bz * (q0*q1 + q2*q3);
+        float wz = 2.0f * bx * (q0*q2 + q1*q3) +
+                   2.0f * bz * (0.5f - q1*q1 - q2*q2);
+
+        /* 步骤3: 计算误差（叉积） */
+        float ex = (ay*vz - az*vy) + (my*wz - mz*wy);
+        float ey = (az*vx - ax*vz) + (mz*wx - mx*wz);
+        float ez = (ax*vy - ay*vx) + (mx*wy - my*wx);
+
+        /* 步骤4: PI控制器 — 积分误差 */
+        if (twoKi > 0.0f) {
+            integral_fbx += twoKi * ex * dt;
+            integral_fby += twoKi * ey * dt;
+            integral_fbz += twoKi * ez * dt;
+        } else {
+            integral_fbx = 0; integral_fby = 0; integral_fbz = 0;
+        }
+
+        /* 步骤5: 校正后的角速度 */
+        gx += twoKp * ex + integral_fbx;
+        gy += twoKp * ey + integral_fby;
+        gz += twoKp * ez + integral_fbz;
+
+        /* 步骤6: 四元数积分（一阶） */
+        float qa = q0, qb = q1, qc = q2, qd = q3;
+        q0 += (-qb*gx - qc*gy - qd*gz) * (0.5f * dt);
+        q1 += ( qa*gx + qd*gy - qc*gz) * (0.5f * dt);
+        q2 += ( qd*gx + qa*gy + qb*gz) * (0.5f * dt);
+        q3 += (-qc*gx + qb*gy + qa*gz) * (0.5f * dt);
+
+        /* 步骤7: 四元数归一化 */
+        float q_norm = sqrtf(q0*q0 + q1*q1 + q2*q2 + q3*q3);
+        if (q_norm > 1e-10f) {
+            q0 /= q_norm; q1 /= q_norm; q2 /= q_norm; q3 /= q_norm;
+        } else {
+            q0 = 1.0f; q1 = q2 = q3 = 0.0f;
+        }
+
+        out_imu->orientation[0] = q0;
+        out_imu->orientation[1] = q1;
+        out_imu->orientation[2] = q2;
+        out_imu->orientation[3] = q3;
     }
     /* 世界坐标系线性加速度：旋转加速度到世界坐标系 */
     {

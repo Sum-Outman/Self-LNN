@@ -1037,12 +1037,39 @@ static int intel_backend_get_memory_info(GpuContext* context, size_t* total_memo
 }
 
 static int intel_backend_device_reset(GpuContext* context) {
-    /* STUB-01: Intel GPU 设备重置 — 本机无 Intel 独显, 无法实现真实重置
-     * Intel GPU 后端通过 OpenCL 接口操作, 设备重置需 clReleaseContext + clCreateContext 重建
-     * 当前标记为已知限制, 不影响纯 CPU/Intel iGPU 无操作的使用场景 */
+    /* P2-004修复: 使用真实Level Zero API进行设备重置
+     * 通过 zeContextDestroy + zeContextCreate 重建GPU上下文。
+     * Level Zero不可用时，返回成功（设备重置仅在Level Zero模式下有意义）。 */
     if (!context) return -1;
-    (void)context;
-    return 0;
+
+    /* 仅Level Zero模式下执行重置 */
+    if (!g_intel_state.use_level_zero || !g_ze_lib.handle) {
+        return 0; /* 无Level Zero上下文可重置，非错误 */
+    }
+
+    /* 销毁旧上下文 */
+    if (g_intel_state.ze_context && g_ze_lib.zeContextDestroy) {
+        int zr = g_ze_lib.zeContextDestroy(g_intel_state.ze_context);
+        if (zr != 0) {
+            log_warn("[Intel GPU] zeContextDestroy失败: 0x%x", (unsigned)zr);
+        }
+        g_intel_state.ze_context = NULL;
+    }
+
+    /* 重建新上下文 */
+    if (g_ze_lib.zeContextCreate && g_ze_lib.drivers && g_ze_lib.drivers[0]) {
+        ze_context_desc_t ctx_desc = {0};  /* 零初始化与init路径一致 */
+        int zr = g_ze_lib.zeContextCreate(g_ze_lib.drivers[0],
+            &ctx_desc, &g_intel_state.ze_context);
+        if (zr != 0) {
+            log_error("[Intel GPU] zeContextCreate重建失败: 0x%x", (unsigned)zr);
+            return -1;
+        }
+        log_info("[Intel GPU] Level Zero上下文已重建");
+        return 0;
+    }
+
+    return -1;
 }
 
 /* F-002: Intel GPU嵌入OpenCL C计算内核源码 */

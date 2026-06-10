@@ -1058,15 +1058,27 @@ static uint32_t lnn_calc_checksum(const void* data, size_t size) {
 
 /**
  * @brief 保存网络到文件
+ *
+ * ZSF-018修复: 参数从 const LNN* 改为 LNN*，因为保存时需要获取
+ * LNN_LOCK 互斥锁以保护权重读取的原子性。const 语义与互斥锁修改冲突。
  */
-int lnn_save(const LNN* network, const char* filepath) {
+int lnn_save(LNN* network, const char* filepath) {
     // 参数检查
     SELFLNN_CHECK_NULL(network, "LNN网络句柄为空");
     SELFLNN_CHECK_NULL(filepath, "文件路径为空");
 
+    /* ZSF-018 修复: 检查点保存需要获取LNN锁保护权重读取。
+     * 锁内仅读取内存数据到局部缓冲区，释放锁后进行文件I/O。
+     * 避免在持有锁期间进行耗时的磁盘操作，也避免early return时忘记解锁。 */
+    LNN_LOCK(network);
+
     FILE* file = fopen(filepath, "wb");
-    SELFLNN_CHECK(file != NULL, SELFLNN_ERROR_IO_ERROR,
-                 "打开文件失败: %s", filepath);
+    if (!file) {
+        LNN_UNLOCK(network);
+        selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                              "打开文件失败: %s", filepath);
+        return SELFLNN_ERROR_IO_ERROR;
+    }
 
     // 构建文件头
     LNNFileHeader header;
@@ -1088,72 +1100,73 @@ int lnn_save(const LNN* network, const char* filepath) {
     // 写入文件头
     if (fwrite(&header, sizeof(header), 1, file) != 1) {
         selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                              "写入模型文件头失败"); fclose(file); return SELFLNN_ERROR_IO_ERROR;
+                              "写入模型文件头失败"); fclose(file); LNN_UNLOCK(network); return SELFLNN_ERROR_IO_ERROR;
     }
     // 保存配置
     if (fwrite(&network->config, sizeof(LNNConfig), 1, file) != 1) {
         selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                              "保存LNN网络配置失败"); fclose(file); return SELFLNN_ERROR_IO_ERROR;
+                              "保存LNN网络配置失败"); fclose(file); LNN_UNLOCK(network); return SELFLNN_ERROR_IO_ERROR;
     }
     // 保存CfC网络
     if (cfc_save(network->cfc_network, file) != 0) {
         selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                              "保存CfC网络数据失败"); fclose(file); return SELFLNN_ERROR_IO_ERROR;
+                              "保存CfC网络数据失败"); fclose(file); LNN_UNLOCK(network); return SELFLNN_ERROR_IO_ERROR;
     }
     // 保存隐藏状态
     size_t hidden_size = network->config.hidden_size;
     if (fwrite(network->hidden_state, sizeof(float), hidden_size, file) != hidden_size) {
         selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                              "保存隐藏状态失败"); fclose(file); return SELFLNN_ERROR_IO_ERROR;
+                              "保存隐藏状态失败"); fclose(file); LNN_UNLOCK(network); return SELFLNN_ERROR_IO_ERROR;
     }
     // 保存细胞状态
     if (fwrite(network->cell_state, sizeof(float), hidden_size, file) != hidden_size) {
         selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                              "保存细胞状态失败"); fclose(file); return SELFLNN_ERROR_IO_ERROR;
+                              "保存细胞状态失败"); fclose(file); LNN_UNLOCK(network); return SELFLNN_ERROR_IO_ERROR;
     }
     // 保存扩展字段版本标记
     uint32_t ext_version = 2;
     if (fwrite(&ext_version, sizeof(uint32_t), 1, file) != 1) {
         selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                              "保存扩展版本标记失败"); fclose(file); return SELFLNN_ERROR_IO_ERROR;
+                              "保存扩展版本标记失败"); fclose(file); LNN_UNLOCK(network); return SELFLNN_ERROR_IO_ERROR;
     }
     // 保存分片配置
     if (fwrite(&network->enable_param_sharding, sizeof(int), 1, file) != 1) {
         selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                              "保存分片配置失败"); fclose(file); return SELFLNN_ERROR_IO_ERROR;
+                              "保存分片配置失败"); fclose(file); LNN_UNLOCK(network); return SELFLNN_ERROR_IO_ERROR;
     }
     if (fwrite(&network->num_local_shards, sizeof(size_t), 1, file) != 1) {
         selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                              "保存分片数失败"); fclose(file); return SELFLNN_ERROR_IO_ERROR;
+                              "保存分片数失败"); fclose(file); LNN_UNLOCK(network); return SELFLNN_ERROR_IO_ERROR;
     }
     if (fwrite(&network->enable_gradient_checkpointing, sizeof(int), 1, file) != 1) {
         selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                              "保存梯度检查点配置失败"); fclose(file); return SELFLNN_ERROR_IO_ERROR;
+                              "保存梯度检查点配置失败"); fclose(file); LNN_UNLOCK(network); return SELFLNN_ERROR_IO_ERROR;
     }
     if (fwrite(&network->enable_model_parallel, sizeof(int), 1, file) != 1) {
         selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                              "保存模型并行配置失败"); fclose(file); return SELFLNN_ERROR_IO_ERROR;
+                              "保存模型并行配置失败"); fclose(file); LNN_UNLOCK(network); return SELFLNN_ERROR_IO_ERROR;
     }
     if (fwrite(&network->enable_async_gradient_sync, sizeof(int), 1, file) != 1) {
         selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                              "保存异步同步配置失败"); fclose(file); return SELFLNN_ERROR_IO_ERROR;
+                              "保存异步同步配置失败"); fclose(file); LNN_UNLOCK(network); return SELFLNN_ERROR_IO_ERROR;
     }
     // 保存统计信息
     if (fwrite(&network->current_loss, sizeof(float), 1, file) != 1) {
         selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                              "保存当前损失失败"); fclose(file); return SELFLNN_ERROR_IO_ERROR;
+                              "保存当前损失失败"); fclose(file); LNN_UNLOCK(network); return SELFLNN_ERROR_IO_ERROR;
     }
     uint64_t fwd_bwd[2] = {(uint64_t)network->forward_count, (uint64_t)network->backward_count};
     if (fwrite(fwd_bwd, sizeof(uint64_t), 2, file) != 2) {
         selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                              "保存前向/反向计数失败"); fclose(file); return SELFLNN_ERROR_IO_ERROR;
+                              "保存前向/反向计数失败"); fclose(file); LNN_UNLOCK(network); return SELFLNN_ERROR_IO_ERROR;
     }
     if (fwrite(&network->total_training_time, sizeof(double), 1, file) != 1) {
         selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                              "保存训练时间失败"); fclose(file); return SELFLNN_ERROR_IO_ERROR;
+                              "保存训练时间失败"); fclose(file); LNN_UNLOCK(network); return SELFLNN_ERROR_IO_ERROR;
     }
 
     fclose(file);
+    LNN_UNLOCK(network);
     return 0;
 }
 

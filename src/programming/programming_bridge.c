@@ -250,6 +250,7 @@ int programming_bridge_intent_to_code(SelfProgrammingEngine* engine,
  * 公共API — reason_to_code
  * ================================================================ */
 
+/* P3-005: 推理→代码生成 — 完整实现，待自我编程引擎任务调度集成调用 */
 int programming_bridge_reason_to_code(SelfProgrammingEngine* engine,
                                       const CodeSpecification* spec,
                                       ProgrammingClosure* closure) {
@@ -532,6 +533,7 @@ void programming_closure_free(ProgrammingClosure* closure) {
     memset(closure, 0, sizeof(ProgrammingClosure));
 }
 
+/* P3-005: 桥接摘要查询 — 完整实现，待前端/日志模块集成调用 */
 const char* programming_bridge_last_summary(void) {
     return g_bridge_summary;
 }

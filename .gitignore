@@ -108,10 +108,10 @@ docs/_site/
 reports/
 examples/
 scripts/
+tests/
 需求.txt
 build/
 data/
-tests/
 tools/
 plan.md
 PPP.md

@@ -1,7 +1,7 @@
 # SELF-LNN 全液态神经网络 AGI 系统
 # SELF-LNN Full Liquid Neural Network AGI System
 
-> **版本 / Version:** 1.6.0 | **语言 / Language:** 100% Pure C (C11) | **许可证 / License:** Apache 2.0
+> **版本 / Version:** 1.5.0 | **语言 / Language:** 100% Pure C (C11) | **许可证 / License:** Apache 2.0
 > **构建 / Build:** CMake 3.10+ | **推荐编译器 / Recommended Compiler:** VS 2022 / GCC 7+ / Clang 6+
 > **开源仓库 / Repository:** https://github.com/Sum-Outman/Self-LNN
 > **开发者邮箱 / Developer Email:** silencecrowtom@qq.com
@@ -54,7 +54,7 @@ The system features self-cognition, reasoning, learning, evolution, memory, robo
 | **认知能力** | 自我认知、元认知、迭代式深度反思、多维自我修正 |
 | **推理能力** | 因果推理、数学推理、分层规划、长期规划、不确定性推理 |
 | **学习能力** | 在线学习、强化学习（PPO/SAC）、模仿学习（BC/DAgger/IRL）、元学习（MAML/Reptile） |
-| **训练系统** | 6 阶段训练流水线、混合精度训练、分布式训练、模型版本管理 |
+| **训练系统** | 7 阶段训练流水线（预训练/深度/多模态/微调/局部/API/评估）、混合精度训练、分布式训练、模型版本管理 |
 | **演化系统** | CMA-ES 演化策略、帕累托优化、NAS 神经架构搜索 |
 | **动态架构** | 运行时网络结构自我调整：扩展/收缩隐藏层、增删层、知识迁移、安全审批、原子交换 |
 | **记忆系统** | 5 层记忆体系（短期、长期、情景、语义、工作记忆）、Ebbinghaus 遗忘曲线、Hebbian 巩固 |
@@ -75,7 +75,7 @@ The system features self-cognition, reasoning, learning, evolution, memory, robo
 | **Cognitive Abilities** | Self-cognition, metacognition, iterative deep reflection, multi-dimensional self-correction |
 | **Reasoning Abilities** | Causal reasoning, mathematical reasoning, hierarchical planning, long-term planning, uncertainty reasoning |
 | **Learning Abilities** | Online learning, reinforcement learning (PPO/SAC), imitation learning (BC/DAgger/IRL), meta-learning (MAML/Reptile) |
-| **Training System** | 6-stage training pipeline, mixed precision training, distributed training, model version management |
+| **Training System** | 7-stage training pipeline (Pretrain/Deep/Multimodal/Fine-tune/Local/API/Evaluation), mixed precision training, distributed training, model version management |
 | **Evolution System** | CMA-ES evolution strategy, Pareto optimization, NAS neural architecture search |
 | **Dynamic Architecture** | Runtime network structure self-adjustment: expand/shrink hidden layers, add/remove layers, knowledge transfer, safety approval, atomic swap |
 | **Memory System** | 5-layer memory hierarchy (short-term, long-term, episodic, semantic, working memory), Ebbinghaus forgetting curve, Hebbian consolidation |
@@ -1043,14 +1043,14 @@ curl http://localhost:8080/api/status
 ### 训练系统 / Training System
 
 #### 中文
-- **6 阶段训练流水线**：预训练 → 深度训练 → 多模态联合训练 → 微调 → 本地适配 → 评估
+- **7 阶段训练流水线**：预训练 → 深度训练 → 多模态联合训练 → 微调 → 本地适配 → API训练 → 评估
 - **混合精度训练**：FP16/BF16 支持，减少内存使用加速训练
 - **分布式训练**：Ring AllReduce、梯度压缩、故障恢复
 - **模型版本管理**：检查点、版本控制、模型选择
 - **API 训练**：支持通过外部 API 进行远程训练
 
 #### English
-- **6-Stage Training Pipeline**: Pretraining → Deep Training → Multimodal Joint Training → Fine-tuning → Local Adaptation → Evaluation
+- **7-Stage Training Pipeline**: Pretraining → Deep Training → Multimodal Joint Training → Fine-tuning → Local Adaptation → API Training → Evaluation
 - **Mixed Precision Training**: FP16/BF16 support, reduces memory usage and accelerates training
 - **Distributed Training**: Ring AllReduce, gradient compression, fault recovery
 - **Model Version Management**: Checkpoints, version control, model selection
@@ -1840,15 +1840,16 @@ The system provides various imitation learning algorithms, enabling robots to le
 ### 机器人训练系统 / Robot Training System
 
 #### 中文
-系统提供完整的6阶段训练流水线，支持机器人技能训练：
+系统提供完整的7阶段训练流水线，支持机器人技能训练：
 
 **训练阶段**：
 1. **预训练（Pretrain）**：基础能力初始化
 2. **深度训练（Deep Train）**：深度网络优化
 3. **多模态联合训练（Multimodal）**：多模态输入联合优化
 4. **微调（Fine-Tune）**：特定任务微调
-5. **本地适配（Local）**：目标环境适配
-6. **评估（Evaluation）**：性能评估与验证
+5. **本地适配（Local）**：目标环境适配与一致性正则化
+6. **API训练（API）**：外部API知识蒸馏迁移学习
+7. **评估（Evaluation）**：性能评估与验证
 
 **训练配置**：
 - 各阶段独立设置训练轮数和学习率
@@ -1892,7 +1893,7 @@ The system provides various imitation learning algorithms, enabling robots to le
 - 自我学习、自我进化、自我修正、自主执行能力开关
 
 #### English
-The system provides a complete 6-stage training pipeline for robot skill training:
+The system provides a complete 7-stage training pipeline for robot skill training:
 
 **Training Stages**:
 1. **Pretrain**: Basic capability initialization

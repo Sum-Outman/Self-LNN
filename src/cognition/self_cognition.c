@@ -2621,6 +2621,9 @@ int self_cognition_make_decision(SelfCognitionSystem* system,
 
 /**
  * @brief 执行决策
+ * 
+ * ZSF-004 修复: 添加决策类型分发桥接，将认知决策连接到真实执行管道。
+ * 此前仅设置状态机构状态和时间戳，现在根据决策类型分发给相应子系统执行。
  */
 int self_cognition_execute_decision(SelfCognitionSystem* system,
                                     const SelfDecisionResult* decision,
@@ -2649,6 +2652,105 @@ int self_cognition_execute_decision(SelfCognitionSystem* system,
     // 记录执行开始时间
     system->execution_start_time = time(NULL);
     system->is_executing = 1;
+    
+    /* ZSF-004: 决策类型分发桥接 —— 将认知决策连接到真实执行管道 */
+    switch (decision->type) {
+    case DECISION_LEARN: {
+        /* 学习决策 → 触发在线学习器执行一步 */
+        extern void* selflnn_get_online_learner(void);
+        extern void* selflnn_get_shared_lnn(void);
+        void* learner = selflnn_get_online_learner();
+        void* lnn = selflnn_get_shared_lnn();
+        if (learner && lnn) {
+            float state_vec[128] = {0};
+            float target_vec[128] = {0};
+            extern int selflnn_get_recent_state(void*, float*, int);
+            extern int selflnn_get_recent_output(void*, float*, int);
+            if (selflnn_get_recent_state(lnn, state_vec, 128) == 0 &&
+                selflnn_get_recent_output(lnn, target_vec, 128) == 0) {
+                float loss = 0.0f;
+                extern int online_learner_update(void*, const float*, size_t, const float*, size_t, float*);
+                online_learner_update(learner, state_vec, 128, target_vec, 128, &loss);
+                snprintf(system->current_execution.feedback, 
+                        sizeof(system->current_execution.feedback),
+                        "学习决策执行: 在线学习步完成, 损失=%.6f", loss);
+            }
+        }
+        break;
+    }
+    case DECISION_PLAN: {
+        /* 规划决策 → 触发规划系统生成新计划 */
+        extern void* selflnn_get_planning_system(void);
+        void* planning = selflnn_get_planning_system();
+        if (planning) {
+            float goal[64] = {0}, state_buf[64] = {0}, plan_buf[512] = {0};
+            extern int planning_generate(void*, const float*, size_t, const float*, size_t, float*, size_t);
+            int plan_len = planning_generate(planning, goal, 64, state_buf, 64, plan_buf, 512);
+            snprintf(system->current_execution.feedback,
+                    sizeof(system->current_execution.feedback),
+                    "规划决策执行: 生成计划长度=%d", plan_len);
+        }
+        break;
+    }
+    case DECISION_EXPLORE: {
+        /* 探索决策 → 触发知识库推理探索新概念 */
+        extern void* selflnn_get_knowledge_inference(void);
+        extern void* selflnn_get_shared_lnn(void);
+        void* kie = selflnn_get_knowledge_inference();
+        void* lnn_exp = selflnn_get_shared_lnn();
+        if (kie && lnn_exp) {
+            extern int selflnn_consume_knowledge_inference(void*, void*, const char*, int, float);
+            selflnn_consume_knowledge_inference(lnn_exp, kie, "探索", 5, 0.15f);
+            snprintf(system->current_execution.feedback,
+                    sizeof(system->current_execution.feedback),
+                    "探索决策执行: 知识推理消费已触发");
+        }
+        break;
+    }
+    case DECISION_ADAPT: {
+        /* 适应决策 → 触发演化引擎执行结构变异 */
+        extern void* selflnn_get_evolution_engine(void);
+        void* evo = selflnn_get_evolution_engine();
+        if (evo) {
+            extern int evolution_step(void*);
+            int evo_ret = evolution_step(evo);
+            snprintf(system->current_execution.feedback,
+                    sizeof(system->current_execution.feedback),
+                    "适应决策执行: 演化步完成, 结果=%d", evo_ret);
+        }
+        break;
+    }
+    case DECISION_EXPLOIT: {
+        /* 利用决策 → 执行当前最佳已知动作（通过LNN前向传播获取最优输出） */
+        extern void* selflnn_get_shared_lnn(void);
+        void* lnn_act = selflnn_get_shared_lnn();
+        if (lnn_act) {
+            float input_vec[128] = {0}, output_vec[128] = {0};
+            extern int selflnn_safe_forward(void*, const float*, float*);
+            selflnn_safe_forward(lnn_act, input_vec, output_vec);
+            snprintf(system->current_execution.feedback,
+                    sizeof(system->current_execution.feedback),
+                    "利用决策执行: LNN前向传播完成, 输出[0]=%.4f", output_vec[0]);
+        }
+        break;
+    }
+    case DECISION_REST: {
+        /* 休息决策 → 降低系统活动水平，执行记忆巩固 */
+        extern void* selflnn_get_memory_manager(void);
+        void* mm = selflnn_get_memory_manager();
+        if (mm) {
+            extern int memory_sleep_consolidation(void*, float, int*);
+            int stats[4] = {0};
+            memory_sleep_consolidation(mm, 0.5f, stats);
+            snprintf(system->current_execution.feedback,
+                    sizeof(system->current_execution.feedback),
+                    "休息决策执行: 记忆巩固 NREM=%d, REM=%d", stats[0], stats[1]);
+        }
+        break;
+    }
+    default:
+        break;
+    }
     
     // 返回初始执行状态
     *execution_state = system->current_execution;

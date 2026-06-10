@@ -108,7 +108,7 @@ struct RosGazeboBridge {
     } cached_imu;
 
 /* 相机图像缓存 —— 从Gazebo /camera/image_raw话题获取真实图像数据 */
-    const void* cached_image_data;
+    void* cached_image_data;
     size_t cached_image_length;
 
     int robot_count_cache;
@@ -248,6 +248,61 @@ static void gazebo_link_states_callback(const void* msg, size_t msg_size, void* 
         &bridge->cached_odom.angular_vel[2], NULL);
     bridge->cached_odom.has_data = 1;
     bridge->cached_odom.timestamp = (double)time(NULL);
+}
+
+/* ================================================================
+ * P3-002修复: 相机图像回调 — 从Gazebo /camera/image_raw 话题获取真实图像
+ * 解析sensor_msgs/Image JSON消息，提取base64编码的图像数据并缓存。
+ * Gazebo未运行时此回调不会被触发，cached_image_data保持NULL。
+ * ================================================================ */
+static void gazebo_camera_image_callback(const void* msg, size_t msg_size, void* user_data) {
+    RosGazeboBridge* bridge = (RosGazeboBridge*)user_data;
+    if (!bridge || !msg || msg_size == 0) return;
+
+    const char* json = (const char*)msg;
+
+    /* 提取图像宽度和高度 */
+    int width = 0, height = 0;
+    const char* wp = strstr(json, "\"width\"");
+    if (wp) { wp = strchr(wp, ':'); if (wp) width = atoi(wp + 1); }
+
+    const char* hp = strstr(json, "\"height\"");
+    if (hp) { hp = strchr(hp, ':'); if (hp) height = atoi(hp + 1); }
+
+    /* 提取base64编码的图像数据 */
+    const char* dp = strstr(json, "\"data\"");
+    if (!dp) return;
+
+    dp = strchr(dp, '"');
+    if (!dp) return;
+    dp++; /* 跳过第一个引号 */
+    dp = strchr(dp, '"');
+    if (!dp) return;
+    dp++; /* 跳过第二个引号（data值开始的引号） */
+
+    const char* de = strchr(dp, '"');
+    if (!de || de <= dp) return;
+
+    size_t data_len = (size_t)(de - dp);
+    if (data_len == 0 || data_len > 10 * 1024 * 1024) return; /* 最大10MB */
+
+    /* 分配缓存并存储图像数据 */
+    char* cached = (char*)safe_malloc(data_len + 1);
+    if (!cached) return;
+
+    memcpy(cached, dp, data_len);
+    cached[data_len] = '\0';
+
+    /* 释放旧缓存 */
+    if (bridge->cached_image_data) {
+        safe_free((void**)&bridge->cached_image_data);
+    }
+
+    bridge->cached_image_data = cached;
+    bridge->cached_image_length = data_len;
+
+    log_debug("[Gazebo相机] 收到图像: %dx%d, %zu字节(base64)",
+              width, height, data_len);
 }
 
 /* 执行简单的TCP连接检查以检测Gazebo/ROS环境是否可用 */
@@ -413,6 +468,12 @@ int ros_gazebo_bridge_connect(RosGazeboBridge* bridge) {
     ros_node_subscribe(bridge->ros_node, bridge->link_states_topic,
                       "gazebo_msgs/LinkStates",
                       (RosMessageCallback)gazebo_link_states_callback, bridge);
+
+    /* P3-002修复: 订阅Gazebo相机图像话题
+     * 从 /camera/image_raw 获取仿真环境中的真实相机图像数据 */
+    ros_node_subscribe(bridge->ros_node, "/camera/image_raw",
+                      "sensor_msgs/Image",
+                      (RosMessageCallback)gazebo_camera_image_callback, bridge);
 
     /* 设置仿真控制服务 */
     ros_node_advertise_service(bridge->ros_node, bridge->pause_physics_srv, NULL, bridge);

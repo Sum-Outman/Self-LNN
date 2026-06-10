@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file training_pipeline.h
  * @brief 完整训练流水线接口
  */
@@ -21,8 +21,9 @@ typedef enum {
     TRAIN_STAGE_MULTIMODAL = 2,
     TRAIN_STAGE_FINE_TUNE = 3,
     TRAIN_STAGE_LOCAL = 4,
-    TRAIN_STAGE_EVALUATION = 5,
-    TRAIN_STAGE_IDLE = 6
+    TRAIN_STAGE_API = 5,      /**< ZSF-016: 外部API训练阶段 */
+    TRAIN_STAGE_EVALUATION = 6,
+    TRAIN_STAGE_IDLE = 7
 } TrainingStage;
 
 typedef struct {
@@ -54,12 +55,14 @@ typedef struct {
     size_t multimodal_epochs;
     size_t fine_tune_epochs;
     size_t local_epochs;
+    size_t api_train_epochs;           /**< ZSF-016: API训练轮数 */
     size_t speech_epochs; /**< 第6阶段语音训练轮数 */
     float pretrain_lr;
     float deep_train_lr;
     float multimodal_lr;
     float fine_tune_lr;
     float local_lr;
+    float api_train_lr;                /**< ZSF-016: API训练学习率 */
     float speech_lr; /**< 第6阶段语音训练学习率 */
     float base_lr;                   /**< 基础学习率 */
     size_t batch_size;

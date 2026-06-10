@@ -2635,7 +2635,9 @@ int ki_bayesian_variable_elimination(
             }
             if (!has_var) continue;
 
-            /* 简化因子：固定证据变量的值 */
+            /* 因子约简：根据证据变量实例化因子
+             * 对包含证据变量的因子，固定证据变量为其观测值，
+             * 将不匹配证据的行置零。这是变量消除法的标准步骤。 */
             Factor* reduced = factor_create(factors[i]->variables, factors[i]->var_count, cardinalities);
             if (!reduced) continue;
 

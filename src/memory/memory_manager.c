@@ -8,6 +8,7 @@
 
 #include "selflnn/memory/memory_manager.h"
 #include "selflnn/memory/memory.h"
+#include "selflnn/memory/semantic.h" /* P2-005: 语义记忆集成 */
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/platform.h"
@@ -860,6 +861,9 @@ struct MemoryManager {
     MemoryManagerConfig config;
     int is_initialized;
 
+    /* P2-005修复: 语义记忆实例 — 独立管理概念/关系/泛化/特化等语义知识 */
+    SemanticMemory* semantic_memory;
+
     CpuBuddyAllocator buddy_allocator;
     int buddy_enabled;
 };
@@ -926,6 +930,21 @@ MemoryManager* memory_manager_create(const MemoryManagerConfig* config)
         }
     }
 
+    /* P2-005修复: 创建语义记忆实例 */
+    {
+        SemanticMemoryConfig sm_cfg;
+        memset(&sm_cfg, 0, sizeof(sm_cfg));
+        sm_cfg.capacity = config->semantic_capacity > 0 ?
+                          config->semantic_capacity : 10000;
+        sm_cfg.association_strength = 0.5f;
+        sm_cfg.generalization_level = 0.3f;
+        sm_cfg.enable_hierarchy = 1;
+        manager->semantic_memory = semantic_memory_create(&sm_cfg);
+        if (!manager->semantic_memory) {
+            log_warning("[记忆管理器] 语义记忆创建失败，将跳过语义存储功能");
+        }
+    }
+
     manager->is_initialized = 1;
     return manager;
 }
@@ -943,6 +962,12 @@ void memory_manager_free(MemoryManager* manager)
 
     if (manager->memory_system) {
         memory_free(manager->memory_system);
+    }
+
+    /* P2-005修复: 释放语义记忆实例 */
+    if (manager->semantic_memory) {
+        semantic_memory_free(manager->semantic_memory);
+        manager->semantic_memory = NULL;
     }
 
     safe_free((void**)&manager);
@@ -1257,6 +1282,14 @@ MemorySystem* memory_manager_get_system(MemoryManager* manager)
 {
     if (!manager || !manager->is_initialized) return NULL;
     return manager->memory_system;
+}
+
+/* P2-005修复: 语义记忆访问器
+ * 供知识库学习、多模态教学等模块获取语义记忆进行概念存储/检索/泛化 */
+void* memory_manager_get_semantic(MemoryManager* manager)
+{
+    if (!manager || !manager->is_initialized) return NULL;
+    return manager->semantic_memory;
 }
 
 /**

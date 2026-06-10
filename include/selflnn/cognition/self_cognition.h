@@ -1655,6 +1655,41 @@ int self_cognition_auto_calibration_cycle(SelfCognitionSystem* system,
                                           char* action_taken,
                                           size_t action_size);
 
+/* ============================================================================
+ * ZSF-009 修复: 将.c中已实现的公共函数声明到头文件
+ * ============================================================================ */
+
+/**
+ * @brief 获取自我模型状态
+ * @param system 自我认知系统句柄
+ * @param model_state 输出模型状态
+ * @return 0成功，-1失败
+ */
+int self_cognition_get_model_status(SelfCognitionSystem* system,
+                                   SelfModelState* model_state);
+
+/**
+ * @brief 评估自我模型准确性
+ * @param system 自我认知系统句柄
+ * @return 模型准确性评分 (0.0-1.0)
+ */
+float self_cognition_assess_model_accuracy(SelfCognitionSystem* system);
+
+/**
+ * @brief 获取深度统计信息（供监控和调试使用）
+ * @param system 自我认知系统句柄
+ * @param total_reflections 输出总反思次数
+ * @param total_corrections 输出总修正次数
+ * @param avg_reflection_score 输出平均反思得分
+ * @param avg_correction_depth 输出平均修正深度
+ * @return 0成功，-1失败
+ */
+int self_cognition_get_deep_stats(SelfCognitionSystem* system,
+                                  int* total_reflections,
+                                  int* total_corrections,
+                                  float* avg_reflection_score,
+                                  float* avg_correction_depth);
+
 #ifdef __cplusplus
 }
 #endif

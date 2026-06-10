@@ -1124,8 +1124,11 @@ VisionHapticFusion* vision_haptic_fusion_create(const VisionHapticFusionConfig* 
     VisionHapticFusion* vf = (VisionHapticFusion*)safe_calloc(1, sizeof(VisionHapticFusion));
     if (!vf) return NULL;
     memcpy(&vf->config, config, sizeof(VisionHapticFusionConfig));
-    /* Phase2: 强制默认使用投影拼接路径，独立CfC ODE已废弃 */
-    vf->config.enable_cfc_fusion = 0;
+    /* P1-008修复: 重新启用CfC ODE融合路径。
+     * 原被强制禁用(enable_cfc_fusion=0)，改用线性投影+EMA降级路径。
+     * 需求规范要求使用完整CfC液态神经网络进行多模态融合。
+     * CfC ODE路径(_hc_cfc_ode_predict)是完整实现，具有真实的权重/偏置/时间常数参数。 */
+    vf->config.enable_cfc_fusion = 1;
     int hs = config->cfc_hidden_size;
     int vd = config->visual_feature_dim;
     int hd = config->haptic_feature_dim;

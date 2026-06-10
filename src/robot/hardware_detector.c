@@ -1148,6 +1148,7 @@ int hd_get_system_info(char* system_name, size_t max_len, char* os_version, size
     return 0;
 }
 
+/* P3-006: 硬件基准测试 — 完整实现，待上层模块集成调用 */
 int hd_benchmark_device(const HDDeviceInfo* device, HDBenchmarkType bench_type, HDBenchmarkResult* out) {
     /* ZSF-078说明：基准测试使用纯CPU浮点运算。
      * GPU设备通过gpu_get_device_info()获取真实性能评分，此函数为CPU补充测试。 */
@@ -1310,6 +1311,7 @@ int hd_health_check(const HDDeviceInfo* device, HDHealthInfo* out) {
     return 0;
 }
 
+/* P3-006: 硬件健康趋势预测 — 完整实现，待上层监控模块集成调用 */
 int hd_health_predict_trend(HDHealthInfo* history, size_t history_len, HDHealthInfo* out) {
     if (!history || !out || history_len == 0) return -1;
     memcpy(out, &history[history_len - 1], sizeof(HDHealthInfo));
@@ -1336,6 +1338,7 @@ int hd_health_predict_trend(HDHealthInfo* history, size_t history_len, HDHealthI
     return 0;
 }
 
+/* P3-006: 设备能力分类 — 完整实现，待上层设备管理模块集成调用 */
 int hd_classify_device_capability(const HDDeviceInfo* device, HDDeviceCapability* caps, size_t max_count, size_t* count) {
     if (!device || !caps || !count) return -1;
     *count = 0;

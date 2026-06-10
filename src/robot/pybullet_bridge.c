@@ -112,21 +112,24 @@ int pybullet_connect(const PyBulletConfig* config) {
     float ts = config->time_step > 0.0f ? config->time_step : 1.0f / 240.0f;
     int steps = config->max_steps_per_call > 0 ? config->max_steps_per_call : 10;
 
-    /* 查找脚本路径：先搜索当前目录，再搜索scripts子目录 */
+    /* 查找脚本路径：先搜索当前目录，再搜索scripts子目录
+     * ZSF-011 修复: 添加详细的路径搜索日志，帮助用户快速定位脚本缺失问题 */
     const char* script_paths[] = {
         "scripts/pybullet_ipc_bridge.py",
         "../scripts/pybullet_ipc_bridge.py",
         "../../scripts/pybullet_ipc_bridge.py",
         "pybullet_ipc_bridge.py"
     };
+    const int num_script_paths = sizeof(script_paths) / sizeof(script_paths[0]);
     const char* script_path = NULL;
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < num_script_paths; i++) {
 #ifdef _WIN32
         FILE* test_fp = NULL;
         errno_t ec = fopen_s(&test_fp, script_paths[i], "r");
         if (test_fp && ec == 0) {
             fclose(test_fp);
             script_path = script_paths[i];
+            log_info("PyBullet桥接: 找到脚本 %s", script_path);
             break;
         }
 #else
@@ -134,13 +137,21 @@ int pybullet_connect(const PyBulletConfig* config) {
         if (test_fp) {
             fclose(test_fp);
             script_path = script_paths[i];
+            log_info("PyBullet桥接: 找到脚本 %s", script_path);
             break;
         }
 #endif
     }
 
     if (!script_path) {
-        log_error("PyBullet桥接: 找不到 pybullet_ipc_bridge.py 脚本\n");
+        log_error("PyBullet桥接: 找不到 pybullet_ipc_bridge.py 脚本。");
+        log_error("  已搜索以下路径(%d个):", num_script_paths);
+        for (int i = 0; i < num_script_paths; i++) {
+            log_error("    [%d] %s (不存在)", i + 1, script_paths[i]);
+        }
+        log_error("  解决方案: 将 pybullet_ipc_bridge.py 放到上述任一位置，");
+        log_error("           或使用 --pybullet-script 命令行参数指定路径。");
+        log_error("  系统将回退到内部纯C物理引擎。");
         conn->state = PYBULLET_ERROR;
         return -1;
     }

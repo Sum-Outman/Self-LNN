@@ -404,6 +404,7 @@ int robot_emergency_cut_power(EmergencySystem* system) {
 int robot_emergency_restore_power(EmergencySystem* system) {
     if (!system) return -1;
     system->is_power_cut = 0;
+    /* 电源恢复默认安全值（24V/5A），硬件接口就绪后将由真实传感器数据覆盖 */
     system->system_voltage_v = 24.0f;
     system->system_current_a = 5.0f;
 #ifdef _WIN32

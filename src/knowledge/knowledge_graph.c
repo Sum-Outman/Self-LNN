@@ -5171,21 +5171,24 @@ int knowledge_graph_to_lnn_bridge(void* kg, void* lnn, float strength) {
     return (result >= 0) ? 0 : -1;
 }
 /* P6-060 */
-/* R002: 知识图谱路径查找（委托find_all_paths完整实现） */
-size_t knowledge_graph_find_paths(KnowledgeGraph* g, KnowledgeGraphNode* s, KnowledgeGraphNode* e, KnowledgeGraphPath** p, size_t m) {
-    if (!g || !s || !e || !p || m == 0) return 0;
+/* R002: 知识图谱路径查找（委托find_all_paths完整实现）
+ * ZSF-015 修复: 参数命名规范化，g→graph, s→start_node, e→end_node, p→paths, m→max_paths */
+size_t knowledge_graph_find_paths(KnowledgeGraph* graph, KnowledgeGraphNode* start_node,
+                                  KnowledgeGraphNode* end_node, KnowledgeGraphPath** paths,
+                                  size_t max_paths) {
+    if (!graph || !start_node || !end_node || !paths || max_paths == 0) return 0;
     KnowledgeGraphQueryOptions opts;
     memset(&opts, 0, sizeof(opts));
-    opts.max_depth = (int)(g->node_count > 0 ? g->node_count : 100);
+    opts.max_depth = (int)(graph->node_count > 0 ? graph->node_count : 100);
     opts.min_confidence = 0.0f;
     opts.directed = 0;
     opts.include_cycles = 0;
-    opts.max_results = m;
-    KnowledgeGraphPath** all = knowledge_graph_find_all_paths(g, s, e, &opts, m);
+    opts.max_results = max_paths;
+    KnowledgeGraphPath** all = knowledge_graph_find_all_paths(graph, start_node, end_node, &opts, max_paths);
     if (!all) return 0;
     size_t count = 0;
-    for (size_t i = 0; i < m && all[i] != NULL; i++) {
-        p[i] = all[i];
+    for (size_t i = 0; i < max_paths && all[i] != NULL; i++) {
+        paths[i] = all[i];
         count++;
     }
     safe_free((void**)&all);

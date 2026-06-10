@@ -1502,7 +1502,8 @@ EquationSolution* solve_equation_symbolic(const char* equation, const char* vari
         return NULL;
     }
 
-    /* 简化方程 */
+    /* 符号化简 — 合并同类项、常数折叠、恒等变换
+     * 简化后送入线性/非线性求解器进行解析或数值求解 */
     MathExpressionNode* simplified = symbolic_simplify(f_expr);
     math_expression_destroy(f_expr);
 

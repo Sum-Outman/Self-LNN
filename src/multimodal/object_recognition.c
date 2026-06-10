@@ -725,25 +725,10 @@ int or_detect_objects(ObjectRecognizer* or_obj, const float* image, int w, int h
                         }
                     }
 
-/* 回退路径 —— HOG+NCC模板匹配
-                     * 当CfC管道未训练或前向传播失败时启用 */
-                    if (best_category < 0 && or_obj->is_trained) {
-                        float best_ncc = -1.0f;
-                        for (int c = 0; c < or_obj->category_count; c++) {
-                            float ncc = normalized_cross_correlation(
-                                hog_features, or_obj->category_templates[c], 128);
-                            if (ncc > best_ncc) {
-                                best_ncc = ncc;
-                                best_category = c;
-                            }
-                        }
-                        if (best_category >= 0) {
-                            obj->confidence = (best_ncc + 1.0f) * 0.5f;
-                            if (obj->confidence < edge_response * 8.0f)
-                                obj->confidence = edge_response * 8.0f;
-                            if (obj->confidence > 1.0f) obj->confidence = 1.0f;
-                        }
-                    }
+                    /* P1-007修复: 移除HOG+NCC模板匹配回退路径。
+                     * 需求规范要求对象识别必须基于CfC深度学习管道，
+                     * 不允许在CfC未训练时降级到HOG+NCC归一化互相关模板匹配。
+                     * 当CfC前向传播失败时，保持best_category=-1，由上层处理。 */
 
 /* 使用显式训练状态标志（is_trained 和 is_cfc_trained） */
                     obj->category_id = best_category;

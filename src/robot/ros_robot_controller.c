@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file ros_robot_controller.c
  * @brief 真实ROS机器人控制器实现 —— 基于rosbridge WebSocket协议的多机器人控制
  *
@@ -562,7 +562,8 @@ int ros_robot_controller_get_robot_info(RosRobotController* controller, int robo
     info->training_state = robot->training_state;
     info->training_progress = robot->training_progress;
     snprintf(info->last_error, sizeof(info->last_error), "%s", robot->last_error);
-    info->battery_level = 100.0f;
+    /* P3-001修复: 电池电量默认-1.0表示"未知"，真实值需从硬件传感器读取 */
+    info->battery_level = -1.0f;
     return 0;
 }
 

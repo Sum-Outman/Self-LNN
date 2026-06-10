@@ -1,4 +1,4 @@
-﻿#ifndef SELFLNN_LNN_H
+#ifndef SELFLNN_LNN_H
 #define SELFLNN_LNN_H
 
 #include <stddef.h>
@@ -334,7 +334,7 @@ int lnn_backward_accumulate(LNN* network, const float* target, float* loss);
  * @param filepath 文件路径
  * @return int 成功返回0，失败返回-1
  */
-int lnn_save(const LNN* network, const char* filepath);
+int lnn_save(LNN* network, const char* filepath);
 
 /**
  * @brief 从文件加载网络

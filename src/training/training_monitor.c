@@ -965,7 +965,9 @@ int training_monitor_log_histogram(TrainingMonitor* monitor,
 
 /* ============================================================================
  * R3-03: GPU硬件监控 + 训练ETA估算
- * 简化实现，仅使用可用的跨平台API。
+ * Windows: GetSystemTimes API获取真实CPU利用率
+ * Linux: /proc/stat 文件系统获取真实CPU利用率
+ * GPU: 通过GpuBackend查询真实GPU温度/利用率/显存
  * ============================================================================ */
 
 static float training_monitor_get_cpu_utilization_percent(const TrainingMonitor* tm) {

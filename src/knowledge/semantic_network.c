@@ -2405,6 +2405,151 @@ float semantic_network_concept_similarity(SemanticNetwork* network,
             return -1.0f;
     }
 }/* P6-060 */
-const char* semantic_relation_type_to_string(SemanticRelationType t) { (void)t; return "unknown"; }
-size_t semantic_network_find_relations(SemanticNetwork* n, SemanticConcept* c, int rt, SemanticRelation** r, size_t m) { (void)n;(void)c;(void)rt;(void)r;(void)m; return 0; }
-int semantic_network_get_stats(SemanticNetwork* n, SemanticNetworkStats* s) { (void)n;(void)s; return 0; }
+
+/* ================================================================
+ * P0-001修复: semantic_relation_type_to_string — 完整类型→字符串映射
+ * 将10种语义关系类型转换为可读的字符串表示。
+ * ================================================================ */
+const char* semantic_relation_type_to_string(SemanticRelationType t) {
+    switch (t) {
+        case RELATION_IS_A:         return "is_a";
+        case RELATION_PART_OF:      return "part_of";
+        case RELATION_HAS_A:        return "has_a";
+        case RELATION_INSTANCE_OF:  return "instance_of";
+        case RELATION_SYNONYM:      return "synonym";
+        case RELATION_ANTONYM:      return "antonym";
+        case RELATION_RELATED_TO:   return "related_to";
+        case RELATION_CAUSES:       return "causes";
+        case RELATION_PRECEDES:     return "precedes";
+        case RELATION_LOCATION_OF:  return "location_of";
+        default:                    return "unknown";
+    }
+}
+
+/* ================================================================
+ * P0-001修复: semantic_network_find_relations — 完整关系查询实现
+ * 遍历语义网络的所有关系，筛选出与指定概念相关且类型匹配的关系。
+ * 将结果写入输出数组，返回实际找到的关系数量。
+ * ================================================================ */
+size_t semantic_network_find_relations(SemanticNetwork* n, SemanticConcept* c,
+                                        int rt, SemanticRelation** r, size_t m) {
+    if (!n || !c || !r || m == 0) return 0;
+
+    SEMANTIC_LOCK(n);
+    size_t found = 0;
+
+    for (size_t i = 0; i < n->relation_count && found < m; i++) {
+        SemanticRelation* rel = n->relations[i];
+        if (!rel) continue;
+
+        /* 检查关系是否涉及目标概念（作为源或目标） */
+        int matches_concept = (rel->source == c || rel->target == c);
+        if (!matches_concept) continue;
+
+        /* 如果指定了关系类型(r >= 0)，则按类型过滤；r < 0 表示不限制类型 */
+        if (rt >= 0 && rel->type != (SemanticRelationType)rt) continue;
+
+        r[found] = rel;
+        found++;
+    }
+
+    SEMANTIC_UNLOCK(n);
+    return found;
+}
+
+/* ================================================================
+ * P0-001修复: semantic_network_get_stats — 完整统计信息计算
+ * 计算语义网络的概念数、关系数、平均层次深度、网络密度和平均语义相似度。
+ * ================================================================ */
+int semantic_network_get_stats(SemanticNetwork* n, SemanticNetworkStats* s) {
+    if (!n || !s) return -1;
+
+    SEMANTIC_LOCK(n);
+    memset(s, 0, sizeof(SemanticNetworkStats));
+
+    s->concept_count = n->concept_count;
+    s->relation_count = n->relation_count;
+
+    /* 计算平均层次深度：遍历所有概念，统计is_a关系层级深度 */
+    if (n->concept_count > 0) {
+        float total_depth = 0.0f;
+        size_t depth_count = 0;
+
+        for (size_t i = 0; i < n->concept_count; i++) {
+            SemanticConcept* concept = n->concepts[i];
+            if (!concept) continue;
+
+            /* 沿is_a关系向上追溯到根，计算深度 */
+            int depth = 0;
+            SemanticConcept* current = concept;
+            /* 防止无限循环：最多追溯100层 */
+            for (int hop = 0; hop < 100; hop++) {
+                /* 查找当前概念的is_a父概念 */
+                SemanticConcept* parent = NULL;
+                for (size_t j = 0; j < n->relation_count; j++) {
+                    SemanticRelation* rel = n->relations[j];
+                    if (rel && rel->source == current && rel->type == RELATION_IS_A) {
+                        parent = rel->target;
+                        break;
+                    }
+                }
+                if (!parent) break;
+                current = parent;
+                depth++;
+            }
+            total_depth += (float)depth;
+            depth_count++;
+        }
+
+        if (depth_count > 0) {
+            s->avg_hierarchy_depth = total_depth / (float)depth_count;
+        }
+    }
+
+    /* 计算网络密度：实际关系数 / 最大可能关系数（概念数^2） */
+    if (n->concept_count > 1) {
+        float max_possible = (float)(n->concept_count * n->concept_count);
+        s->network_density = (float)n->relation_count / max_possible;
+    }
+
+    /* 计算平均语义相似度：对所有概念对的嵌入余弦相似度取平均（采样以避免O(n^2)） */
+    if (n->concept_count >= 2) {
+        float total_sim = 0.0f;
+        size_t sim_count = 0;
+        /* 采样策略：相邻概念对 + 随机间隔对，最多计算min(100, concept_count*2)对 */
+        size_t max_pairs = n->concept_count < 100 ? n->concept_count * 2 : 200;
+        size_t step = n->concept_count / max_pairs;
+        if (step == 0) step = 1;
+
+        for (size_t i = 0; i + step < n->concept_count && sim_count < max_pairs; i += step) {
+            SemanticConcept* c1 = n->concepts[i];
+            SemanticConcept* c2 = n->concepts[i + step];
+            if (!c1 || !c2) continue;
+
+            /* 计算嵌入余弦相似度 */
+            if (c1->embedding && c2->embedding &&
+                c1->embedding_size > 0 && c2->embedding_size > 0) {
+                size_t dim = c1->embedding_size < c2->embedding_size ?
+                             c1->embedding_size : c2->embedding_size;
+                float dot = 0.0f, norm1 = 0.0f, norm2 = 0.0f;
+                for (size_t d = 0; d < dim; d++) {
+                    dot += c1->embedding[d] * c2->embedding[d];
+                    norm1 += c1->embedding[d] * c1->embedding[d];
+                    norm2 += c2->embedding[d] * c2->embedding[d];
+                }
+                float norm_prod = sqrtf(norm1) * sqrtf(norm2);
+                if (norm_prod > 1e-9f) {
+                    total_sim += dot / norm_prod;
+                    sim_count++;
+                }
+            }
+        }
+
+        if (sim_count > 0) {
+            s->avg_semantic_similarity = total_sim / (float)sim_count;
+        }
+    }
+
+    SEMANTIC_UNLOCK(n);
+    return 0;
+}

@@ -232,10 +232,13 @@ int kb_resolve_conflict(const char* fact_a, const float* source_weights_a,
     a_src /= (float)(num_sources_a + 1);
     b_src /= (float)(num_sources_b + 1);
 
-    /* 时间衰减 */
-    long t_now = (long)time(NULL); /* simplified timestamp */
-    float a_time = expf(-KB_TIME_DECAY_LAMBDA * (float)(t_now - timestamp_a) * 0.001f);
-    float b_time = expf(-KB_TIME_DECAY_LAMBDA * (float)(t_now - timestamp_b) * 0.001f);
+    /* 时间衰减 — 使用秒级精度时间差计算
+     * 新近知识权重更高，过期知识逐渐衰减 */
+    time_t t_now = time(NULL);
+    double t_diff_a = difftime(t_now, timestamp_a);
+    double t_diff_b = difftime(t_now, timestamp_b);
+    float a_time = expf(-KB_TIME_DECAY_LAMBDA * (float)t_diff_a);
+    float b_time = expf(-KB_TIME_DECAY_LAMBDA * (float)t_diff_b);
 
     /* 社区一致性 */
     float a_consensus = (float)num_sources_a / (float)(num_sources_a + 1);

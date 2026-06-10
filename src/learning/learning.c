@@ -13,6 +13,9 @@
 #include "selflnn/utils/perf.h"
 #include "selflnn/utils/math_utils.h"
 #include "selflnn/utils/logging.h"
+/* ZSF-010: 学习引擎→演化引擎桥接，使learning_self_evolve可委托给EvolutionEngine */
+#include "selflnn/evolution/evolution_engine.h"
+#include "selflnn/core/lnn.h"
 #include "selflnn/utils/xorshift_prng.h"
 #include "selflnn/utils/secure_random.h"
 #include "selflnn/core/errors.h"
@@ -1413,6 +1416,37 @@ int learning_self_evolve(LearningEngine* engine,
     // 5. 更新演化统计
     engine->self_evolution.adaptation_rate = 1.0f - (target_learning_rate / 0.1f); // 归一化适应率
     engine->current_generation++;
+
+    /* ZSF-010 修复: 深度停滞时委托给EvolutionEngine进行架构级演化
+     * 当学习引擎检测到连续停滞超过阈值时，不再仅依赖参数自适应，
+     * 而是将问题提升到EvolutionEngine，由其执行完整的GA/CMA-ES/
+     * 结构变异等深度演化操作。这确保了"自我演化进化能力"路径统一。 */
+    if (engine->self_evolution.stagnation_counter >= 10) {
+        /* 尝试获取全局演化引擎 */
+        extern void* selflnn_get_evolution_engine(void);
+        void* evo_handle = selflnn_get_evolution_engine();
+        if (evo_handle) {
+            EvolutionEngine* evo = (EvolutionEngine*)evo_handle;
+            log_info("[学习演化桥接] 检测到深度停滞(%d代), 委托给演化引擎执行架构级演化",
+                     engine->self_evolution.stagnation_counter);
+            /* 将当前最佳个体编码传递给演化引擎作为种子 */
+            if (engine->population && engine->individual_size > 0) {
+                /* ZSF-010补充: evolution_set_seed_chromosome不存在，
+                 * 演化引擎已通过evolution_engine_set_arch_controller管理种群，
+                 * 学习引擎仅触发演化步执行。 */
+            }
+            /* 执行一步演化 */
+            int evo_result = evolution_step(evo);
+            if (evo_result == 0) {
+                /* 演化成功，将有希望的结果应用到LNN */
+                evolution_engine_apply_best_to_lnn(evo);
+                log_info("[学习演化桥接] 演化引擎架构级演化完成, 停滞计数器已重置");
+                engine->self_evolution.stagnation_counter = 0;
+            }
+        } else {
+            log_debug("[学习演化桥接] 全局演化引擎不可用，继续使用学习引擎内部演化策略");
+        }
+    }
 
     return 0;
 }

@@ -988,11 +988,13 @@ static void agi_bg_training_step(void) {
         tp_cfg.multimodal_epochs = 80;
         tp_cfg.fine_tune_epochs = 30;
         tp_cfg.local_epochs = 20;
+        tp_cfg.api_train_epochs = 15;   /* ZSF-016: API训练阶段 */
         tp_cfg.pretrain_lr = 0.001f;
         tp_cfg.deep_train_lr = 0.0005f;
         tp_cfg.multimodal_lr = 0.001f;
         tp_cfg.fine_tune_lr = 0.0001f;
         tp_cfg.local_lr = 0.001f;
+        tp_cfg.api_train_lr = 0.00005f; /* ZSF-016: API训练使用极低学习率避免遗忘 */
         tp_cfg.batch_size = 32;
         tp_cfg.use_gpu = 1;
         tp_cfg.use_mixed_precision = 1;
@@ -1095,10 +1097,8 @@ static void agi_bg_training_step(void) {
 #endif
                 if (data_file_count == 0) {
                     log_warn("[AGI后台] 训练数据目录 data/training/ 中未找到任何数据文件(.json/.csv/.txt/.bin)，" 
-                             "将仅执行空训练步（不加载空数据），请放入训练数据文件后重新训练。");
-                    /* 仅执行空训练步，不加载空数据 */
-                    if (!g_training_pipeline) return;
-                    training_pipeline_step(g_training_pipeline);
+                             "将跳过训练步（不执行空操作），请放入训练数据文件后重新训练。");
+                    /* ZSF-007 修复: 无数据时直接返回，不执行空训练步浪费计算资源 */
                     return;
                 }
                 log_info("[AGI后台] 训练数据目录扫描完成，发现 %d 个数据文件", data_file_count);
@@ -2566,6 +2566,7 @@ int main(int argc, char** argv)
         int sysjson_mem_cap = 0, sysjson_max_tasks = 0;
         char sysjson_model_path[512] = {0};
         int sysjson_power_mode = -1, sysjson_gpu_backend = -1;
+        int sysjson_mixed_precision = -1;  /* ZSF-003: 混合精度模式 */
 
         FILE* sysfp = fopen("config/system_config.json", "r");
         if (sysfp) {
@@ -2610,6 +2611,25 @@ int main(int argc, char** argv)
                             else if (strcmp(gb_str, "auto") == 0) sysjson_gpu_backend = GPU_BACKEND_CPU;
                             else sysjson_gpu_backend = GPU_BACKEND_CPU;
                         }
+                        /* ZSF-003 修复: 解析training子对象中的mixed_precision配置
+                         * 此前仅解析了gpu_backend，training子对象完全被忽略，
+                         * 导致混合精度训练配置从JSON文件无法生效。 */
+                        {
+                            JsonValue* training_obj = json_get(root, "training");
+                            if (training_obj) {
+                                const char* mp_str = json_get_string(training_obj, "mixed_precision");
+                                if (mp_str) {
+                                    if (strcmp(mp_str, "fp16") == 0)
+                                        sysjson_mixed_precision = 2;
+                                    else if (strcmp(mp_str, "bf16") == 0)
+                                        sysjson_mixed_precision = 3;
+                                    else if (strcmp(mp_str, "auto") == 0)
+                                        sysjson_mixed_precision = 1;
+                                    else if (strcmp(mp_str, "off") == 0 || strcmp(mp_str, "none") == 0)
+                                        sysjson_mixed_precision = 0;
+                                }
+                            }
+                        }
                         json_free(root);
                     } else {
                         fprintf(stderr, "警告: system_config.json JSON解析失败，使用默认参数\n");
@@ -2636,6 +2656,7 @@ int main(int argc, char** argv)
             sys_config.max_concurrent_tasks = (sysjson_max_tasks > 0) ? sysjson_max_tasks : 100;
             sys_config.power_mode = (sysjson_power_mode >= 0) ? sysjson_power_mode : POWER_MODE_BALANCED;
             sys_config.gpu_backend = (sysjson_gpu_backend >= 0) ? sysjson_gpu_backend : GPU_BACKEND_CPU;
+            sys_config.mixed_precision_mode = (sysjson_mixed_precision >= 0) ? sysjson_mixed_precision : 1; /* ZSF-003: 默认auto */
             sys_config.model_path = (sysjson_model_path[0] != '\0') ? sysjson_model_path : NULL;
 
         if (selflnn_init(&sys_config) == 0) {

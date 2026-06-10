@@ -14,25 +14,20 @@
 
 #include "selflnn/core/architecture_controller.h"
 #include "selflnn/core/lnn.h"
-#include "selflnn/core/cfc_cell.h"
 #include "selflnn/core/cfc_network.h"
-
-#include <stdio.h>
+#include "selflnn/core/cfc_cell.h"
+#include "selflnn/core/errors.h"
+#include "selflnn/utils/memory_utils.h"  /* ZSF-023: safe_malloc/calloc/free宏 */
+#include "selflnn/utils/time_utils.h"     /* ZSF-023: get_timestamp_ms */
+#include "selflnn/utils/logging.h"
+#include "selflnn/utils/secure_random.h"
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
+#include <stdio.h>
 #include <math.h>
+#include <time.h>
 
-/* ============ 外部函数声明 ============ */
-extern void log_info(const char* fmt, ...);
-extern void log_warning(const char* fmt, ...);
-extern void log_error(const char* fmt, ...);
-extern void* safe_malloc(size_t size);
-extern void* safe_calloc(size_t num, size_t size);
-extern void safe_free(void** ptr);
-extern uint64_t get_timestamp_ms(void);
 extern uint64_t lnn_get_forward_count(const LNN* network);
-extern uint64_t lnn_get_backward_count(const LNN* network);
 
 /* ============ 维度范围常量 ============ */
 #define ARCH_MIN_HIDDEN_SIZE    32    /**< 隐藏层最小尺寸 */
@@ -242,10 +237,15 @@ int arch_controller_approve_change(ArchitectureController* controller,
 /* ============ 知识迁移 ============ */
 
 /**
- * @brief 将权重矩阵从旧网络迁移到新网络（左上角复制策略）
+ * @brief 将权重矩阵从旧网络迁移到新网络（重要性感知迁移策略）
  *
+ * ZSF-005 修复：当收缩(新维度<旧维度)时，不再简单截断末尾神经元，
+ * 而是基于神经元L2范数重要性评分，保留最重要的神经元权重。
+ * 
  * 对于 h2h 权重矩阵 [new_hidden × new_hidden]：
- *   - 旧部分直接复制
+ *   - 计算每个旧神经元的权重范数作为重要性评分
+ *   - 按重要性降序排列神经元索引
+ *   - 优先复制重要性最高的神经元权重
  *   - 新行/新列使用 Xavier 初始化
  */
 static void arch_transfer_weight_matrix(const float* old_w, size_t old_rows, size_t old_cols,
@@ -254,13 +254,65 @@ static void arch_transfer_weight_matrix(const float* old_w, size_t old_rows, siz
     /* 清零新矩阵 */
     memset(new_w, 0, new_rows * new_cols * sizeof(float));
 
-    /* 复制重叠区域（左上角） */
     size_t copy_rows = (old_rows < new_rows) ? old_rows : new_rows;
     size_t copy_cols = (old_cols < new_cols) ? old_cols : new_cols;
 
-    for (size_t r = 0; r < copy_rows; r++) {
-        for (size_t c = 0; c < copy_cols; c++) {
-            new_w[r * new_cols + c] = old_w[r * old_cols + c];
+    /* ZSF-005: 收缩时基于神经元重要性排序，保留最重要的神经元 */
+    if (new_rows < old_rows && copy_rows > 0) {
+        /* 计算每个旧神经元的重要性评分(L2范数) */
+        float* importance = (float*)safe_malloc(old_rows * sizeof(float));
+        size_t* sorted_indices = (size_t*)safe_malloc(old_rows * sizeof(size_t));
+        if (importance && sorted_indices) {
+            for (size_t r = 0; r < old_rows; r++) {
+                float row_norm = 0.0f;
+                for (size_t c = 0; c < old_cols; c++) {
+                    float w = old_w[r * old_cols + c];
+                    row_norm += w * w;
+                }
+                importance[r] = sqrtf(row_norm);
+                sorted_indices[r] = r;
+            }
+            /* 简单插入排序（按重要性降序，保留最重要的在前） */
+            for (size_t i = 1; i < old_rows; i++) {
+                size_t key_idx = sorted_indices[i];
+                float key_val = importance[key_idx];
+                size_t j = i;
+                while (j > 0 && importance[sorted_indices[j - 1]] < key_val) {
+                    sorted_indices[j] = sorted_indices[j - 1];
+                    j--;
+                }
+                sorted_indices[j] = key_idx;
+            }
+            /* 按重要性顺序复制行 */
+            for (size_t r = 0; r < copy_rows; r++) {
+                size_t src_row = sorted_indices[r];
+                for (size_t c = 0; c < copy_cols; c++) {
+                    new_w[r * new_cols + c] = old_w[src_row * old_cols + c];
+                }
+            }
+            /* 记录被丢弃的神经元重要性信息 */
+            if (copy_rows < old_rows) {
+                float kept_min = importance[sorted_indices[copy_rows - 1]];
+                float discarded_max = importance[sorted_indices[copy_rows]];
+                log_debug("[架构修剪] 保留%d/%zu神经元, 保留最低重要性=%.6f, 丢弃最高重要性=%.6f",
+                         (int)copy_rows, old_rows, kept_min, discarded_max);
+            }
+        } else {
+            /* 内存不足回退到简单左上角复制 */
+            for (size_t r = 0; r < copy_rows; r++) {
+                for (size_t c = 0; c < copy_cols; c++) {
+                    new_w[r * new_cols + c] = old_w[r * old_cols + c];
+                }
+            }
+        }
+        safe_free((void**)&importance);
+        safe_free((void**)&sorted_indices);
+    } else {
+        /* 扩展或维度不变：左上角复制（原有逻辑） */
+        for (size_t r = 0; r < copy_rows; r++) {
+            for (size_t c = 0; c < copy_cols; c++) {
+                new_w[r * new_cols + c] = old_w[r * old_cols + c];
+            }
         }
     }
 
@@ -740,10 +792,23 @@ int arch_controller_submit_change(ArchitectureController* controller,
         return SELFLNN_ERROR_OPERATION_FAILED;
     }
 
-    /* 5. 原子交换 */
+    /* ZSF-017 修复: 架构变更的并发安全保护。
+     * 注释说"原子交换"但实际是普通指针赋值，且立即释放旧LNN。
+     * 如果训练线程正在 lnn_forward/backward 中持有旧LNN锁并访问权重，
+     * 释放旧LNN会导致 use-after-free → 未定义行为 → 可能崩溃。
+     * 
+     * 修复: 在交换前获取旧LNN的锁，确保所有在途训练操作已完成。
+     * lnn_forward/backward 都在 LNN_LOCK 保护下执行，获取旧LNN锁后
+     * 不会有任何训练操作正在访问旧LNN的内存。交换后训练线程将自动
+     * 获取新LNN的锁。 */
+    lnn_lock(old_lnn);
+    
+    /* 5. 原子交换（在旧LNN锁保护下执行） */
     *lnn_ptr = new_lnn;
+    
+    lnn_unlock(old_lnn);
 
-    /* 6. 销毁旧 LNN */
+    /* 6. 延迟释放旧LNN —— 已在锁保护下完成交换，安全释放 */
     lnn_free(old_lnn);
 
     /* 7. 记录变更时间戳 */

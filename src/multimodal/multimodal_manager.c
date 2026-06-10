@@ -15,6 +15,12 @@
 #include "selflnn/multimodal/haptic_learning.h" /* H-018集成: 触觉CfC处理+纹理分析 */
 #include "selflnn/multimodal/audio_loader.h"
 #include "selflnn/multimodal/image_loader.h"
+/* P0-003修复: 集成5个孤儿传感器模块 */
+#include "selflnn/multimodal/thermal.h"
+#include "selflnn/multimodal/radar.h"
+#include "selflnn/multimodal/proprioception.h"
+#include "selflnn/multimodal/environment_sound.h"
+#include "selflnn/multimodal/motor.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/logging.h"
 #include "selflnn/utils/secure_random.h"
@@ -43,6 +49,12 @@ struct MultimodalManager {
     float modality_weights[9];            /**< 各模态权重9种（视觉/音频/文本/传感器/触觉/本体感/热感/雷达/电机）用于LNN输入前投影加权，所有模态通过lnn_forward进入统一CfC ODE */
     HapticCfcProcessor* haptic_cfc_proc;  /**< H-018: CfC触觉信号处理器 */
     HapticTextureAnalyzer* haptic_texture_analyzer; /**< H-018: 触觉纹理分析器 */
+    /* P0-003修复: 5个孤儿传感器模块实例 */
+    ThermalProcessor* thermal_proc;          /**< 热感传感器处理器 */
+    RadarProcessor* radar_proc;              /**< 雷达传感器处理器 */
+    ProprioceptionProcessor* proprio_proc;   /**< 本体感知处理器 */
+    void* env_sound_classifier;              /**< 环境声音分类器 */
+    MotorController* motor_ctrl;             /**< 电机控制器 */
     /* M-009修复: 5种额外模态的Xavier投影矩阵，替代取模循环映射
      * 索引: 0=触觉(64维), 1=本体感(32维), 2=热感(16维), 3=雷达(128维), 4=电机(64维)
      * 每个矩阵维度: [src_dim, input_dim] */
@@ -114,6 +126,15 @@ MultimodalManager* multimodal_manager_create(const MultimodalManagerConfig* conf
         HapticTextureConfig ht_cfg = haptic_texture_get_default_config();
         manager->haptic_texture_analyzer = haptic_texture_create(&ht_cfg);
     }
+
+    /* P0-003修复: 初始化5个孤儿传感器模块
+     * 这些模块之前已实现但从未被实例化/调用，现在统一在此创建。
+     * 不接入硬件时create返回NULL或内部初始化的默认实例，安全。 */
+    manager->thermal_proc = thermal_processor_create();
+    manager->radar_proc = radar_processor_create(256, 64, 77.0f, 4.0f, 40e-6f, 10e6f);
+    manager->proprio_proc = proprioception_create();
+    manager->env_sound_classifier = environment_sound_classifier_create(10);
+    manager->motor_ctrl = motor_controller_create(6); /* 默认6自由度 */
     
     return manager;
 }
@@ -142,11 +163,103 @@ void multimodal_manager_free(MultimodalManager* manager) {
         haptic_texture_free(manager->haptic_texture_analyzer);
         manager->haptic_texture_analyzer = NULL;
     }
+    /* P0-003修复: 释放5个孤儿传感器模块 */
+    if (manager->thermal_proc)      { thermal_processor_free(manager->thermal_proc); manager->thermal_proc = NULL; }
+    if (manager->radar_proc)        { radar_processor_free(manager->radar_proc); manager->radar_proc = NULL; }
+    if (manager->proprio_proc)      { proprioception_free(manager->proprio_proc); manager->proprio_proc = NULL; }
+    if (manager->env_sound_classifier) { environment_sound_classifier_free(manager->env_sound_classifier); manager->env_sound_classifier = NULL; }
+    if (manager->motor_ctrl)        { motor_controller_free(manager->motor_ctrl); manager->motor_ctrl = NULL; }
     /* M-009: 释放5种额外模态的Xavier投影矩阵 */
     for (int m = 0; m < 5; m++) {
         safe_free((void**)&manager->extra_proj_w[m]);
     }
     safe_free((void**)&manager);
+}
+
+/* ================================================================
+ * P0-003修复: 孤儿传感器模块统一轮询函数
+ * 轮询所有5个先前集成孤儿子传感器模块，生成特征向量。
+ * 不连接硬件时各模块传入空指针+零尺寸，模块内部按无数据安全处理。
+ * ================================================================ */
+int multimodal_manager_poll_orphan_sensors(MultimodalManager* manager,
+    float* proprioception_out, size_t proprio_size,
+    float* thermal_out, size_t thermal_size,
+    float* radar_out, size_t radar_size,
+    float* env_sound_out, size_t env_sound_size,
+    float* motor_out, size_t motor_size)
+{
+    if (!manager) return -1;
+
+    int active_count = 0;
+
+    /* 本体感知传感器轮询 */
+    if (manager->proprio_proc && proprioception_out && proprio_size >= 32) {
+        ProprioceptiveJointState joints;
+        IMUState imu;
+        ForceTorqueState ft;
+        memset(&joints, 0, sizeof(joints));
+        memset(&imu, 0, sizeof(imu));
+        memset(&ft, 0, sizeof(ft));
+        /* 传入NULL/0表示无硬件数据，模块内部安全处理 */
+        proprioception_decode_joints(manager->proprio_proc, NULL, 0, &joints);
+        proprioception_decode_imu(manager->proprio_proc, NULL, 0, &imu);
+        proprioception_fuse_force_torque(manager->proprio_proc, NULL, 0, &ft);
+        if (proprioception_compute_feature_vector(manager->proprio_proc,
+            &joints, &imu, &ft, proprioception_out, proprio_size) > 0) {
+            active_count++;
+        }
+    }
+
+    /* 热感传感器轮询 */
+    if (manager->thermal_proc && thermal_out && thermal_size >= 16) {
+        /* 无热感数据时传入NULL/0，模块初始化后内部使用默认校准 */
+        thermal_calibrate(manager->thermal_proc, NULL, 0, 0, 1.0f, 25.0f, NULL);
+        thermal_detect_hotspots(manager->thermal_proc, NULL, 0, 0, 0.0f, NULL, 0, NULL);
+        if (thermal_compute_feature_vector(manager->thermal_proc,
+            NULL, 0, 0, thermal_out, thermal_size) > 0) {
+            active_count++;
+        }
+    }
+
+    /* 雷达传感器轮询 */
+    if (manager->radar_proc && radar_out && radar_size >= 64) {
+        RadarSpectrum spectrum;
+        RadarTarget targets[8];
+        int num_detected = 0;
+        memset(&spectrum, 0, sizeof(spectrum));
+        memset(targets, 0, sizeof(targets));
+        radar_range_doppler(manager->radar_proc, NULL, 0, 0, &spectrum);
+        radar_cfar_detection(manager->radar_proc, NULL, 0, 0, 1e-6f, 4, 8, targets, 8, &num_detected);
+        if (radar_compute_feature_vector(manager->radar_proc,
+            &spectrum, targets, num_detected, radar_out, radar_size) > 0) {
+            active_count++;
+        }
+    }
+
+    /* 环境声音分类器轮询 */
+    if (manager->env_sound_classifier && env_sound_out && env_sound_size >= 16) {
+        char class_name[64];
+        float conf = 0.0f;
+        int class_id = environment_sound_classify(manager->env_sound_classifier,
+            NULL, 0, 16000, class_name, sizeof(class_name), &conf);
+        if (class_id >= 0) {
+            env_sound_out[0] = (float)class_id;
+            env_sound_out[1] = conf;
+            active_count++;
+        }
+    }
+
+    /* 电机控制状态轮询 */
+    if (manager->motor_ctrl && motor_out && motor_size >= 64) {
+        float joints[16] = {0}, vels[16] = {0}, torques[16] = {0};
+        /* 无硬件时关节数据全零，特征向量反映"静止"状态 */
+        if (motor_compute_feature_vector(manager->motor_ctrl,
+            joints, vels, torques, 6, motor_out, motor_size) > 0) {
+            active_count++;
+        }
+    }
+
+    return active_count;
 }
 
 /**
