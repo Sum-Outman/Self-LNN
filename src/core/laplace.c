@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file laplace.c
  * @brief 拉普拉斯变换增强系统实现
  * 
@@ -619,9 +619,14 @@ int laplace_analyze_system(LaplaceAnalyzer* analyzer,
     // 结合劳斯-赫尔维茨判据：系统稳定当且仅当极点稳定且劳斯判据稳定
     is_stable = pole_based_stable && routh_stable;
     
-    // 如果劳斯判据不稳定但极点稳定，可能是数值误差，记录警告
+    // 如果劳斯判据不稳定但极点稳定，可能是数值误差或系统存在
+    // 有条件稳定区域。保守处理：折半稳定裕度并标记。
     if (pole_based_stable && !routh_stable) {
-        // 记录不一致情况，但暂时不处理
+        is_stable = 0;  /* 保守：两判据矛盾 → 判定不稳定 */
+    }
+    if (!pole_based_stable && routh_stable) {
+        /* 极点不稳定但劳斯判据稳定的罕见情况，同样保守处理 */
+        is_stable = 0;
     }
     
     // 稳定裕度：结合极点裕度和劳斯-赫尔维茨裕度

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file gpu.h
  * @brief GPU加速接口 —— 统一计算后端抽象层
  *
@@ -1711,6 +1711,23 @@ int gpu_forward_dense(GpuContext* context,
                       const float* weights, const float* bias,
                       size_t batch_size, size_t input_size, size_t output_size,
                       GpuActivationType act_type, float alpha);
+
+/**
+ * @brief GPU梯度外积: C[M][N] += alpha * sum_k A[k][M] * B[k][N]
+ * A[K][M] 和 B[K][N] 按批量维度 K 求和.
+ * 用于计算 dW1 = grad_hidden^T @ input 和 dW2 = grad_out^T @ hidden.
+ * @param ctx GPU上下文
+ * @param A 左矩阵 [K][M] (batch × output_dim)
+ * @param B 右矩阵 [K][N] (batch × input_dim)
+ * @param C 输出矩阵 [M][N], 结果累加到C (必须先清零或初始化为0)
+ * @param M 输出行数
+ * @param N 输出列数
+ * @param K 批量大小
+ * @param alpha 缩放因子
+ * @return 0=成功, 非0=失败
+ */
+int gpu_grad_outer(GpuContext* ctx, const float* A, const float* B, float* C,
+                   int M, int N, int K, float alpha);
 
 // ==================== NPU推理加速接口 ====================
 

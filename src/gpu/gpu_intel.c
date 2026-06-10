@@ -193,50 +193,49 @@ static int intel_detect_hardware(void) {
 
 /* ==================== CPU实际参数检测（替代GPU硬编码回退值） ==================== */
 
-/* 检测CPU逻辑核心数 */
+/* 使用统一CPU检测 (定义于 gpu.c) */
+extern int gpu_hardware_get_cpu_info(GpuDeviceInfo* info);
+
+/* 检测CPU逻辑核心数 (优先使用统一接口, OS调用为回退) */
 static int intel_detect_cpu_cores(void) {
+    GpuDeviceInfo info;
+    if (gpu_hardware_get_cpu_info(&info) == 0 && info.logical_cores > 0)
+        return (int)info.logical_cores;
 #ifdef _WIN32
-    SYSTEM_INFO sysinfo;
-    GetSystemInfo(&sysinfo);
-    return (int)sysinfo.dwNumberOfProcessors;
+    SYSTEM_INFO sysinfo; GetSystemInfo(&sysinfo); return (int)sysinfo.dwNumberOfProcessors;
 #else
-    long nprocs = sysconf(_SC_NPROCESSORS_ONLN);
-    return (int)(nprocs > 0 ? nprocs : 4);
+    long n = sysconf(_SC_NPROCESSORS_ONLN); return (int)(n > 0 ? n : 4);
 #endif
 }
 
-/* 检测CPU频率 (MHz) */
+/* 检测CPU频率 MHz (优先使用统一接口, OS调用为回退) */
 static float intel_detect_cpu_frequency_mhz(void) {
+    GpuDeviceInfo info;
+    if (gpu_hardware_get_cpu_info(&info) == 0 && info.clock_speed > 0)
+        return info.clock_speed;
 #ifdef _WIN32
-    /* 从注册表读取CPU频率 */
     HKEY hKey;
     if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
             "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0",
             0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-        DWORD mhz = 0;
-        DWORD size = sizeof(mhz);
+        DWORD mhz = 0; DWORD size = sizeof(mhz);
         if (RegQueryValueExA(hKey, "~MHz", NULL, NULL, (LPBYTE)&mhz, &size) == ERROR_SUCCESS) {
-            RegCloseKey(hKey);
-            return mhz > 0 ? (float)mhz : 0.0f;
+            RegCloseKey(hKey); return mhz > 0 ? (float)mhz : 0.0f;
         }
         RegCloseKey(hKey);
     }
     return 0.0f;
 #else
-    /* 从/proc/cpuinfo读取CPU频率 */
     FILE* fp = fopen("/proc/cpuinfo", "r");
     if (fp) {
         char line[256];
         while (fgets(line, sizeof(line), fp)) {
-            float mhz = 0.0f;
-            if (sscanf(line, "cpu MHz : %f", &mhz) == 1) {
-                fclose(fp);
-                return mhz;
-            }
+            float mhz = 0;
+            if (sscanf(line, "cpu MHz : %f", &mhz) == 1) { fclose(fp); return mhz; }
         }
         fclose(fp);
     }
-    return 0.0f;
+    return 1000.0f;
 #endif
 }
 

@@ -1417,6 +1417,23 @@ static const char* PTX_CFC_STEP_KERNEL =
 "}\n";
 
 /* ========================================================================
+ * GPU梯度外积内核: C[M][N] = alpha * sum_k A[k][M] * B[k][N]
+ * A[K][M], B[K][N], sum over batch dimension K (outer product over batch)
+ * 用于 dW = grad_input^T @ input  (W1: 128×784, W2: 10×128)
+ * ======================================================================== */
+static const char* CUDA_GRAD_OUTER_KERNEL =
+"extern \"C\" __global__ void grad_outer_product(const float* A, const float* B, float* C, int M, int N, int K, float alpha) {\n"
+"    int row = blockIdx.y * blockDim.y + threadIdx.y;\n"
+"    int col = blockIdx.x * blockDim.x + threadIdx.x;\n"
+"    if (row >= M || col >= N) return;\n"
+"    float sum = 0.0f;\n"
+"    for (int k = 0; k < K; k++) {\n"
+"        sum += A[k * M + row] * B[k * N + col];\n"
+"    }\n"
+"    C[row * N + col] = alpha * sum + C[row * N + col];\n"
+"}\n";
+
+/* ========================================================================
  * P1-6: 根据内核名称匹配内嵌PTX回退
  * 当nvcc JIT编译失败时，尝试加载预编译的PTX内核
  * ======================================================================== */
@@ -2055,6 +2072,9 @@ static char g_cuda_error_string[256] = "无错误";
  * @brief 已加载的CUDA设备数量
  */
 static int g_cuda_device_count = 0;
+static int g_cuda_compute_major = 0;
+static int g_cuda_compute_minor = 0;
+static char g_cuda_arch_target[16] = "sm_50";  /* 默认兼容目标 */
 
 /**
  * @brief CUDA设备属性缓存
@@ -2388,6 +2408,15 @@ static int load_cuda_library(void) {
                 /* Runtime API未检测到设备(笔记本WDDM常见), Driver API重试 */
                 cuDeviceGetCount(&g_cuda_device_count);
             }
+            /* 查询计算能力(用于PTX目标架构选择) */
+            if (g_cuda_device_count > 0 && cuDeviceComputeCapability) {
+                int mj = 0, mn = 0;
+                if (cuDeviceComputeCapability(&mj, &mn, 0) == 0) {
+                    g_cuda_compute_major = mj;
+                    g_cuda_compute_minor = mn;
+                    snprintf(g_cuda_arch_target, sizeof(g_cuda_arch_target), "sm_%d%d", mj, mn);
+                }
+            }
         }
     } else {
         set_cuda_error_string("无法加载CUDA驱动程序库，PTX加载将不可用");
@@ -2440,6 +2469,41 @@ static char* compile_cuda_to_ptx(const char* cuda_source, size_t* ptx_size) {
     }
     
     *ptx_size = 0;
+    
+    /* PTX文件缓存: 避免每次启动重新nvcc编译 */
+    {
+        unsigned long hash = 5381;
+        for (const char* s = cuda_source; *s; s++) hash = ((hash << 5) + hash) + (unsigned char)*s;
+        /* 混入目标架构 */
+        const char* arch = g_cuda_arch_target;
+        for (const char* s = arch; *s; s++) hash = ((hash << 5) + hash) + (unsigned char)*s;
+        
+        char cache_dir[MAX_PATH], cache_path[MAX_PATH];
+#ifdef _WIN32
+        GetTempPathA(sizeof(cache_dir), cache_dir);
+        strcat_s(cache_dir, sizeof(cache_dir), "selflnn_ptx_cache\\");
+        CreateDirectoryA(cache_dir, NULL);  /* 忽略已存在的错误 */
+#else
+        snprintf(cache_dir, sizeof(cache_dir), "%s/.cache/selflnn_ptx/", getenv("HOME") ? getenv("HOME") : "/tmp");
+        mkdir(cache_dir, 0755);  /* 忽略错误 */
+#endif
+        snprintf(cache_path, sizeof(cache_path), "%s%08lx.ptx", cache_dir, hash);
+        FILE* cached = fopen(cache_path, "rb");
+        if (cached) {
+            fseek(cached, 0, SEEK_END);
+            long sz = ftell(cached);
+            fseek(cached, 0, SEEK_SET);
+            char* ptx = (char*)safe_malloc(sz + 1);
+            if (ptx && fread(ptx, 1, sz, cached) == (size_t)sz) {
+                ptx[sz] = '\0';
+                *ptx_size = sz;
+                fclose(cached);
+                return ptx;  /* 缓存命中 */
+            }
+            safe_free((void**)&ptx);
+            fclose(cached);
+        }
+    }
     
     // 查找nvcc编译器路径
     char nvcc_path[MAX_PATH];
@@ -2593,14 +2657,14 @@ static char* compile_cuda_to_ptx(const char* cuda_source, size_t* ptx_size) {
             return NULL;
         }
         snprintf(command, command_needed,
-                 "cmd /c \"\"%s\" -ptx -arch=sm_89 -o \"%s\" \"%s\"\"",
-                 nvcc_path, temp_ptx_path, temp_cu_path);
+                 "cmd /c \"\"%s\" -ptx -arch=%s -o \"%s\" \"%s\"\"",
+                 nvcc_path, g_cuda_arch_target, temp_ptx_path, temp_cu_path);
     } else {
         char command_stack[2048];
         command = command_stack;
         snprintf(command, 2048,
-                 "cmd /c \"\"%s\" -ptx -arch=sm_89 -o \"%s\" \"%s\"\"",
-                 nvcc_path, temp_ptx_path, temp_cu_path);
+                 "cmd /c \"\"%s\" -ptx -arch=%s -o \"%s\" \"%s\"\"",
+                 nvcc_path, g_cuda_arch_target, temp_ptx_path, temp_cu_path);
     }
 
     // 使用popen执行nvcc编译（比system更安全，可捕获编译输出）
@@ -2692,9 +2756,31 @@ static char* compile_cuda_to_ptx(const char* cuda_source, size_t* ptx_size) {
         return NULL;
     }
     
-    ptx_code[file_size] = '\0';  // 添加字符串终止符
+    ptx_code[file_size] = '\0';
     
-    // 清理临时文件
+    /* 写入PTX文件缓存(下次启动跳过nvcc) */
+    {
+        unsigned long hash = 5381;
+        const char* orig = (cuda_source && cuda_source[0]) ? cuda_source : "";
+        for (const char* s = orig; *s; s++) hash = ((hash << 5) + hash) + (unsigned char)*s;
+        const char* arch = g_cuda_arch_target;
+        for (const char* s = arch; *s; s++) hash = ((hash << 5) + hash) + (unsigned char)*s;
+        char cache_dir[MAX_PATH], cache_path[MAX_PATH];
+#ifdef _WIN32
+        GetTempPathA(sizeof(cache_dir), cache_dir);
+        strcat_s(cache_dir, sizeof(cache_dir), "selflnn_ptx_cache\\");
+        CreateDirectoryA(cache_dir, NULL);
+        snprintf(cache_path, sizeof(cache_path), "%s%08lx.ptx", cache_dir, hash);
+#else
+        snprintf(cache_dir, sizeof(cache_dir), "%s/.cache/selflnn_ptx/", getenv("HOME") ? getenv("HOME") : "/tmp");
+        mkdir(cache_dir, 0755);
+        snprintf(cache_path, sizeof(cache_path), "%s%08lx.ptx", cache_dir, hash);
+#endif
+        FILE* cf = fopen(cache_path, "wb");
+        if (cf) { fwrite(ptx_code, 1, file_size, cf); fclose(cf); }
+    }
+    
+    /* 清理临时文件 */
     remove(temp_cu_path);
     remove(temp_ptx_path);
     
@@ -2706,55 +2792,61 @@ static char* compile_cuda_to_ptx(const char* cuda_source, size_t* ptx_size) {
  * @brief 获取设备属性
  */
 static int get_cuda_device_properties(int device_id, cudaDevicePropCompat* prop) {
-    /* P0-SKIP: CUDA13.x结构体大小未知, cudaGetDeviceProperties会堆损坏 */
-    (void)device_id; (void)prop;
-    return 0;
-#if 0
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable:4312)  /* CUdevice cast */
+#endif
+    /* Driver API查询 (避免Runtime API的WDDM/CUDA13兼容问题) */
+    if (!prop) return -1;
+    memset(prop, 0, sizeof(*prop));
     
-    // 调用CUDA API获取设备属性 (堆分配避免CUDA13.x结构体栈溢出)
-    cudaDeviceProp* cuda_prop = (cudaDeviceProp*)safe_malloc(sizeof(cudaDeviceProp));
-    if (!cuda_prop) return -1;
-    cudaError_t err = cudaGetDeviceProperties(cuda_prop, device_id);
-    if (err != cudaSuccess) {
-        safe_free((void**)&cuda_prop);
-        return -1;
+    if (cuDeviceGetName) {
+        cuDeviceGetName(prop->name, sizeof(prop->name), (CUdevice)device_id);
+        if (!prop->name[0]) snprintf(prop->name, sizeof(prop->name), "NVIDIA GPU %d", device_id);
     }
-    
-    // 复制到兼容结构体 - 只复制基本和必需的成员
-    memset(prop, 0, sizeof(cudaDevicePropCompat));
-    
-    // 复制设备名称
-    if (cuda_prop->name) {
-        strncpy(prop->name, cuda_prop->name, sizeof(prop->name) - 1);
+    if (cuDeviceTotalMem) {
+        size_t mem = 0;
+        cuDeviceTotalMem(&mem, (CUdevice)device_id);
+        prop->totalGlobalMem = mem;
     }
-    
-    // 复制基本内存和计算属性
-    prop->totalGlobalMem = cuda_prop->totalGlobalMem;
-    prop->sharedMemPerBlock = cuda_prop->sharedMemPerBlock;
-    prop->regsPerBlock = cuda_prop->regsPerBlock;
-    prop->warpSize = cuda_prop->warpSize;
-    prop->memPitch = cuda_prop->memPitch;
-    prop->maxThreadsPerBlock = cuda_prop->maxThreadsPerBlock;
-    prop->maxThreadsDim[0] = cuda_prop->maxThreadsDim[0];
-    prop->maxThreadsDim[1] = cuda_prop->maxThreadsDim[1];
-    prop->maxThreadsDim[2] = cuda_prop->maxThreadsDim[2];
-    prop->maxGridSize[0] = cuda_prop->maxGridSize[0];
-    prop->maxGridSize[1] = cuda_prop->maxGridSize[1];
-    prop->maxGridSize[2] = cuda_prop->maxGridSize[2];
-    prop->totalConstMem = cuda_prop->totalConstMem;
-    
-    // 复制计算能力
-    prop->major = cuda_prop->major;
-    prop->minor = cuda_prop->minor;
-    
-    // 复制时钟频率
-    prop->clockRate = cuda_prop->clockRate;
-    
-    // 复制多处理器数量
-    prop->multiProcessorCount = cuda_prop->multiProcessorCount;
-    
-    safe_free((void**)&cuda_prop);
+    if (cuDeviceComputeCapability) {
+        cuDeviceComputeCapability(&prop->major, &prop->minor, (CUdevice)device_id);
+    }
+    if (cuDeviceGetAttribute) {
+        int val;
+        #define A_MAX_THREADS 1
+        #define A_WARP 8
+        #define A_BLOCK_X 2
+        #define A_BLOCK_Y 3
+        #define A_BLOCK_Z 4
+        #define A_GRID_X 5
+        #define A_GRID_Y 6
+        #define A_GRID_Z 7
+        #define A_SHARED 9
+        #define A_REGS 12
+        #define A_CLOCK 13
+        #define A_MP_COUNT 16
+        #define A_CONST_MEM 14
+        #define GET_ATTR(_attr, _field) \
+            if (cuDeviceGetAttribute(&val, _attr, (CUdevice)device_id) == 0) prop->_field = val
+        GET_ATTR(A_MAX_THREADS, maxThreadsPerBlock);
+        GET_ATTR(A_WARP, warpSize);
+        GET_ATTR(A_BLOCK_X, maxThreadsDim[0]);
+        GET_ATTR(A_BLOCK_Y, maxThreadsDim[1]);
+        GET_ATTR(A_BLOCK_Z, maxThreadsDim[2]);
+        GET_ATTR(A_GRID_X, maxGridSize[0]);
+        GET_ATTR(A_GRID_Y, maxGridSize[1]);
+        GET_ATTR(A_GRID_Z, maxGridSize[2]);
+        GET_ATTR(A_SHARED, sharedMemPerBlock);
+        GET_ATTR(A_REGS, regsPerBlock);
+        GET_ATTR(A_CLOCK, clockRate);
+        GET_ATTR(A_MP_COUNT, multiProcessorCount);
+        GET_ATTR(A_CONST_MEM, totalConstMem);
+        #undef GET_ATTR
+    }
     return 0;
+#ifdef _MSC_VER
+#pragma warning(pop)
 #endif
 }
 
@@ -2772,8 +2864,7 @@ static int cuda_backend_init(void) {
         }
     }
     
-    // 缓存设备属性 — 仅在Runtime API能访问GPU时有效
-    // P0-GPU-TODO: 用Driver API替代Runtime API获取属性, 避免WDDM笔记本兼容问题
+    // 缓存设备属性 (通过 Driver API cuDeviceGetName/Attribute 获取)
     if (g_cuda_device_count > 0 && !g_cuda_device_props) {
         g_cuda_device_props = (cudaDevicePropCompat*)safe_calloc(g_cuda_device_count, sizeof(cudaDevicePropCompat));
         if (g_cuda_device_props) {
@@ -3368,6 +3459,9 @@ static GpuKernel* cuda_backend_kernel_create(GpuContext* context, const char* ke
     } else if (strcmp(kernel_name, "matmul_train") == 0) {
         actual_kernel_source = CUDA_MATMUL_TRAIN_KERNEL;
         actual_kernel_name = "matmul_train";
+    } else if (strcmp(kernel_name, "grad_outer_product") == 0) {
+        actual_kernel_source = CUDA_GRAD_OUTER_KERNEL;
+        actual_kernel_name = "grad_outer_product";
     } else if (strcmp(kernel_name, "dropout_forward") == 0) {
         actual_kernel_source = CUDA_DROPOUT_FORWARD_KERNEL;
         actual_kernel_name = "dropout_forward";
@@ -4384,6 +4478,52 @@ int cuda_matmul_train(GpuContext* ctx, const float* A, const float* B, float* C,
     cudaFree(d_B);
     cudaFree(d_C);
 
+    return 0;
+}
+
+/**
+ * @brief CUDA梯度外积: C[M][N] += alpha * sum_k A[k][M] * B[k][N]
+ * 对batch维度求和, 用于 dW = grad^T @ input
+ */
+int cuda_grad_outer(GpuContext* ctx, const float* A, const float* B, float* C,
+                     int M, int N, int K, float alpha) {
+    if (!ctx || !A || !B || !C || M <= 0 || N <= 0 || K <= 0) {
+        set_cuda_error_string("cuda_grad_outer: param invalid");
+        return -1;
+    }
+    size_t a_bytes = (size_t)K * M * sizeof(float);
+    size_t b_bytes = (size_t)K * N * sizeof(float);
+    size_t c_bytes = (size_t)M * N * sizeof(float);
+    float *d_A = NULL, *d_B = NULL, *d_C = NULL;
+    if (cudaMalloc((void**)&d_A, a_bytes) != cudaSuccess ||
+        cudaMalloc((void**)&d_B, b_bytes) != cudaSuccess ||
+        cudaMalloc((void**)&d_C, c_bytes) != cudaSuccess) {
+        if (d_A) cudaFree(d_A); if (d_B) cudaFree(d_B); if (d_C) cudaFree(d_C);
+        return -1;
+    }
+    cudaMemcpy(d_C, C, c_bytes, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_A, A, a_bytes, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_B, B, b_bytes, cudaMemcpyHostToDevice);
+
+    GpuKernel* kernel = cuda_backend_kernel_create(ctx, "grad_outer_product", "grad_outer_product");
+    if (!kernel) { cudaFree(d_A); cudaFree(d_B); cudaFree(d_C); return -1; }
+    cuda_backend_kernel_set_arg(kernel, 0, sizeof(void*), &d_A);
+    cuda_backend_kernel_set_arg(kernel, 1, sizeof(void*), &d_B);
+    cuda_backend_kernel_set_arg(kernel, 2, sizeof(void*), &d_C);
+    cuda_backend_kernel_set_arg(kernel, 3, sizeof(int), &M);
+    cuda_backend_kernel_set_arg(kernel, 4, sizeof(int), &N);
+    cuda_backend_kernel_set_arg(kernel, 5, sizeof(int), &K);
+    cuda_backend_kernel_set_arg(kernel, 6, sizeof(float), &alpha);
+
+    size_t global[2] = { (size_t)((N + 15) / 16 * 16), (size_t)((M + 15) / 16 * 16) };
+    size_t local[2] = { 16, 16 };
+    if (cuda_backend_kernel_execute_nd(kernel, 2, global, local) != 0) {
+        cuda_backend_kernel_free(kernel); cudaFree(d_A); cudaFree(d_B); cudaFree(d_C);
+        return -1;
+    }
+    cuda_backend_kernel_free(kernel);
+    cudaMemcpy(C, d_C, c_bytes, cudaMemcpyDeviceToHost);
+    cudaFree(d_A); cudaFree(d_B); cudaFree(d_C);
     return 0;
 }
 

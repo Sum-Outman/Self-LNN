@@ -948,15 +948,16 @@ static float compute_mmd_loss(const float* source, const float* target,
                               float sigma) {
     if (!source || !target || batch_size == 0 || feature_dim == 0) return 0.0f;
 
-/* MMD多尺度RBF核计算，O(N²·D)复杂度。
-     * 大批量时性能受限，建议后续版本引入随机傅里叶特征(RFF)近似。
-     * 当样本数>1024时自动降采样以避免OOM和计算超时。 */
+    /* MMD多尺度RBF核, O(N²·D)复杂度。大批量时随机降采样。
+     * 阈值4096: 现代硬件(~10 GFLOPS CPU)可处理 4096²*128 = 2B ops ≈ 0.2s */
     size_t effective_n = batch_size;
-    if (batch_size > 1024) {
-        effective_n = 1024;
-        /* 使用固定步长降采样保持代表性 */
+    if (batch_size > 4096) {
+        effective_n = 4096;
+        /* 随机偏移: 避免总是截取开头样本 */
+        size_t rand_skip = (size_t)(((float)rand() / RAND_MAX) * (batch_size - effective_n));
+        source += rand_skip * feature_dim;
+        target += rand_skip * feature_dim;
     }
-
     float mmd = 0.0f;
     float n_inv = 1.0f / (float)effective_n;
 

@@ -44,10 +44,10 @@ endif()
 
 target_compile_definitions(selflnn_core PRIVATE WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
 
-# GCC 15.1/MinGW workaround: cfc_network.c O2 generates AVX instructions that crash on
-# 某些堆内存页。降级到O0绕过。
+# GCC 15.1/MinGW workaround: cfc_network.c O2 auto-vectorization generates AVX
+# instructions that crash on certain heap pages. Disable vectorization to keep O2.
 if(MINGW)
-    set_source_files_properties(cfc_network.c PROPERTIES COMPILE_FLAGS "-O0")
+    set_source_files_properties(cfc_network.c PROPERTIES COMPILE_FLAGS "-O2 -fno-tree-vectorize")
 endif()
 
 target_include_directories(selflnn_core PUBLIC
