@@ -1,4 +1,4 @@
-# SELF-LNN 全液态神经网络 AGI 系统
+# SELF-LNN 全液态神经网络 AGI   系统
 # SELF-LNN Full Liquid Neural Network AGI System
 
 > **版本 / Version:** 1.5.0 | **语言 / Language:** 100% Pure C (C11) | **许可证 / License:** Apache 2.0
