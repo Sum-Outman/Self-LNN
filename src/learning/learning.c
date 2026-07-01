@@ -13,6 +13,7 @@
 #include "selflnn/utils/perf.h"
 #include "selflnn/utils/math_utils.h"
 #include "selflnn/utils/logging.h"
+#include "selflnn/selflnn.h"            /* 修复#5: selflnn_get_shared_lnn() */
 /* ZSF-010: 学习引擎→演化引擎桥接，使learning_self_evolve可委托给EvolutionEngine */
 #include "selflnn/evolution/evolution_engine.h"
 #include "selflnn/core/lnn.h"
@@ -350,12 +351,11 @@ LearningEngine* learning_engine_create(const LearningConfig* config) {
     engine->has_real_knowledge = 0;
 
     /* P0-010: 初始化时所有数据源标记为空白状态
- *修复: 尝试自动关联全局共享LNN
-     * 避免因遗漏调用set_network导致学习引擎静默失败 */
+     * 修复#5: 通过selflnn_get_shared_lnn()安全获取全局LNN */
     {
-        extern void* g_global_lnn;
-        if (g_global_lnn) {
-            CfCNetwork* cfc = lnn_get_cfc_network((LNN*)g_global_lnn);
+        void* lnn_ptr = selflnn_get_shared_lnn();
+        if (lnn_ptr) {
+            CfCNetwork* cfc = lnn_get_cfc_network((LNN*)lnn_ptr);
             if (cfc) {
                 engine->has_real_weights = 1;
                 log_info("[学习引擎] 自动关联全局共享LNN，权重标记为就绪");

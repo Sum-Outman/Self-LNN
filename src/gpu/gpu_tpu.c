@@ -5,6 +5,7 @@
 #include "selflnn/utils/platform.h"
 #include "selflnn/utils/logging.h"
 #include "selflnn/math/matrix_ops.h"
+#include "selflnn/selflnn.h"            /* 修复#5: selflnn_get_shared_lnn()安全访问全局LNN */
 #include "gpu_internal.h"
 #include "npu_internal.h"
 #include "npu_common.h"
@@ -600,9 +601,9 @@ static int npu_tpu_cpu_infer_fallback(NpuModel* model, const float** inputs,
      *   （而非随机哈希投影产生的虚假结果）
      */
 
-    /* 尝试获取全局LNN进行真实推理 */
-    extern void* g_global_lnn;  /* main.c 中的全局LNN指针 */
-    if (g_global_lnn && input_dim > 0 && output_dim > 0) {
+    /* 修复#5: 通过selflnn_get_shared_lnn()安全获取全局LNN，替代无锁的extern g_global_lnn */
+    void* lnn = selflnn_get_shared_lnn();
+    if (lnn && input_dim > 0 && output_dim > 0) {
         for (int b = 0; b < batch_size; b++) {
             if (!inputs[b] || !outputs[b]) continue;
             const float* in = inputs[b];
@@ -617,7 +618,7 @@ static int npu_tpu_cpu_infer_fallback(NpuModel* model, const float** inputs,
                     memcpy(lnn_input, in, input_dim * sizeof(float));
                     /* 调用真实LNN推理 */
                     extern int lnn_forward(void* lnn, const float* input, float* output);
-                    if (lnn_forward(g_global_lnn, lnn_input, hidden) == 0) {
+                    if (lnn_forward(lnn, lnn_input, hidden) == 0) {
                         /* 取前output_dim个元素 */
                         size_t copy_dim = (input_dim < output_dim) ? input_dim : output_dim;
                         memcpy(out, hidden, copy_dim * sizeof(float));

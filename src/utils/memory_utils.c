@@ -35,13 +35,16 @@ void memory_utils_bypass_safe_alloc(int bypass) { g_bypass_safe_alloc = bypass; 
 
 /**
  * @brief 内存块头部信息
+ * 修复#4: magic字段添加volatile限定符，防止MSVC /O2优化下编译器将
+ * magic != MEMORY_MAGIC 常量折叠为false或跨函数缓存magic值。
+ * volatile确保每次读取都从内存获取，不依赖寄存器缓存。
  */
 typedef struct {
     size_t size;              /**< 块大小 */
     int is_allocated;         /**< 是否已分配 */
     const char* file;         /**< 分配文件（调试用） */
     int line;                 /**< 分配行号（调试用） */
-    size_t magic;             /**< 魔法数字用于验证 */
+    volatile size_t magic;    /**< 魔法数字用于验证（volatile防止编译器优化） */
     size_t alloc_id;          /**< 分配序号（用于调试） */
     void* caller_address;     /**< 调用者返回地址（用于调试） */
 } MemoryBlockHeader;
@@ -50,7 +53,7 @@ typedef struct {
  * @brief 内存块尾部信息
  */
 typedef struct {
-    size_t magic;             /**< 魔法数字用于验证 */
+    volatile size_t magic;    /**< 魔法数字用于验证（volatile防止编译器优化） */
 } MemoryBlockFooter;
 
 /**
@@ -331,7 +334,11 @@ static int validate_all_magic(void) {
 
 /**
  * @brief 内部安全内存分配：分配内存并初始化为零（带文件/行号跟踪）
+ * 修复#4: __declspec(noinline)防止_ReturnAddress()在函数内联后返回错误地址
  */
+#ifdef _MSC_VER
+__declspec(noinline)
+#endif
 void* _safe_malloc(size_t size, const char* file, int line) {
     (void)file; (void)line;
     if (g_bypass_safe_alloc) { return malloc(size); }
@@ -362,6 +369,13 @@ void* _safe_malloc(size_t size, const char* file, int line) {
     header->file = file;
     header->line = line;
     header->magic = MEMORY_MAGIC;
+    /* 修复#4: 编译器屏障——确保magic写入完成后，后续代码不会因优化而重排到magic写入之前。
+     * MSVC: _ReadWriteBarrier() | GCC/Clang: asm volatile("" ::: "memory") */
+#ifdef _MSC_VER
+    _ReadWriteBarrier();
+#else
+    __asm__ __volatile__("" ::: "memory");
+#endif
     MEM_LOCK();
     header->alloc_id = ++g_allocation_counter;
     MEM_UNLOCK();
@@ -385,6 +399,12 @@ void* _safe_malloc(size_t size, const char* file, int line) {
     // 设置尾部（在保护字节之后）
     MemoryBlockFooter* footer = (MemoryBlockFooter*)(guard_ptr + guard_size);
     footer->magic = MEMORY_MAGIC;
+    /* 修复#4: 编译器屏障——确保尾部magic写入对所有线程可见 */
+#ifdef _MSC_VER
+    _ReadWriteBarrier();
+#else
+    __asm__ __volatile__("" ::: "memory");
+#endif
     
     // 添加调试信息：记录分配大小和地址
     #ifdef _DEBUG
@@ -563,6 +583,14 @@ void safe_free(void** ptr) {
     
     // 获取头部
     MemoryBlockHeader* header = (MemoryBlockHeader*)((char*)data_ptr - BLOCK_HEADER_SIZE);
+    
+    /* 修复#4: 编译器屏障——确保header读取前所有对数据区的写入已完成，
+     * 防止MSVC /O2优化重排导致读取过期的header内容 */
+#ifdef _MSC_VER
+    _ReadWriteBarrier();
+#else
+    __asm__ __volatile__("" ::: "memory");
+#endif
     
     // 安全检查：确保header指针看起来合理
     // 检查对齐：header应该至少对齐到sizeof(void*)

@@ -45,25 +45,43 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 
-# 编译选项
+# ================================================================
+# 编译选项 — 修复#2/#3: 使用target级别编译选项，移除最危险的警告抑制
+# ================================================================
+# 注意: 以下编译选项影响所有库目标和可执行目标。
+# SELFLNN_* 功能开关宏(add_definitions)因需全局生效于所有20+静态库，
+# 保留全局方式。Windows/MSVC警告抑制/C运行时宏采用target级别，
+# 仅对selflnn可执行目标生效。
+# ================================================================
+
+# GCC/Clang: 公共基础编译选项（全局，因作用于所有静态库目标）
+if(NOT MSVC)
+    add_compile_options(-Wall -Wextra -ffast-math -fpermissive
+        -Wno-unused-parameter -Wno-unused-function -Wno-unused-variable
+        -Wno-unused-but-set-variable -Wno-sign-compare
+        -Wno-unknown-pragmas -Wno-comment -Wno-parentheses
+        -Wno-misleading-indentation)
+    # 修复#3: 移除以下3个最危险的警告抑制（它们会掩盖真实bug）
+    # -Wno-implicit-function-declaration（隐式函数声明→UB）
+    # -Wno-incompatible-pointer-types（不兼容指针→运行时崩溃）
+    # -Wno-int-conversion（整数到指针隐式转换→UB）
+    # 如有个别文件需抑制, 使用set_source_files_properties逐文件处理
+    
+    # 针对不同配置的优化选项
+    set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -O3 -march=native")
+    set(CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO} -O3 -march=native -g")
+    set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -O0 -g")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--allow-multiple-definition")
+endif()
+
+# MSVC: 公共基础编译选项（全局，因作用于所有静态库目标）
 if(MSVC)
-    # 从17个警告禁用减少到11个（移除6个）
-    # 已移除: /wd4026 /wd4032 （重要：函数签名不匹配警告，已全部修复源码）
-    # 暂时保留: /wd4244（类型转换，全项目约50处，需逐文件系统性修复）
-    # 保留必需: 灵活数组成员(4205)、文件作用域函数(4210)、良性重定义(4142)、CRT弃用(4996)、
-    #          函数指针转换(4152)、extern/static重定义(4211)、头文件内联声明差异(4028/4029)、
-    #          未引用参数(4100)、未引用局部变量(4189)
-    add_compile_options(/W4 /WX /EHa /wd4142 /wd4205 /wd4210 /wd4996 /wd4152 /wd4211 /wd4028 /wd4029 /wd4100 /wd4189 /wd4244 /wd4013 /wd4457 /wd4431 /wd4218 /wd4127 /wd4102 /wd4702 /FImath.h /FS)
-    # MSVC特定抑制: /wd4127(常量条件) /wd4102(未引用标签)
-    # MSVC C编译器不支持C99混合声明: 特定文件编译为C++模式
-    # 追加: /wd4013(未声明函数-预存头文件断裂), /wd4457(变量遮蔽-安全),
-    #              /wd4431(缺少类型说明符-预存), /wd4218(非标准存储类-预存)
-    # 后续版本路线图:
-    #   v1.5: 移除/wd4100（需在所有函数添加(void)参数转换）
-    #   v1.6: 移除/wd4189（需删除所有未引用局部变量）
-    #   v1.7: 移除/wd4244（需添加显式类型转换到所有隐式转换点）
-    #   v2.0: 移除/wd4028/wd4029（需统一头文件内联函数声明）
-    add_definitions(-D_CRT_SECURE_NO_WARNINGS -D_USE_MATH_DEFINES -DWIN32_LEAN_AND_MEAN -D_WINSOCK_DEPRECATED_NO_WARNINGS)
+    # 从20个警告禁用减少到19个（移除/wd4013隐式函数声明——掩盖真实bug）
+    # 路线图: v1.5移除/wd4100, v1.6移除/wd4189, v1.7移除/wd4244, v2.0移除/wd4028/wd4029
+    add_compile_options(/W4 /WX /EHa /wd4142 /wd4205 /wd4210 /wd4996 /wd4152
+        /wd4211 /wd4028 /wd4029 /wd4100 /wd4189 /wd4244
+        /wd4457 /wd4431 /wd4218 /wd4127 /wd4102 /wd4702 /FImath.h /FS)
+    # 修复#3: 已移除 /wd4013（隐式函数声明），此警告将暴露缺失的头文件包含
     
     # Release配置的优化选项
     set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /O2 /fp:fast")
@@ -71,20 +89,6 @@ if(MSVC)
     
     # Debug配置的调试选项
     set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} /Od /RTC1")
-else()
-    # GCC/Clang的编译选项
-    add_compile_options(-Wall -Wextra -ffast-math -fpermissive
-        -Wno-unused-parameter -Wno-unused-function -Wno-unused-variable
-        -Wno-unused-but-set-variable -Wno-sign-compare
-        -Wno-unknown-pragmas -Wno-comment -Wno-parentheses
-        -Wno-misleading-indentation -Wno-implicit-function-declaration
-        -Wno-incompatible-pointer-types -Wno-int-conversion)
-    
-    # 针对不同配置的优化选项
-    set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -O3 -march=native")
-    set(CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO} -O3 -march=native -g")
-    set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -O0 -g")
-    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--allow-multiple-definition")
 endif()
 
 # 项目选项
@@ -254,8 +258,16 @@ target_link_libraries(selflnn PRIVATE
 if(MSVC)
     target_link_libraries(selflnn PRIVATE uuid ole32 mmdevapi propsys winmm)
     set_target_properties(selflnn PROPERTIES LINK_FLAGS "/STACK:67108864 /FORCE:MULTIPLE")
+    # 修复#2: CRT/Windows宏定义改为target级别，仅对selflnn可执行目标生效
+    target_compile_definitions(selflnn PRIVATE
+        _CRT_SECURE_NO_WARNINGS _USE_MATH_DEFINES
+        WIN32_LEAN_AND_MEAN _WINSOCK_DEPRECATED_NO_WARNINGS)
 elseif(WIN32)
     target_link_libraries(selflnn PRIVATE uuid ole32 mmdevapi propsys winmm setupapi pdh bcrypt)
+else()
+    # 修复#10: Linux/macOS系统库链接（POSIX线程、数学库、动态加载）
+    find_package(Threads REQUIRED)
+    target_link_libraries(selflnn PRIVATE Threads::Threads m dl)
 endif()
 
 # MSVC: /WX 严格模式 + UTF-8 源文件编码
@@ -321,9 +333,16 @@ if(BUILD_TESTS)
     if(MSVC)
         target_link_libraries(lnn_verify PRIVATE uuid ole32 winmm mmdevapi propsys)
         set_target_properties(lnn_verify PROPERTIES LINK_FLAGS "/STACK:67108864")
+        target_compile_definitions(lnn_verify PRIVATE
+            _CRT_SECURE_NO_WARNINGS _USE_MATH_DEFINES
+            WIN32_LEAN_AND_MEAN _WINSOCK_DEPRECATED_NO_WARNINGS)
     elseif(WIN32)
         target_link_libraries(lnn_verify PRIVATE uuid ole32 winmm mmdevapi propsys setupapi pdh bcrypt)
         target_link_options(lnn_verify PRIVATE "-Wl,--end-group")
+    else()
+        # Linux/macOS: POSIX线程 + 数学库 + 动态加载
+        find_package(Threads REQUIRED)
+        target_link_libraries(lnn_verify PRIVATE Threads::Threads m dl)
     endif()
     add_test(NAME lnn_correctness COMMAND lnn_verify WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()

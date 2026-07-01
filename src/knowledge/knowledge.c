@@ -22,6 +22,7 @@
 #include "selflnn/utils/xorshift_prng.h"
 #include "selflnn/cognition/abstraction.h"
 #include "selflnn/core/laplace.h"
+#include "selflnn/selflnn.h"            /* 修复#5: selflnn_get_shared_lnn() */
 #ifdef _DEBUG
 #include <crtdbg.h>  /* _CrtCheckMemory() */
 #endif
@@ -5874,10 +5875,10 @@ int knowledge_base_retrain_embeddings(KnowledgeBase* kb, int epochs) {
     /* 将共享LNN连接到CfC嵌入引擎以提升嵌入质量 */
     void* shared_lnn = knowledge_get_lnn_network(kb);
     if (!shared_lnn) {
-        /* 尝试通过全局LNN注册获取（如果尚未通过 knowledge_set_lnn_network 设置） */
-        extern void* g_global_lnn;
-        if (g_global_lnn) {
-            cfc_embed_set_lnn_network(kb->cfc_embed, g_global_lnn);
+        /* 修复#5: 通过selflnn_get_shared_lnn()安全获取全局LNN */
+        void* global_lnn = selflnn_get_shared_lnn();
+        if (global_lnn) {
+            cfc_embed_set_lnn_network(kb->cfc_embed, global_lnn);
         }
     }
 

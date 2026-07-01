@@ -13,9 +13,10 @@
  */
 
 #include "selflnn/core/evolutionary_algorithms.h"
-/* ZSFJJJ-FIX: SELFLNN_IMPLEMENTATION 必须在 cfc.h 之前定义,
+/*
  * 因为 cfc.h 内部已 #include cfc_network.h, 后设宏会被 include guard 阻止 */
 #define SELFLNN_IMPLEMENTATION
+#define SELFLNN_CORE_INTERNAL
 #include "selflnn/core/cfc.h"
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/errors.h"
@@ -24,6 +25,7 @@
 #include "selflnn/utils/logging.h"
 #include "selflnn/utils/perf.h"
 #include "selflnn/evolution/neural_architecture_search.h"
+#include "selflnn/selflnn.h"            /* 修复#5: selflnn_get_shared_lnn() */
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -564,9 +566,8 @@ static ArchitectureEvaluation* population_nas_evaluator(
     const ArchitectureDescription* architecture, void* user_data) {
     if (!architecture || !user_data) return NULL;
 
-    /* 获取全局LNN实例用于真实评估 */
-    extern void* volatile g_global_lnn;
-    LNN* lnn = (LNN*)g_global_lnn;
+    /* 修复#5: 通过selflnn_get_shared_lnn()安全获取全局LNN，替代无锁extern g_global_lnn */
+    LNN* lnn = (LNN*)selflnn_get_shared_lnn();
     if (!lnn) return NULL; /* 无LNN实例，无法真实评估 */
 
     ArchitectureEvaluation* eval = (ArchitectureEvaluation*)safe_calloc(1, sizeof(ArchitectureEvaluation));
