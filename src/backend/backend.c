@@ -2491,8 +2491,14 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
         return (method && strcmp(method, "DELETE") == 0) ? API_POST_KNOWLEDGE_DELETE : API_GET_KNOWLEDGE_ENTRY;
     if (strcmp(p, "/api/knowledge/stats") == 0)           return API_GET_KNOWLEDGE_STATS;
     if (strcmp(p, "/api/knowledge/export") == 0)          return API_POST_KNOWLEDGE_EXPORT;
-    /* R003: 知识图谱专用端点 */
-    if (strncmp(p, "/api/kg/", 8) == 0)                    return 314;  /* Z7-S01修复: 知识图谱专用槽位314-320 */
+    /* R003: 知识图谱专用端点 — FIX API-1: 每个子端点独立路由到对应槽位 */
+    if (strcmp(p, "/api/kg/stats") == 0)                   return 314;
+    if (strcmp(p, "/api/kg/pagerank") == 0)                return 315;
+    if (strcmp(p, "/api/kg/communities") == 0)             return 316;
+    if (strcmp(p, "/api/kg/path") == 0)                    return 317;
+    if (strcmp(p, "/api/kg/search") == 0)                  return 318;
+    if (strcmp(p, "/api/kg/sparql") == 0)                  return 319;
+    if (strcmp(p, "/api/kg/visualize") == 0)               return 320;
 /* knowledge/import路由到POST_KNOWLEDGE(21)，而非与memory/export共用的slot 226 */
     if (strcmp(p, "/api/knowledge/import") == 0)          return API_POST_KNOWLEDGE; /* slot 21: handle_api_post_knowledge */
     if (strcmp(p, "/api/knowledge/delete") == 0)          return API_POST_KNOWLEDGE_DELETE;
@@ -2567,7 +2573,7 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/robot/parameters") == 0)          return API_POST_ROBOT_PARAMETERS;
     if (strcmp(p, "/api/robot/sensor") == 0)              return API_GET_ROBOT_SENSOR;
     if (strcmp(p, "/api/robot/emergency_stop") == 0)      return API_POST_ROBOT_EMERGENCY_STOP;
-    if (strcmp(p, "/api/robot/config/save") == 0)         return API_POST_ROBOT_PARAMETERS;
+    if (strcmp(p, "/api/robot/config/save") == 0)         return API_POST_ROBOT_CONFIG_SAVE; /* FIX API-3: 修复路由到正确的槽位327 */
     if (strcmp(p, "/api/robot/connect") == 0)             return API_POST_ROBOT_CONNECT;
     if (strcmp(p, "/api/robot/disconnect") == 0)          return API_POST_ROBOT_DISCONNECT;
     if (strcmp(p, "/api/robot/firmware") == 0)            return API_POST_ROBOT_FIRMWARE;
@@ -2692,7 +2698,10 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     /* === 产品设计 === */
     /* 枚举值定义见 backend.h: API_POST_PRODUCT_DESIGN=270, API_GET_PRODUCT_SPEC=271 */
     if (strcmp(p, "/api/product/status") == 0)            return (ApiRequestType)300;
-    if (strcmp(p, "/api/product/spec") == 0)              return (ApiRequestType)271;
+    if (strcmp(p, "/api/product/spec") == 0) {
+        /* FIX API-4: 区分GET(271)和POST(330)方法 */
+        return (method && strcmp(method, "POST") == 0) ? (ApiRequestType)330 : (ApiRequestType)271;
+    }
     if (strcmp(p, "/api/product/design") == 0)            return (ApiRequestType)270;
 
     /* === 安全 === */

@@ -79,8 +79,6 @@
         };
     </script>
     <script src="js/programming-workbench.js"></script>
-    <script src="js/training-center.js"></script>
-    <script src="js/simulation-control.js"></script>
     <script src="js/product-design.js"></script>
     <script src="js/hardware-util.js"></script>
 </head>
@@ -5081,7 +5079,7 @@ response = requests.get(
 
         <div class="skills-container">
             <div class="skill-list">
-                <input type="text" class="search-box" id="skill-search" placeholder="搜索技能..." oninput="filterSkills">
+                <input type="text" class="search-box" id="skill-search" placeholder="搜索技能..." oninput="filterSkills()">
                 <div class="filter-bar">
                     <select id="skill-filter-select" style="display:none;" onchange="renderSkillList(this.value)"><option value="all">全部</option></select>
                     <button class="filter-btn active" onclick="setFilter('all', this)">全部</button>
@@ -5289,11 +5287,11 @@ response = requests.get(
                 badge.style.color = '#fff';
             }
         }
-        checkSkillsConnection;
+        checkSkillsConnection(); /* F-1修复: 添加函数调用括号 */
 
         window.addEventListener('DOMContentLoaded', function() {
-            checkSkillsConnection;
-            loadSkills;
+            checkSkillsConnection(); /* F-1修复: 添加函数调用括号 */
+            loadSkills();            /* F-1修复: 添加函数调用括号 */
             setInterval(checkSkillsConnection, 30000);
         });
     </script>
@@ -6521,62 +6519,159 @@ response = requests.get(
             </div>
         </section>
 
-        <!-- F-S03修复：路由导航占位section -->
+        <!-- F-S03修复：双目空间识别模块 -->
         <section id="stereo" class="section">
             <div class="card full-width">
-                <div class="card-header"><h3>双目空间识别</h3></div>
+                <div class="card-header"><h3>双目空间识别</h3><span class="badge badge-info" id="stereo-conn-status">未连接</span></div>
                 <div class="card-content">
-                    <div class="section-placeholder">
-                        <div class="placeholder-spinner"></div>
-                        <p>双目空间识别模块加载中...</p>
+                    <div class="stereo-grid">
+                        <div class="stereo-panel">
+                            <h4>左目摄像头</h4>
+                            <canvas id="stereo-left-canvas" width="320" height="240" style="background:#1a1a2e;border-radius:8px;"></canvas>
+                            <p class="stereo-info">状态: <span id="stereo-left-status">等待连接</span></p>
+                        </div>
+                        <div class="stereo-panel">
+                            <h4>右目摄像头</h4>
+                            <canvas id="stereo-right-canvas" width="320" height="240" style="background:#1a1a2e;border-radius:8px;"></canvas>
+                            <p class="stereo-info">状态: <span id="stereo-right-status">等待连接</span></p>
+                        </div>
+                        <div class="stereo-panel">
+                            <h4>深度图 (视差匹配)</h4>
+                            <canvas id="stereo-depth-canvas" width="320" height="240" style="background:#0a0a1a;border-radius:8px;"></canvas>
+                            <p class="stereo-info">算法: Census变换立体匹配 | 状态: <span id="stereo-depth-status">等待左/右目数据</span></p>
+                        </div>
+                        <div class="stereo-panel">
+                            <h4>3D点云重建</h4>
+                            <canvas id="stereo-pointcloud-canvas" width="320" height="240" style="background:#0a0a1a;border-radius:8px;"></canvas>
+                            <p class="stereo-info">点数: <span id="stereo-point-count">--</span> | 状态: <span id="stereo-recon-status">等待深度图</span></p>
+                        </div>
+                    </div>
+                    <div class="stereo-controls" style="margin-top:16px;">
+                        <button class="btn btn-primary" onclick="initStereoVision()">初始化双目视觉</button>
+                        <button class="btn btn-secondary" onclick="captureStereoFrame()">采集一帧</button>
+                        <button class="btn btn-secondary" onclick="toggleStereoStream()">连续采集</button>
+                        <span id="stereo-fps" style="margin-left:12px;color:#888;"></span>
                     </div>
                 </div>
             </div>
         </section>
 
+        <!-- F-S03修复：机器人管理模块 -->
         <section id="robots" class="section">
             <div class="card full-width">
-                <div class="card-header"><h3>机器人管理</h3></div>
+                <div class="card-header"><h3>机器人管理</h3><span class="badge badge-info" id="robots-conn-status">未连接</span></div>
                 <div class="card-content">
-                    <div class="section-placeholder">
-                        <div class="placeholder-spinner"></div>
-                        <p>机器人管理模块加载中...</p>
+                    <div class="robot-dashboard">
+                        <div class="robot-summary">
+                            <div class="summary-item"><span>已连接机器人</span><strong id="robot-connected-count">0</strong></div>
+                            <div class="summary-item"><span>活跃任务</span><strong id="robot-active-tasks">0</strong></div>
+                            <div class="summary-item"><span>集群规模</span><strong id="robot-swarm-size">0/64</strong></div>
+                        </div>
+                        <div class="robot-list-container" style="margin-top:16px;">
+                            <h4>机器人列表</h4>
+                            <table class="data-table" id="robot-list-table">
+                                <thead><tr>
+                                    <th>名称</th><th>类型</th><th>状态</th><th>IP地址</th><th>操作</th>
+                                </tr></thead>
+                                <tbody id="robot-list-body">
+                                    <tr><td colspan="5" style="text-align:center;color:#888;">暂无机器人连接，请在后端注册机器人设备</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <div class="robot-actions" style="margin-top:16px;">
+                            <button class="btn btn-primary" onclick="scanRobots()">扫描机器人</button>
+                            <button class="btn btn-secondary" onclick="connectRobot()">手动连接</button>
+                            <button class="btn btn-danger" onclick="emergencyStopAllRobots()">全部紧急停止</button>
+                        </div>
                     </div>
                 </div>
             </div>
         </section>
 
+        <!-- F-S03修复：智能代理模块 -->
         <section id="agents" class="section">
             <div class="card full-width">
-                <div class="card-header"><h3>智能代理</h3></div>
+                <div class="card-header"><h3>智能代理</h3><span class="badge badge-info" id="agents-conn-status">未连接</span></div>
                 <div class="card-content">
-                    <div class="section-placeholder">
-                        <div class="placeholder-spinner"></div>
-                        <p>智能代理模块加载中...</p>
+                    <div class="agents-dashboard">
+                        <div class="agent-summary">
+                            <div class="summary-item"><span>代理数量</span><strong id="agent-count">0</strong></div>
+                            <div class="summary-item"><span>协作模式</span><strong id="agent-collab-mode">单代理</strong></div>
+                            <div class="summary-item"><span>任务队列</span><strong id="agent-task-queue">0</strong></div>
+                        </div>
+                        <div class="agent-list-container" style="margin-top:16px;">
+                            <h4>代理列表</h4>
+                            <div id="agent-list" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px;">
+                                <div class="agent-card-placeholder" style="padding:24px;background:#1a1a2e;border-radius:8px;text-align:center;color:#888;">
+                                    <p>多智能体系统未激活</p>
+                                    <p style="font-size:12px;">启动AGI系统后将自动创建认知代理、学习代理和执行代理</p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="agent-actions" style="margin-top:16px;">
+                            <button class="btn btn-primary" onclick="initMultiAgentSystem()">初始化多智能体</button>
+                            <button class="btn btn-secondary" onclick="createAgent()">创建代理</button>
+                            <button class="btn btn-secondary" onclick="broadcastTask()">广播任务</button>
+                        </div>
                     </div>
                 </div>
             </div>
         </section>
 
+        <!-- F-S03修复：数据集管理模块 -->
         <section id="datasets" class="section">
             <div class="card full-width">
-                <div class="card-header"><h3>数据集管理</h3></div>
+                <div class="card-header"><h3>数据集管理</h3><span class="badge badge-info" id="datasets-conn-status">未连接</span></div>
                 <div class="card-content">
-                    <div class="section-placeholder">
-                        <div class="placeholder-spinner"></div>
-                        <p>数据集管理模块加载中...</p>
+                    <div class="datasets-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px;">
+                        <div class="dataset-card" style="background:#1a1a2e;border-radius:8px;padding:16px;">
+                            <h4>MNIST 手写数字</h4>
+                            <p style="color:#888;font-size:13px;">训练: 60,000 | 测试: 10,000 | 28x28 灰度</p>
+                            <p style="color:#888;font-size:13px;">状态: <span id="ds-mnist-status" style="color:#f39c12;">待加载</span></p>
+                            <button class="btn btn-sm btn-primary" onclick="loadDataset('mnist')">加载</button>
+                        </div>
+                        <div class="dataset-card" style="background:#1a1a2e;border-radius:8px;padding:16px;">
+                            <h4>CIFAR-10 图像分类</h4>
+                            <p style="color:#888;font-size:13px;">训练: 50,000 | 测试: 10,000 | 32x32 RGB</p>
+                            <p style="color:#888;font-size:13px;">状态: <span id="ds-cifar10-status" style="color:#f39c12;">待加载</span></p>
+                            <button class="btn btn-sm btn-primary" onclick="loadDataset('cifar10')">加载</button>
+                        </div>
+                        <div class="dataset-card" style="background:#1a1a2e;border-radius:8px;padding:16px;">
+                            <h4>预训练数据</h4>
+                            <p style="color:#888;font-size:13px;">8个预训练检查点 (pt01-pt08)</p>
+                            <p style="color:#888;font-size:13px;">状态: <span id="ds-pretrain-status" style="color:#f39c12;">待加载</span></p>
+                            <button class="btn btn-sm btn-primary" onclick="loadDataset('pretrain')">加载</button>
+                        </div>
+                        <div class="dataset-card" style="background:#1a1a2e;border-radius:8px;padding:16px;">
+                            <h4>自定义数据集</h4>
+                            <p style="color:#888;font-size:13px;">支持CSV/图像/音频格式导入</p>
+                            <input type="file" id="custom-dataset-file" style="margin-top:8px;color:#aaa;" accept=".csv,.bin" onchange="uploadCustomDataset()">
+                        </div>
                     </div>
                 </div>
             </div>
         </section>
 
+        <!-- F-S03修复：AGI诊断模块 -->
         <section id="agi-diagnostic" class="section">
             <div class="card full-width">
-                <div class="card-header"><h3>AGI诊断</h3></div>
+                <div class="card-header"><h3>AGI系统诊断</h3><span class="badge" id="agi-diag-status" style="background:#f39c12;">待检测</span></div>
                 <div class="card-content">
-                    <div class="section-placeholder">
-                        <div class="placeholder-spinner"></div>
-                        <p>AGI诊断模块加载中...</p>
+                    <div class="diag-summary" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;margin-bottom:16px;">
+                        <div class="diag-item"><span>LNN状态</span><strong id="diag-lnn" style="color:#f39c12;">待检测</strong></div>
+                        <div class="diag-item"><span>知识库</span><strong id="diag-kb" style="color:#f39c12;">待检测</strong></div>
+                        <div class="diag-item"><span>记忆系统</span><strong id="diag-mem" style="color:#f39c12;">待检测</strong></div>
+                        <div class="diag-item"><span>AGI认知</span><strong id="diag-agi" style="color:#f39c12;">待检测</strong></div>
+                        <div class="diag-item"><span>GPU后端</span><strong id="diag-gpu" style="color:#f39c12;">待检测</strong></div>
+                        <div class="diag-item"><span>训练系统</span><strong id="diag-train" style="color:#f39c12;">待检测</strong></div>
+                    </div>
+                    <div id="diag-results" style="background:#1a1a2e;border-radius:8px;padding:16px;max-height:400px;overflow-y:auto;">
+                        <pre style="color:#888;font-size:12px;margin:0;">点击"运行完整诊断"开始系统自检...</pre>
+                    </div>
+                    <div style="margin-top:16px;">
+                        <button class="btn btn-primary" onclick="runFullDiagnostic()">运行完整诊断</button>
+                        <button class="btn btn-secondary" onclick="exportDiagnosticReport()">导出诊断报告</button>
+                        <button class="btn btn-secondary" onclick="quickHealthCheck()">快速健康检查</button>
                     </div>
                 </div>
             </div>
@@ -6620,7 +6715,9 @@ response = requests.get(
     <script src="js/dialogue-enhanced.js"></script>
     <script src="js/knowledge-graph.js"></script>
     <script src="js/training-push.js"></script>
+    <script src="js/training-center.js"></script>
     <script src="js/main.js?v=211"></script>
+    <script src="js/simulation-control.js"></script>
     <script>
         // 更新当前时间
         function updateTime() {
