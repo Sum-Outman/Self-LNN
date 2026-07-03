@@ -570,7 +570,7 @@ int abstraction_learn_concept(AbstractionSystem* system,
         safe_free((void**)&new_concept->name);
         new_concept->name = (char*)safe_malloc(strlen(concept_name) + 1);
         if (new_concept->name) {
-            strcpy(new_concept->name, concept_name);
+            memcpy(new_concept->name, concept_name, strlen(concept_name) + 1);
         }
         
         // 复制到输出
@@ -1078,7 +1078,7 @@ static Concept* create_concept(const char* name,
     if (name) {
         concept->name = (char*)safe_malloc(strlen(name) + 1);
         if (concept->name) {
-            strcpy(concept->name, name);
+            memcpy(concept->name, name, strlen(name) + 1);
         }
     }
     

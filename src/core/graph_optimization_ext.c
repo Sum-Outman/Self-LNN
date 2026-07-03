@@ -100,7 +100,7 @@ static int internal_cholesky_decompose(float* L, const float* A, int n) {
 }
 
 static void internal_cholesky_solve(const float* L, const float* b, float* x, int n) {
-    float* y = (float*)malloc((size_t)n * sizeof(float));
+    float* y = (float*)safe_malloc((size_t)n * sizeof(float));
     if (!y) return;
     for (int i = 0; i < n; i++) {
         float s = 0.0f;
@@ -120,7 +120,7 @@ static void internal_cholesky_solve(const float* L, const float* b, float* x, in
 }
 
 static float internal_quad_form(const float* H, const float* v, int n) {
-    float* Hv = (float*)malloc((size_t)n * sizeof(float));
+    float* Hv = (float*)safe_malloc((size_t)n * sizeof(float));
     if (!Hv) return 0.0f;
     internal_mat_vec_mul(H, v, Hv, n, n);
     float q = internal_dot(v, Hv, n);
@@ -131,7 +131,7 @@ static float internal_quad_form(const float* H, const float* v, int n) {
 static float internal_line_search(const float* x, const float* d, PowellFunc func,
                                    void* user_data, float f0, int n, float* fx) {
     float alpha = 1.0f;
-    float* xtry = (float*)malloc((size_t)n * sizeof(float));
+    float* xtry = (float*)safe_malloc((size_t)n * sizeof(float));
     if (!xtry) return 0.0f;
     float c = 0.5f;
     float tau = 0.5f;
@@ -161,11 +161,11 @@ int lm_optimizer_create(LMOptimizer* opt, int n_params, int n_residuals) {
     if (!opt || n_params < 1 || n_residuals < 1) return -1;
     opt->n_params = n_params;
     opt->n_residuals = n_residuals;
-    opt->params = (float*)calloc((size_t)n_params, sizeof(float));
-    opt->residuals = (float*)calloc((size_t)n_residuals, sizeof(float));
-    opt->jacobian = (float*)calloc((size_t)n_residuals * n_params, sizeof(float));
+    opt->params = (float*)safe_calloc((size_t)n_params, sizeof(float));
+    opt->residuals = (float*)safe_calloc((size_t)n_residuals, sizeof(float));
+    opt->jacobian = (float*)safe_calloc((size_t)n_residuals * n_params, sizeof(float));
     int ws_size = n_params * n_params + n_params + n_params;
-    opt->workspace = (float*)calloc((size_t)ws_size, sizeof(float));
+    opt->workspace = (float*)safe_calloc((size_t)ws_size, sizeof(float));
     if (!opt->params || !opt->residuals || !opt->jacobian || !opt->workspace) {
         safe_free((void**)&opt->params); safe_free((void**)&opt->residuals); safe_free((void**)&opt->jacobian); safe_free((void**)&opt->workspace);
         return -1;
@@ -241,15 +241,15 @@ int lm_optimizer_solve(LMOptimizer* opt, float* initial_params,
 
         int accepted = 0;
         for (int inner = 0; inner < 30; inner++) {
-            float* H_aug = (float*)malloc((size_t)n * n * sizeof(float));
+            float* H_aug = (float*)safe_malloc((size_t)n * (size_t)n * sizeof(float));
             if (!H_aug) return -1;
-            memcpy(H_aug, H, (size_t)n * n * sizeof(float));
+            memcpy(H_aug, H, (size_t)n * (size_t)n * sizeof(float));
             for (int i = 0; i < n; i++)
                 H_aug[i * n + i] += opt->lambda;
 
-            float* L = (float*)malloc((size_t)n * n * sizeof(float));
+            float* L = (float*)safe_malloc((size_t)n * (size_t)n * sizeof(float));
             if (!L) { safe_free((void**)&H_aug); return -1; }
-            memset(L, 0, (size_t)n * n * sizeof(float));
+            memset(L, 0, (size_t)n * (size_t)n * sizeof(float));
 
             if (internal_cholesky_decompose(L, H_aug, n) != 0) {
                 opt->lambda *= opt->lambda_factor;
@@ -262,12 +262,12 @@ int lm_optimizer_solve(LMOptimizer* opt, float* initial_params,
             safe_free((void**)&H_aug);
             safe_free((void**)&L);
 
-            float* new_params = (float*)malloc((size_t)n * sizeof(float));
+            float* new_params = (float*)safe_malloc((size_t)n * sizeof(float));
             if (!new_params) return -1;
             for (int i = 0; i < n; i++)
                 new_params[i] = opt->params[i] + delta[i];
 
-            float* new_res = (float*)malloc((size_t)m * sizeof(float));
+            float* new_res = (float*)safe_malloc((size_t)m * sizeof(float));
             if (!new_res) { safe_free((void**)&new_params); return -1; }
             if (res_func(new_params, new_res, user_data) != 0) {
                 safe_free((void**)&new_params); safe_free((void**)&new_res);
@@ -331,14 +331,14 @@ int dogleg_optimizer_create(DoglegOptimizer* opt, int n_params, int n_residuals)
     if (!opt || n_params < 1 || n_residuals < 1) return -1;
     opt->n_params = n_params;
     opt->n_residuals = n_residuals;
-    opt->params = (float*)calloc((size_t)n_params, sizeof(float));
-    opt->residuals = (float*)calloc((size_t)n_residuals, sizeof(float));
-    opt->jacobian = (float*)calloc((size_t)n_residuals * n_params, sizeof(float));
-    opt->gradient = (float*)calloc((size_t)n_params, sizeof(float));
-    opt->gn_step = (float*)calloc((size_t)n_params, sizeof(float));
-    opt->cauchy_step = (float*)calloc((size_t)n_params, sizeof(float));
+    opt->params = (float*)safe_calloc((size_t)n_params, sizeof(float));
+    opt->residuals = (float*)safe_calloc((size_t)n_residuals, sizeof(float));
+    opt->jacobian = (float*)safe_calloc((size_t)n_residuals * n_params, sizeof(float));
+    opt->gradient = (float*)safe_calloc((size_t)n_params, sizeof(float));
+    opt->gn_step = (float*)safe_calloc((size_t)n_params, sizeof(float));
+    opt->cauchy_step = (float*)safe_calloc((size_t)n_params, sizeof(float));
     int ws_size = n_params * n_params + n_params + n_params;
-    opt->workspace = (float*)calloc((size_t)ws_size, sizeof(float));
+    opt->workspace = (float*)safe_calloc((size_t)ws_size, sizeof(float));
     if (!opt->params || !opt->residuals || !opt->jacobian || !opt->gradient ||
         !opt->gn_step || !opt->cauchy_step || !opt->workspace) {
         safe_free((void**)&opt->params); safe_free((void**)&opt->residuals); safe_free((void**)&opt->jacobian);
@@ -456,12 +456,12 @@ int dogleg_optimizer_solve(DoglegOptimizer* opt, float* initial_params,
         dogleg_compute_step(opt->gn_step, opt->gn_step, opt->cauchy_step,
                            opt->trust_radius, n);
 
-        float* new_params = (float*)malloc((size_t)n * sizeof(float));
+        float* new_params = (float*)safe_malloc((size_t)n * sizeof(float));
         if (!new_params) return -1;
         for (int i = 0; i < n; i++)
             new_params[i] = opt->params[i] + opt->gn_step[i];
 
-        float* new_res = (float*)malloc((size_t)m * sizeof(float));
+        float* new_res = (float*)safe_malloc((size_t)m * sizeof(float));
         if (!new_res) { safe_free((void**)&(new_params)); return -1; }
         if (res_func(new_params, new_res, user_data) != 0) {
             safe_free((void**)&(new_params)); safe_free((void**)&(new_res)); return -1;
@@ -553,11 +553,11 @@ static float powell_brent_line_search(const float* x, const float* d, PowellFunc
 int powell_optimizer_create(PowellOptimizer* opt, int n_params) {
     if (!opt || n_params < 1) return -1;
     opt->n_params = n_params;
-    opt->params = (float*)calloc((size_t)n_params, sizeof(float));
-    opt->directions = (float*)calloc((size_t)n_params * n_params, sizeof(float));
-    opt->workspace = (float*)calloc((size_t)n_params, sizeof(float));
-    opt->prev_params = (float*)calloc((size_t)n_params, sizeof(float));
-    opt->step = (float*)calloc((size_t)n_params, sizeof(float));
+    opt->params = (float*)safe_calloc((size_t)n_params, sizeof(float));
+    opt->directions = (float*)safe_calloc((size_t)n_params * n_params, sizeof(float));
+    opt->workspace = (float*)safe_calloc((size_t)n_params, sizeof(float));
+    opt->prev_params = (float*)safe_calloc((size_t)n_params, sizeof(float));
+    opt->step = (float*)safe_calloc((size_t)n_params, sizeof(float));
     if (!opt->params || !opt->directions || !opt->workspace ||
         !opt->prev_params || !opt->step) {
         safe_free((void**)&(opt->params)); safe_free((void**)&(opt->directions)); safe_free((void**)&(opt->workspace));
@@ -650,13 +650,13 @@ int powell_optimizer_solve(PowellOptimizer* opt, float* initial_params,
 
 int fg_create(FactorGraph* fg, int max_vars, int max_factors) {
     if (!fg || max_vars < 1 || max_factors < 1) return -1;
-    fg->variables = (FgVariableNode*)calloc((size_t)max_vars, sizeof(FgVariableNode));
-    fg->factors = (FgFactorNode*)calloc((size_t)max_factors, sizeof(FgFactorNode));
+    fg->variables = (FgVariableNode*)safe_calloc((size_t)max_vars, sizeof(FgVariableNode));
+    fg->factors = (FgFactorNode*)safe_calloc((size_t)max_factors, sizeof(FgFactorNode));
     fg->n_variables = 0;
     fg->n_factors = 0;
     fg->max_variables = max_vars;
     fg->max_factors = max_factors;
-    fg->elim_order = (int*)calloc((size_t)max_vars, sizeof(int));
+    fg->elim_order = (int*)safe_calloc((size_t)max_vars, sizeof(int));
     if (!fg->variables || !fg->factors || !fg->elim_order) {
         safe_free((void**)&(fg->variables)); safe_free((void**)&(fg->factors)); safe_free((void**)&(fg->elim_order));
         return -1;
@@ -687,8 +687,8 @@ int fg_add_variable(FactorGraph* fg, int id, const char* name, int domain_size) 
     v->id = id;
     strncpy_s(v->name, sizeof(v->name), name ? name : "", _TRUNCATE);
     v->domain_size = domain_size;
-    v->belief = (float*)calloc((size_t)domain_size, sizeof(float));
-    v->factor_ids = (int*)calloc((size_t)fg->max_factors, sizeof(int));
+    v->belief = (float*)safe_calloc((size_t)domain_size, sizeof(float));
+    v->factor_ids = (int*)safe_calloc((size_t)fg->max_factors, sizeof(int));
     v->n_factors = 0;
     if (!v->belief || !v->factor_ids) {
         safe_free((void**)&(v->belief)); safe_free((void**)&(v->factor_ids)); return -1;
@@ -704,8 +704,8 @@ int fg_add_factor(FactorGraph* fg, int id, const char* name,
     f->id = id;
     strncpy_s(f->name, sizeof(f->name), name ? name : "", _TRUNCATE);
     f->n_connected_vars = n_vars;
-    f->connected_vars = (int*)malloc((size_t)n_vars * sizeof(int));
-    f->var_dimensions = (int*)malloc((size_t)n_vars * sizeof(int));
+    f->connected_vars = (int*)safe_malloc((size_t)n_vars * sizeof(int));
+    f->var_dimensions = (int*)safe_malloc((size_t)n_vars * sizeof(int));
     if (!f->connected_vars || !f->var_dimensions) {
         safe_free((void**)&(f->connected_vars)); safe_free((void**)&(f->var_dimensions)); return -1;
     }
@@ -719,7 +719,7 @@ int fg_add_factor(FactorGraph* fg, int id, const char* name,
         f->var_dimensions[i] = vs > 0 ? vs : 2;
         total_size *= f->var_dimensions[i];
     }
-    f->values = (float*)malloc((size_t)total_size * sizeof(float));
+    f->values = (float*)safe_malloc((size_t)total_size * sizeof(float));
     if (!f->values) { safe_free((void**)&(f->values)); return -1; }
     memcpy(f->values, values, (size_t)total_size * sizeof(float));
 
@@ -785,7 +785,7 @@ int fg_sum_product(FactorGraph* fg, int target_var, float* marginal, int max_ite
             for (int s = 0; s < ds; s++) {
                 float msg = 0.0f;
                 if (other_dim > 0) {
-                    int* idx = (int*)calloc((size_t)f->n_connected_vars, sizeof(int));
+                    int* idx = (int*)safe_calloc((size_t)f->n_connected_vars, sizeof(int));
                     if (!idx) continue;
                     idx[var_pos] = s;
                     for (int o = 0; o < other_dim; o++) {
@@ -847,7 +847,7 @@ int fg_max_product(FactorGraph* fg, int* map_assignment, int max_iter) {
                 int ds2 = fg->variables[i].domain_size;
                 for (int s = 0; s < ds2; s++) {
                     float best = -FLT_MAX;
-                    int* idx = (int*)calloc((size_t)f->n_connected_vars, sizeof(int));
+                    int* idx = (int*)safe_calloc((size_t)f->n_connected_vars, sizeof(int));
                     if (!idx) continue;
                     int other_dim = 1;
                     for (int p = 0; p < f->n_connected_vars; p++)
@@ -895,8 +895,8 @@ int fg_variable_elimination(FactorGraph* fg, int elim_var, int* new_factor_vars,
     if (vi < 0) return -1;
 
     int total_size = 1;
-    int* all_vars = (int*)malloc((size_t)fg->max_factors * sizeof(int));
-    int* all_dims = (int*)malloc((size_t)fg->max_factors * sizeof(int));
+    int* all_vars = (int*)safe_malloc((size_t)fg->max_factors * sizeof(int));
+    int* all_dims = (int*)safe_malloc((size_t)fg->max_factors * sizeof(int));
     int all_n = 0;
     if (!all_vars || !all_dims) { safe_free((void**)&(all_vars)); safe_free((void**)&(all_dims)); return -1; }
 
@@ -935,10 +935,10 @@ int fg_variable_elimination(FactorGraph* fg, int elim_var, int* new_factor_vars,
     int total_combos = total_size * elim_domain;
     if (total_combos > 1000000) total_combos = 1000000;
 
-    float* temp_values = (float*)calloc((size_t)total_combos, sizeof(float));
+    float* temp_values = (float*)safe_calloc((size_t)total_combos, sizeof(float));
     if (!temp_values) { safe_free((void**)&(all_vars)); safe_free((void**)&(all_dims)); return -1; }
 
-    int* indices = (int*)calloc((size_t)all_n + 1, sizeof(int));
+    int* indices = (int*)safe_calloc((size_t)all_n + 1, sizeof(int));
     if (!indices) { safe_free((void**)&(temp_values)); safe_free((void**)&(all_vars)); safe_free((void**)&(all_dims)); return -1; }
 
     int out_idx = 0;
@@ -1029,12 +1029,12 @@ int fg_variable_elimination(FactorGraph* fg, int elim_var, int* new_factor_vars,
 
 int bn_create(BayesianNetwork* bn, int max_nodes) {
     if (!bn || max_nodes < 1) return -1;
-    bn->nodes = (BNNode*)calloc((size_t)max_nodes, sizeof(BNNode));
+    bn->nodes = (BNNode*)safe_calloc((size_t)max_nodes, sizeof(BNNode));
     bn->n_nodes = 0;
     bn->max_nodes = max_nodes;
-    bn->topological_order = (int*)calloc((size_t)max_nodes, sizeof(int));
-    bn->sorted = (int*)calloc((size_t)max_nodes, sizeof(int));
-    bn->visited = (int*)calloc((size_t)max_nodes, sizeof(int));
+    bn->topological_order = (int*)safe_calloc((size_t)max_nodes, sizeof(int));
+    bn->sorted = (int*)safe_calloc((size_t)max_nodes, sizeof(int));
+    bn->visited = (int*)safe_calloc((size_t)max_nodes, sizeof(int));
     if (!bn->nodes || !bn->topological_order || !bn->sorted || !bn->visited) {
         safe_free((void**)&(bn->nodes)); safe_free((void**)&(bn->topological_order));
         safe_free((void**)&(bn->sorted)); safe_free((void**)&(bn->visited));
@@ -1063,8 +1063,8 @@ int bn_add_node(BayesianNetwork* bn, int id, const char* name, int domain_size) 
     n->id = id;
     strncpy_s(n->name, sizeof(n->name), name ? name : "", _TRUNCATE);
     n->domain_size = domain_size;
-    n->parent_ids = (int*)calloc((size_t)bn->max_nodes, sizeof(int));
-    n->child_ids = (int*)calloc((size_t)bn->max_nodes, sizeof(int));
+    n->parent_ids = (int*)safe_calloc((size_t)bn->max_nodes, sizeof(int));
+    n->child_ids = (int*)safe_calloc((size_t)bn->max_nodes, sizeof(int));
     n->n_parents = 0;
     n->n_children = 0;
     n->cpt = NULL;
@@ -1097,7 +1097,7 @@ int bn_set_cpt(BayesianNetwork* bn, int node_id, const float* cpt_values, int cp
     BNNode* n = &bn->nodes[ni];
     safe_free((void**)&(n->cpt));
     n->cpt_size = cpt_size;
-    n->cpt = (float*)malloc((size_t)cpt_size * sizeof(float));
+    n->cpt = (float*)safe_malloc((size_t)cpt_size * sizeof(float));
     if (!n->cpt) return -1;
     memcpy(n->cpt, cpt_values, (size_t)cpt_size * sizeof(float));
     return 0;
@@ -1154,7 +1154,7 @@ float bn_infer_marginal(const BayesianNetwork* bn, int query_var, int evidence_v
             float norm = 0.0f;
             for (int d = 0; d < en->domain_size; d++) {
                 float prob = 0.0f;
-                int* p_assign = (int*)calloc((size_t)en->n_parents, sizeof(int));
+                int* p_assign = (int*)safe_calloc((size_t)en->n_parents, sizeof(int));
                 if (!p_assign) continue;
                 if (d == evidence_val) {
                     for (int pi = 0; pi < parent_stride; pi++) {
@@ -1194,7 +1194,7 @@ float bn_infer_marginal(const BayesianNetwork* bn, int query_var, int evidence_v
         }
         /* 有父节点：使用实际domain_size，正确计算组合数 */
         int total = 1;
-        int* parent_ds = (int*)calloc((size_t)qn->n_parents, sizeof(int));
+        int* parent_ds = (int*)safe_calloc((size_t)qn->n_parents, sizeof(int));
         if (!parent_ds) return 1.0f / (float)qn->domain_size;
         for (int p = 0; p < qn->n_parents; p++) {
             parent_ds[p] = 2; /* 默认二值 */
@@ -1228,7 +1228,7 @@ int bn_sample(const BayesianNetwork* bn, int* samples, int n_samples) {
     }
 
     for (int s = 0; s < n_samples; s++) {
-        int* assignment = (int*)calloc((size_t)bn->n_nodes, sizeof(int));
+        int* assignment = (int*)safe_calloc((size_t)bn->n_nodes, sizeof(int));
         if (!assignment) continue;
 
         for (int oi = 0; oi < bn->n_nodes; oi++) {
@@ -1272,15 +1272,15 @@ int bn_sample(const BayesianNetwork* bn, int* samples, int n_samples) {
 
 int mrf_create(MarkovRandomField* mrf, int max_nodes, int max_cliques) {
     if (!mrf || max_nodes < 1 || max_cliques < 1) return -1;
-    mrf->nodes = (MrfNode*)calloc((size_t)max_nodes, sizeof(MrfNode));
+    mrf->nodes = (MrfNode*)safe_calloc((size_t)max_nodes, sizeof(MrfNode));
     mrf->n_nodes = 0;
     mrf->max_nodes = max_nodes;
-    mrf->cliques = (Clique*)calloc((size_t)max_cliques, sizeof(Clique));
+    mrf->cliques = (Clique*)safe_calloc((size_t)max_cliques, sizeof(Clique));
     mrf->n_cliques = 0;
     mrf->max_cliques = max_cliques;
-    mrf->edges = (int*)calloc((size_t)max_nodes * max_nodes, sizeof(int));
-    mrf->edge_pairs = (int*)calloc((size_t)max_nodes * 2, sizeof(int));
-    mrf->pairwise_potentials = (float*)calloc((size_t)max_nodes * max_nodes * 4, sizeof(float));
+    mrf->edges = (int*)safe_calloc((size_t)max_nodes * max_nodes, sizeof(int));
+    mrf->edge_pairs = (int*)safe_calloc((size_t)max_nodes * 2, sizeof(int));
+    mrf->pairwise_potentials = (float*)safe_calloc((size_t)max_nodes * max_nodes * 4, sizeof(float));
     mrf->edge_count = 0;
     if (!mrf->nodes || !mrf->cliques || !mrf->edges ||
         !mrf->edge_pairs || !mrf->pairwise_potentials) {
@@ -1310,8 +1310,8 @@ int mrf_add_node(MarkovRandomField* mrf, int id, const char* name, int domain_si
     n->id = id;
     strncpy_s(n->name, sizeof(n->name), name ? name : "", _TRUNCATE);
     n->domain_size = domain_size;
-    n->belief = (float*)calloc((size_t)domain_size, sizeof(float));
-    n->clique_ids = (int*)calloc((size_t)mrf->max_cliques, sizeof(int));
+    n->belief = (float*)safe_calloc((size_t)domain_size, sizeof(float));
+    n->clique_ids = (int*)safe_calloc((size_t)mrf->max_cliques, sizeof(int));
     n->n_cliques = 0;
     if (!n->belief || !n->clique_ids) {
         safe_free((void**)&(n->belief)); safe_free((void**)&(n->clique_ids)); return -1;
@@ -1344,7 +1344,7 @@ int mrf_add_edge(MarkovRandomField* mrf, int node_i, int node_j, const float* po
 int mrf_add_clique(MarkovRandomField* mrf, const int* node_ids, int n_nodes, const float* potential) {
     if (!mrf || !node_ids || !potential || mrf->n_cliques >= mrf->max_cliques) return -1;
     Clique* c = &mrf->cliques[mrf->n_cliques];
-    c->node_ids = (int*)malloc((size_t)n_nodes * sizeof(int));
+    c->node_ids = (int*)safe_malloc((size_t)n_nodes * sizeof(int));
     c->n_nodes = n_nodes;
     if (!c->node_ids) return -1;
     int total_size = 1;
@@ -1356,7 +1356,7 @@ int mrf_add_clique(MarkovRandomField* mrf, const int* node_ids, int n_nodes, con
                 break;
             }
     }
-    c->potential = (float*)malloc((size_t)total_size * sizeof(float));
+    c->potential = (float*)safe_malloc((size_t)total_size * sizeof(float));
     if (!c->potential) { safe_free((void**)&(c->node_ids)); return -1; }
     memcpy(c->potential, potential, (size_t)total_size * sizeof(float));
 
@@ -1376,7 +1376,7 @@ int mrf_gibbs_sample(const MarkovRandomField* mrf, int* assignment, int n_burnin
     if (!mrf || !assignment) return -1;
     int n = mrf->n_nodes;
 
-    int* current = (int*)malloc((size_t)n * sizeof(int));
+    int* current = (int*)safe_malloc((size_t)n * sizeof(int));
     if (!current) return -1;
     for (int i = 0; i < n; i++) /* K-008修复：安全随机数 */
         current[i] = (int)(secure_random_int((uint32_t)(mrf->nodes[i].domain_size - 1)));
@@ -1385,7 +1385,7 @@ int mrf_gibbs_sample(const MarkovRandomField* mrf, int* assignment, int n_burnin
         for (int vi = 0; vi < n; vi++) {
             MrfNode* v = &mrf->nodes[vi];
             int ds = v->domain_size;
-            float* log_probs = (float*)calloc((size_t)ds, sizeof(float));
+            float* log_probs = (float*)safe_calloc((size_t)ds, sizeof(float));
             if (!log_probs) continue;
 
             for (int ei = 0; ei < mrf->edge_count; ei++) {
@@ -1429,7 +1429,7 @@ int mrf_gibbs_sample(const MarkovRandomField* mrf, int* assignment, int n_burnin
             for (int s = 1; s < ds; s++)
                 if (log_probs[s] > max_lp) max_lp = log_probs[s];
 
-            float* probs = (float*)malloc((size_t)ds * sizeof(float));
+            float* probs = (float*)safe_malloc((size_t)ds * sizeof(float));
             if (!probs) { safe_free((void**)&(log_probs)); continue; }
             float sum_p = 0.0f;
             for (int s = 0; s < ds; s++) {
@@ -1469,7 +1469,7 @@ float mrf_infer_marginal(const MarkovRandomField* mrf, int node_id, int n_burnin
     int ds = mrf->nodes[vi].domain_size;
     int nsamples = n_samples > 0 ? n_samples : 100;
 
-    int* all_samples = (int*)malloc((size_t)nsamples * n * sizeof(int));
+    int* all_samples = (int*)safe_malloc((size_t)nsamples * (size_t)n * sizeof(int));
     if (!all_samples) return -1.0f;
 
     if (mrf_gibbs_sample(mrf, all_samples, n_burnin, nsamples) != 0) {
@@ -1477,7 +1477,7 @@ float mrf_infer_marginal(const MarkovRandomField* mrf, int node_id, int n_burnin
         return -1.0f;
     }
 
-    float* counts = (float*)calloc((size_t)ds, sizeof(float));
+    float* counts = (float*)safe_calloc((size_t)ds, sizeof(float));
     if (!counts) { safe_free((void**)&(all_samples)); return -1.0f; }
     for (int s = 0; s < nsamples; s++) {
         int val = all_samples[s * n + vi];
@@ -1500,8 +1500,8 @@ int mrf_loopy_bp(MarkovRandomField* mrf, int max_iter, float tol) {
     if (!mrf || max_iter < 1) return -1;
     int n = mrf->n_nodes;
 
-    float* messages = (float*)calloc((size_t)mrf->edge_count * 4, sizeof(float));
-    float* new_messages = (float*)calloc((size_t)mrf->edge_count * 4, sizeof(float));
+    float* messages = (float*)safe_calloc((size_t)mrf->edge_count * 4, sizeof(float));
+    float* new_messages = (float*)safe_calloc((size_t)mrf->edge_count * 4, sizeof(float));
     if (!messages || !new_messages) {
         safe_free((void**)&(messages)); safe_free((void**)&(new_messages)); return -1;
     }

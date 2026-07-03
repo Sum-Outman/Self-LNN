@@ -112,11 +112,11 @@ int thread_set_name(const char* name) {
         if (pSetThreadDescription) {
             int wlen = MultiByteToWideChar(CP_UTF8, 0, name, -1, NULL, 0);
             if (wlen > 0) {
-                wchar_t* wname = (wchar_t*)malloc(wlen * sizeof(wchar_t));
+                wchar_t* wname = (wchar_t*)safe_malloc(wlen * sizeof(wchar_t));
                 if (wname) {
                     MultiByteToWideChar(CP_UTF8, 0, name, -1, wname, wlen);
                     pSetThreadDescription(GetCurrentThread(), wname);
-                    free(wname);
+                    safe_free((void**)&wname);
                 }
             }
         }
@@ -654,7 +654,8 @@ int platform_path_join(const char* base, const char* component,
         return -1;
     }
 
-    strcpy(out_buffer, base);
+    strncpy(out_buffer, base, base_len + 1);
+    out_buffer[base_len] = '\0';
 
     char sep = platform_path_separator();
     if (base_len > 0 && base[base_len - 1] != sep && base[base_len - 1] != '/' && base[base_len - 1] != '\\') {
@@ -662,7 +663,7 @@ int platform_path_join(const char* base, const char* component,
         out_buffer[base_len + 1] = '\0';
     }
 
-    strcat(out_buffer, component);
+    strncat(out_buffer, component, buffer_size - strlen(out_buffer) - 1);
     return 0;
 }
 
@@ -865,7 +866,12 @@ int platform_path_optimized(const char* path, char* out_buffer, size_t buffer_si
             out_buffer[6] = 'C';
             /* 跳过原始UNC的双斜杠 */
             if (strlen(tmp) > 2) {
-                strcpy(out_buffer + 7, tmp + 2);
+                size_t tmp_len = strlen(tmp + 2);
+                if (7 + tmp_len + 1 > buffer_size) {
+                    return -1;
+                }
+                strncpy(out_buffer + 7, tmp + 2, buffer_size - 7);
+                out_buffer[buffer_size - 1] = '\0';
             }
         } else {
             /* 普通路径：\\?\C:\... */
@@ -877,7 +883,8 @@ int platform_path_optimized(const char* path, char* out_buffer, size_t buffer_si
             out_buffer[1] = '\\';
             out_buffer[2] = '?';
             out_buffer[3] = '\\';
-            strcpy(out_buffer + 4, normalized);
+            strncpy(out_buffer + 4, normalized, buffer_size - 5);
+            out_buffer[buffer_size - 1] = '\0';
         }
     }
 #else

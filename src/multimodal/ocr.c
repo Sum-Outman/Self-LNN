@@ -3018,7 +3018,7 @@ int ocr_processor_set_language_model(OcrProcessor* processor,
         int frequency;
     } OcrNgram;
     
-    OcrNgram* ngram_table = (OcrNgram*)calloc(10000, sizeof(OcrNgram));
+    OcrNgram* ngram_table = (OcrNgram*)safe_calloc(10000, sizeof(OcrNgram));
     if (!ngram_table) return -1;
     
     const char* p = language_model_data;
@@ -3050,7 +3050,7 @@ int ocr_processor_set_language_model(OcrProcessor* processor,
     ngram_count = total_parsed;
     
     /* 存储到processor中供后处理使用 */
-    if (processor->lm_ngram_table) free(processor->lm_ngram_table);
+    if (processor->lm_ngram_table) safe_free((void**)&processor->lm_ngram_table);
     processor->lm_ngram_table = ngram_table;
     processor->lm_ngram_count = ngram_count;
     
@@ -3077,7 +3077,7 @@ int ocr_processor_set_dictionary(OcrProcessor* processor,
     /* 构建词典词条的摘要统计和样本存储
      * 存储策略：取前2000词条+长度分布统计用于后处理编辑距离纠错 */
     int store_count = (dict_size < 2000) ? dict_size : 2000;
-    char** dict_store = (char**)calloc((size_t)store_count, sizeof(char*));
+    char** dict_store = (char**)safe_calloc((size_t)store_count, sizeof(char*));
     if (!dict_store) return -1;
     
     int total_chars = 0, min_len = 256, max_len = 0, stored = 0;
@@ -3088,7 +3088,7 @@ int ocr_processor_set_dictionary(OcrProcessor* processor,
             if (len < min_len) min_len = len;
             if (len > max_len) max_len = len;
             /* 存储词条副本 */
-            dict_store[stored] = (char*)malloc((size_t)len + 1);
+            dict_store[stored] = (char*)safe_malloc((size_t)len + 1);
             if (dict_store[stored]) {
                 memcpy(dict_store[stored], dictionary[i], (size_t)len + 1);
                 stored++;
@@ -3098,8 +3098,8 @@ int ocr_processor_set_dictionary(OcrProcessor* processor,
     
     /* 存储到processor中供编辑距离纠错使用 */
     if (processor->dict_words) {
-        for (int i = 0; i < processor->dict_size; i++) free(processor->dict_words[i]);
-        free(processor->dict_words);
+        for (int i = 0; i < processor->dict_size; i++) safe_free((void**)&processor->dict_words[i]);
+        safe_free((void**)&processor->dict_words);
     }
     processor->dict_words = dict_store;
     processor->dict_size = stored;

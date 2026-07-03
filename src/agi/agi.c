@@ -651,7 +651,7 @@ AGISystem* agi_system_create(const AGIConfig* config)
     system->consecutive_low_reward = 0;
     system->total_cycles = 0;
     system->initialized = 0;
-    strcpy(system->self_model_description, "AGI高级认知系统 v1.0");
+    memcpy(system->self_model_description, "AGI高级认知系统 v1.0", strlen("AGI高级认知系统 v1.0") + 1);
 
     system->state_vector = (float*)safe_malloc((size_t)system->expand_state_vector * sizeof(float));
     if (!system->state_vector) {

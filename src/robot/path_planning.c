@@ -213,7 +213,7 @@ int plan_astar(const PlanConfig* config, PlanResult* result)
     if (map->cells[sy * map->width + sx] > 0) return -1;
 
     int total_cells = map->width * map->height;
-    AStarNode* nodes = (AStarNode*)calloc(total_cells, sizeof(AStarNode));
+    AStarNode* nodes = (AStarNode*)safe_calloc(total_cells, sizeof(AStarNode));
     if (!nodes) return -1;
 
     for (int i = 0; i < total_cells; i++)
@@ -234,12 +234,12 @@ int plan_astar(const PlanConfig* config, PlanResult* result)
         config->goal.yaw, config->min_turning_radius);
     nodes[start_idx].in_open = 1;
 
-    int* open_list = (int*)malloc(total_cells * sizeof(int));
-    if (!open_list) { free(nodes); return -1; }
+    int* open_list = (int*)safe_malloc(total_cells * sizeof(int));
+    if (!open_list) { safe_free((void**)&nodes); return -1; }
     
     /* 二叉堆优先队列索引数组：heap_idx[node_idx] = 在heap中的位置(-1表示不在堆中) */
-    int* heap_idx = (int*)malloc(total_cells * sizeof(int));
-    if (!heap_idx) { free(open_list); free(nodes); return -1; }
+    int* heap_idx = (int*)safe_malloc(total_cells * sizeof(int));
+    if (!heap_idx) { safe_free((void**)&open_list); safe_free((void**)&nodes); return -1; }
     for (int i = 0; i < total_cells; i++) heap_idx[i] = -1;
     
     int heap_size = 0;
@@ -372,9 +372,9 @@ int plan_astar(const PlanConfig* config, PlanResult* result)
             plan_smooth_path(result->waypoints, result->waypoint_count, 0.3f);
     }
 
-    free(open_list);
-    free(heap_idx);
-    free(nodes);
+    safe_free((void**)&open_list);
+    safe_free((void**)&heap_idx);
+    safe_free((void**)&nodes);
     return result->success ? 0 : -1;
 }
 
@@ -541,7 +541,7 @@ int plan_rrt(const PlanConfig* config, PlanResult* result)
 
     memset(result, 0, sizeof(PlanResult));
 
-    RRTNode* nodes = (RRTNode*)malloc(config->rrt_config.max_nodes * sizeof(RRTNode));
+    RRTNode* nodes = (RRTNode*)safe_malloc(config->rrt_config.max_nodes * sizeof(RRTNode));
     if (!nodes) return -1;
 
     nodes[0].x = config->start.x;
@@ -660,7 +660,7 @@ int plan_rrt(const PlanConfig* config, PlanResult* result)
             path_idx[pc++] = cur;
             cur = nodes[cur].parent_idx;
         }
-        if (pc <= 1) { free(nodes); return -1; }
+        if (pc <= 1) { safe_free((void**)&nodes); return -1; }
         for (int i = 0; i < pc; i++)
         {
             int idx = path_idx[pc - 1 - i];
@@ -674,7 +674,7 @@ int plan_rrt(const PlanConfig* config, PlanResult* result)
         result->waypoint_count = pc;
         result->total_length = plan_path_length(result->waypoints, result->waypoint_count);
         result->success = 1;
-        free(nodes);
+        safe_free((void**)&nodes);
         return 0;
     }
 
@@ -703,7 +703,7 @@ int plan_rrt(const PlanConfig* config, PlanResult* result)
     if (config->smooth_path && result->waypoint_count > 2)
         plan_smooth_path(result->waypoints, result->waypoint_count, 0.3f);
 
-    free(nodes);
+    safe_free((void**)&nodes);
     return 0;
 }
 
@@ -758,9 +758,9 @@ int plan_hybrid_astar_dwa(const PlanConfig* config, const float* current_state, 
 int plan_smooth_path(PlanWaypoint* waypoints, int count, float smooth_factor)
 {
     if (!waypoints || count < 3 || smooth_factor <= 0.0f) return -1;
-    float* ox = (float*)malloc(count * sizeof(float));
-    float* oy = (float*)malloc(count * sizeof(float));
-    if (!ox || !oy) { free(ox); free(oy); return -1; }
+    float* ox = (float*)safe_malloc(count * sizeof(float));
+    float* oy = (float*)safe_malloc(count * sizeof(float));
+    if (!ox || !oy) { safe_free((void**)&ox); safe_free((void**)&oy); return -1; }
     for (int i = 0; i < count; i++)
     {
         ox[i] = waypoints[i].x;
@@ -783,8 +783,8 @@ int plan_smooth_path(PlanWaypoint* waypoints, int count, float smooth_factor)
         }
         if (max_change < tol) break;
     }
-    free(ox);
-    free(oy);
+    safe_free((void**)&ox);
+    safe_free((void**)&oy);
     return 0;
 }
 
@@ -792,12 +792,12 @@ int plan_simplify_path(PlanWaypoint* waypoints, int* count, float tolerance)
 {
     if (!waypoints || !count || *count < 3 || tolerance <= 0.0f) return -1;
     int in_count = *count;
-    char* keep = (char*)calloc(in_count, 1);
+    char* keep = (char*)safe_calloc(in_count, 1);
     if (!keep) return -1;
     keep[0] = 1;
     keep[in_count - 1] = 1;
-    int* stack = (int*)malloc(in_count * sizeof(int));
-    if (!stack) { free(keep); return -1; }
+    int* stack = (int*)safe_malloc(in_count * sizeof(int));
+    if (!stack) { safe_free((void**)&keep); return -1; }
     int stack_count = 0;
     stack[stack_count++] = 0;
     stack[stack_count++] = in_count - 1;
@@ -840,8 +840,8 @@ int plan_simplify_path(PlanWaypoint* waypoints, int* count, float tolerance)
         }
     }
     *count = out_count;
-    free(keep);
-    free(stack);
+    safe_free((void**)&keep);
+    safe_free((void**)&stack);
     return 0;
 }
 

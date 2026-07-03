@@ -316,7 +316,9 @@ static GpuKernel* cpu_pool_kernel_create(GpuContext* context, const char* kernel
     if (kernel_source) {
         kernel->kernel_source = (char*)safe_malloc(strlen(kernel_source) + 1);
         if (kernel->kernel_source) {
-            strcpy(kernel->kernel_source, kernel_source);
+            size_t _ks_len = strlen(kernel_source);
+            strncpy(kernel->kernel_source, kernel_source, _ks_len);
+            kernel->kernel_source[_ks_len] = '\0';
         }
     } else {
         kernel->kernel_source = NULL;
@@ -325,7 +327,9 @@ static GpuKernel* cpu_pool_kernel_create(GpuContext* context, const char* kernel
     if (kernel_name) {
         kernel->kernel_name = (char*)safe_malloc(strlen(kernel_name) + 1);
         if (kernel->kernel_name) {
-            strcpy(kernel->kernel_name, kernel_name);
+            size_t _kn_len = strlen(kernel_name);
+            strncpy(kernel->kernel_name, kernel_name, _kn_len);
+            kernel->kernel_name[_kn_len] = '\0';
         }
     } else {
         kernel->kernel_name = NULL;

@@ -233,7 +233,7 @@ SwarmConfig swarm_config_default(void)
 
 SwarmController* swarm_controller_create(const SwarmConfig* config)
 {
-    SwarmController* ctrl = (SwarmController*)malloc(sizeof(SwarmController));
+    SwarmController* ctrl = (SwarmController*)safe_malloc(sizeof(SwarmController));
     if (!ctrl) return NULL;
     memset(ctrl, 0, sizeof(SwarmController));
 
@@ -267,7 +267,7 @@ void swarm_controller_destroy(SwarmController* controller)
 {
     if (!controller) return;
     if (controller->mutex) { mutex_destroy(controller->mutex); controller->mutex = NULL; }
-    if (controller->consensus_state) free(controller->consensus_state);
+    if (controller->consensus_state) safe_free((void**)&controller->consensus_state);
 
     /* 关闭UDP网络 */
     if (controller->udp_socket != SWARM_INVALID_SOCKET) {
@@ -276,7 +276,7 @@ void swarm_controller_destroy(SwarmController* controller)
     }
     controller->udp_initialized = 0;
 
-    free(controller);
+    safe_free((void**)&controller);
 }
 
 int swarm_add_robot(SwarmController* controller, int robot_id, const RobotConfig* config)
@@ -785,14 +785,14 @@ int swarm_update_consensus(SwarmController* controller, float* shared_state, int
 
     if (!controller->consensus_state || controller->consensus_state_dim != state_dim)
     {
-        if (controller->consensus_state) free(controller->consensus_state);
-        controller->consensus_state = (float*)malloc(state_dim * sizeof(float));
+        if (controller->consensus_state) safe_free((void**)&controller->consensus_state);
+        controller->consensus_state = (float*)safe_malloc(state_dim * sizeof(float));
         controller->consensus_state_dim = state_dim;
         if (!controller->consensus_state) return -1;
         memcpy(controller->consensus_state, shared_state, state_dim * sizeof(float));
     }
 
-    float* consensus_avg = (float*)calloc(state_dim, sizeof(float));
+    float* consensus_avg = (float*)safe_calloc(state_dim, sizeof(float));
     if (!consensus_avg) return -1;
     int total_neighbors = 0;
 
@@ -815,7 +815,7 @@ int swarm_update_consensus(SwarmController* controller, float* shared_state, int
     if (total_neighbors > 0)
     {
         float inv = 1.0f / (total_neighbors + 1);
-        float* temp = (float*)calloc(state_dim, sizeof(float));
+        float* temp = (float*)safe_calloc(state_dim, sizeof(float));
         if (temp)
         {
             for (int d = 0; d < state_dim; d++)
@@ -823,7 +823,7 @@ int swarm_update_consensus(SwarmController* controller, float* shared_state, int
                 temp[d] = controller->consensus_state[d] + dt * cp->position_gain * (consensus_avg[d] * inv - controller->consensus_state[d]);
             }
             memcpy(controller->consensus_state, temp, state_dim * sizeof(float));
-            free(temp);
+            safe_free((void**)&temp);
         }
     }
 
@@ -835,13 +835,13 @@ int swarm_update_consensus(SwarmController* controller, float* shared_state, int
     }
     if (max_diff < cp->convergence_threshold)
     {
-        free(consensus_avg);
+        safe_free((void**)&consensus_avg);
         swarm_unlock(controller);
         return 1;
     }
 
     memcpy(shared_state, controller->consensus_state, state_dim * sizeof(float));
-    free(consensus_avg);
+    safe_free((void**)&consensus_avg);
     swarm_unlock(controller);
     return 0;
 }
@@ -1063,7 +1063,7 @@ int swarm_allocate_tasks(SwarmController* controller)
     }
     if (pending <= 0) { swarm_unlock(controller); return 0; }
 
-    float* bids = (float*)malloc(controller->task_count * state->robot_count * sizeof(float));
+    float* bids = (float*)safe_malloc(controller->task_count * state->robot_count * sizeof(float));
     if (!bids) { swarm_unlock(controller); return -1; }
 
     for (int t = 0; t < controller->task_count; t++)
@@ -1083,8 +1083,8 @@ int swarm_allocate_tasks(SwarmController* controller)
         }
     }
 
-    int* assigned = (int*)calloc(state->robot_count, sizeof(int));
-    if (!assigned) { free(bids); swarm_unlock(controller); return -1; }
+    int* assigned = (int*)safe_calloc(state->robot_count, sizeof(int));
+    if (!assigned) { safe_free((void**)&bids); swarm_unlock(controller); return -1; }
 
     if (controller->config.task_config.method == TASK_ALLOCATION_AUCTION)
     {
@@ -1129,8 +1129,8 @@ int swarm_allocate_tasks(SwarmController* controller)
         }
     }
 
-    free(bids);
-    free(assigned);
+    safe_free((void**)&bids);
+    safe_free((void**)&assigned);
     controller->allocated_tasks = 0;
     for (int i = 0; i < controller->task_count; i++)
         if (controller->tasks[i].is_assigned) controller->allocated_tasks++;

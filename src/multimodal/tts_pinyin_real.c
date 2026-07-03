@@ -8516,7 +8516,7 @@ static int sf_synthesize_syllable(int initial, int final_part, int tone,
 
     /* 2. F0基频曲线生成 */
     int num_frames = total_samples;              /* 逐样本F0 */
-    float* f0_curve = (float*)malloc((size_t)num_frames * sizeof(float));
+    float* f0_curve = (float*)safe_malloc((size_t)num_frames * sizeof(float));
     if (!f0_curve) return -1;
 
     f0_curve_generate(f0_curve, num_frames, params->f0_mean,
@@ -8550,9 +8550,9 @@ static int sf_synthesize_syllable(int initial, int final_part, int tone,
     }
 
     /* 6. LF声门激励源生成 */
-    float* excitation = (float*)malloc((size_t)total_samples * sizeof(float));
+    float* excitation = (float*)safe_malloc((size_t)total_samples * sizeof(float));
     if (!excitation) {
-        free(f0_curve);
+        safe_free((void**)&f0_curve);
         return -1;
     }
 
@@ -8565,10 +8565,10 @@ static int sf_synthesize_syllable(int initial, int final_part, int tone,
     }
 
     /* 7. LPC全极点滤波（声道滤波） */
-    float* filtered = (float*)malloc((size_t)total_samples * sizeof(float));
+    float* filtered = (float*)safe_malloc((size_t)total_samples * sizeof(float));
     if (!filtered) {
-        free(f0_curve);
-        free(excitation);
+        safe_free((void**)&f0_curve);
+        safe_free((void**)&excitation);
         return -1;
     }
     lpc_allpole_filter(excitation, filtered, total_samples,
@@ -8622,9 +8622,9 @@ static int sf_synthesize_syllable(int initial, int final_part, int tone,
         out_samples[i] = sample;
     }
 
-    free(f0_curve);
-    free(excitation);
-    free(filtered);
+    safe_free((void**)&f0_curve);
+    safe_free((void**)&excitation);
+    safe_free((void**)&filtered);
 
     return total_samples;
 }
@@ -8658,7 +8658,7 @@ static int sf_synthesize_sequence(const int* initials, const int* finals,
     if (!initials || !finals || !tones || !params || !out_samples) return -1;
     if (num_syllables <= 0 || num_syllables > SF_MAX_SYLLABLES) return -1;
 
-    float* syllable_buf = (float*)malloc((size_t)max_samples * sizeof(float));
+    float* syllable_buf = (float*)safe_malloc((size_t)max_samples * sizeof(float));
     if (!syllable_buf) return -1;
 
     int total_written = 0;
@@ -8725,7 +8725,7 @@ static int sf_synthesize_sequence(const int* initials, const int* finals,
         }
     }
 
-    free(syllable_buf);
+    safe_free((void**)&syllable_buf);
     return total_written;
 }
 

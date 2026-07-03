@@ -252,27 +252,28 @@ int matrix_inverse(const float* A, float* invA, size_t n) {
     if (!A || !invA || n == 0) return -1;
 
     /* 复制A到工作矩阵，LU分解会修改工作副本 */
-    float* work = (float*)malloc(n * n * sizeof(float));
-    int* pivot = (int*)malloc(n * sizeof(int));
+    /* P2修复: 使用safe_malloc替代原生malloc，添加NULL检查 */
+    float* work = (float*)safe_malloc(n * n * sizeof(float));
+    int* pivot = (int*)safe_malloc(n * sizeof(int));
     if (!work || !pivot) {
-        free(work);
-        free(pivot);
+        safe_free((void**)&work);
+        safe_free((void**)&pivot);
         return -1;
     }
     memcpy(work, A, n * n * sizeof(float));
 
     /* LU分解（带部分主元选取） */
     if (matrix_lu_decompose(work, pivot, n) != 0) {
-        free(work);
-        free(pivot);
+        safe_free((void**)&work);
+        safe_free((void**)&pivot);
         return -1;
     }
 
     /* 为每列求解 */
-    float* col = (float*)malloc(n * sizeof(float));
+    float* col = (float*)safe_malloc(n * sizeof(float));
     if (!col) {
-        free(work);
-        free(pivot);
+        safe_free((void**)&work);
+        safe_free((void**)&pivot);
         return -1;
     }
 
@@ -287,9 +288,9 @@ int matrix_inverse(const float* A, float* invA, size_t n) {
         matrix_lu_solve(work, col, &invA[j * n], n);
     }
 
-    free(col);
-    free(pivot);
-    free(work);
+    safe_free((void**)&col);
+    safe_free((void**)&pivot);
+    safe_free((void**)&work);
     return 0;
 }
 

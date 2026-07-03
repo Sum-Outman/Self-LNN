@@ -116,8 +116,9 @@ static int lm_insert_ngram(LmHashMap* map, const char* ngram, int* existing) {
     map->entries[idx].count = 1;
     map->entries[idx].next = map->heads[h];
     /* P0-003修复: 手动分配并复制N-gram字符串，避免strdup跨平台问题 */
+    /* P1修复: 使用safe_malloc替代原生malloc，统一内存管理 */
     size_t ngram_len = strlen(ngram) + 1;
-    map->entries[idx].ngram_str = (char*)malloc(ngram_len);
+    map->entries[idx].ngram_str = (char*)safe_malloc(ngram_len);
     if (map->entries[idx].ngram_str) {
         memcpy(map->entries[idx].ngram_str, ngram, ngram_len);
     }
@@ -192,12 +193,22 @@ int speech_language_model_train(const char* corpus_path, int n, const char* mode
         /* 插入bigram/trigram等高阶ngram */
         for (int order = 1; order < n; order++) {
             for (int i = 0; i + order < wc; i++) {
-                char ngram[256] = "";
+                /* P1修复: 动态计算总长度并分配，避免固定缓冲区溢出 */
+                size_t total_len = 0;
+                for (int j = 0; j <= order; j++) {
+                    total_len += strlen(words[i + j]);
+                    if (j > 0) total_len += 1; /* 空格 */
+                }
+                total_len += 1; /* 字符串结束符 */
+                char* ngram = (char*)safe_malloc(total_len);
+                if (!ngram) continue; /* 分配失败跳过 */
+                ngram[0] = '\0';
                 for (int j = 0; j <= order; j++) {
                     if (j > 0) strcat(ngram, " ");
                     strcat(ngram, words[i + j]);
                 }
                 lm_insert_ngram(lm->ngram_maps[order], ngram, NULL);
+                safe_free((void**)&ngram);
             }
         }
     }
@@ -352,8 +363,12 @@ float speech_language_model_score(void* model, const int* tokens, int num_tokens
 
         /* 从高阶到低阶尝试匹配 */
         for (int order = n - 1; order >= 0 && order <= pos; order--) {
-            /* 构建当前ngram查询字符串 */
-            char ngram[512] = "";
+            /* P1修复: 动态计算缓冲区大小，避免固定512字节溢出风险 */
+            /* order+1个token，每个token最多12字符(含符号)，加上空格和结束符 */
+            size_t ngram_max_len = (size_t)(order + 1) * 12 + (size_t)order + 1;
+            char* ngram = (char*)safe_malloc(ngram_max_len);
+            if (!ngram) continue; /* 分配失败跳过当前阶 */
+            ngram[0] = '\0';
             for (int j = pos - order; j <= pos; j++) {
                 if (j < 0) break;
                 char token_str[32];
@@ -381,79 +396,90 @@ float speech_language_model_score(void* model, const int* tokens, int num_tokens
                 /* 获取上下文计数（order-1的ngram） */
                 int context_count = lm->total_words;
                 int distinct_successors = 0;
-                char ctx[512] = "";
-                if (order > 0 && pos > 0) {
-                    for (int j = pos - order; j < pos; j++) {
-                        if (j < 0) break;
-                        char token_str[32];
-                        snprintf(token_str, sizeof(token_str), "%d", tokens[j]);
-                        if (j > pos - order) strcat(ctx, " ");
-                        strcat(ctx, token_str);
-                    }
-                    unsigned int ctx_h = lm_hash_str(ctx);
-                    LmHashMap* ctx_map = lm->ngram_maps[order - 1];
-                    for (int idx = ctx_map->heads[ctx_h]; idx != -1; idx = ctx_map->entries[idx].next) {
-                        if (ctx_map->entries[idx].key == ctx_h) {
-                            if (ctx_map->entries[idx].ngram_str && strcmp(ctx_map->entries[idx].ngram_str, ctx) == 0) {
-                                context_count = ctx_map->entries[idx].count;
-                                break;
-                            }
+                /* P1修复: 动态分配ctx缓冲区，避免固定512字节溢出风险 */
+                size_t ctx_max_len = (size_t)order * 12 + (size_t)(order > 0 ? order - 1 : 0) + 1;
+                char* ctx = (char*)safe_malloc(ctx_max_len);
+                if (ctx) {
+                    ctx[0] = '\0';
+                    if (order > 0 && pos > 0) {
+                        for (int j = pos - order; j < pos; j++) {
+                            if (j < 0) break;
+                            char token_str[32];
+                            snprintf(token_str, sizeof(token_str), "%d", tokens[j]);
+                            if (j > pos - order) strcat(ctx, " ");
+                            strcat(ctx, token_str);
                         }
-                    }
-                }
-
-                /* P2-056修复: 真实Kneser-Ney平滑
-                 * P_KN(w|h) = max(c(hw)-d,0)/c(h) + lambda(h) * P_KN_continuation(w|h')
-                 * 其中 lambda(h) = d * N₁₊(h•) / c(h)
-                 * N₁₊(h•) = 上下文h后出现的不同词的种类数 */
-                float discounted_prob = ((float)count - d) / (float)(context_count > 0 ? context_count : 1);
-                if (discounted_prob < 0.0f) discounted_prob = 0.0f;
-
-                /* 计算回退权重lambda: 只有当前阶还有未匹配的后继词时才有回退 */
-                if (order > 0 && context_count > 0) {
-                    /* 统计上下文h后有多少不同的后继词种类 */
-                    for (int succ_idx = 0; succ_idx < map->entry_count && succ_idx < 1000; succ_idx++) {
-                        if (map->entries[succ_idx].ngram_str && map->entries[succ_idx].count > 0) {
-                            /* 检查该ngram是否以此上下文开头 */
-                            const char* s = map->entries[succ_idx].ngram_str;
-                            const char* last_sp = strrchr(s, ' ');
-                            if (last_sp) {
-                                size_t prefix_len = (size_t)(last_sp - s);
-                                if (ctx[0] && strncmp(s, ctx, prefix_len) == 0 && (int)prefix_len == (int)strlen(ctx)) {
-                                    distinct_successors++;
+                        unsigned int ctx_h = lm_hash_str(ctx);
+                        LmHashMap* ctx_map = lm->ngram_maps[order - 1];
+                        for (int idx = ctx_map->heads[ctx_h]; idx != -1; idx = ctx_map->entries[idx].next) {
+                            if (ctx_map->entries[idx].key == ctx_h) {
+                                if (ctx_map->entries[idx].ngram_str && strcmp(ctx_map->entries[idx].ngram_str, ctx) == 0) {
+                                    context_count = ctx_map->entries[idx].count;
+                                    break;
                                 }
                             }
                         }
                     }
-                    if (distinct_successors == 0) distinct_successors = 1;
-                }
 
-                /* lambda = d * N₁₊(h•) / c(h)  — 回退到低阶的概率质量 */
-                float lambda = (context_count > 0) ? (d * (float)distinct_successors / (float)context_count) : 0.0f;
-                if (lambda > 1.0f) lambda = 1.0f;
+                    /* P2-056修复: 真实Kneser-Ney平滑
+                     * P_KN(w|h) = max(c(hw)-d,0)/c(h) + lambda(h) * P_KN_continuation(w|h')
+                     * 其中 lambda(h) = d * N₁₊(h•) / c(h)
+                     * N₁₊(h•) = 上下文h后出现的不同词的种类数 */
+                    float discounted_prob = ((float)count - d) / (float)(context_count > 0 ? context_count : 1);
+                    if (discounted_prob < 0.0f) discounted_prob = 0.0f;
 
-                float prob = discounted_prob;
-                if (discounted_prob < 1e-10f) prob = 1e-10f;
-                best_prob = logf(prob);
-
-                /* 如果当前阶是unigram(order==0)，使用continuation probability */
-                if (order == 0) {
-                    int w = tokens[pos];
-                    float cont_prob = 1e-10f;
-                    if (w >= 0 && w < KN_MAX_UNIQUE_TOKENS && total_distinct_continuations > 0) {
-                        cont_prob = (float)(cont_count[w] > 0 ? cont_count[w] : 1) / (float)total_distinct_continuations;
-                    } else {
-                        cont_prob = 1.0f / (float)(lm->ngram_maps[0]->entry_count > 0 ? lm->ngram_maps[0]->entry_count : 1);
+                    /* 计算回退权重lambda: 只有当前阶还有未匹配的后继词时才有回退 */
+                    if (order > 0 && context_count > 0) {
+                        /* 统计上下文h后有多少不同的后继词种类 */
+                        for (int succ_idx = 0; succ_idx < map->entry_count && succ_idx < 1000; succ_idx++) {
+                            if (map->entries[succ_idx].ngram_str && map->entries[succ_idx].count > 0) {
+                                /* 检查该ngram是否以此上下文开头 */
+                                const char* s = map->entries[succ_idx].ngram_str;
+                                const char* last_sp = strrchr(s, ' ');
+                                if (last_sp) {
+                                    size_t prefix_len = (size_t)(last_sp - s);
+                                    if (ctx[0] && strncmp(s, ctx, prefix_len) == 0 && (int)prefix_len == (int)strlen(ctx)) {
+                                        distinct_successors++;
+                                    }
+                                }
+                            }
+                        }
+                        if (distinct_successors == 0) distinct_successors = 1;
                     }
-                    /* 混合continuation probability与折扣概率 */
-                    float mixed = cont_prob * 0.5f + prob * 0.5f;
-                    if (mixed < 1e-10f) mixed = 1e-10f;
-                    best_prob = logf(mixed);
+
+                    /* lambda = d * N₁₊(h•) / c(h)  — 回退到低阶的概率质量 */
+                    float lambda = (context_count > 0) ? (d * (float)distinct_successors / (float)context_count) : 0.0f;
+                    if (lambda > 1.0f) lambda = 1.0f;
+
+                    float prob = discounted_prob;
+                    if (discounted_prob < 1e-10f) prob = 1e-10f;
+                    best_prob = logf(prob);
+
+                    /* 如果当前阶是unigram(order==0)，使用continuation probability */
+                    if (order == 0) {
+                        int w = tokens[pos];
+                        float cont_prob = 1e-10f;
+                        if (w >= 0 && w < KN_MAX_UNIQUE_TOKENS && total_distinct_continuations > 0) {
+                            cont_prob = (float)(cont_count[w] > 0 ? cont_count[w] : 1) / (float)total_distinct_continuations;
+                        } else {
+                            cont_prob = 1.0f / (float)(lm->ngram_maps[0]->entry_count > 0 ? lm->ngram_maps[0]->entry_count : 1);
+                        }
+                        /* 混合continuation probability与折扣概率 */
+                        float mixed = cont_prob * 0.5f + prob * 0.5f;
+                        if (mixed < 1e-10f) mixed = 1e-10f;
+                        best_prob = logf(mixed);
+                    }
+
+                    safe_free((void**)&ctx);
                 }
 
+                /* P1修复: 释放动态分配的ngram缓冲区 */
+                safe_free((void**)&ngram);
                 found_higher = 1;
                 break;
             }
+            /* P1修复: 未匹配成功时释放ngram，下一轮order循环会重新分配 */
+            safe_free((void**)&ngram);
         }
 
         /* 全部未命中：使用continuation probability回退 */

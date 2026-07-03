@@ -317,7 +317,14 @@ int reasoning_load_history(ReasoningEngine* engine, const char* filepath) {
     long file_end = ftell(fp);
     fseek(fp, saved_pos, SEEK_SET);
     size_t remaining = (size_t)(file_end - saved_pos);
-    size_t expected_min = hist_size * 256 * 2 * sizeof(float);
+    /* P2修复: 防止整数溢出 - 检查 hist_size * 256 * 2 * sizeof(float) 是否溢出 */
+    size_t expected_min = 0;
+    if (hist_size > 0 && hist_size <= SIZE_MAX / (256 * 2 * sizeof(float))) {
+        expected_min = hist_size * 256 * 2 * sizeof(float);
+    } else if (hist_size > 0) {
+        /* 溢出则使用最大值，仅允许读取维度字段 */
+        expected_min = SIZE_MAX;
+    }
     /* 如果文件足够大包含维度字段，读取它们 */
     if (remaining > expected_min) {
         fread(&in_dim, sizeof(size_t), 1, fp);
@@ -350,7 +357,7 @@ int reasoning_set_autosave(ReasoningEngine* engine, const char* filepath) {
     safe_free((void**)&engine->history_file_path);
     if (filepath) {
         engine->history_file_path = (char*)safe_malloc(strlen(filepath) + 1);
-        if (engine->history_file_path) strcpy(engine->history_file_path, filepath);
+        if (engine->history_file_path) memcpy(engine->history_file_path, filepath, strlen(filepath) + 1);
     }
     return 0;
 }
@@ -1798,7 +1805,7 @@ static int inductive_reasoning(const float* premises, size_t num_premises,
         if (val < min_val) min_val = val;
         if (val > max_val) max_val = val;
         
-        if (val != 0.0f) {
+        if (fabsf(val) >= 1e-6f) {
             geometric_mean *= fabsf(val);
         } else {
             zero_count++;

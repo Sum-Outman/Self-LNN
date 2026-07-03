@@ -202,7 +202,7 @@ int episodic_memory_store_event(EpisodicMemory* memory, const char* event_id,
             memory->event_index[memory->event_count].event_id = 
                 (char*)safe_malloc(strlen(event_id) + 1);
             if (memory->event_index[memory->event_count].event_id) {
-                strcpy(memory->event_index[memory->event_count].event_id, event_id);
+                memcpy(memory->event_index[memory->event_count].event_id, event_id, strlen(event_id) + 1);
                 memory->event_index[memory->event_count].timestamp = actual_timestamp;
                 memory->event_index[memory->event_count].strength = strength;
                 memory->event_index[memory->event_count].has_associations = 0;
@@ -299,8 +299,8 @@ int episodic_memory_associate_events(EpisodicMemory* memory, const char* event_i
                 (char*)safe_malloc(strlen(event_id2) + 1);
             if (memory->assoc_index[memory->assoc_count].event_id1 &&
                 memory->assoc_index[memory->assoc_count].event_id2) {
-                strcpy(memory->assoc_index[memory->assoc_count].event_id1, event_id1);
-                strcpy(memory->assoc_index[memory->assoc_count].event_id2, event_id2);
+                memcpy(memory->assoc_index[memory->assoc_count].event_id1, event_id1, strlen(event_id1) + 1);
+                memcpy(memory->assoc_index[memory->assoc_count].event_id2, event_id2, strlen(event_id2) + 1);
                 memory->assoc_index[memory->assoc_count].association_strength = association_strength;
                 memory->assoc_count++;
             } else {
@@ -397,7 +397,7 @@ int episodic_memory_retrieve_related(EpisodicMemory* memory, const char* event_i
         // 分配并复制结果ID
         results[i] = (char*)safe_malloc(strlen(matches[i].related_id) + 1);
         if (results[i]) {
-            strcpy(results[i], matches[i].related_id);
+            memcpy(results[i], matches[i].related_id, strlen(matches[i].related_id) + 1);
         }
         strengths[i] = matches[i].assoc_strength;
     }
@@ -459,7 +459,7 @@ int episodic_memory_retrieve_by_time(EpisodicMemory* memory, float start_time,
     for (size_t i = 0; i < return_count; i++) {
         results[i] = (char*)safe_malloc(strlen(matches[i].event_id) + 1);
         if (results[i]) {
-            strcpy(results[i], matches[i].event_id);
+            memcpy(results[i], matches[i].event_id, strlen(matches[i].event_id) + 1);
         }
         timestamps[i] = matches[i].timestamp;
     }

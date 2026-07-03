@@ -2622,8 +2622,10 @@ static char* compile_cuda_to_ptx(const char* cuda_source, size_t* ptx_size) {
     snprintf(temp_ptx_path, sizeof(temp_ptx_path), 
              "%s\\selflnn_temp_%u.ptx", temp_dir, temp_counter);
 #else
-    strcpy(temp_cu_path, "/tmp/selflnn_temp.cu");
-    strcpy(temp_ptx_path, "/tmp/selflnn_temp.ptx");
+    strncpy(temp_cu_path, "/tmp/selflnn_temp.cu", sizeof(temp_cu_path)-1);
+    temp_cu_path[sizeof(temp_cu_path)-1] = '\0';
+    strncpy(temp_ptx_path, "/tmp/selflnn_temp.ptx", sizeof(temp_ptx_path)-1);
+    temp_ptx_path[sizeof(temp_ptx_path)-1] = '\0';
 #endif
     
     // 写入CUDA源代码到临时文件

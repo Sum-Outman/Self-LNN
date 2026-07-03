@@ -3406,7 +3406,7 @@ int knowledge_graph_save(KnowledgeGraph* graph, const char* filename) {
         return -1;
     }
 
-    unsigned char* file_buffer = (unsigned char*)malloc((size_t)file_size);
+    unsigned char* file_buffer = (unsigned char*)safe_malloc((size_t)file_size);
     if (!file_buffer) {
         fclose(file);
         remove(temp_filename);
@@ -3417,7 +3417,7 @@ int knowledge_graph_save(KnowledgeGraph* graph, const char* filename) {
 
     fseek(file, 0, SEEK_SET);
     if (fread(file_buffer, 1, (size_t)file_size, file) != (size_t)file_size) {
-        free(file_buffer);
+        safe_free((void**)&file_buffer);
         fclose(file);
         remove(temp_filename);
         selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
@@ -3427,7 +3427,7 @@ int knowledge_graph_save(KnowledgeGraph* graph, const char* filename) {
     fclose(file);
 
     uint32_t checksum = crc32_compute(file_buffer, (size_t)file_size);
-    free(file_buffer);
+    safe_free((void**)&file_buffer);
 
     // 追加CRC32校验和到临时文件末尾
     file = fopen(temp_filename, "ab");
@@ -3512,7 +3512,7 @@ KnowledgeGraph* knowledge_graph_load(const char* filename) {
         return NULL;
     }
 
-    unsigned char* verify_buffer = (unsigned char*)malloc((size_t)data_size);
+    unsigned char* verify_buffer = (unsigned char*)safe_malloc((size_t)data_size);
     if (!verify_buffer) {
         fclose(file);
         selflnn_set_last_error(SELFLNN_ERROR_MEMORY_ALLOCATION, __func__, __FILE__, __LINE__,
@@ -3522,7 +3522,7 @@ KnowledgeGraph* knowledge_graph_load(const char* filename) {
 
     fseek(file, 0, SEEK_SET);
     if (fread(verify_buffer, 1, (size_t)data_size, file) != (size_t)data_size) {
-        free(verify_buffer);
+        safe_free((void**)&verify_buffer);
         fclose(file);
         selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
                               "加载知识图谱：读取文件数据计算CRC32失败");
@@ -3530,7 +3530,7 @@ KnowledgeGraph* knowledge_graph_load(const char* filename) {
     }
 
     uint32_t computed_checksum = crc32_compute(verify_buffer, (size_t)data_size);
-    free(verify_buffer);
+    safe_free((void**)&verify_buffer);
 
     if (computed_checksum != stored_checksum) {
         fclose(file);

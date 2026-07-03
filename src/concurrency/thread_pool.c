@@ -17,6 +17,7 @@
 #include "selflnn/concurrency/lock_free.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/memory_utils.h"
+#include "selflnn/utils/logging.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -520,6 +521,14 @@ static void* worker_thread_func(void* arg)
                 // 线程被标记为停止，退出循环
                 break;
             }
+        }
+        /* P2修复: 线程索引未分配时短暂休眠，避免busy-loop空转 */
+        if (thread_index < 0) {
+#ifdef _WIN32
+            Sleep(1);
+#else
+            usleep(1000);
+#endif
         }
         
         ThreadPoolTask task = {0};

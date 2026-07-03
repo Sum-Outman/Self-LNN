@@ -90,6 +90,18 @@ static int co_linux_is_xwayland(void) {
 
 /* 纯Wayland环境下检查原生工具是否可用 */
 static int co_linux_wayland_has_tool(const char* tool_name) {
+    /* B-L02: tool_name使用白名单字符集验证，防止命令注入 */
+    int safe_name = 1;
+    for (size_t i = 0; tool_name[i] && safe_name; i++) {
+        unsigned char c = (unsigned char)tool_name[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '-' || c == '_')) {
+            safe_name = 0;
+            break;
+        }
+    }
+    if (!safe_name) return 0;
+
     char cmd[256];
     snprintf(cmd, sizeof(cmd), "command -v %s >/dev/null 2>&1", tool_name);
     int ret = system(cmd);
@@ -1035,7 +1047,7 @@ static int co_os_screenshot_real(COSystem* system, const COAction* action) {
 
     size_t row_size = ((size_t)(w * 3 + 3) / 4) * 4;
     size_t data_size = row_size * (size_t)h;
-    unsigned char* pixels = (unsigned char*)malloc(data_size);
+    unsigned char* pixels = (unsigned char*)safe_malloc(data_size);
 
     if (pixels) {
         GetDIBits(hdcMem, hBitmap, 0, (UINT)h, pixels,
@@ -1043,12 +1055,9 @@ static int co_os_screenshot_real(COSystem* system, const COAction* action) {
 
         size_t target_w = CO_SCREEN_WIDTH;
         size_t target_h = CO_SCREEN_HEIGHT;
-        if (system->last_screen_cache) {
-            free(system->last_screen_cache);
-            system->last_screen_cache = NULL;
-        }
+        safe_free((void**)&system->last_screen_cache);
 
-        system->last_screen_cache = (float*)malloc(target_w * target_h * 3 * sizeof(float));
+        system->last_screen_cache = (float*)safe_malloc(target_w * target_h * 3 * sizeof(float));
         system->last_width = target_w;
         system->last_height = target_h;
 
@@ -1067,7 +1076,7 @@ static int co_os_screenshot_real(COSystem* system, const COAction* action) {
                 }
             }
         }
-        free(pixels);
+        safe_free((void**)&pixels);
     }
 
     DeleteObject(hBitmap);
@@ -1120,12 +1129,9 @@ static int co_os_screenshot_real(COSystem* system, const COAction* action) {
 
     size_t target_w = CO_SCREEN_WIDTH;
     size_t target_h = CO_SCREEN_HEIGHT;
-    if (system->last_screen_cache) {
-        free(system->last_screen_cache);
-        system->last_screen_cache = NULL;
-    }
+    safe_free((void**)&system->last_screen_cache);
 
-    system->last_screen_cache = (float*)malloc(target_w * target_h * 3 * sizeof(float));
+    system->last_screen_cache = (float*)safe_malloc(target_w * target_h * 3 * sizeof(float));
     system->last_width = target_w;
     system->last_height = target_h;
 
@@ -1157,12 +1163,9 @@ static int co_os_screenshot_real(COSystem* system, const COAction* action) {
 
     size_t target_w = CO_SCREEN_WIDTH;
     size_t target_h = CO_SCREEN_HEIGHT;
-    if (system->last_screen_cache) {
-        free(system->last_screen_cache);
-        system->last_screen_cache = NULL;
-    }
+    safe_free((void**)&system->last_screen_cache);
 
-    system->last_screen_cache = (float*)malloc(target_w * target_h * 3 * sizeof(float));
+    system->last_screen_cache = (float*)safe_malloc(target_w * target_h * 3 * sizeof(float));
     system->last_width = target_w;
     system->last_height = target_h;
 
@@ -1170,7 +1173,7 @@ static int co_os_screenshot_real(COSystem* system, const COAction* action) {
         /* 通过CGBitmapContext读取像素 */
         CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
         size_t row_stride = img_w * 4;
-        unsigned char* raw = (unsigned char*)malloc(img_h * row_stride);
+        unsigned char* raw = (unsigned char*)safe_malloc(img_h * row_stride);
         if (raw) {
             CGContextRef ctx = CGBitmapContextCreate(raw, img_w, img_h, 8, row_stride,
                                                       cs, kCGImageAlphaNoneSkipLast);
@@ -1189,7 +1192,7 @@ static int co_os_screenshot_real(COSystem* system, const COAction* action) {
                     }
                 }
             }
-            free(raw);
+            safe_free((void**)&raw);
         }
         CGColorSpaceRelease(cs);
     }
@@ -1426,7 +1429,7 @@ static int co_os_set_volume(int level) {
 }
 
 COSystem* co_system_create(COConfig config) {
-    COSystem* system = (COSystem*)calloc(1, sizeof(COSystem));
+    COSystem* system = (COSystem*)safe_calloc(1, sizeof(COSystem));
     if (!system) return NULL;
 
     /* ================================================================
@@ -1511,7 +1514,7 @@ COSystem* co_system_create(COConfig config) {
         log_warn("[电脑操作] 全局LNN未初始化，AI功能将不可用。请先调用selflnn_init()初始化系统。");
     }
 
-    system->last_screen_cache = (float*)calloc(CO_SCREEN_WIDTH * CO_SCREEN_HEIGHT * CO_SCREEN_CHANNELS, sizeof(float));
+    system->last_screen_cache = (float*)safe_calloc(CO_SCREEN_WIDTH * CO_SCREEN_HEIGHT * CO_SCREEN_CHANNELS, sizeof(float));
 
     COSafetyRule default_rule;
     default_rule.rule_id = 0;
@@ -1531,11 +1534,11 @@ void co_system_destroy(COSystem* system) {
     if (system->element_detector && system->element_detector_owns) lnn_free(system->element_detector);
     if (system->ui_classifier && system->ui_classifier_owns) lnn_free(system->ui_classifier);
     if (system->ocr_net && system->ocr_net_owns) lnn_free(system->ocr_net);
-    free(system->last_screen_cache);
-    free(system->demo_screen_buffer);
-    free(system->demo_action_buffer);
-    free(system->demo_label);
-    free(system);
+    safe_free((void**)&system->last_screen_cache);
+    safe_free((void**)&system->demo_screen_buffer);
+    safe_free((void**)&system->demo_action_buffer);
+    safe_free((void**)&system->demo_label);
+    safe_free((void**)&system);
 }
 
 int co_analyze_screen(COSystem* system, const float* screen_data, size_t width, size_t height, size_t channels) {
@@ -2953,8 +2956,8 @@ int co_record_demo_start(COSystem* system) {
     {
         size_t screen_bytes = (size_t)CO_MAX_DEMO_FRAMES * CO_SCREEN_WIDTH * CO_SCREEN_HEIGHT * CO_SCREEN_CHANNELS * sizeof(float);
         size_t action_bytes = (size_t)CO_MAX_DEMO_FRAMES * sizeof(COAction);
-        float* new_screen = (float*)realloc(system->demo_screen_buffer, screen_bytes);
-        COAction* new_action = (COAction*)realloc(system->demo_action_buffer, action_bytes);
+        float* new_screen = (float*)safe_realloc(system->demo_screen_buffer, screen_bytes);
+        COAction* new_action = (COAction*)safe_realloc(system->demo_action_buffer, action_bytes);
         if (!new_screen || !new_action) {
             if (new_screen) system->demo_screen_buffer = new_screen;
             if (new_action) system->demo_action_buffer = new_action;
@@ -3041,14 +3044,14 @@ int co_record_demo_load(COSystem* system, const char* filepath) {
 
     if (num_frames > CO_MAX_DEMO_FRAMES) num_frames = CO_MAX_DEMO_FRAMES;
 
-    free(system->demo_screen_buffer);
-    free(system->demo_action_buffer);
-    free(system->demo_label);
+    safe_free((void**)&system->demo_screen_buffer);
+    safe_free((void**)&system->demo_action_buffer);
+    safe_free((void**)&system->demo_label);
 
     system->demo_buffer_capacity = num_frames;
     system->demo_frame_count = num_frames;
-    system->demo_screen_buffer = (float*)malloc(num_frames * CO_SCREEN_WIDTH * CO_SCREEN_HEIGHT * CO_SCREEN_CHANNELS * sizeof(float));
-    system->demo_action_buffer = (COAction*)malloc(num_frames * sizeof(COAction));
+    system->demo_screen_buffer = (float*)safe_malloc(num_frames * CO_SCREEN_WIDTH * CO_SCREEN_HEIGHT * CO_SCREEN_CHANNELS * sizeof(float));
+    system->demo_action_buffer = (COAction*)safe_malloc(num_frames * sizeof(COAction));
     system->demo_label = NULL;
 
     for (uint32_t i = 0; i < num_frames; i++) {
@@ -3060,7 +3063,7 @@ int co_record_demo_load(COSystem* system, const char* filepath) {
     if (fread(&magic, sizeof(magic), 1, f) == 1) {
         uint32_t label_len = magic;
         if (label_len > 0 && label_len < 1024) {
-            system->demo_label = (char*)calloc(label_len + 1, 1);
+            system->demo_label = (char*)safe_calloc(label_len + 1, 1);
             fread(system->demo_label, 1, label_len, f);
         }
     }
@@ -3174,9 +3177,9 @@ int co_learn_from_demo(COSystem* system, const float* screen_sequence, const COA
         co_forward(system, system->action_policy, policy_input, 1024+512, policy_out, CO_ACTION_MAX * 10);
     }
 
-    free(system->demo_label);
+    safe_free((void**)&system->demo_label);
     size_t label_len = strlen(task_label);
-    system->demo_label = (char*)malloc(label_len + 1);
+    system->demo_label = (char*)safe_malloc(label_len + 1);
     if (system->demo_label) memcpy(system->demo_label, task_label, label_len + 1);
 
     return 0;

@@ -309,12 +309,12 @@ static GpuKernel* tpu_backend_kernel_create(GpuContext* context, const char* ker
     k->context = context;
     if (kernel_name) {
         k->kernel_name = (char*)safe_malloc(strlen(kernel_name) + 1);
-        if (k->kernel_name) strcpy(k->kernel_name, kernel_name);
+        if (k->kernel_name) { size_t _kn_len = strlen(kernel_name); memcpy(k->kernel_name, kernel_name, _kn_len + 1); }
     }
     /* 存储内核源代码，用于后续编译到TPU可执行格式 */
     if (kernel_source) {
         k->kernel_source = (char*)safe_malloc(strlen(kernel_source) + 1);
-        if (k->kernel_source) strcpy(k->kernel_source, kernel_source);
+        if (k->kernel_source) { size_t _ks_len = strlen(kernel_source); memcpy(k->kernel_source, kernel_source, _ks_len + 1); }
     }
     k->arg_values = (void**)safe_calloc(8, sizeof(void*));
     k->arg_sizes = (size_t*)safe_calloc(8, sizeof(size_t));
@@ -610,10 +610,10 @@ static int npu_tpu_cpu_infer_fallback(NpuModel* model, const float** inputs,
             float* out = outputs[b];
 
             /* 使用真实LNN前向传播：输入→隐藏→输出 */
-            float* hidden = (float*)calloc(input_dim > output_dim ? input_dim : output_dim, sizeof(float));
+            float* hidden = (float*)safe_calloc(input_dim > output_dim ? input_dim : output_dim, sizeof(float));
             if (hidden) {
                 /* 将输入复制到LNN兼容格式 */
-                float* lnn_input = (float*)calloc(input_dim, sizeof(float));
+                float* lnn_input = (float*)safe_calloc(input_dim, sizeof(float));
                 if (lnn_input) {
                     memcpy(lnn_input, in, input_dim * sizeof(float));
                     /* 调用真实LNN推理 */
@@ -623,13 +623,13 @@ static int npu_tpu_cpu_infer_fallback(NpuModel* model, const float** inputs,
                         size_t copy_dim = (input_dim < output_dim) ? input_dim : output_dim;
                         memcpy(out, hidden, copy_dim * sizeof(float));
                         if (output_dim > copy_dim) memset(out + copy_dim, 0, (output_dim - copy_dim) * sizeof(float));
-                        free(lnn_input);
-                        free(hidden);
+                        safe_free((void**)&lnn_input);
+                        safe_free((void**)&hidden);
                         continue;
                     }
-                    free(lnn_input);
+                    safe_free((void**)&lnn_input);
                 }
-                free(hidden);
+                safe_free((void**)&hidden);
             }
 
             /* LNN推理失败：输出零向量（表示真实的未训练状态） */

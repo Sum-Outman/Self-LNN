@@ -57,7 +57,8 @@
                             if (hasBigInt) {
                                 val |= (BigInt(1) << BigInt(bit));
                             } else {
-                                val |= (1 << bit);
+                                /* BUG-11修复：32位回退路径中，bit>=32时位移操作会溢出，添加bit<32检查 */
+                                if (bit < 32) val |= (1 << bit);
                             }
                         }
                         bit++;

@@ -154,7 +154,7 @@ class TrainingPushManager {
         this._wsSafetyAlertHandler = (function(data) {
             console.warn('[TrainingPush] 安全告警:', data);
             if (data && data.message && typeof window.showNotification === 'function') {
-                window.showNotification('⚠️ 安全告警: ' + data.message, 'error');
+                window.showNotification('⚠️ 安全告警: ' + data.message, 'danger');
             }
             document.dispatchEvent(new CustomEvent('ws-safety-alert', { detail: data }));
         }).bind(this);
@@ -471,7 +471,8 @@ class TrainingPushManager {
             setText('training-elapsed-time', `${h}h ${m}m ${sec}s`);
         }
 
-        if (s.etaSec > 0 && s.etaSec < 86400) {
+        /* BUG-22修复：ETA超过24小时也显示具体时间，不再显示"计算中..." */
+        if (s.etaSec > 0) {
             const h = Math.floor(s.etaSec / 3600);
             const m = Math.floor((s.etaSec % 3600) / 60);
             setText('training-remaining-time', `${h}h ${m}m`);

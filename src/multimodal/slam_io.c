@@ -318,7 +318,7 @@ static int slam_frame_reader_open(const char* source, int width, int height) {
                 reader->directory_path[i+1] = '\0';
             }
         }
-        strcpy(reader->filename_pattern, "*.ppm");
+        memcpy(reader->filename_pattern, "*.ppm", strlen("*.ppm") + 1);
     } else {
         reader->list_fp = fopen(source, "r");
         if (!reader->list_fp) { slam_free(reader); return -1; }
@@ -399,18 +399,18 @@ CameraInput* slam_camera_input_open(const char* device_path, int width, int heig
         if (fp) {
             fclose(fp);
             cam->device_path = (char*)slam_malloc(strlen(device_path) + 1);
-            if (cam->device_path) strcpy(cam->device_path, device_path);
+            if (cam->device_path) memcpy(cam->device_path, device_path, strlen(device_path) + 1);
         }
     } else if (strstr(device_path, ".txt") || strstr(device_path, ".lst")) {
         FILE* fp = fopen(device_path, "r");
         if (fp) {
             fclose(fp);
             cam->device_path = (char*)slam_malloc(strlen(device_path) + 1);
-            if (cam->device_path) strcpy(cam->device_path, device_path);
+            if (cam->device_path) memcpy(cam->device_path, device_path, strlen(device_path) + 1);
         }
     } else {
         cam->device_path = (char*)slam_malloc(strlen(device_path) + 1);
-        if (cam->device_path) strcpy(cam->device_path, device_path);
+        if (cam->device_path) memcpy(cam->device_path, device_path, strlen(device_path) + 1);
         cam->frame_counter = 0;
     }
 

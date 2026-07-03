@@ -871,15 +871,15 @@ static int pc_algorithm(CausalReasoningEngine* engine, const float* data,
                 if (i == j) continue;
                 /* i->j: adj[i][j]>0 且 adj[j][i]==0 */
                 if (engine->graph.adjacency_matrix[i][j] > 0.0f && 
-                    engine->graph.adjacency_matrix[j][i] == 0.0f) {
+                    fabsf(engine->graph.adjacency_matrix[j][i]) < 1e-6f) {
                     for (size_t k = 0; k < num_variables; k++) {
                         if (k == i || k == j) continue;
                         /* j-k（无向边）：adj[j][k]>0 且 adj[k][j]>0 */
                         if (engine->graph.adjacency_matrix[j][k] > 0.0f && 
                             engine->graph.adjacency_matrix[k][j] > 0.0f) {
                             /* i-k不相邻 */
-                            if (engine->graph.adjacency_matrix[i][k] == 0.0f && 
-                                engine->graph.adjacency_matrix[k][i] == 0.0f) {
+                            if (fabsf(engine->graph.adjacency_matrix[i][k]) < 1e-6f && 
+                                fabsf(engine->graph.adjacency_matrix[k][i]) < 1e-6f) {
                                 engine->graph.adjacency_matrix[k][j] = 0.0f;  /* j->k */
                                 changed = 1;
                             }
@@ -894,11 +894,11 @@ static int pc_algorithm(CausalReasoningEngine* engine, const float* data,
             for (size_t j = 0; j < num_variables; j++) {
                 if (i == j) continue;
                 if (engine->graph.adjacency_matrix[i][j] > 0.0f && 
-                    engine->graph.adjacency_matrix[j][i] == 0.0f) {
+                    fabsf(engine->graph.adjacency_matrix[j][i]) < 1e-6f) {
                     for (size_t k = 0; k < num_variables; k++) {
                         if (k == i || k == j) continue;
                         if (engine->graph.adjacency_matrix[i][k] > 0.0f && 
-                            engine->graph.adjacency_matrix[k][i] == 0.0f) {
+                            fabsf(engine->graph.adjacency_matrix[k][i]) < 1e-6f) {
                             if (engine->graph.adjacency_matrix[j][k] > 0.0f && 
                                 engine->graph.adjacency_matrix[k][j] > 0.0f) {
                                 engine->graph.adjacency_matrix[k][j] = 0.0f;  /* j->k */
@@ -919,9 +919,9 @@ static int pc_algorithm(CausalReasoningEngine* engine, const float* data,
                     for (size_t k = 0; k < num_variables; k++) {
                         if (k == i || k == j) continue;
                         if (engine->graph.adjacency_matrix[i][k] > 0.0f && 
-                            engine->graph.adjacency_matrix[k][i] == 0.0f) {
+                            fabsf(engine->graph.adjacency_matrix[k][i]) < 1e-6f) {
                             if (engine->graph.adjacency_matrix[j][k] > 0.0f && 
-                                engine->graph.adjacency_matrix[k][j] == 0.0f) {
+                                fabsf(engine->graph.adjacency_matrix[k][j]) < 1e-6f) {
                                 engine->graph.adjacency_matrix[j][i] = 0.0f;  /* i->j */
                                 changed = 1;
                             }
@@ -978,7 +978,7 @@ int causal_reasoning_build_graph(CausalReasoningEngine* engine,
                     size_t name_len = strlen(variable_names[i]) + 1;
                     engine->graph.variable_names[i] = (char*)safe_malloc(name_len);
                     if (engine->graph.variable_names[i] != NULL) {
-                        strcpy(engine->graph.variable_names[i], variable_names[i]);
+                        memcpy(engine->graph.variable_names[i], variable_names[i], strlen(variable_names[i]) + 1);
                     }
                 }
             }
@@ -1260,7 +1260,7 @@ int causal_reasoning_infer(CausalReasoningEngine* engine,
         /* 没有找到因果路径 */
         result->causal_effect = 0.0f;
         result->effect_confidence = 0.5f;
-        strcpy(result->explanation, "未发现显著的因果关系");
+        memcpy(result->explanation, "未发现显著的因果关系", strlen("未发现显著的因果关系") + 1);
         result->requires_intervention = 0;
     }
     
@@ -1664,13 +1664,13 @@ static int fci_algorithm(CausalReasoningEngine* engine, const float* data,
                     if (k == i || k == j) continue;
                     
                     int i_to_k = (engine->graph.adjacency_matrix[i][k] > 0.0f && 
-                                  engine->graph.adjacency_matrix[k][i] == 0.0f);
+                                  fabsf(engine->graph.adjacency_matrix[k][i]) < 1e-6f);
                     int k_from_j = (engine->graph.adjacency_matrix[k][j] > 0.0f && 
-                                    engine->graph.adjacency_matrix[j][k] == 0.0f);
+                                    fabsf(engine->graph.adjacency_matrix[j][k]) < 1e-6f);
                     int k_to_i = (engine->graph.adjacency_matrix[k][i] > 0.0f && 
-                                  engine->graph.adjacency_matrix[i][k] == 0.0f);
+                                  fabsf(engine->graph.adjacency_matrix[i][k]) < 1e-6f);
                     int j_to_k = (engine->graph.adjacency_matrix[j][k] > 0.0f && 
-                                  engine->graph.adjacency_matrix[k][j] == 0.0f);
+                                  fabsf(engine->graph.adjacency_matrix[k][j]) < 1e-6f);
                     
                     /* v-结构模式：i->k<-j 且 i-j非相邻 => 可能存在隐变量 */
                     if ((i_to_k && k_from_j) || (k_to_i && j_to_k)) {
@@ -1708,7 +1708,7 @@ static int fci_algorithm(CausalReasoningEngine* engine, const float* data,
                 float adj_ji = engine->graph.adjacency_matrix[j][i];
                 
                 if (adj_ij <= 0.0f) continue;
-                int is_directed_ij = (adj_ij > 0.0f && adj_ji == 0.0f);
+                int is_directed_ij = (adj_ij > 0.0f && fabsf(adj_ji) < 1e-6f);
                 int is_undirected = (adj_ij > 0.0f && adj_ji > 0.0f);
                 
                 for (size_t k = 0; k < num_variables; k++) {
@@ -1720,8 +1720,8 @@ static int fci_algorithm(CausalReasoningEngine* engine, const float* data,
                     
                     /* FCI-R1: i -> j, j - k (无向), i-k非相邻 => j -> k */
                     if (is_directed_ij && adj_jk > 0.0f && adj_kj > 0.0f) {
-                        if (engine->graph.adjacency_matrix[i][k] == 0.0f && 
-                            engine->graph.adjacency_matrix[k][i] == 0.0f) {
+                        if (fabsf(engine->graph.adjacency_matrix[i][k]) < 1e-6f && 
+                            fabsf(engine->graph.adjacency_matrix[k][i]) < 1e-6f) {
                             engine->graph.adjacency_matrix[k][j] = 0.0f;
                             changed = 1;
                         }
@@ -1730,7 +1730,7 @@ static int fci_algorithm(CausalReasoningEngine* engine, const float* data,
                     /* FCI-R2: i -> j, i -> k, j - k => j -> k */
                     if (is_directed_ij && adj_jk > 0.0f && adj_kj > 0.0f) {
                         if (engine->graph.adjacency_matrix[i][k] > 0.0f && 
-                            engine->graph.adjacency_matrix[k][i] == 0.0f) {
+                            fabsf(engine->graph.adjacency_matrix[k][i]) < 1e-6f) {
                             engine->graph.adjacency_matrix[k][j] = 0.0f;
                             changed = 1;
                         }
@@ -1739,9 +1739,9 @@ static int fci_algorithm(CausalReasoningEngine* engine, const float* data,
                     /* FCI-R3: i - j, i -> k, j -> k => i -> j */
                     if (is_undirected) {
                         if (engine->graph.adjacency_matrix[i][k] > 0.0f && 
-                            engine->graph.adjacency_matrix[k][i] == 0.0f &&
+                            fabsf(engine->graph.adjacency_matrix[k][i]) < 1e-6f &&
                             engine->graph.adjacency_matrix[j][k] > 0.0f && 
-                            engine->graph.adjacency_matrix[k][j] == 0.0f) {
+                            fabsf(engine->graph.adjacency_matrix[k][j]) < 1e-6f) {
                             engine->graph.adjacency_matrix[j][i] = 0.0f;
                             changed = 1;
                         }
@@ -2578,7 +2578,7 @@ static float estimate_causal_effect_do_calculus(CausalReasoningEngine* engine,
                 break;
             }
         }
-        if (direct_effect == 0.0f) {
+        if (fabsf(direct_effect) < 1e-6f) {
             direct_effect = engine->graph.adjacency_matrix[treatment][outcome];
         }
         total_effect = direct_effect;
@@ -2701,7 +2701,7 @@ static float estimate_causal_effect_do_calculus(CausalReasoningEngine* engine,
         }
         
         /* 如果没有数据，使用基于图结构的近似 */
-        if (backdoor_adjustment == 0.0f) {
+        if (fabsf(backdoor_adjustment) < 1e-6f) {
             /* 基于混淆变量的近似调整 */
             float confounder_effect = 0.0f;
             for (size_t c = 0; c < num_confounders; c++) {
@@ -2717,7 +2717,7 @@ static float estimate_causal_effect_do_calculus(CausalReasoningEngine* engine,
         }
         
         /* 合并后门调整效应 */
-        if (backdoor_adjustment != 0.0f) {
+        if (fabsf(backdoor_adjustment) >= 1e-6f) {
             total_effect = backdoor_adjustment;
         }
     }
@@ -2754,15 +2754,15 @@ static float estimate_causal_effect_do_calculus(CausalReasoningEngine* engine,
                 }
             }
             
-            if (effect_tm == 0.0f) effect_tm = engine->graph.adjacency_matrix[treatment][m];
-            if (effect_mo == 0.0f) effect_mo = engine->graph.adjacency_matrix[m][outcome];
+            if (fabsf(effect_tm) < 1e-6f) effect_tm = engine->graph.adjacency_matrix[treatment][m];
+            if (fabsf(effect_mo) < 1e-6f) effect_mo = engine->graph.adjacency_matrix[m][outcome];
             
             indirect_effect += effect_tm * effect_mo;
         }
     }
     
     /* 合并间接效应（如果已有直接效应，需要合计） */
-    if (direct_effect != 0.0f) {
+    if (fabsf(direct_effect) >= 1e-6f) {
         total_effect = direct_effect + indirect_effect;
     } else if (indirect_effect > 0.0f) {
         total_effect = indirect_effect;
@@ -3210,15 +3210,15 @@ static int moralize_graph(CausalGraph* graph) {
                 if (k == i || k == j) continue;
                 /* i->k 且 j->k */
                 int i_to_k = (graph->adjacency_matrix[i][k] > 0.0f && 
-                              graph->adjacency_matrix[k][i] == 0.0f);
+                              fabsf(graph->adjacency_matrix[k][i]) < 1e-6f);
                 int j_to_k = (graph->adjacency_matrix[j][k] > 0.0f && 
-                              graph->adjacency_matrix[k][j] == 0.0f);
+                              fabsf(graph->adjacency_matrix[k][j]) < 1e-6f);
                 if (i_to_k && j_to_k) {
                     has_common_child = 1;
                 }
             }
             
-            if (has_common_child && graph->adjacency_matrix[i][j] == 0.0f) {
+            if (has_common_child && fabsf(graph->adjacency_matrix[i][j]) < 1e-6f) {
                 /* 添加无向边"结婚"i和j */
                 graph->adjacency_matrix[i][j] = 1.0f;
                 graph->adjacency_matrix[j][i] = 1.0f;
@@ -3231,7 +3231,7 @@ static int moralize_graph(CausalGraph* graph) {
         for (size_t j = 0; j < n; j++) {
             if (i == j) continue;
             float val = graph->adjacency_matrix[i][j];
-            if (val > 0.0f && graph->adjacency_matrix[j][i] == 0.0f) {
+            if (val > 0.0f && fabsf(graph->adjacency_matrix[j][i]) < 1e-6f) {
                 /* 有向边 i->j，转换为无向边 */
                 graph->adjacency_matrix[j][i] = val;
             }
@@ -3323,7 +3323,7 @@ static int triangulate_graph(CausalGraph* graph) {
             for (int b = a + 1; b < num_later; b++) {
                 int na = later_neighbors[a];
                 int nb = later_neighbors[b];
-                if (graph->adjacency_matrix[na][nb] == 0.0f) {
+                if (fabsf(graph->adjacency_matrix[na][nb]) < 1e-6f) {
                     /* 添加填充边 */
                     graph->adjacency_matrix[na][nb] = 0.5f;
                     graph->adjacency_matrix[nb][na] = 0.5f;

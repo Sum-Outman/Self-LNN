@@ -1176,7 +1176,7 @@ int hd_benchmark_device(const HDDeviceInfo* device, HDBenchmarkType bench_type, 
         }
         case HD_BENCHMARK_MEMORY: {
             size_t buf_size = device->total_memory_bytes > 0 ? (device->total_memory_bytes < (1024 * 1024) ? device->total_memory_bytes : (1024 * 1024)) : (1024 * 1024);
-            char* buf = (char*)malloc(buf_size);
+            char* buf = (char*)safe_malloc(buf_size);
             if (!buf) return -1;
             for (int s = 0; s < 10 && s < HD_MAX_BENCHMARK_SAMPLES; s++) {
                 double t0 = hd_timestamp_ms();
@@ -1184,7 +1184,7 @@ int hd_benchmark_device(const HDDeviceInfo* device, HDBenchmarkType bench_type, 
                 double t1 = hd_timestamp_ms();
                 samples[num_samples++] = (double)buf_size / (1024.0 * 1024.0) / ((t1 - t0) / 1000.0);
             }
-            free(buf);
+            safe_free((void**)&buf);
             break;
         }
         case HD_BENCHMARK_IO: {

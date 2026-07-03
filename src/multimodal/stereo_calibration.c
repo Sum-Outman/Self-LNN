@@ -470,8 +470,8 @@ int camera_calibrate_monocular(CameraCalibrator* calibrator,
     if (calibrator->all_image_points) free(calibrator->all_image_points);
     if (calibrator->all_object_points) free(calibrator->all_object_points);
 
-    calibrator->all_image_points = (float*)malloc(total_corners * 2 * sizeof(float));
-    calibrator->all_object_points = (float*)malloc(total_corners * 3 * sizeof(float));
+    calibrator->all_image_points = (float*)malloc((size_t)total_corners * 2 * sizeof(float));
+    calibrator->all_object_points = (float*)malloc((size_t)total_corners * 3 * sizeof(float));
 
     if (!calibrator->all_image_points || !calibrator->all_object_points)
     {
@@ -605,8 +605,8 @@ int camera_calibrate_stereo(CameraCalibrator* calibrator,
     int total_left_images = calibrator->total_images;
     int obj_size = total_left_images * corners_per_image * 3;
     int img_size = total_left_images * corners_per_image * 2;
-    float* saved_obj_points = (float*)malloc((size_t)obj_size * sizeof(float));
-    float* saved_left_points = (float*)malloc((size_t)img_size * sizeof(float));
+    float* saved_obj_points = (float*)malloc((size_t)total_left_images * (size_t)corners_per_image * 3 * sizeof(float));
+    float* saved_left_points = (float*)malloc((size_t)total_left_images * (size_t)corners_per_image * 2 * sizeof(float));
     if (!saved_obj_points || !saved_left_points) {
         free(saved_obj_points);
         free(saved_left_points);
@@ -1475,7 +1475,7 @@ int camera_calibration_detect_corners(const float* image,
         }
     }
 
-    int* sorted_indices = (int*)malloc(width * height * sizeof(int));
+    int* sorted_indices = (int*)malloc((size_t)width * (size_t)height * sizeof(int));
     if (!sorted_indices)
     {
         free(grad_x); free(grad_y); free(grad_mag); free(grad_orient); free(corner_score);

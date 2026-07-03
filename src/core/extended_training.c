@@ -1174,8 +1174,8 @@ SELFLNN_API int lnn_self_supervised_pretrain(LNN* network,
     int total_count = 0;
 
 /* 动态分配替代硬编码512维上限 */
-    float* anchor_emb = (float*)malloc(hidden_size * sizeof(float));
-    float* pos_emb = (float*)malloc(hidden_size * sizeof(float));
+    float* anchor_emb = (float*)malloc((size_t)hidden_size * sizeof(float));
+    float* pos_emb = (float*)malloc((size_t)hidden_size * sizeof(float));
     if (!anchor_emb || !pos_emb) {
         if (anchor_emb) free(anchor_emb);
         if (pos_emb) free(pos_emb);
@@ -1332,10 +1332,10 @@ SELFLNN_API int lnn_knowledge_distill(LNN* teacher, LNN* student,
 /* 动态分配替代硬编码256维上限 */
             size_t out_dim = teacher->config.output_size;
             if (out_dim == 0) out_dim = 128;
-            float* t_output = (float*)malloc(out_dim * sizeof(float));
-            float* s_output = (float*)malloc(out_dim * sizeof(float));
-            float* t_prob = (float*)malloc(out_dim * sizeof(float));
-            float* s_prob = (float*)malloc(out_dim * sizeof(float));
+            float* t_output = (float*)malloc((size_t)out_dim * sizeof(float));
+            float* s_output = (float*)malloc((size_t)out_dim * sizeof(float));
+            float* t_prob = (float*)malloc((size_t)out_dim * sizeof(float));
+            float* s_prob = (float*)malloc((size_t)out_dim * sizeof(float));
             if (!t_output || !s_output || !t_prob || !s_prob) {
                 if (t_output) free(t_output);
                 if (s_output) free(s_output);

@@ -244,10 +244,10 @@ static int probe_serial_device(const char* port_pattern) {
     for (int i = 0; i < 32; i++) {
         snprintf(port_path, sizeof(port_path), "/dev/ttyS%d", i);
         FILE* fp = fopen(port_path, "r");
-        if (fp) { fclose(fp); found = 1; break; }
+        if (fp) { fclose(fp); fp = NULL; found = 1; break; }
         snprintf(port_path, sizeof(port_path), "/dev/ttyUSB%d", i);
         fp = fopen(port_path, "r");
-        if (fp) { fclose(fp); found = 1; break; }
+        if (fp) { fclose(fp); fp = NULL; found = 1; break; }
     }
 #endif
     (void)port_pattern;
@@ -286,11 +286,11 @@ static int probe_hid_device_sensor_type(DataCollectionSourceType sensor_type) {
     }
     if (num_devices == 0) return 0;
 
-    RAWINPUTDEVICELIST* device_list = (RAWINPUTDEVICELIST*)malloc(num_devices * sizeof(RAWINPUTDEVICELIST));
+    RAWINPUTDEVICELIST* device_list = (RAWINPUTDEVICELIST*)safe_malloc(num_devices * sizeof(RAWINPUTDEVICELIST));
     if (!device_list) return 0;
 
     if (GetRawInputDeviceList(device_list, &num_devices, sizeof(RAWINPUTDEVICELIST)) == (UINT)-1) {
-        free(device_list);
+        safe_free((void**)&device_list);
         return 0;
     }
 
@@ -365,7 +365,7 @@ static int probe_hid_device_sensor_type(DataCollectionSourceType sensor_type) {
         if (found_matching_sensor) break;
     }
 
-    free(device_list);
+    safe_free((void**)&device_list);
 
 #else
     /* Linux: 读取输入设备名称和IIO子系统 */

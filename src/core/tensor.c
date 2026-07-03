@@ -183,8 +183,11 @@ Tensor* tensor_create(const int* shape, int ndim, TensorDataType dtype) {
     if (!tensor->data) {
         selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
                               "分配张量数据内存失败");
-        safe_free(&tensor->strides);
-        safe_free(&tensor->shape);
+        /* P1修复: safe_free 参数类型不匹配
+         * tensor->strides 是 size_t* 类型，&tensor->strides 是 size_t**，
+         * 必须显式转换为 void** 以匹配 safe_free 的函数签名。 */
+        safe_free((void**)&tensor->strides);
+        safe_free((void**)&tensor->shape);
         safe_free((void**)&tensor);
         return NULL;
     }

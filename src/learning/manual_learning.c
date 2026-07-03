@@ -302,7 +302,8 @@ static int ml_append_page_content(MLPage* page, const char* data, size_t len) {
     if (needed > page->content_capacity) {
         size_t new_cap = page->content_capacity * 2;
         if (new_cap < needed) new_cap = needed + 4096;
-        char* new_content = (char*)realloc(page->content, new_cap);
+        /* P2修复: 使用safe_realloc替代原生realloc，统一内存管理 */
+        char* new_content = (char*)safe_realloc(page->content, new_cap);
         if (!new_content) return -1;
         page->content = new_content;
         page->content_capacity = new_cap;

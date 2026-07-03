@@ -5530,10 +5530,10 @@ static int sgbm_postprocess(float* disparity_map, const float* aggregated_cost,
         int* visited = (int*)calloc((size_t)width * height, sizeof(int));
         if (!visited) return 0;
 
-        int* qx = (int*)malloc((size_t)width * height * sizeof(int));
-        int* qy = (int*)malloc((size_t)width * height * sizeof(int));
-        int* rx = (int*)malloc((size_t)width * height * sizeof(int));
-        int* ry = (int*)malloc((size_t)width * height * sizeof(int));
+        int* qx = (int*)malloc((size_t)width * (size_t)height * sizeof(int));
+        int* qy = (int*)malloc((size_t)width * (size_t)height * sizeof(int));
+        int* rx = (int*)malloc((size_t)width * (size_t)height * sizeof(int));
+        int* ry = (int*)malloc((size_t)width * (size_t)height * sizeof(int));
 
         if (qx && qy && rx && ry) {
             for (int y = half_window; y < height - half_window; y++) {

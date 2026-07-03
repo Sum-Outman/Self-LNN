@@ -3640,22 +3640,25 @@ int point_cloud_load_from_file(PointCloud* point_cloud,
     }
     size_t count = 0;
     size_t capacity = estimated_points;
-    while (fgets(line, sizeof(line), fp) && count < capacity) {
+    while (fgets(line, sizeof(line), fp)) {
         float x, y, z;
-        if (format == 3) {
-            if (sscanf(line, "%f,%f,%f", &x, &y, &z) == 3) {
-                point_cloud->points[count * 3] = x;
-                point_cloud->points[count * 3 + 1] = y;
-                point_cloud->points[count * 3 + 2] = z;
-                count++;
+        if ((format == 3 && sscanf(line, "%f,%f,%f", &x, &y, &z) == 3) ||
+            (format != 3 && sscanf(line, "%f %f %f", &x, &y, &z) == 3)) {
+            /* P1修复: 如果已达到容量上限，使用safe_realloc动态扩容为原来2倍 */
+            if (count >= capacity) {
+                size_t new_capacity = capacity * 2;
+                float* new_points = (float*)safe_realloc(point_cloud->points, new_capacity * 3 * sizeof(float));
+                if (!new_points) {
+                    /* 扩容失败但已成功读取的点保留，不影响现有结果 */
+                    break;
+                }
+                point_cloud->points = new_points;
+                capacity = new_capacity;
             }
-        } else {
-            if (sscanf(line, "%f %f %f", &x, &y, &z) == 3) {
-                point_cloud->points[count * 3] = x;
-                point_cloud->points[count * 3 + 1] = y;
-                point_cloud->points[count * 3 + 2] = z;
-                count++;
-            }
+            point_cloud->points[count * 3] = x;
+            point_cloud->points[count * 3 + 1] = y;
+            point_cloud->points[count * 3 + 2] = z;
+            count++;
         }
     }
     fclose(fp);

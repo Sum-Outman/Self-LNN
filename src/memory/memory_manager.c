@@ -373,6 +373,11 @@ static void* buddy_alloc(CpuBuddyAllocator* allocator, size_t size)
 {
     if (!allocator || !allocator->is_initialized || size == 0) return NULL;
 
+    /* 持锁前预计算所需级别和大小，避免持锁期间调用safe_malloc */
+    int required_level = buddy_get_level(size);
+    if (required_level < 0) required_level = 0;
+    size_t required_level_size = buddy_level_size(required_level);
+
     mutex_lock(allocator->lock);
 
     if (size >= allocator->page_threshold && allocator->page_merge_enabled) {
@@ -401,15 +406,15 @@ static void* buddy_alloc(CpuBuddyAllocator* allocator, size_t size)
         }
     }
 
-    int required_level = buddy_get_level(size);
-    if (required_level < 0) required_level = 0;
-    if (buddy_level_size(required_level) > allocator->max_size) {
-        /* 请求大小超过伙伴分配器最大池，使用malloc回退 */
-        void* overflow_ptr = malloc(size);
+    if (required_level_size > allocator->max_size) {
+        /* 请求大小超过伙伴分配器最大池，释放锁后使用safe_malloc回退 */
+        mutex_unlock(allocator->lock);
+        void* overflow_ptr = safe_malloc(size);
         if (!overflow_ptr) {
-            mutex_unlock(allocator->lock);
             return NULL;
         }
+        /* 重新获取锁以更新跟踪数据 */
+        mutex_lock(allocator->lock);
         int idx = allocator->overflow_count;
         if (idx < BUDDY_MAX_OVERFLOW_BLOCKS) {
             allocator->overflow_blocks[idx].address = overflow_ptr;
@@ -417,11 +422,9 @@ static void* buddy_alloc(CpuBuddyAllocator* allocator, size_t size)
             allocator->overflow_count++;
             allocator->overflow_used += size;
         } else {
-            /* M-017修复: 溢出块数量已达上限，无法继续跟踪，可能导致内存泄漏 */
             log_warning("伙伴分配器溢出块数量已达到上限(%d)，无法跟踪此块(%zu字节)。"
                         "请增大BUDDY_POOL_SIZE或BUDDY_MAX_OVERFLOW_BLOCKS。",
                         BUDDY_MAX_OVERFLOW_BLOCKS, size);
-            /* 即使不跟踪，仍分配内存给调用者，buddy_free通过malloc释放 */
         }
         allocator->total_allocations++;
         mutex_unlock(allocator->lock);
@@ -438,13 +441,14 @@ static void* buddy_alloc(CpuBuddyAllocator* allocator, size_t size)
     }
 
     if (!block || current_level >= allocator->levels) {
-        /* 伙伴分配器无空闲块，使用malloc回退分配 */
-        void* overflow_ptr = malloc(size);
+        /* 伙伴分配器无空闲块，释放锁后使用safe_malloc回退分配 */
+        mutex_unlock(allocator->lock);
+        void* overflow_ptr = safe_malloc(size);
         if (!overflow_ptr) {
-            mutex_unlock(allocator->lock);
             return NULL;
         }
-        /* 记录溢出块到跟踪数组 */
+        /* 重新获取锁以更新跟踪数据 */
+        mutex_lock(allocator->lock);
         int idx = allocator->overflow_count;
         if (idx < BUDDY_MAX_OVERFLOW_BLOCKS) {
             allocator->overflow_blocks[idx].address = overflow_ptr;
@@ -452,11 +456,9 @@ static void* buddy_alloc(CpuBuddyAllocator* allocator, size_t size)
             allocator->overflow_count++;
             allocator->overflow_used += size;
         } else {
-            /* M-017修复: 溢出块数量已达上限，无法继续跟踪，可能导致内存泄漏 */
             log_warning("伙伴分配器溢出块数量已达到上限(%d)，无法跟踪此块(%zu字节)。"
                         "请增大BUDDY_POOL_SIZE或BUDDY_MAX_OVERFLOW_BLOCKS。",
                         BUDDY_MAX_OVERFLOW_BLOCKS, size);
-            /* 即使不跟踪，仍分配内存给调用者，buddy_free通过malloc释放 */
         }
         allocator->total_allocations++;
         mutex_unlock(allocator->lock);
@@ -475,12 +477,14 @@ static void* buddy_alloc(CpuBuddyAllocator* allocator, size_t size)
 
             BuddyBlock* buddy = buddy_alloc_descriptor(allocator);
             if (!buddy) {
-                /* 描述符耗尽，使用malloc回退 */
-                void* overflow_ptr = malloc(size);
+                /* 描述符耗尽，释放锁后使用safe_malloc回退 */
+                mutex_unlock(allocator->lock);
+                void* overflow_ptr = safe_malloc(size);
                 if (!overflow_ptr) {
-                    mutex_unlock(allocator->lock);
                     return NULL;
                 }
+                /* 重新获取锁以更新跟踪数据 */
+                mutex_lock(allocator->lock);
                 int oidx = allocator->overflow_count;
                 if (oidx < BUDDY_MAX_OVERFLOW_BLOCKS) {
                     allocator->overflow_blocks[oidx].address = overflow_ptr;
@@ -488,11 +492,9 @@ static void* buddy_alloc(CpuBuddyAllocator* allocator, size_t size)
                     allocator->overflow_count++;
                     allocator->overflow_used += size;
                 } else {
-                    /* M-017修复: 溢出块数量已达上限，无法继续跟踪，可能导致内存泄漏 */
                     log_warning("伙伴分配器溢出块数量已达到上限(%d)，无法跟踪此块(%zu字节)。"
                                 "请增大BUDDY_POOL_SIZE或BUDDY_MAX_OVERFLOW_BLOCKS。",
                                 BUDDY_MAX_OVERFLOW_BLOCKS, size);
-                    /* 即使不跟踪，仍分配内存给调用者，buddy_free通过malloc释放 */
                 }
                 allocator->total_allocations++;
                 mutex_unlock(allocator->lock);
@@ -517,7 +519,7 @@ static void* buddy_alloc(CpuBuddyAllocator* allocator, size_t size)
     buddy_insert_head(&allocator->used_list, block);
     allocator->total_used_blocks++;
 
-    size_t allocated_size = buddy_level_size(required_level);
+    size_t allocated_size = required_level_size;
     allocator->current_used += allocated_size;
     if (allocator->current_used > allocator->peak_used) {
         allocator->peak_used = allocator->current_used;
@@ -837,7 +839,8 @@ static void buddy_get_stats(CpuBuddyAllocator* allocator, BuddyAllocatorStats* s
     stats->overflow_blocks = allocator->overflow_count;
     stats->overflow_used = allocator->overflow_used;
 
-    if (stats->free_size > 0 && stats->free_blocks > 1) {
+    /* P2修复: largest_free_block为0时除零保护 */
+    if (stats->free_size > 0 && stats->free_blocks > 1 && allocator->largest_free_block > 0) {
         float ideal_free = (float)stats->free_size / (float)allocator->largest_free_block;
         stats->fragmentation_ratio = 1.0f - (ideal_free / (float)stats->free_blocks);
         if (stats->fragmentation_ratio < 0.0f) stats->fragmentation_ratio = 0.0f;

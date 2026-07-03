@@ -23,6 +23,29 @@
 #define UNUSED(x) (void)(x)
 #endif
 
+/**
+ * @brief strnlen跨平台兼容宏
+ * 
+ * MSVC使用_strnlen，其他平台使用strnlen（POSIX标准）。
+ * 在非MSVC环境中，如果strnlen不可用，回退到手动实现。
+ */
+#if defined(_MSC_VER)
+#define selflnn_strnlen(s, maxlen) _strnlen((s), (maxlen))
+#else
+/* POSIX系统通常提供strnlen，但为安全起见提供回退实现 */
+#include <string.h>
+#ifndef HAVE_STRNLEN
+#define selflnn_strnlen(s, maxlen) ({ \
+    const char* _p = (const char*)(s); \
+    size_t _n = 0; \
+    while (_n < (maxlen) && *_p) { _p++; _n++; } \
+    _n; \
+})
+#else
+#define selflnn_strnlen(s, maxlen) strnlen((s), (maxlen))
+#endif
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif

@@ -804,6 +804,10 @@ int population_evaluate(Population* pop, FitnessFunction fitness_func, void* use
     if (!pop->enabled) {
         return -1;
     }
+    /* P2修复: 除零风险 — population_size为0时直接返回 */
+    if (pop->population_size == 0) {
+        return -1;
+    }
     
     float total_fitness = 0.0f;
     float best_fitness = -FLT_MAX;

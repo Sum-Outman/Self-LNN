@@ -28,10 +28,10 @@ class VoiceCaptureUtil {
         if (this._recording) return { success: false, error: '录音已在进行中' };
         try {
             if (!stream) throw new Error('未提供麦克风流');
-/* BrowserCompat类存在性检查，优先使用全局实例 */
-        var compat = window.g_browserCompat || (typeof BrowserCompat !== 'undefined' ? new BrowserCompat() : null);
-        /* BUG-1修复：返回与调用方期望一致的 {success, error} 对象，而非裸布尔值 */
-        if (!compat) return { success: false, error: 'BrowserCompat未加载，无法创建录音器' };
+            /* BrowserCompat类存在性检查，优先使用全局实例 */
+            var compat = window.g_browserCompat || (typeof BrowserCompat !== 'undefined' ? new BrowserCompat() : null);
+            /* BUG-1修复：返回与调用方期望一致的 {success, error} 对象，而非裸布尔值 */
+            if (!compat) return { success: false, error: 'BrowserCompat未加载，无法创建录音器' };
             var mimeType = compat.getSupportedMediaRecorderMimeType();
             this._chunks = [];
             this._stream = stream;

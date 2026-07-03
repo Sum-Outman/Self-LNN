@@ -1,6 +1,23 @@
-// SELF-LNN AGI 管理系统 - 主JavaScript文件
+﻿// SELF-LNN AGI 管理系统 - 主JavaScript文件
 var g_dataEngine = null;
 var g_usingDataEngine = false;
+
+/* C-04修复: 全局事件监听器清理注册表，防止事件监听器泄漏 */
+window._eventCleanupList = window._eventCleanupList || [];
+window._registerEventListener = function(target, event, handler, options) {
+    if (!target || !target.addEventListener) return;
+    target.addEventListener(event, handler, options);
+    window._eventCleanupList.push({ target: target, event: event, handler: handler, options: options });
+};
+window._cleanupAllEventListeners = function() {
+    var list = window._eventCleanupList;
+    while (list.length > 0) {
+        var entry = list.pop();
+        if (entry.target && entry.target.removeEventListener) {
+            try { entry.target.removeEventListener(entry.event, entry.handler, entry.options); } catch(e) {}
+        }
+    }
+};
 
 /* L006: 统一API安全调用辅助——消除全文件typeof === 'function'重复检查 */
 window._safeApiCall = function(methodName) {
@@ -8,6 +25,20 @@ window._safeApiCall = function(methodName) {
     if (!api) return null;
     var fn = api[methodName];
     return (typeof fn === 'function') ? fn.bind(api) : null;
+};
+
+/* C-05修复: 安全的DOM元素获取辅助函数，自动添加空值检查 */
+window._e = function(id) {
+    return document.getElementById(id);
+};
+
+/* F-M02修复：汉堡菜单切换函数，通过window.前缀暴露给内联onclick */
+window.toggleHamburgerMenu = function() {
+    var n = document.getElementById('main-nav');
+    if (n) {
+        n.classList.toggle('collapsed');
+        n.classList.toggle('visible');
+    }
 };
 
 /* ================================================================
@@ -74,15 +105,28 @@ window.escapeHtml = function(str) {
 };
 
 // 全局设备管理、指令、对话增强实例
-var g_deviceManager = null;
-var g_voiceCommandSystem = null;
-var g_textCommandSystem = null;
-var g_commandEngine = null;
-var g_dialogueEnhanced = null;
-var g_agiController = null;
-/* 浏览器兼容层全局实例（生成一次，全站复用） */
-/* BUG-4修复: 优先复用window.g_browserCompat全局实例，避免双重创建 */
-var g_browserCompat = window.g_browserCompat || new BrowserCompat();
+/* M-09修复: SELF-LNN全局变量注册表 - 所有全局变量均使用 g_ 前缀，避免命名冲突 */
+var g_deviceManager = null;      /* 设备管理器实例 */
+var g_voiceCommandSystem = null; /* 语音指令系统实例 */
+var g_textCommandSystem = null;  /* 文本指令系统实例 */
+var g_commandEngine = null;      /* 指令引擎实例 */
+var g_dialogueEnhanced = null;   /* 增强对话实例 */
+var g_agiController = null;      /* AGI控制器实例 */
+var g_rosGazeboRefreshTimer = null; /* ROS/Gazebo刷新定时器 */
+var g_skillsData = [];           /* 技能数据缓存 */
+/* BUG-3修复: 浏览器兼容层延迟初始化，避免BrowserCompat类加载顺序依赖 */
+var g_browserCompat = window.g_browserCompat || null;
+function ensureBrowserCompat() {
+    if (!g_browserCompat) {
+        if (typeof BrowserCompat !== 'undefined') {
+            g_browserCompat = new BrowserCompat();
+            window.g_browserCompat = g_browserCompat;
+        } else {
+            g_browserCompat = null;
+        }
+    }
+    return g_browserCompat;
+}
 
 (async function() {
     
@@ -201,28 +245,33 @@ var g_browserCompat = window.g_browserCompat || new BrowserCompat();
     }
         
 var g_dataEngineFirstConnect = true;
-        g_dataEngine.addListener(function(data) {
-            try {
-                if (data._backendConnected && data.system._connected) {
-                    updateRealTimeMetrics({ success: true, data: data.system });
-                    if (g_dataEngineFirstConnect) {
-                        g_dataEngineFirstConnect = false;
-                        g_dataEngine.registerModule('real_time_updates', 5000, pollRealTimeUpdates);
-                        g_dataEngine.registerModule('tom_display', 10000, updateTomDisplay);
-                        refreshAllSections();
-                        showNotification('✅ 后端服务器已连接', 'success');
+        /* BUG-2修复: g_dataEngine可能为null，添加空值检查 */
+        if (g_dataEngine && typeof g_dataEngine.addListener === 'function') {
+            g_dataEngine.addListener(function(data) {
+                try {
+                    if (data._backendConnected && data.system._connected) {
+                        updateRealTimeMetrics({ success: true, data: data.system });
+                        if (g_dataEngineFirstConnect) {
+                            g_dataEngineFirstConnect = false;
+                            g_dataEngine.registerModule('real_time_updates', 5000, pollRealTimeUpdates);
+                            g_dataEngine.registerModule('tom_display', 10000, updateTomDisplay);
+                            refreshAllSections();
+                            showNotification('后端服务器已连接', 'success');
+                        }
                     }
-                }
 
-                /* L-024修复: 每次数据更新时同步训练历史占位文本 */
-                if (typeof updateTrainingHistoryPlaceholderState === 'function') {
-                    updateTrainingHistoryPlaceholderState();
+                    /* L-024修复: 每次数据更新时同步训练历史占位文本 */
+                    if (typeof updateTrainingHistoryPlaceholderState === 'function') {
+                        updateTrainingHistoryPlaceholderState();
+                    }
+                } catch(e) {
+                    console.error('[SELF-LNN] 仪表盘更新失败:', e.message);
+                    showNotification('仪表盘数据更新异常: ' + e.message, 'warning');
                 }
-            } catch(e) {
-                console.error('[SELF-LNN] 仪表盘更新失败:', e.message);
-                showNotification('⚠️ 仪表盘数据更新异常: ' + e.message, 'warning');
-            }
-        });
+            });
+        } else {
+            console.error('[SELF-LNN] DataEngine未初始化，监听器注册失败');
+        }
     LoadingOverlay.hide();
     
     refreshAllSections();
@@ -313,7 +362,7 @@ async function refreshApiUsageStats() {
     if (cached && cached.system && cached.system._connected && cached.system.requests) {
         var requests = cached.system.requests;
         setEl('#api-stat-total', requests.total || 0);
-        setEl('#api-stat-success', requests.total - (requests.errors || 0));
+        setEl('#api-stat-success', (requests.total || 0) - (requests.errors || 0));
         setEl('#api-stat-active', requests.connections || 0);
         setEl('#api-stat-errors', requests.errors || 0);
         setEl('#api-stat-rate', (requests.rate_per_minute !== undefined) ? requests.rate_per_minute : '--');
@@ -376,14 +425,14 @@ async function configureROS() {
                 var txt = document.querySelector('#ros-master-status .status-text');
                 if (dot) dot.className = 'status-dot offline';
                 if (txt) txt.textContent = '连接失败';
-                showNotification('❌ ' + errMsg, 'error');
+                showNotification('❌ ' + errMsg, 'danger');
             }
         } else {
-            showNotification('❌ ROS配置后端未连接', 'error');
+            showNotification('❌ ROS配置后端未连接', 'danger');
         }
     } catch (e) {
         console.error('配置ROS Master异常:', e);
-        showNotification('❌ 配置ROS Master异常: ' + e.message, 'error');
+        showNotification('❌ 配置ROS Master异常: ' + e.message, 'danger');
     }
 }
 
@@ -400,14 +449,14 @@ async function controlGazebo(action) {
                 refreshRosGazeboStatus();
             } else {
                 var errMsg = (result && result.error) || '控制失败';
-                showNotification('❌ ' + errMsg, 'error');
+                showNotification('❌ ' + errMsg, 'danger');
             }
         } else {
-            showNotification('❌ Gazebo控制后端未连接', 'error');
+            showNotification('❌ Gazebo控制后端未连接', 'danger');
         }
     } catch (e) {
         console.error('控制Gazebo异常:', e);
-        showNotification('❌ 控制Gazebo异常: ' + e.message, 'error');
+        showNotification('❌ 控制Gazebo异常: ' + e.message, 'danger');
     }
 }
 
@@ -419,12 +468,19 @@ async function spawnGazeboModel() {
     if (!modelNameEl) return;
     var name = modelNameEl.value;
     if (!name) { showNotification('⚠️ 请输入模型名称', 'warning'); return; }
-    var x = parseFloat(((document.getElementById('gazebo-model-x') || {}).value)) || 0;
-    var y = parseFloat(((document.getElementById('gazebo-model-y') || {}).value)) || 0;
-    var z = parseFloat(((document.getElementById('gazebo-model-z') || {}).value)) || 0;
-    var yaw = parseFloat(((document.getElementById('gazebo-model-yaw') || {}).value)) || 0;
-    var pitch = parseFloat(((document.getElementById('gazebo-model-pitch') || {}).value)) || 0;
-    var roll = parseFloat(((document.getElementById('gazebo-model-roll') || {}).value)) || 0;
+    /* F4-C02修复: 空指针安全访问 */
+    var el = document.getElementById('gazebo-model-x');
+    var x = el ? parseFloat(el.value) || 0 : 0;
+    el = document.getElementById('gazebo-model-y');
+    var y = el ? parseFloat(el.value) || 0 : 0;
+    el = document.getElementById('gazebo-model-z');
+    var z = el ? parseFloat(el.value) || 0 : 0;
+    el = document.getElementById('gazebo-model-yaw');
+    var yaw = el ? parseFloat(el.value) || 0 : 0;
+    el = document.getElementById('gazebo-model-pitch');
+    var pitch = el ? parseFloat(el.value) || 0 : 0;
+    el = document.getElementById('gazebo-model-roll');
+    var roll = el ? parseFloat(el.value) || 0 : 0;
     showNotification('正在生成模型 ' + name + '...', 'info');
     try {
         if (window.SelfLnnApi && typeof window.SelfLnnApi.controlGazebo === 'function') {
@@ -437,14 +493,14 @@ async function spawnGazeboModel() {
             if (result && result.success) {
                 showNotification('✅ 模型 ' + name + ' 生成成功', 'success');
             } else {
-                showNotification('❌ 模型生成失败: ' + ((result && result.error) || '未知错误'), 'error');
+                showNotification('❌ 模型生成失败: ' + ((result && result.error) || '未知错误'), 'danger');
             }
         } else {
-            showNotification('❌ Gazebo控制后端未连接', 'error');
+            showNotification('❌ Gazebo控制后端未连接', 'danger');
         }
     } catch (e) {
         console.error('生成模型异常:', e);
-        showNotification('❌ 生成模型异常: ' + e.message, 'error');
+        showNotification('❌ 生成模型异常: ' + e.message, 'danger');
     }
 }
 
@@ -467,14 +523,14 @@ async function deleteGazeboModel() {
             if (result && result.success) {
                 showNotification('✅ 模型 ' + name + ' 已删除', 'success');
             } else {
-                showNotification('❌ 模型删除失败: ' + ((result && result.error) || '未知错误'), 'error');
+                showNotification('❌ 模型删除失败: ' + ((result && result.error) || '未知错误'), 'danger');
             }
         } else {
-            showNotification('❌ Gazebo控制后端未连接', 'error');
+            showNotification('❌ Gazebo控制后端未连接', 'danger');
         }
     } catch (e) {
         console.error('删除模型异常:', e);
-        showNotification('❌ 删除模型异常: ' + e.message, 'error');
+        showNotification('❌ 删除模型异常: ' + e.message, 'danger');
     }
 }
 
@@ -631,14 +687,14 @@ async function startRobotTraining() {
                 showNotification('✅ 机器人训练已启动', 'success');
                 refreshTrainingStatus();
             } else {
-                showNotification('❌ 启动机器人训练失败: ' + ((result && result.error) || '未知错误'), 'error');
+                showNotification('❌ 启动机器人训练失败: ' + ((result && result.error) || '未知错误'), 'danger');
             }
         } else {
-            showNotification('❌ 机器人训练控制后端未连接', 'error');
+            showNotification('❌ 机器人训练控制后端未连接', 'danger');
         }
     } catch (e) {
         console.error('启动机器人训练异常:', e);
-        showNotification('❌ 启动机器人训练异常: ' + e.message, 'error');
+        showNotification('❌ 启动机器人训练异常: ' + e.message, 'danger');
     }
 }
 
@@ -658,12 +714,12 @@ async function pauseRobotTraining() {
                 if (pauseStatusEl) pauseStatusEl.textContent = '已暂停';
                 showNotification('⏸️ 机器人训练已暂停', 'warning');
             } else {
-                showNotification('❌ 暂停机器人训练失败: ' + ((result && result.error) || '未知错误'), 'error');
+                showNotification('❌ 暂停机器人训练失败: ' + ((result && result.error) || '未知错误'), 'danger');
             }
         }
     } catch (e) {
         console.error('暂停机器人训练异常:', e);
-        showNotification('❌ 暂停机器人训练异常: ' + e.message, 'error');
+        showNotification('❌ 暂停机器人训练异常: ' + e.message, 'danger');
     }
 }
 
@@ -684,12 +740,12 @@ async function resumeRobotTraining() {
                 if (tsEl) tsEl.className = 'training-status-badge active';
                 showNotification('✅ 机器人训练已继续', 'success');
             } else {
-                showNotification('❌ 继续机器人训练失败: ' + ((result && result.error) || '未知错误'), 'error');
+                showNotification('❌ 继续机器人训练失败: ' + ((result && result.error) || '未知错误'), 'danger');
             }
         }
     } catch (e) {
         console.error('继续机器人训练异常:', e);
-        showNotification('❌ 继续机器人训练异常: ' + e.message, 'error');
+        showNotification('❌ 继续机器人训练异常: ' + e.message, 'danger');
     }
 }
 
@@ -706,17 +762,20 @@ async function stopRobotTraining() {
                 action: 'stop'
             });
             if (result && result.success) {
-                document.getElementById('training-global-status').textContent = '空闲';
-                document.getElementById('training-global-status').className = 'training-status-badge';
+                var statusEl = document.getElementById('training-global-status');
+                if (statusEl) {
+                    statusEl.textContent = '空闲';
+                    statusEl.className = 'training-status-badge';
+                }
                 showNotification('⏹️ 机器人训练已停止', 'danger');
                 refreshTrainingStatus();
             } else {
-                showNotification('❌ 停止机器人训练失败: ' + ((result && result.error) || '未知错误'), 'error');
+                showNotification('❌ 停止机器人训练失败: ' + ((result && result.error) || '未知错误'), 'danger');
             }
         }
     } catch (e) {
         console.error('停止机器人训练异常:', e);
-        showNotification('❌ 停止机器人训练异常: ' + e.message, 'error');
+        showNotification('❌ 停止机器人训练异常: ' + e.message, 'danger');
     }
 }
 
@@ -734,12 +793,12 @@ async function startRecording() {
             if (result && result.success) {
                 showNotification('🔴 轨迹录制中...', 'info');
             } else {
-                showNotification('❌ 录制启动失败: ' + ((result && result.error) || '未知错误'), 'error');
+                showNotification('❌ 录制启动失败: ' + ((result && result.error) || '未知错误'), 'danger');
             }
         }
     } catch (e) {
         console.error('开始录制异常:', e);
-        showNotification('❌ 开始录制异常: ' + e.message, 'error');
+        showNotification('❌ 开始录制异常: ' + e.message, 'danger');
     }
 }
 
@@ -757,11 +816,12 @@ async function stopRecording() {
             if (result && result.success) {
                 showNotification('⏹️ 录制已停止', 'success');
             } else {
-                showNotification('❌ 停止录制失败', 'error');
+                showNotification('❌ 停止录制失败', 'danger');
             }
         }
     } catch (e) {
-        console.error('停止录制异常:', e);
+        console.error('停止录音失败:', e);
+        showNotification('停止录音失败: ' + e.message, 'danger');
     }
 }
 
@@ -779,12 +839,12 @@ async function replayTrajectory() {
             if (result && result.success) {
                 showNotification('▶️ 轨迹回放中...', 'info');
             } else {
-                showNotification('❌ 轨迹回放失败: ' + ((result && result.error) || '未知错误'), 'error');
+                showNotification('❌ 轨迹回放失败: ' + ((result && result.error) || '未知错误'), 'danger');
             }
         }
     } catch (e) {
         console.error('回放轨迹异常:', e);
-        showNotification('❌ 回放轨迹异常: ' + e.message, 'error');
+        showNotification('❌ 回放轨迹异常: ' + e.message, 'danger');
     }
 }
 
@@ -805,21 +865,26 @@ async function refreshTrainingStatus() {
                         if (stateLabelEl) stateLabelEl.textContent = stateNames[r.training_state] || ('状态:'+r.training_state);
                     }
                     if (r.training_episode !== undefined) {
-                        document.getElementById('training-episode').textContent = r.training_episode;
+                        var epEl = document.getElementById('training-episode');
+                        if (epEl) epEl.textContent = r.training_episode;
                     }
                     if (r.training_reward !== undefined) {
-                        document.getElementById('training-reward').textContent = r.training_reward.toFixed(4);
+                        var rewardEl = document.getElementById('training-reward');
+                        if (rewardEl) rewardEl.textContent = r.training_reward.toFixed(4);
                     }
                     if (r.training_progress !== undefined) {
                         var pct = Math.round(r.training_progress * 100);
-                        document.getElementById('training-progress-fill').style.width = pct + '%';
-                        document.getElementById('training-progress-text').textContent = pct + '%';
+                        var fillEl = document.getElementById('training-progress-fill');
+                        if (fillEl) fillEl.style.width = pct + '%';
+                        var textEl = document.getElementById('training-progress-text');
+                        if (textEl) textEl.textContent = pct + '%';
                     }
                 }
             }
         }
     } catch (e) {
         console.error('刷新训练状态异常:', e);
+        showNotification('刷新训练状态失败: ' + e.message, 'danger');
     }
 }
 
@@ -837,24 +902,31 @@ async function refreshSensorPipeline() {
             var result = await window.SelfLnnApi.getSensorPipelineStatus();
             if (result && result.success && result.data) {
                 var d = result.data;
-                // 概要信息
-                document.getElementById('pipeline-running').textContent = d.running ? '运行中' : '已停止';
-                document.getElementById('pipeline-sensor-count').textContent = d.sensor_count || 0;
-                document.getElementById('pipeline-sample-rate').textContent = (d.sample_rate || 0) + ' Hz';
-                document.getElementById('pipeline-stream-port').textContent = d.stream_port || '未配置';
+                // 概要信息 (C-05修复: 添加空值检查)
+                var prEl = document.getElementById('pipeline-running');
+                if (prEl) prEl.textContent = d.running ? '运行中' : '已停止';
+                var pscEl = document.getElementById('pipeline-sensor-count');
+                if (pscEl) pscEl.textContent = d.sensor_count || 0;
+                var psrEl = document.getElementById('pipeline-sample-rate');
+                if (psrEl) psrEl.textContent = (d.sample_rate || 0) + ' Hz';
+                var pspEl = document.getElementById('pipeline-stream-port');
+                if (pspEl) pspEl.textContent = d.stream_port || '未配置';
                 // 状态徽章
                 var badge = document.getElementById('pipeline-status-badge');
-                if (d.running) {
-                    badge.textContent = ' 在线';
-                    badge.className = 'pipeline-status-badge online';
-                } else {
-                    badge.textContent = ' 离线';
-                    badge.className = 'pipeline-status-badge';
+                if (badge) {
+                    if (d.running) {
+                        badge.textContent = ' 在线';
+                        badge.className = 'pipeline-status-badge online';
+                    } else {
+                        badge.textContent = ' 离线';
+                        badge.className = 'pipeline-status-badge';
+                    }
                 }
                 // 传感器列表
                 if (d.sensors && d.sensors.length > 0) {
                     var tbody = document.getElementById('pipeline-sensor-tbody');
-                    tbody.innerHTML = d.sensors.map(function(s, i) {
+                    if (tbody) {
+                        tbody.innerHTML = d.sensors.map(function(s, i) {
                         var typeNames = {0:'未知',1:'摄像头',2:'激光雷达',3:'IMU',4:'超声波',5:'温度',6:'压力',7:'红外',8:'深度',9:'力觉',10:'触觉'};
                         return '<tr>' +
                             '<td>' + (s.id !== undefined ? s.id : i) + '</td>' +
@@ -865,6 +937,7 @@ async function refreshSensorPipeline() {
                             '<td>' + (s.last_value !== undefined ? s.last_value : '--') + '</td>' +
                             '</tr>';
                     }).join('');
+                    }
                 }
                 // LNN传感器输入状态
                 if (d.sensor_input) {
@@ -880,14 +953,14 @@ async function refreshSensorPipeline() {
                 }
                 showNotification('✅ 传感器管道状态已更新', 'success');
             } else {
-                showNotification('❌ 获取传感器状态失败: ' + ((result && result.error) || '未知错误'), 'error');
+                showNotification('❌ 获取传感器状态失败: ' + ((result && result.error) || '未知错误'), 'danger');
             }
         } else {
-            showNotification('❌ 传感器管道后端未连接', 'error');
+            showNotification('❌ 传感器管道后端未连接', 'danger');
         }
     } catch (e) {
         console.error('刷新传感器管道异常:', e);
-        showNotification('❌ 刷新传感器管道异常: ' + e.message, 'error');
+        showNotification('❌ 刷新传感器管道异常: ' + e.message, 'danger');
     }
 }
 
@@ -901,11 +974,11 @@ async function calibrateIMU() {
             var result = await window.SelfLnnApi.getSensorPipelineStatus({ calibrate_imu: true });
             showNotification('✅ IMU校准命令已发送', 'success');
         } else {
-            showNotification('❌ 校准后端未连接', 'error');
+            showNotification('❌ 校准后端未连接', 'danger');
         }
     } catch (e) {
         console.error('校准IMU异常:', e);
-        showNotification('❌ 校准IMU异常: ' + e.message, 'error');
+        showNotification('❌ 校准IMU异常: ' + e.message, 'danger');
     }
 }
 
@@ -920,7 +993,7 @@ async function resetSensorInput() {
             var result = await window.SelfLnnApi.getSensorPipelineStatus({ reset_sensor_input: true });
             showNotification('✅ LNN传感器输入已重置', 'success');
         } else {
-            showNotification('❌ 重置后端未连接', 'error');
+            showNotification('❌ 重置后端未连接', 'danger');
         }
     } catch (e) {
         console.error('重置LNN传感器输入异常:', e);
@@ -938,7 +1011,7 @@ async function startSensorStream() {
             if (result && result.success) {
                 showNotification('✅ 传感器流媒体已启动', 'success');
             } else {
-                showNotification('❌ 启动流媒体失败', 'error');
+                showNotification('❌ 启动流媒体失败', 'danger');
             }
         }
     } catch (e) {
@@ -957,7 +1030,7 @@ async function stopSensorStream() {
             if (result && result.success) {
                 showNotification('⏹️ 传感器流媒体已停止', 'success');
             } else {
-                showNotification('❌ 停止流媒体失败', 'error');
+                showNotification('❌ 停止流媒体失败', 'danger');
             }
         }
     } catch (e) {
@@ -981,14 +1054,14 @@ async function connectRobotEnhanced(robotId, connectGazebo, robotName) {
                 showNotification('✅ ROS机器人连接成功', 'success');
                 refreshRosGazeboStatus();
             } else {
-                showNotification('❌ 连接失败: ' + ((result && result.error) || '未知错误'), 'error');
+                showNotification('❌ 连接失败: ' + ((result && result.error) || '未知错误'), 'danger');
             }
         } else {
-            showNotification('❌ 增强连接后端未连接', 'error');
+            showNotification('❌ 增强连接后端未连接', 'danger');
         }
     } catch (e) {
         console.error('增强连接异常:', e);
-        showNotification('❌ 连接异常: ' + e.message, 'error');
+        showNotification('❌ 连接异常: ' + e.message, 'danger');
     }
 }
 
@@ -1005,22 +1078,20 @@ async function disconnectRobotEnhanced(robotId, disconnectGazebo, modelName) {
                 showNotification('✅ ROS机器人已断开', 'success');
                 refreshRosGazeboStatus();
             } else {
-                showNotification('❌ 断开失败: ' + ((result && result.error) || '未知错误'), 'error');
+                showNotification('❌ 断开失败: ' + ((result && result.error) || '未知错误'), 'danger');
             }
         } else {
-            showNotification('❌ 增强断开后端未连接', 'error');
+            showNotification('❌ 增强断开后端未连接', 'danger');
         }
     } catch (e) {
         console.error('增强断开异常:', e);
-        showNotification('❌ 断开异常: ' + e.message, 'error');
+        showNotification('❌ 断开异常: ' + e.message, 'danger');
     }
 }
 
 // =============================================================================
-// 自动刷新定时器
+// 自动刷新定时器 (M-09修复: 使用 g_rosGazeboRefreshTimer 统一全局变量命名)
 // =============================================================================
-
-var rosGazeboRefreshTimer = null;
 
 /**
  * 启动ROS/Gazebo状态自动刷新（通过统一轮询中心调度）
@@ -1034,7 +1105,7 @@ function startRosGazeboAutoRefresh(intervalMs) {
             refreshTrainingStatus();
         });
     } else {
-        rosGazeboRefreshTimer = setInterval(function() {
+        g_rosGazeboRefreshTimer = setInterval(function() {
             refreshRosGazeboStatus();
             refreshTrainingStatus();
         }, intervalMs);
@@ -1045,9 +1116,9 @@ function startRosGazeboAutoRefresh(intervalMs) {
  * 停止ROS/Gazebo状态自动刷新
  */
 function stopRosGazeboAutoRefresh() {
-    if (rosGazeboRefreshTimer) {
-        clearInterval(rosGazeboRefreshTimer);
-        rosGazeboRefreshTimer = null;
+    if (g_rosGazeboRefreshTimer) {
+        clearInterval(g_rosGazeboRefreshTimer);
+        g_rosGazeboRefreshTimer = null;
     }
     if (typeof g_dataEngine !== 'undefined' && g_dataEngine) {
         g_dataEngine.unregisterModule('ros_gazebo');
@@ -1182,7 +1253,7 @@ function showApiUnavailableError() {
     /* 如果内联仪表盘更新器已设值，不覆盖 */
     if (window.__dashboardLive === true) return;
     console.warn('后端未连接，显示断开状态（绝不生成虚假数据）');
-    showNotification('⚠️ 后端后端未连接，等待连接...', 'warning');
+    showNotification('⚠ 后端未连接，等待连接...', 'warning');
     
     if (g_usingDataEngine && g_dataEngine) {
         g_dataEngine.start(2000);
@@ -1304,7 +1375,8 @@ function _applyTrainingHistoryPlaceholderText(connected) {
  * 更新系统健康状态
  */
 function updateSystemHealth(systemStatus) {
-    const cpuElement = document.querySelector('.metric:nth-child(1) .metric-value');
+    /* F4-H01修复: 使用稳定ID选择器替代脆弱CSS选择器 */
+    const cpuElement = document.getElementById('cpu-usage');
     const memoryElement = document.querySelector('.metric:nth-child(2) .metric-value');
     const uptimeElement = document.querySelector('.metric:nth-child(3) .metric-value');
     
@@ -2180,57 +2252,63 @@ function setEl(sel, val, prop) {
  * 设置事件监听器
  */
 function setupEventListeners() {
+    /* C-04修复: 在重新设置监听器前清理旧的 */
+    window._cleanupAllEventListeners();
     
     // 导航切换 + 下拉菜单
     var navLinks = document.querySelectorAll('.nav a');
     
+    /* C-04修复: 提取为命名函数以便清理 */
+    function _handleNavLinkClick(e) {
+        var parentLi = this.parentElement;
+        var isDropdownToggle = parentLi.classList.contains('nav-dropdown');
+        var isDropdownItem = parentLi.parentElement && parentLi.parentElement.classList.contains('dropdown-menu');
+        var href = this.getAttribute('href');
+        
+        if (isDropdownToggle) {
+            e.preventDefault();
+            parentLi.classList.toggle('active');
+            return;
+        }
+        
+        if (isDropdownItem) {
+            e.preventDefault();
+            var dropdown = parentLi.closest('.nav-dropdown');
+            if (dropdown) dropdown.classList.remove('active');
+            var targetId = href.substring(1);
+            document.querySelectorAll('.section').forEach(function(s) { s.classList.remove('active'); });
+            var target = document.getElementById(targetId);
+            if (target) target.classList.add('active');
+            navLinks.forEach(function(l) { l.classList.remove('active'); });
+            this.classList.add('active');
+            return;
+        }
+        
+        if (href && href.startsWith('#')) {
+            e.preventDefault();
+            navLinks.forEach(function(l) { l.classList.remove('active'); });
+            this.classList.add('active');
+            var targetId = href.substring(1);
+            document.querySelectorAll('.section').forEach(function(s) { s.classList.remove('active'); });
+            var target = document.getElementById(targetId);
+            if (target) target.classList.add('active');
+        }
+    }
+    
     navLinks.forEach(function(link) {
-        link.addEventListener('click', function(e) {
-            var parentLi = this.parentElement;
-            var isDropdownToggle = parentLi.classList.contains('nav-dropdown');
-            var isDropdownItem = parentLi.parentElement && parentLi.parentElement.classList.contains('dropdown-menu');
-            var href = this.getAttribute('href');
-            
-            if (isDropdownToggle) {
-                e.preventDefault();
-                parentLi.classList.toggle('active');
-                return;
-            }
-            
-            if (isDropdownItem) {
-                e.preventDefault();
-                var dropdown = parentLi.closest('.nav-dropdown');
-                if (dropdown) dropdown.classList.remove('active');
-                var targetId = href.substring(1);
-                document.querySelectorAll('.section').forEach(function(s) { s.classList.remove('active'); });
-                var target = document.getElementById(targetId);
-                if (target) target.classList.add('active');
-                navLinks.forEach(function(l) { l.classList.remove('active'); });
-                this.classList.add('active');
-                return;
-            }
-            
-            if (href && href.startsWith('#')) {
-                e.preventDefault();
-                navLinks.forEach(function(l) { l.classList.remove('active'); });
-                this.classList.add('active');
-                var targetId = href.substring(1);
-                document.querySelectorAll('.section').forEach(function(s) { s.classList.remove('active'); });
-                var target = document.getElementById(targetId);
-                if (target) target.classList.add('active');
-            }
-        });
+        window._registerEventListener(link, 'click', _handleNavLinkClick);
     });
     
-    // 点击页面其他区域关闭下拉菜单
-    document.addEventListener('click', function(e) {
+    /* C-04修复: 提取为命名函数 */
+    function _handleDocClickCloseDropdown(e) {
         if (!e.target.closest('.nav-dropdown')) {
             document.querySelectorAll('.nav-dropdown.active').forEach(function(d) { d.classList.remove('active'); });
         }
-    });
+    }
+    window._registerEventListener(document, 'click', _handleDocClickCloseDropdown);
     
-    // 键盘快捷键（P3-001修复：Ctrl+R仅在非文本编辑区刷新仪表盘，不阻止浏览器刷新）
-    document.addEventListener('keydown', function(e) {
+    /* C-04修复: 提取为命名函数 */
+    function _handleKeydownShortcuts(e) {
         // Ctrl+Shift+R 刷新仪表盘（不禁用浏览器Ctrl+R刷新）
         if (e.ctrlKey && e.shiftKey && e.key === 'R') {
             e.preventDefault();
@@ -2293,35 +2371,37 @@ function setupEventListeners() {
                 refreshRobotStatus();
             }
         }
-    });
+    }
+    window._registerEventListener(document, 'keydown', _handleKeydownShortcuts);
 
     // === 设备管理器事件绑定 ===
     setTimeout(function() {
+        /* C-04修复: 提取为命名函数 */
+        function _handleVoiceInputClick() { toggleVoiceInput(); }
+        function _handleVoiceOutputClick() { toggleVoiceOutput(); }
+        function _handleMultimodalToggleChange() {
+            if (g_dialogueEnhanced) {
+                if (this.checked) g_dialogueEnhanced.enableMultimodal();
+                else g_dialogueEnhanced.disableMultimodal();
+            }
+        }
+        
         // 语音输入按钮
         var voiceInputBtn = document.getElementById('dialogue-voice-input');
         if (voiceInputBtn) {
-            voiceInputBtn.addEventListener('click', function() {
-                toggleVoiceInput();
-            });
+            window._registerEventListener(voiceInputBtn, 'click', _handleVoiceInputClick);
         }
 
         // 语音输出按钮
         var voiceOutputBtn = document.getElementById('dialogue-voice-output');
         if (voiceOutputBtn) {
-            voiceOutputBtn.addEventListener('click', function() {
-                toggleVoiceOutput();
-            });
+            window._registerEventListener(voiceOutputBtn, 'click', _handleVoiceOutputClick);
         }
 
         // 多模态切换复选框
         var multimodalToggle = document.getElementById('dialogue-multimodal-toggle');
         if (multimodalToggle) {
-            multimodalToggle.addEventListener('change', function() {
-                if (g_dialogueEnhanced) {
-                    if (this.checked) g_dialogueEnhanced.enableMultimodal();
-                    else g_dialogueEnhanced.disableMultimodal();
-                }
-            });
+            window._registerEventListener(multimodalToggle, 'change', _handleMultimodalToggleChange);
         }
 
         // WebSocket流式对话初始化
@@ -2366,7 +2446,7 @@ function setupEventListeners() {
                         sendDialogueMessage();
                     }
                 } else {
-                    showNotification('语音识别失败: ' + (result.error || '未知错误'), 'error');
+                    showNotification('语音识别失败: ' + (result.error || '未知错误'), 'danger');
                 }
             };
             g_dialogueEnhanced.onVoiceOutputStart = function() {
@@ -2384,39 +2464,42 @@ function setupEventListeners() {
         }
 
         // TTS速度控制
+        function _handleTtsSpeedInput() {
+            var val = parseFloat(this.value);
+            if (g_dialogueEnhanced) g_dialogueEnhanced.setTtsSpeed(val);
+            var display = document.getElementById('tts-speed-value');
+            if (display) display.textContent = val.toFixed(1) + 'x';
+        }
         var ttsSpeedSlider = document.getElementById('tts-speed');
         if (ttsSpeedSlider) {
-            ttsSpeedSlider.addEventListener('input', function() {
-                var val = parseFloat(this.value);
-                if (g_dialogueEnhanced) g_dialogueEnhanced.setTtsSpeed(val);
-                var display = document.getElementById('tts-speed-value');
-                if (display) display.textContent = val.toFixed(1) + 'x';
-            });
+            window._registerEventListener(ttsSpeedSlider, 'input', _handleTtsSpeedInput);
         }
 
         // 语音指令开关
+        function _handleVoiceCommandToggleChange() {
+            if (g_voiceCommandSystem) {
+                if (this.checked) g_voiceCommandSystem.startContinuousMode();
+                else g_voiceCommandSystem.stopContinuousMode();
+            }
+        }
         var voiceCommandToggle = document.getElementById('voice-command-toggle');
         if (voiceCommandToggle) {
-            voiceCommandToggle.addEventListener('change', function() {
-                if (g_voiceCommandSystem) {
-                    if (this.checked) g_voiceCommandSystem.startContinuousMode();
-                    else g_voiceCommandSystem.stopContinuousMode();
-                }
-            });
+            window._registerEventListener(voiceCommandToggle, 'change', _handleVoiceCommandToggleChange);
         }
 
         // 对话发送摄像头画面复选框
+        function _handleSendCameraChange() {
+            if (this.checked && g_deviceManager) {
+                var hasActiveCam = g_deviceManager.cameras.some(function(c) { return c.active; });
+                if (!hasActiveCam) {
+                    showNotification('没有已激活的摄像头，请先在设备管理中启动摄像头', 'warning');
+                    this.checked = false;
+                }
+            }
+        }
         var sendCameraCb = document.getElementById('dialogue-send-camera');
         if (sendCameraCb) {
-            sendCameraCb.addEventListener('change', function() {
-                if (this.checked && g_deviceManager) {
-                    var hasActiveCam = g_deviceManager.cameras.some(function(c) { return c.active; });
-                    if (!hasActiveCam) {
-                        showNotification('没有已激活的摄像头，请先在设备管理中启动摄像头', 'warning');
-                        this.checked = false;
-                    }
-                }
-            });
+            window._registerEventListener(sendCameraCb, 'change', _handleSendCameraChange);
         }
     }, 200);
 
@@ -2430,7 +2513,8 @@ function setupEventListeners() {
     }
 
     /* P2-06: 监听WebSocket连接状态变化，更新训练中心WS状态指示器 */
-    document.addEventListener('websocket-connection-status', function(e) {
+    /* C-04修复: 提取为命名函数 */
+    function _handleWsConnectionStatus(e) {
         var wsStatusEl = document.getElementById('ws-status');
         if (!wsStatusEl) return;
         if (e.detail && e.detail.connected) {
@@ -2440,15 +2524,17 @@ function setupEventListeners() {
             wsStatusEl.textContent = '未连接';
             wsStatusEl.style.color = '#f87171';
         }
-    });
+    }
+    window._registerEventListener(document, 'websocket-connection-status', _handleWsConnectionStatus);
 
     /* P2-06: 监听WebSocket重连状态，更新WS状态指示器 */
-    document.addEventListener('websocket-reconnect-status', function(e) {
+    function _handleWsReconnectStatus(e) {
         var wsStatusEl = document.getElementById('ws-status');
         if (!wsStatusEl) return;
         wsStatusEl.textContent = '重连中(' + e.detail.attempt + '/' + e.detail.maxAttempts + ')';
         wsStatusEl.style.color = '#eab308';
-    });
+    }
+    window._registerEventListener(document, 'websocket-reconnect-status', _handleWsReconnectStatus);
 }
 
 /**
@@ -2456,13 +2542,15 @@ function setupEventListeners() {
  * 自动为每个 .range-with-value 中的 input[type="range"] 绑定 oninput 事件
  */
 function initRangeSliders() {
+    /* C-04修复: 提取为命名函数 */
+    function _handleRangeSliderInput() {
+        var display = this.parentElement.querySelector('.slider-value');
+        if (display) {
+            display.textContent = this.value;
+        }
+    }
     document.querySelectorAll('.range-with-value input[type="range"]').forEach(function(slider) {
-        slider.addEventListener('input', function() {
-            var display = this.parentElement.querySelector('.slider-value');
-            if (display) {
-                display.textContent = this.value;
-            }
-        });
+        window._registerEventListener(slider, 'input', _handleRangeSliderInput);
     });
 }
 
@@ -2685,7 +2773,7 @@ function showSuccess(message) {
     showNotification(message, 'success');
 }
 function showError(message) {
-    showNotification(message, 'error');
+    showNotification(message, 'danger');
 }
 
 /* ===== 机器人控制功能 ===== */
@@ -2705,38 +2793,43 @@ async function refreshRobotStatus() {
             
             // 检查机器人是否可用
             if (robot.status === 'available') {
-                // 更新电池电量
+                // 更新电池电量 (C-05修复: 添加空值检查)
                 const batteryLevel = Math.max(0, Math.min(100, Math.round(robot.battery)));
-                document.getElementById('robot-battery-fill').style.width = `${batteryLevel}%`;
-                document.getElementById('robot-battery-text').textContent = `${batteryLevel}%`;
+                var batFill = document.getElementById('robot-battery-fill');
+                if (batFill) batFill.style.width = batteryLevel + '%';
+                var batText = document.getElementById('robot-battery-text');
+                if (batText) batText.textContent = batteryLevel + '%';
                 
                 // 更新位置
+                var posEl = document.getElementById('robot-position');
                 if (robot.position && robot.position.length >= 3) {
                     const x = robot.position[0].toFixed(2);
                     const y = robot.position[1].toFixed(2);
                     const z = robot.position[2].toFixed(2);
-                    document.getElementById('robot-position').textContent = `X: ${x}m, Y: ${y}m, Z: ${z}m`;
+                    if (posEl) posEl.textContent = 'X: ' + x + 'm, Y: ' + y + 'm, Z: ' + z + 'm';
                 } else {
-                    document.getElementById('robot-position').textContent = 'X: -- m, Y: -- m, Z: -- m';
+                    if (posEl) posEl.textContent = 'X: -- m, Y: -- m, Z: -- m';
                 }
                 
                 // 更新姿态（F-005修复: 后端未提供姿态数据时显示"数据未加载"）
+                var orientEl = document.getElementById('robot-orientation');
                 if (robot.orientation) {
                     const roll = (robot.orientation[0] || 0).toFixed(1);
                     const pitch = (robot.orientation[1] || 0).toFixed(1);
                     const yaw = (robot.orientation[2] || 0).toFixed(1);
-                    document.getElementById('robot-orientation').textContent = 
+                    if (orientEl) orientEl.textContent = 
                         'Roll: ' + roll + '°, Pitch: ' + pitch + '°, Yaw: ' + yaw + '°';
                 } else {
-                    document.getElementById('robot-orientation').textContent = '数据未加载';
+                    if (orientEl) orientEl.textContent = '数据未加载';
                 }
                 
                 // 更新温度（F-005修复: 不再使用25.0作为默认fallback值）
+                var tempEl = document.getElementById('robot-temperature');
                 if (robot.temperature !== undefined && robot.temperature !== null) {
                     const temperature = Math.round(robot.temperature);
-                    document.getElementById('robot-temperature').textContent = `${temperature}°C`;
+                    if (tempEl) tempEl.textContent = temperature + '°C';
                 } else {
-                    document.getElementById('robot-temperature').textContent = '数据未加载';
+                    if (tempEl) tempEl.textContent = '数据未加载';
                 }
                 
                 // 更新状态指示器
@@ -2752,12 +2845,17 @@ async function refreshRobotStatus() {
                 // 机器人不可用或出错
                 console.warn('机器人状态不可用:', robot.status, robot.error);
                 
-                // 显示错误状态
-                document.getElementById('robot-battery-fill').style.width = '0%';
-                document.getElementById('robot-battery-text').textContent = '--';
-                document.getElementById('robot-position').textContent = 'X: -- m, Y: -- m, Z: -- m';
-                document.getElementById('robot-orientation').textContent = 'Roll: --°, Pitch: --°, Yaw: --°';
-                document.getElementById('robot-temperature').textContent = '--°C';
+                // 显示错误状态 (C-05修复: 添加空值检查)
+                var batFill2 = document.getElementById('robot-battery-fill');
+                if (batFill2) batFill2.style.width = '0%';
+                var batText2 = document.getElementById('robot-battery-text');
+                if (batText2) batText2.textContent = '--';
+                var posEl2 = document.getElementById('robot-position');
+                if (posEl2) posEl2.textContent = 'X: -- m, Y: -- m, Z: -- m';
+                var orientEl2 = document.getElementById('robot-orientation');
+                if (orientEl2) orientEl2.textContent = 'Roll: --°, Pitch: --°, Yaw: --°';
+                var tempEl2 = document.getElementById('robot-temperature');
+                if (tempEl2) tempEl2.textContent = '--°C';
                 
                 if (robot.error) {
                     showNotification(`⚠️ 机器人状态错误: ${robot.error}`, 'warning');
@@ -2769,12 +2867,17 @@ async function refreshRobotStatus() {
             // API调用失败
             console.error('获取机器人状态API失败:', result.error);
             
-            // 显示错误状态
-            document.getElementById('robot-battery-fill').style.width = '0%';
-            document.getElementById('robot-battery-text').textContent = '--';
-            document.getElementById('robot-position').textContent = 'X: -- m, Y: -- m, Z: -- m';
-            document.getElementById('robot-orientation').textContent = 'Roll: --°, Pitch: --°, Yaw: --°';
-            document.getElementById('robot-temperature').textContent = '--°C';
+            // 显示错误状态 (C-05修复: 添加空值检查)
+            var batFill3 = document.getElementById('robot-battery-fill');
+            if (batFill3) batFill3.style.width = '0%';
+            var batText3 = document.getElementById('robot-battery-text');
+            if (batText3) batText3.textContent = '--';
+            var posEl3 = document.getElementById('robot-position');
+            if (posEl3) posEl3.textContent = 'X: -- m, Y: -- m, Z: -- m';
+            var orientEl3 = document.getElementById('robot-orientation');
+            if (orientEl3) orientEl3.textContent = 'Roll: --°, Pitch: --°, Yaw: --°';
+            var tempEl3 = document.getElementById('robot-temperature');
+            if (tempEl3) tempEl3.textContent = '--°C';
             
             showNotification('❌ 获取机器人状态失败: ' + (result.error || 'API错误'), 'danger');
         }
@@ -2832,8 +2935,11 @@ async function moveBackward() {
     showNotification('机器人后退中...', 'info');
     
     // 更新UI状态
-    document.getElementById('robot-status-mode').textContent = '手动控制：后退';
-    document.querySelector('.direction-btn.backward').style.background = 'rgba(0, 212, 255, 0.3)';
+    /* F4-H02修复: 添加DOM空指针检查 */
+    var robotStatusEl = document.getElementById('robot-status-mode');
+    if (robotStatusEl) robotStatusEl.textContent = '手动控制：后退';
+    var backwardBtn = document.querySelector('.direction-btn.backward');
+    if (backwardBtn) backwardBtn.style.background = 'rgba(0, 212, 255, 0.3)';
     
     try {
         // 发送真实机器人控制命令
@@ -2966,10 +3072,13 @@ async function stopMovement() {
  * 更新线速度
  */
 async function updateLinearSpeed(value) {
-    document.getElementById('linear-speed-value').textContent = value;
+    /* F4-H02修复: 添加DOM空指针检查 */
+    var linearSpeedEl = document.getElementById('linear-speed-value');
+    if (linearSpeedEl) linearSpeedEl.textContent = value;
     
     // 更新UI状态
-    document.getElementById('robot-status-mode').textContent = `手动控制：速度 ${value}m/s`;
+    var robotStatusEl2 = document.getElementById('robot-status-mode');
+    if (robotStatusEl2) robotStatusEl2.textContent = `手动控制：速度 ${value}m/s`;
     
     try {
         // 发送速度参数更新到机器人控制系统
@@ -2990,10 +3099,13 @@ async function updateLinearSpeed(value) {
  * 更新角速度
  */
 async function updateAngularSpeed(value) {
-    document.getElementById('angular-speed-value').textContent = value;
+    /* F4-H02修复: 添加DOM空指针检查 */
+    var angularSpeedEl = document.getElementById('angular-speed-value');
+    if (angularSpeedEl) angularSpeedEl.textContent = value;
     
     // 更新UI状态
-    document.getElementById('robot-status-mode').textContent = `手动控制：转向速度 ${value}rad/s`;
+    var robotStatusEl3 = document.getElementById('robot-status-mode');
+    if (robotStatusEl3) robotStatusEl3.textContent = `手动控制：转向速度 ${value}rad/s`;
     
     try {
         // 发送角速度参数更新到机器人控制系统
@@ -3101,7 +3213,7 @@ async function executeAction(action) {
 /**
  * 创建新任务
  */
-function createNewTask() {
+async function createNewTask() {
     showNotification('创建新任务...', 'info');
     
     const taskName = await promptAsync('请输入任务名称:');
@@ -3627,7 +3739,7 @@ function adjustVideoQuality(quality) {
             if (result && result.success) {
                 showNotification(`视频质量已切换: ${qualityNames[quality]}`, 'success');
             } else {
-                showNotification(`视频质量切换失败: ${qualityNames[quality]}`, 'error');
+                showNotification(`视频质量切换失败: ${qualityNames[quality]}`, 'danger');
             }
         }).catch(function() {
             showNotification(`无法连接到后端，视频质量设置未生效: ${qualityNames[quality]}`, 'warning');
@@ -3659,10 +3771,10 @@ function saveRobotConfig() {
             if (result && result.success) {
                 showNotification('✅ 机器人配置已保存到后端', 'success');
             } else {
-                showNotification('⚠️ 配置保存失败: ' + (result ? result.message : '未知错误'), 'error');
+                showNotification('⚠️ 配置保存失败: ' + (result ? result.message : '未知错误'), 'danger');
             }
         }).catch(function(err) {
-            showNotification('❌ 无法连接后端保存配置: ' + (err.message || '网络错误'), 'error');
+            showNotification('❌ 无法连接后端保存配置: ' + (err.message || '网络错误'), 'danger');
         });
     } else {
         showNotification('⚠️ 后端API未就绪，配置未持久化', 'warning');
@@ -3694,7 +3806,7 @@ async function connectRobot() {
                 console.warn('机器人控制未启用:', robot);
             } else if (robot.status === 'error') {
                 // 机器人状态错误
-                showNotification(`❌ 机器人状态错误: ${robot.error || '未知错误'}`, 'error');
+                showNotification(`❌ 机器人状态错误: ${robot.error || '未知错误'}`, 'danger');
                 console.error('机器人状态错误:', robot);
             } else {
                 // 其他状态
@@ -3704,12 +3816,12 @@ async function connectRobot() {
         } else {
             // 获取机器人状态失败
             const errorMsg = statusResult.error || '获取机器人状态失败';
-            showNotification(`❌ ${errorMsg}`, 'error');
+            showNotification(`❌ ${errorMsg}`, 'danger');
             console.error('获取机器人状态失败:', statusResult);
         }
     } catch (error) {
         console.error('连接机器人失败:', error);
-        showNotification(`❌ 连接机器人失败: ${error.message}`, 'error');
+        showNotification(`❌ 连接机器人失败: ${error.message}`, 'danger');
     }
 }
 
@@ -3739,7 +3851,7 @@ async function disconnectRobot() {
             
         } catch (error) {
             console.error('断开机器人连接失败:', error);
-            showNotification(`❌ 断开机器人连接失败: ${error.message}`, 'error');
+            showNotification(`❌ 断开机器人连接失败: ${error.message}`, 'danger');
         }
     }
 }
@@ -3762,16 +3874,16 @@ async function rebootRobot() {
                 if (result.success) {
                     showNotification('✅ 机器人重启命令已发送', 'success');
                 } else {
-                    showNotification(`❌ 机器人重启失败: ${result.error || '未知错误'}`, 'error');
+                    showNotification(`❌ 机器人重启失败: ${result.error || '未知错误'}`, 'danger');
                 }
             } else {
                 // 后端未连接，显示错误
-                showNotification('❌ 机器人重启后端未连接，请检查服务器状态', 'error');
+                showNotification('❌ 机器人重启后端未连接，请检查服务器状态', 'danger');
                 console.error('机器人重启后端未连接');
             }
         } catch (error) {
             console.error('重启机器人失败:', error);
-            showNotification(`❌ 重启机器人失败: ${error.message}`, 'error');
+            showNotification(`❌ 重启机器人失败: ${error.message}`, 'danger');
         }
     }
 }
@@ -3793,16 +3905,16 @@ async function calibrateSensors() {
             if (result.success) {
                 showNotification('✅ 传感器校准命令已发送', 'success');
             } else {
-                showNotification(`❌ 传感器校准失败: ${result.error || '未知错误'}`, 'error');
+                showNotification(`❌ 传感器校准失败: ${result.error || '未知错误'}`, 'danger');
             }
         } else {
             // 后端未连接，显示错误
-            showNotification('❌ 传感器校准后端未连接，请检查服务器状态', 'error');
+            showNotification('❌ 传感器校准后端未连接，请检查服务器状态', 'danger');
             console.error('传感器校准后端未连接');
         }
     } catch (error) {
         console.error('校准传感器失败:', error);
-        showNotification(`❌ 校准传感器失败: ${error.message}`, 'error');
+        showNotification(`❌ 校准传感器失败: ${error.message}`, 'danger');
     }
 }
 
@@ -3824,16 +3936,16 @@ async function updateFirmware() {
                     document.getElementById('robot-error-status').innerHTML = '<i class="fas fa-check-circle"></i> 固件已更新';
                     document.getElementById('robot-error-status').className = 'status-value normal';
                 } else {
-                    showNotification(`❌ 固件更新失败: ${result.message || '未知错误'}`, 'error');
+                    showNotification(`❌ 固件更新失败: ${result.message || '未知错误'}`, 'danger');
                 }
             } else {
                 // 后端未连接，显示错误
-                showNotification('❌ 固件更新后端未连接，请检查服务器状态', 'error');
+                showNotification('❌ 固件更新后端未连接，请检查服务器状态', 'danger');
                 console.error('固件更新后端未连接');
             }
         } catch (error) {
             console.error('固件更新失败:', error);
-            showNotification(`❌ 固件更新失败: ${error.message}`, 'error');
+            showNotification(`❌ 固件更新失败: ${error.message}`, 'danger');
         }
     }
 }
@@ -3853,16 +3965,16 @@ async function runSelfDiagnostic() {
             if (result.success) {
                 showNotification('✅ 自检完成：所有系统正常', 'success');
             } else {
-                showNotification(`❌ 自检失败: ${result.message || '未知错误'}`, 'error');
+                showNotification(`❌ 自检失败: ${result.message || '未知错误'}`, 'danger');
             }
         } else {
             // 后端未连接，显示错误
-            showNotification('❌ 系统自检后端未连接，请检查服务器状态', 'error');
+            showNotification('❌ 系统自检后端未连接，请检查服务器状态', 'danger');
             console.error('系统自检后端未连接');
         }
     } catch (error) {
         console.error('系统自检失败:', error);
-        showNotification(`❌ 系统自检失败: ${error.message}`, 'error');
+        showNotification(`❌ 系统自检失败: ${error.message}`, 'danger');
     }
 }
 
@@ -3881,16 +3993,16 @@ async function exportDiagnosticData() {
             if (result.success) {
                 showNotification('✅ 诊断数据导出完成', 'success');
             } else {
-                showNotification(`❌ 诊断数据导出失败: ${result.message || '未知错误'}`, 'error');
+                showNotification(`❌ 诊断数据导出失败: ${result.message || '未知错误'}`, 'danger');
             }
         } else {
             // 后端未连接，显示错误
-            showNotification('❌ 诊断数据导出后端未连接，请检查服务器状态', 'error');
+            showNotification('❌ 诊断数据导出后端未连接，请检查服务器状态', 'danger');
             console.error('诊断数据导出后端未连接');
         }
     } catch (error) {
         console.error('诊断数据导出失败:', error);
-        showNotification(`❌ 诊断数据导出失败: ${error.message}`, 'error');
+        showNotification(`❌ 诊断数据导出失败: ${error.message}`, 'danger');
     }
 }
 
@@ -3936,16 +4048,16 @@ async function refreshMultimodalStatus() {
                     if (el) el.textContent = status.error_tasks;
                 }
             } else {
-                showNotification(`❌ 获取多模态状态失败: ${result.error || '未知错误'}`, 'error');
+                showNotification(`❌ 获取多模态状态失败: ${result.error || '未知错误'}`, 'danger');
             }
         } else {
             // 后端未连接，显示错误
-            showNotification('❌ 多模态状态后端未连接，请检查服务器状态', 'error');
+            showNotification('❌ 多模态状态后端未连接，请检查服务器状态', 'danger');
             console.error('多模态状态后端未连接');
         }
     } catch (error) {
         console.error('刷新多模态状态失败:', error);
-        showNotification(`❌ 刷新多模态状态失败: ${error.message}`, 'error');
+        showNotification(`❌ 刷新多模态状态失败: ${error.message}`, 'danger');
     }
 }
 
@@ -3996,16 +4108,16 @@ async function saveMultimodalConfig() {
             if (result.success) {
                 showNotification('✅ 多模态配置已保存', 'success');
             } else {
-                showNotification(`❌ 保存多模态配置失败: ${result.error || '未知错误'}`, 'error');
+                showNotification(`❌ 保存多模态配置失败: ${result.error || '未知错误'}`, 'danger');
             }
         } else {
             // 后端未连接，显示错误
-            showNotification('❌ 多模态配置后端未连接，请检查服务器状态', 'error');
+            showNotification('❌ 多模态配置后端未连接，请检查服务器状态', 'danger');
             console.error('多模态配置后端未连接');
         }
     } catch (error) {
         console.error('保存多模态配置失败:', error);
-        showNotification(`❌ 保存多模态配置失败: ${error.message}`, 'error');
+        showNotification(`❌ 保存多模态配置失败: ${error.message}`, 'danger');
     }
 }
 
@@ -4068,16 +4180,16 @@ async function testMultimodalProcessing() {
                         `测试结果: ${result.data.result}`;
                 }
             } else {
-                showNotification(`❌ 多模态处理测试失败: ${result.error || '未知错误'}`, 'error');
+                showNotification(`❌ 多模态处理测试失败: ${result.error || '未知错误'}`, 'danger');
             }
         } else {
             // 后端未连接，显示错误
-            showNotification('❌ 多模态处理后端未连接，请检查服务器状态', 'error');
+            showNotification('❌ 多模态处理后端未连接，请检查服务器状态', 'danger');
             console.error('多模态处理后端未连接');
         }
     } catch (error) {
         console.error('测试多模态处理失败:', error);
-        showNotification(`❌ 测试多模态处理失败: ${error.message}`, 'error');
+        showNotification(`❌ 测试多模态处理失败: ${error.message}`, 'danger');
     }
 }
 
@@ -4101,16 +4213,16 @@ async function resetMultimodalConfig() {
                     // 刷新配置显示
                     refreshMultimodalStatus();
                 } else {
-                    showNotification(`❌ 重置多模态配置失败: ${result.error || '未知错误'}`, 'error');
+                    showNotification(`❌ 重置多模态配置失败: ${result.error || '未知错误'}`, 'danger');
                 }
             } else {
                 // 后端未连接，显示错误
-                showNotification('❌ 多模态重置后端未连接，请检查服务器状态', 'error');
+                showNotification('❌ 多模态重置后端未连接，请检查服务器状态', 'danger');
                 console.error('多模态重置后端未连接');
             }
         } catch (error) {
             console.error('重置多模态配置失败:', error);
-            showNotification(`❌ 重置多模态配置失败: ${error.message}`, 'error');
+            showNotification(`❌ 重置多模态配置失败: ${error.message}`, 'danger');
         }
     }
 }
@@ -4135,16 +4247,16 @@ async function stopMultimodalProcessing() {
                     // 刷新状态
                     refreshMultimodalStatus();
                 } else {
-                    showNotification(`❌ 停止多模态处理失败: ${result.error || '未知错误'}`, 'error');
+                    showNotification(`❌ 停止多模态处理失败: ${result.error || '未知错误'}`, 'danger');
                 }
             } else {
                 // 后端未连接，显示错误
-                showNotification('❌ 多模态停止后端未连接，请检查服务器状态', 'error');
+                showNotification('❌ 多模态停止后端未连接，请检查服务器状态', 'danger');
                 console.error('多模态停止后端未连接');
             }
         } catch (error) {
             console.error('停止多模态处理失败:', error);
-            showNotification(`❌ 停止多模态处理失败: ${error.message}`, 'error');
+            showNotification(`❌ 停止多模态处理失败: ${error.message}`, 'danger');
         }
     }
 }
@@ -4167,16 +4279,16 @@ async function resetRobotConfig() {
                 if (result.success) {
                     showNotification('✅ 机器人配置重置命令已发送', 'success');
                 } else {
-                    showNotification(`❌ 重置机器人配置失败: ${result.error || '未知错误'}`, 'error');
+                    showNotification(`❌ 重置机器人配置失败: ${result.error || '未知错误'}`, 'danger');
                 }
             } else {
                 // 后端未连接，显示错误
-                showNotification('❌ 机器人配置重置后端未连接，请检查服务器状态', 'error');
+                showNotification('❌ 机器人配置重置后端未连接，请检查服务器状态', 'danger');
                 console.error('机器人配置重置后端未连接');
             }
         } catch (error) {
             console.error('重置机器人配置失败:', error);
-            showNotification(`❌ 重置机器人配置失败: ${error.message}`, 'error');
+            showNotification(`❌ 重置机器人配置失败: ${error.message}`, 'danger');
         }
     }
 }
@@ -4264,16 +4376,16 @@ async function refreshLNNStatus() {
                     if (ifs[3]) ifs[3].style.width = diffusionPercent + '%';
                 }
             } else {
-                showNotification(`❌ 获取LNN状态失败: ${result.error || '未知错误'}`, 'error');
+                showNotification(`❌ 获取LNN状态失败: ${result.error || '未知错误'}`, 'danger');
             }
         } else {
             // 后端未连接，显示错误
-            showNotification('❌ LNN状态后端未连接，请检查服务器状态', 'error');
+            showNotification('❌ LNN状态后端未连接，请检查服务器状态', 'danger');
             console.error('LNN状态后端未连接');
         }
     } catch (error) {
         console.error('刷新LNN状态失败:', error);
-        showNotification(`❌ 刷新LNN状态失败: ${error.message}`, 'error');
+        showNotification(`❌ 刷新LNN状态失败: ${error.message}`, 'danger');
     }
 }
 
@@ -4307,16 +4419,16 @@ async function saveLNNParameters() {
             if (result.success) {
                 showNotification('✅ LNN参数已保存', 'success');
             } else {
-                showNotification(`❌ 保存LNN参数失败: ${result.error || '未知错误'}`, 'error');
+                showNotification(`❌ 保存LNN参数失败: ${result.error || '未知错误'}`, 'danger');
             }
         } else {
             // 后端未连接，显示错误
-            showNotification('❌ LNN参数后端未连接，请检查服务器状态', 'error');
+            showNotification('❌ LNN参数后端未连接，请检查服务器状态', 'danger');
             console.error('LNN参数后端未连接');
         }
     } catch (error) {
         console.error('保存LNN参数失败:', error);
-        showNotification(`❌ 保存LNN参数失败: ${error.message}`, 'error');
+        showNotification(`❌ 保存LNN参数失败: ${error.message}`, 'danger');
     }
 }
 
@@ -4428,7 +4540,7 @@ async function refreshKnowledgeStats() {
         }
     } catch (error) {
         console.error('刷新知识库统计失败:', error);
-        showNotification('❌ 刷新知识库统计失败', 'error');
+        showNotification('❌ 刷新知识库统计失败', 'danger');
     }
 }
 
@@ -4456,16 +4568,16 @@ async function addKnowledgeEntry() {
             if (result.success) {
                 showNotification('✅ 知识条目已添加', 'success');
             } else {
-                showNotification(`❌ 知识条目添加失败: ${result.message || '未知错误'}`, 'error');
+                showNotification(`❌ 知识条目添加失败: ${result.message || '未知错误'}`, 'danger');
             }
         } else {
             // 后端未连接，显示错误
-            showNotification('❌ 知识条目添加后端未连接，请检查服务器状态', 'error');
+            showNotification('❌ 知识条目添加后端未连接，请检查服务器状态', 'danger');
             console.error('知识条目添加后端未连接');
         }
     } catch (error) {
         console.error('添加知识条目失败:', error);
-        showNotification(`❌ 添加知识条目失败: ${error.message}`, 'error');
+        showNotification(`❌ 添加知识条目失败: ${error.message}`, 'danger');
     }
 }
 
@@ -4498,10 +4610,10 @@ async function viewKnowledgeDetail(id) {
                 showNotification('知识条目未找到', 'warning');
             }
         } else {
-            showNotification('知识条目查询后端未连接', 'error');
+            showNotification('知识条目查询后端未连接', 'danger');
         }
     } catch (e) {
-        showNotification('查看知识详情失败: ' + e.message, 'error');
+        showNotification('查看知识详情失败: ' + e.message, 'danger');
     }
 }
 
@@ -4517,13 +4629,13 @@ async function deleteKnowledgeEntry(id) {
             if (result && result.success) {
                 showNotification('知识条目已删除', 'success');
             } else {
-                showNotification('删除失败: ' + ((result && result.error) || '未知错误'), 'error');
+                showNotification('删除失败: ' + ((result && result.error) || '未知错误'), 'danger');
             }
         } else {
-            showNotification('知识条目删除后端未连接', 'error');
+            showNotification('知识条目删除后端未连接', 'danger');
         }
     } catch (e) {
-        showNotification('删除失败: ' + e.message, 'error');
+        showNotification('删除失败: ' + e.message, 'danger');
     }
 }
 
@@ -4637,13 +4749,13 @@ async function knowledgeSaveToDisk() {
                 }
                 showNotification('✅ 知识库保存成功', 'success');
             } else {
-                showNotification('❌ 保存失败: ' + ((result && result.error) || '后端错误'), 'error');
+                showNotification('❌ 保存失败: ' + ((result && result.error) || '后端错误'), 'danger');
             }
         } else {
-            showNotification('❌ 知识库保存后端未连接', 'error');
+            showNotification('❌ 知识库保存后端未连接', 'danger');
         }
     } catch (e) {
-        showNotification('❌ 保存失败: ' + e.message, 'error');
+        showNotification('❌ 保存失败: ' + e.message, 'danger');
     }
 }
 
@@ -4670,10 +4782,10 @@ async function knowledgeLoadFromDisk() {
                 showNotification('⚠️ 加载失败: ' + ((result && result.error) || '文件可能不存在'), 'warning');
             }
         } else {
-            showNotification('❌ 知识库加载后端未连接', 'error');
+            showNotification('❌ 知识库加载后端未连接', 'danger');
         }
     } catch (e) {
-        showNotification('❌ 加载失败: ' + e.message, 'error');
+        showNotification('❌ 加载失败: ' + e.message, 'danger');
     }
 }
 
@@ -4697,13 +4809,13 @@ async function knowledgeExportAsJSON() {
                 URL.revokeObjectURL(url);
                 showNotification('✅ JSON导出完成（' + (result.count || '?') + '条目）', 'success');
             } else {
-                showNotification('❌ 导出失败: ' + ((result && result.error) || '无数据'), 'error');
+                showNotification('❌ 导出失败: ' + ((result && result.error) || '无数据'), 'danger');
             }
         } else {
-            showNotification('❌ 知识库导出后端未连接', 'error');
+            showNotification('❌ 知识库导出后端未连接', 'danger');
         }
     } catch (e) {
-        showNotification('❌ 导出失败: ' + e.message, 'error');
+        showNotification('❌ 导出失败: ' + e.message, 'danger');
     }
 }
 
@@ -4726,13 +4838,13 @@ async function knowledgeImportFromJSON() {
                     showNotification('✅ 导入成功（' + (result.count || '?') + '条目）', 'success');
                     refreshKnowledgeStats();
                 } else {
-                    showNotification('❌ 导入失败: ' + ((result && result.error) || '格式错误'), 'error');
+                    showNotification('❌ 导入失败: ' + ((result && result.error) || '格式错误'), 'danger');
                 }
             } else {
-                showNotification('❌ 知识库导入后端未连接', 'error');
+                showNotification('❌ 知识库导入后端未连接', 'danger');
             }
         } catch (e) {
-            showNotification('❌ 导入失败: ' + e.message, 'error');
+            showNotification('❌ 导入失败: ' + e.message, 'danger');
         }
     };
     fileInput.click();
@@ -5256,14 +5368,14 @@ async function startHyperparameterSearch() {
                 showNotification('✅ 超参数搜索已启动', 'success');
                 pollHyperparameterStatus();
             } else {
-                showNotification('❌ 超参数搜索启动失败', 'error');
+                showNotification('❌ 超参数搜索启动失败', 'danger');
             }
         } else {
-            showNotification('❌ 超参数搜索后端未连接', 'error');
+            showNotification('❌ 超参数搜索后端未连接', 'danger');
         }
     } catch (error) {
         console.error('超参数搜索失败:', error);
-        showNotification('❌ 超参数搜索出错', 'error');
+        showNotification('❌ 超参数搜索出错', 'danger');
     }
 }
 
@@ -5677,7 +5789,7 @@ function emergencyStopRobot(robotId) {
  */
 let robotGroups = {};
 
-function createRobotGroup() {
+async function createRobotGroup() {
     const groupName = await promptAsync('请输入机器人组名称:');
     if (!groupName) return;
     
@@ -6058,11 +6170,14 @@ async function sendMultimodalRequest(message, imageData, audioData, params) {
 function renderMarkdown(text) {
     if (!text) return '';
     var out = text;
+    /* M-06修复: 先转义HTML特殊字符，再应用Markdown标记 */
     out = out.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     out = out.replace(/```(\w*)\n([\s\S]*?)```/g, function(m, lang, code) {
-        return '<pre><code class="language-' + lang + '">' + code.replace(/\n$/, '') + '</code></pre>';
+        return '<pre><code class="language-' + lang + '">' + window.escapeHtml(code.replace(/\n$/, '')) + '</code></pre>';
     });
-    out = out.replace(/`([^`]+)`/g, '<code>$1</code>');
+    out = out.replace(/`([^`]+)`/g, function(m, code) {
+        return '<code>' + window.escapeHtml(code) + '</code>';
+    });
     out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
     out = out.replace(/\*([^*]+)\*/g, '<em>$1</em>');
     out = out.replace(/^### (.+)$/gm, '<h4>$1</h4>');
@@ -6223,9 +6338,11 @@ function initDialogueTemperature() {
     const slider = document.getElementById('dialogue-temperature');
     const display = document.getElementById('dialogue-temperature-value');
     if (slider && display) {
-        slider.addEventListener('input', function() {
+        /* C-04修复: 提取为命名函数 */
+        function _handleTemperatureSliderInput() {
             display.textContent = parseFloat(this.value).toFixed(1);
-        });
+        }
+        window._registerEventListener(slider, 'input', _handleTemperatureSliderInput);
     }
 }
 
@@ -6250,7 +6367,7 @@ async function toggleAgiFeature(feature, enabled) {
     } else {
         const checkbox = document.querySelector('#feature-' + feature.replace(/_/g, '-'));
         if (checkbox) checkbox.checked = !enabled;
-        showNotification('操作失败: ' + (result.error || '后端未连接'), 'error');
+        showNotification('操作失败: ' + (result.error || '后端未连接'), 'danger');
     }
 }
 
@@ -6312,13 +6429,13 @@ async function toggleAutoLearn(enabled) {
                     setTimeout(refreshAutoLearnStats, 500);
                 }
             } else {
-                showNotification('❌ 切换失败: ' + (result.error || '未知错误'), 'error');
+                showNotification('❌ 切换失败: ' + (result.error || '未知错误'), 'danger');
             }
         } else {
-            showNotification('❌ 自主知识库学习后端未连接，无法切换（请确认SELF-LNN服务器已启动）', 'error');
+            showNotification('❌ 自主知识库学习后端未连接，无法切换（请确认SELF-LNN服务器已启动）', 'danger');
         }
     } catch (e) {
-        showNotification('❌ 自主知识库学习请求失败: ' + e.message, 'error');
+        showNotification('❌ 自主知识库学习请求失败: ' + e.message, 'danger');
     }
 }
 
@@ -6339,7 +6456,7 @@ async function triggerAutoLearnScan() {
             }
         }
     } catch (e) {
-        showNotification('扫描请求失败: ' + e.message, 'error');
+        showNotification('扫描请求失败: ' + e.message, 'danger');
     }
 }
 
@@ -6408,7 +6525,7 @@ function toggleVoiceInput() {
         }
         var stream = g_deviceManager.getMicrophoneStream(activeMic.id);
         if (!stream) {
-            showNotification('麦克风流不可用', 'error');
+            showNotification('麦克风流不可用', 'danger');
             return;
         }
         g_dialogueEnhanced.startVoiceInput(stream);
@@ -6443,7 +6560,7 @@ function triggerVisionInput() {
         return;
     }
     if (!window.SelfLnnApi) {
-        showNotification('后端API未连接', 'error');
+        showNotification('后端API未连接', 'danger');
         return;
     }
     var input = document.getElementById('dialogue-input');
@@ -6458,7 +6575,7 @@ function triggerVisionInput() {
         .then(function(data) {
             if (input) input.value += '\n[视觉输入已处理]';
         })
-        .catch(function() { showNotification('视觉输入API请求失败', 'error'); });
+        .catch(function() { showNotification('视觉输入API请求失败', 'danger'); });
 }
 
 function triggerAudioInput() {
@@ -6467,7 +6584,7 @@ function triggerAudioInput() {
         return;
     }
     if (!window.SelfLnnApi) {
-        showNotification('后端API未连接', 'error');
+        showNotification('后端API未连接', 'danger');
         return;
     }
     var activeMic = g_deviceManager.microphones.find(function(m) { return m.active; });
@@ -6493,7 +6610,7 @@ function triggerTextInput() {
 
 function triggerSensorInput() {
     if (!window.SelfLnnApi) {
-        showNotification('后端API未连接', 'error');
+        showNotification('后端API未连接', 'danger');
         return;
     }
     var input = document.getElementById('dialogue-input');
@@ -6503,7 +6620,7 @@ function triggerSensorInput() {
             if (input) input.value += '\n[传感器数据已请求]';
             showNotification('传感器输入已触发', 'success');
         })
-        .catch(function() { showNotification('传感器输入API请求失败', 'error'); });
+        .catch(function() { showNotification('传感器输入API请求失败', 'danger'); });
 }
 
 /**
@@ -6962,13 +7079,13 @@ async function toggleMultimodalLearning(enabled) {
                     window.g_agiController.multimodalLearningEnabled = enabled;
                 }
             } else {
-                showNotification('❌ 多模态学习切换失败: ' + (result.data?.multimodal?.status || '未知错误'), 'error');
+                showNotification('❌ 多模态学习切换失败: ' + (result.data?.multimodal?.status || '未知错误'), 'danger');
             }
         } else {
-            showNotification('❌ 多模态学习后端未连接，无法切换（请确认SELF-LNN服务器已启动）', 'error');
+            showNotification('❌ 多模态学习后端未连接，无法切换（请确认SELF-LNN服务器已启动）', 'danger');
         }
     } catch (e) {
-        showNotification('❌ 多模态学习请求失败: ' + e.message, 'error');
+        showNotification('❌ 多模态学习请求失败: ' + e.message, 'danger');
     }
 }
 
@@ -6998,10 +7115,10 @@ async function triggerSleepConsolidation() {
             document.getElementById('sleep-consolidation-result').style.display = 'block';
             showNotification('记忆睡眠固化完成', 'success');
         } else {
-            showNotification('睡眠固化失败: ' + (result.error || '未知错误'), 'error');
+            showNotification('睡眠固化失败: ' + (result.error || '未知错误'), 'danger');
         }
     } catch (e) {
-        showNotification('睡眠固化请求失败: ' + e.message, 'error');
+        showNotification('睡眠固化请求失败: ' + e.message, 'danger');
     }
 }
 
@@ -7106,10 +7223,10 @@ async function refreshDecisionLog() {
             document.getElementById('decision-log-override').textContent = overrideCount;
             document.getElementById('decision-log-errors').textContent = errorCount;
         } else {
-            showNotification('获取决策日志失败', 'error');
+            showNotification('获取决策日志失败', 'danger');
         }
     } catch (e) {
-        showNotification('决策日志请求失败: ' + e.message, 'error');
+        showNotification('决策日志请求失败: ' + e.message, 'danger');
     }
 }
 
@@ -7143,13 +7260,13 @@ async function saveGeneralSettings() {
             if (result && result.success) {
                 showNotification('设置已保存', 'success');
             } else {
-                showNotification('保存失败: ' + ((result && result.error) || '未知错误'), 'error');
+                showNotification('保存失败: ' + ((result && result.error) || '未知错误'), 'danger');
             }
         } else {
-            showNotification('设置保存后端未连接', 'error');
+            showNotification('设置保存后端未连接', 'danger');
         }
     } catch (e) {
-        showNotification('保存设置失败: ' + e.message, 'error');
+        showNotification('保存设置失败: ' + e.message, 'danger');
     }
 }
 
@@ -7161,12 +7278,12 @@ async function changePassword() {
     if (!oldPwd) return;
     var newPwd = await promptAsync('请输入新密码:');
     if (!newPwd || newPwd.length < 6) {
-        showNotification('密码长度至少6位', 'error');
+        showNotification('密码长度至少6位', 'danger');
         return;
     }
     var confirmPwd = await promptAsync('请再次输入新密码:');
     if (newPwd !== confirmPwd) {
-        showNotification('两次输入密码不一致', 'error');
+        showNotification('两次输入密码不一致', 'danger');
         return;
     }
     showNotification('正在修改密码...', 'info');
@@ -7176,13 +7293,13 @@ async function changePassword() {
             if (result && result.success) {
                 showNotification('密码修改成功', 'success');
             } else {
-                showNotification('修改失败: ' + ((result && result.error) || '未知错误'), 'error');
+                showNotification('修改失败: ' + ((result && result.error) || '未知错误'), 'danger');
             }
         } else {
-            showNotification('密码修改后端未连接', 'error');
+            showNotification('密码修改后端未连接', 'danger');
         }
     } catch (e) {
-        showNotification('密码修改失败: ' + e.message, 'error');
+        showNotification('密码修改失败: ' + e.message, 'danger');
     }
 }
 
@@ -7204,6 +7321,7 @@ async function startSelfLearning() {
         }
     } catch (e) {
         console.error('startSelfLearning 失败:', e);
+        showNotification('自我学习启动失败: ' + e.message, 'danger');
     } finally {
         if (btn) { btn.disabled = false; btn.textContent = ' 开始学习'; }
     }
@@ -7229,6 +7347,7 @@ async function triggerSelfCorrection() {
         }
     } catch (e) {
         console.error('triggerSelfCorrection 失败:', e);
+        showNotification('自我修正触发失败: ' + e.message, 'danger');
     } finally {
         if (btn) { btn.disabled = false; btn.textContent = ' 触发修正'; }
     }
@@ -7243,20 +7362,21 @@ async function startEvolution() {
     if (btn) { btn.disabled = true; btn.textContent = '演化中...'; }
     try {
         const result = await window.SelfLnnApi.agiEvolve({ mode: 'auto', generations: 10 });
-    if (result.success) {
-        const progress = document.getElementById('evolution-progress');
-        if (progress) {
-            const gen = (result.data && (result.data.generation !== undefined)) ? result.data.generation : 0;
-            const total = (result.data && (result.data.total_generations !== undefined)) ? result.data.total_generations : 10;
-            progress.innerHTML = '<div class="evolution-stage active">演化已启动 - 第 ' + gen + '/' + total + ' 代</div>';
+        if (result.success) {
+            const progress = document.getElementById('evolution-progress');
+            if (progress) {
+                const gen = (result.data && (result.data.generation !== undefined)) ? result.data.generation : 0;
+                const total = (result.data && (result.data.total_generations !== undefined)) ? result.data.total_generations : 10;
+                progress.innerHTML = '<div class="evolution-stage active">演化已启动 - 第 ' + gen + '/' + total + ' 代</div>';
+            }
+            const evolutionStatus = document.getElementById('evolution-status');
+            if (evolutionStatus && result.data && result.data.status) {
+                evolutionStatus.textContent = result.data.status;
+            }
         }
-        const evolutionStatus = document.getElementById('evolution-status');
-        if (evolutionStatus && result.data && result.data.status) {
-            evolutionStatus.textContent = result.data.status;
-        }
-    }
     } catch (e) {
         console.error('startEvolution 失败:', e);
+        showNotification('演化启动失败: ' + e.message, 'danger');
     } finally {
         if (btn) { btn.disabled = false; btn.textContent = ' 开始演化'; }
     }
@@ -7272,13 +7392,13 @@ async function resetLNNParameters() {
                 showNotification('LNN参数已重置为默认值', 'success');
                 refreshLNNStatus();
             } else {
-                showNotification('重置失败: ' + ((result && result.error) || '未知错误'), 'error');
+                showNotification('重置失败: ' + ((result && result.error) || '未知错误'), 'danger');
             }
         } else {
-            showNotification('LNN参数重置后端未连接', 'error');
+            showNotification('LNN参数重置后端未连接', 'danger');
         }
     } catch (e) {
-        showNotification('重置LNN参数失败: ' + e.message, 'error');
+        showNotification('重置LNN参数失败: ' + e.message, 'danger');
     }
 }
 
@@ -7299,13 +7419,13 @@ async function calibrateLNN() {
                 showNotification('LNN自动校准完成', 'success');
                 refreshLNNStatus();
             } else {
-                showNotification('校准失败: ' + ((result && result.error) || '未知错误'), 'error');
+                showNotification('校准失败: ' + ((result && result.error) || '未知错误'), 'danger');
             }
         } else {
-            showNotification('LNN校准后端未连接', 'error');
+            showNotification('LNN校准后端未连接', 'danger');
         }
     } catch (e) {
-        showNotification('校准LNN失败: ' + e.message, 'error');
+        showNotification('校准LNN失败: ' + e.message, 'danger');
     }
 }
 
@@ -7327,13 +7447,13 @@ async function exportLNNConfig() {
                 URL.revokeObjectURL(url);
                 showNotification('LNN配置导出成功', 'success');
             } else {
-                showNotification('导出失败: ' + ((result && result.error) || '未知错误'), 'error');
+                showNotification('导出失败: ' + ((result && result.error) || '未知错误'), 'danger');
             }
         } else {
-            showNotification('LNN配置导出后端未连接', 'error');
+            showNotification('LNN配置导出后端未连接', 'danger');
         }
     } catch (e) {
-        showNotification('导出LNN配置失败: ' + e.message, 'error');
+        showNotification('导出LNN配置失败: ' + e.message, 'danger');
     }
 }
 
@@ -7343,7 +7463,7 @@ async function saveModelConfig() {
     try {
         var configForm = document.querySelector('#models .config-form');
         if (!configForm) {
-            showNotification('模型配置表单未找到', 'error');
+            showNotification('模型配置表单未找到', 'danger');
             return;
         }
         var sliderValues = configForm.querySelectorAll('.slider-value');
@@ -7358,13 +7478,13 @@ async function saveModelConfig() {
             if (result && result.success) {
                 showNotification('模型配置已保存', 'success');
             } else {
-                showNotification('保存失败: ' + ((result && result.error) || '未知错误'), 'error');
+                showNotification('保存失败: ' + ((result && result.error) || '未知错误'), 'danger');
             }
         } else {
-            showNotification('模型配置保存后端未连接', 'error');
+            showNotification('模型配置保存后端未连接', 'danger');
         }
     } catch (e) {
-        showNotification('保存模型配置失败: ' + e.message, 'error');
+        showNotification('保存模型配置失败: ' + e.message, 'danger');
     }
 }
 
@@ -7407,10 +7527,10 @@ async function refreshMemoryStats() {
             }
             showNotification('记忆统计已刷新', 'success');
         } else {
-            showNotification('获取记忆统计失败: ' + ((result && result.error) || '未知错误'), 'error');
+            showNotification('获取记忆统计失败: ' + ((result && result.error) || '未知错误'), 'danger');
         }
     } catch (e) {
-        showNotification('刷新记忆统计失败: ' + e.message, 'error');
+        showNotification('刷新记忆统计失败: ' + e.message, 'danger');
     }
 }
 
@@ -7428,13 +7548,13 @@ async function addMemoryEntry() {
                 refreshMemoryStats();
                 searchMemories();
             } else {
-                showNotification('添加失败: ' + ((result && result.error) || '未知错误'), 'error');
+                showNotification('添加失败: ' + ((result && result.error) || '未知错误'), 'danger');
             }
         } else {
-            showNotification('记忆添加后端未连接', 'error');
+            showNotification('记忆添加后端未连接', 'danger');
         }
     } catch (e) {
-        showNotification('添加记忆失败: ' + e.message, 'error');
+        showNotification('添加记忆失败: ' + e.message, 'danger');
     }
 }
 
@@ -7467,10 +7587,10 @@ async function viewMemoryDetails(id) {
                 showNotification('记忆条目未找到', 'warning');
             }
         } else {
-            showNotification('记忆条目查询后端未连接', 'error');
+            showNotification('记忆条目查询后端未连接', 'danger');
         }
     } catch (e) {
-        showNotification('查看记忆详情失败: ' + e.message, 'error');
+        showNotification('查看记忆详情失败: ' + e.message, 'danger');
     }
 }
 
@@ -7488,13 +7608,13 @@ async function editMemoryEntry(id) {
                 showNotification('记忆已更新', 'success');
                 searchMemories();
             } else {
-                showNotification('更新失败: ' + ((result && result.error) || '未知错误'), 'error');
+                showNotification('更新失败: ' + ((result && result.error) || '未知错误'), 'danger');
             }
         } else {
-            showNotification('记忆更新后端未连接', 'error');
+            showNotification('记忆更新后端未连接', 'danger');
         }
     } catch (e) {
-        showNotification('更新记忆失败: ' + e.message, 'error');
+        showNotification('更新记忆失败: ' + e.message, 'danger');
     }
 }
 
@@ -7511,13 +7631,13 @@ async function deleteMemoryEntry(id) {
                 showNotification('记忆已删除', 'success');
                 searchMemories();
             } else {
-                showNotification('删除失败: ' + ((result && result.error) || '未知错误'), 'error');
+                showNotification('删除失败: ' + ((result && result.error) || '未知错误'), 'danger');
             }
         } else {
-            showNotification('记忆删除后端未连接', 'error');
+            showNotification('记忆删除后端未连接', 'danger');
         }
     } catch (e) {
-        showNotification('删除失败: ' + e.message, 'error');
+        showNotification('删除失败: ' + e.message, 'danger');
     }
 }
 
@@ -7539,13 +7659,13 @@ async function exportMemory() {
                 URL.revokeObjectURL(url);
                 showNotification('记忆导出成功', 'success');
             } else {
-                showNotification('导出失败: ' + ((result && result.error) || '未知错误'), 'error');
+                showNotification('导出失败: ' + ((result && result.error) || '未知错误'), 'danger');
             }
         } else {
-            showNotification('记忆导出后端未连接', 'error');
+            showNotification('记忆导出后端未连接', 'danger');
         }
     } catch (e) {
-        showNotification('导出记忆失败: ' + e.message, 'error');
+        showNotification('导出记忆失败: ' + e.message, 'danger');
     }
 }
 
@@ -7562,13 +7682,13 @@ async function clearOldMemories() {
                 refreshMemoryStats();
                 searchMemories();
             } else {
-                showNotification('清理失败: ' + ((result && result.error) || '未知错误'), 'error');
+                showNotification('清理失败: ' + ((result && result.error) || '未知错误'), 'danger');
             }
         } else {
-            showNotification('记忆清理后端未连接', 'error');
+            showNotification('记忆清理后端未连接', 'danger');
         }
     } catch (e) {
-        showNotification('清理旧记忆失败: ' + e.message, 'error');
+        showNotification('清理旧记忆失败: ' + e.message, 'danger');
     }
 }
 
@@ -7604,13 +7724,13 @@ async function searchMemories() {
                 }
                 showNotification('搜索完成，找到 ' + entries.length + ' 条结果', 'success');
             } else {
-                showNotification('搜索失败: ' + ((result && result.error) || '未知错误'), 'error');
+                showNotification('搜索失败: ' + ((result && result.error) || '未知错误'), 'danger');
             }
         } else {
-            showNotification('记忆搜索后端未连接', 'error');
+            showNotification('记忆搜索后端未连接', 'danger');
         }
     } catch (e) {
-        showNotification('搜索记忆失败: ' + e.message, 'error');
+        showNotification('搜索记忆失败: ' + e.message, 'danger');
     }
 }
 
@@ -7748,11 +7868,11 @@ window.saveSafetySetting = function(key, value) {
                 if (r && r.success) {
                     window.showNotification('安全设置已保存', 'success');
                 } else {
-                    window.showNotification('保存失败: ' + ((r && r.message) || '未知错误'), 'error');
+                    window.showNotification('保存失败: ' + ((r && r.message) || '未知错误'), 'danger');
                 }
             }).catch(function(e) {
                 console.warn('安全设置保存失败:', e);
-                window.showNotification('安全设置保存失败，请检查网络连接', 'error');
+                window.showNotification('安全设置保存失败，请检查网络连接', 'danger');
             });
         }
     } catch (e) {
@@ -7855,10 +7975,10 @@ async function refreshReasoningStats() {
             }
             showNotification('推理统计已刷新', 'success');
         } else {
-            showNotification('获取推理统计失败', 'error');
+            showNotification('获取推理统计失败', 'danger');
         }
     } catch (e) {
-        showNotification('刷新推理统计失败: ' + e.message, 'error');
+        showNotification('刷新推理统计失败: ' + e.message, 'danger');
     }
 }
 
@@ -7886,13 +8006,13 @@ async function startNewReasoning() {
                 }
                 showNotification('推理任务已创建，ID: ' + taskId, 'success');
             } else {
-                showNotification('创建推理任务失败: ' + ((result && result.error) || '未知错误'), 'error');
+                showNotification('创建推理任务失败: ' + ((result && result.error) || '未知错误'), 'danger');
             }
         } else {
-            showNotification('推理任务后端未连接', 'error');
+            showNotification('推理任务后端未连接', 'danger');
         }
     } catch (e) {
-        showNotification('创建推理任务失败: ' + e.message, 'error');
+        showNotification('创建推理任务失败: ' + e.message, 'danger');
     }
 }
 
@@ -7913,13 +8033,13 @@ async function pauseReasoning() {
                 }
                 showNotification('推理已暂停', 'warning');
             } else {
-                showNotification('暂停失败: ' + ((result && result.error) || '未知错误'), 'error');
+                showNotification('暂停失败: ' + ((result && result.error) || '未知错误'), 'danger');
             }
         } else {
-            showNotification('推理暂停后端未连接', 'error');
+            showNotification('推理暂停后端未连接', 'danger');
         }
     } catch (e) {
-        showNotification('暂停推理失败: ' + e.message, 'error');
+        showNotification('暂停推理失败: ' + e.message, 'danger');
     }
 }
 
@@ -7937,13 +8057,13 @@ async function stopAllReasoning() {
                 }
                 showNotification('所有推理任务已停止', 'success');
             } else {
-                showNotification('停止失败: ' + ((result && result.error) || '未知错误'), 'error');
+                showNotification('停止失败: ' + ((result && result.error) || '未知错误'), 'danger');
             }
         } else {
-            showNotification('推理停止后端未连接', 'error');
+            showNotification('推理停止后端未连接', 'danger');
         }
     } catch (e) {
-        showNotification('停止推理失败: ' + e.message, 'error');
+        showNotification('停止推理失败: ' + e.message, 'danger');
     }
 }
 
@@ -7958,13 +8078,13 @@ async function saveReasoningConfig() {
             if (result && result.success) {
                 showNotification('推理配置已保存', 'success');
             } else {
-                showNotification('保存失败: ' + ((result && result.error) || '未知错误'), 'error');
+                showNotification('保存失败: ' + ((result && result.error) || '未知错误'), 'danger');
             }
         } else {
-            showNotification('推理配置保存后端未连接', 'error');
+            showNotification('推理配置保存后端未连接', 'danger');
         }
     } catch (e) {
-        showNotification('保存推理配置失败: ' + e.message, 'error');
+        showNotification('保存推理配置失败: ' + e.message, 'danger');
     }
 }
 
@@ -8010,34 +8130,65 @@ async function refreshLearningMetrics() {
             }
             showNotification('学习指标已刷新', 'success');
         } else {
-            showNotification('获取学习指标失败: ' + ((result && result.error) || '未知错误'), 'error');
+            showNotification('获取学习指标失败: ' + ((result && result.error) || '未知错误'), 'danger');
         }
     } catch (e) {
-        showNotification('刷新学习指标失败: ' + e.message, 'error');
+        showNotification('刷新学习指标失败: ' + e.message, 'danger');
     }
 }
 
 /* ===== SPA 路由支持 - hashchange 事件监听 ===== */
+/* 修复：原setTimeout(300)在大型HTML（~6500行/485KB）中过早触发，
+ * 位于71%位置的section（如product-design第4616行）尚未被浏览器解析，
+ * 导致document.getElementById返回null，路由切换失败。
+ * 改为DOMContentLoaded事件确保完整DOM就绪后再执行初始路由。 */
 (function() {
+    var _routeRetryCount = 0;
+    var _routeMaxRetry = 50;
+
     function navigateToSection() {
         var hash = window.location.hash;
         if (!hash || hash.length < 2) return;
         var sectionId = hash.substring(1);
         var section = document.getElementById(sectionId);
-        if (section) {
-            /* 激活目标section（修复：之前只滚动不切换display） */
-            document.querySelectorAll('.section').forEach(function(s) { s.classList.remove('active'); });
-            section.classList.add('active');
-            /* 同步导航链接高亮 */
-            document.querySelectorAll('.nav a').forEach(function(l) { l.classList.remove('active'); });
-            var navLink = document.querySelector('.nav a[href="#' + sectionId + '"]');
-            if (navLink) navLink.classList.add('active');
+        if (!section) {
+            /* 容错：如果目标section仍未找到，延迟重试（最长等待5秒） */
+            _routeRetryCount++;
+            if (_routeRetryCount <= _routeMaxRetry) {
+                setTimeout(navigateToSection, 100);
+            } else {
+                console.warn('[SPA路由] 目标section[' + sectionId + ']未找到，已重试' + _routeMaxRetry + '次，放弃');
+            }
+            return;
+        }
+        _routeRetryCount = 0;
+        /* 激活目标section */
+        document.querySelectorAll('.section').forEach(function(s) { s.classList.remove('active'); });
+        section.classList.add('active');
+        /* 同步导航链接高亮 */
+        document.querySelectorAll('.nav a').forEach(function(l) { l.classList.remove('active'); });
+        var navLink = document.querySelector('.nav a[href="#' + sectionId + '"]');
+        if (navLink) navLink.classList.add('active');
+        /* 滚动到目标区域，使用scrollIntoView滚动.main-content容器 */
+        var mainContent = document.querySelector('.main-content');
+        if (mainContent) {
+            var headerH = document.querySelector('.header') ? document.querySelector('.header').offsetHeight : 60;
+            var sectionTop = section.offsetTop;
+            mainContent.scrollTo({ top: Math.max(0, sectionTop - headerH - 8), behavior: 'smooth' });
+        } else {
             section.scrollIntoView({ behavior: 'smooth', block: 'start' });
         }
     }
-    window.addEventListener('hashchange', navigateToSection);
+    window._registerEventListener(window, 'hashchange', navigateToSection);
     if (window.location.hash) {
-        setTimeout(navigateToSection, 300);
+        /* 使用DOMContentLoaded确保完整HTML解析完毕后再执行初始路由 */
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', function() {
+                setTimeout(navigateToSection, 50);
+            });
+        } else {
+            navigateToSection();
+        }
     }
     
     // ===== 可靠仪表盘自动更新器 =====
@@ -8173,7 +8324,7 @@ async function searchKnowledge() {
             renderKnowledgeSearchResults(kbResult);
         }
     } catch (e) {
-        showNotification('搜索知识库失败: ' + e.message, 'error');
+        showNotification('搜索知识库失败: ' + e.message, 'danger');
     }
 }
 
@@ -8238,7 +8389,7 @@ async function testInference() {
         }
     } catch (e) {
         resultText.textContent = '推理出错: ' + e.message;
-        showNotification('推理测试失败: ' + e.message, 'error');
+        showNotification('推理测试失败: ' + e.message, 'danger');
     }
 }
 
@@ -8432,14 +8583,14 @@ async function resetSafety() {
 }
 
 /* ---- 技能管理 (原HTML L5033-L5227) ---- */
-var skillsData = [];
+/* M-09修复: skillsData 已统一为 g_skillsData 全局变量 */
 
 async function loadSkills() {
     try {
         var resp = await SelfLnnApi.request('/skills');
         var d = await resp.json();
         if (d && d.skills) {
-            skillsData = d.skills;
+            g_skillsData = d.skills;
 /* 始终确保renderSkillList已定义再调用 */
             if (typeof renderSkillList === 'function') renderSkillList();
             updateStats(d);
@@ -8448,7 +8599,7 @@ async function loadSkills() {
 }
 
 function updateStats(data) {
-    var total = document.getElementById('skills-total'); if (total) total.textContent = (data ? data.skills.length : skillsData.length);
+    var total = document.getElementById('skills-total'); if (total) total.textContent = (data ? data.skills.length : g_skillsData.length);
 }
 
 /* setFilter/selectSkill/testSkill在HTML内联脚本中定义（具有DOM特定UI逻辑）
@@ -8457,9 +8608,9 @@ if (typeof setFilter === 'undefined') {
 function renderSkillList(filterType) {
     var container = document.getElementById('skill-list-container');
     if (!container) return;
-    var filtered = skillsData;
+    var filtered = g_skillsData;
     if (filterType && filterType !== 'all') {
-        filtered = skillsData.filter(function(s) { return s.type === filterType; });
+        filtered = g_skillsData.filter(function(s) { return s.type === filterType; });
     }
     if (filtered.length === 0) {
         container.innerHTML = '<div style="text-align:center;padding:20px;color:rgba(255,255,255,0.4);">暂无技能数据</div>';
@@ -8479,8 +8630,8 @@ function filterSkills() {
 }
 if (typeof selectSkill === 'undefined') {
 function selectSkill(index) {
-    if (index < 0 || index >= skillsData.length) return;
-    var s = skillsData[index];
+    if (index < 0 || index >= g_skillsData.length) return;
+    var s = g_skillsData[index];
     var panel = document.getElementById('skill-detail');
     if (panel) {
         panel.innerHTML = '<h4>' + (s.name||'未知技能') + '</h4>' +
@@ -8493,8 +8644,8 @@ function selectSkill(index) {
 
 if (typeof testSkill === 'undefined') {
 async function testSkill(index) {
-    if (index < 0 || index >= skillsData.length) return;
-    var s = skillsData[index];
+    if (index < 0 || index >= g_skillsData.length) return;
+    var s = g_skillsData[index];
     try {
         var resp = await SelfLnnApi.request('/skills/execute', { method: 'POST', body: JSON.stringify({ skill_id: s.id||index }) });
         var d = await resp.json();
@@ -8794,15 +8945,22 @@ window.toggleCameraPreview = toggleCameraPreview;
  * 防止内存泄漏和后台持续请求
  * ================================================================ */
 window.addEventListener('beforeunload', function() {
+    /* C-04修复: 清理所有注册的事件监听器 */
+    window._cleanupAllEventListeners();
     /* 清理已知的全局定时器 */
     if (window._trainingPollInterval) { clearInterval(window._trainingPollInterval); delete window._trainingPollInterval; }
     if (window._statusPollInterval) { clearInterval(window._statusPollInterval); delete window._statusPollInterval; }
     if (window._sensorStreamInterval) { clearInterval(window._sensorStreamInterval); delete window._sensorStreamInterval; }
     if (window._rosGazeboRefreshTimer) { clearInterval(window._rosGazeboRefreshTimer); delete window._rosGazeboRefreshTimer; }
-    if (typeof rosGazeboRefreshTimer !== 'undefined' && rosGazeboRefreshTimer) { clearInterval(rosGazeboRefreshTimer); rosGazeboRefreshTimer = null; }
+    if (g_rosGazeboRefreshTimer) { clearInterval(g_rosGazeboRefreshTimer); g_rosGazeboRefreshTimer = null; }
     if (window._multimodalStreamInterval) { clearInterval(window._multimodalStreamInterval); delete window._multimodalStreamInterval; }
     if (window._allPanelsRefreshTimer) { clearInterval(window._allPanelsRefreshTimer); delete window._allPanelsRefreshTimer; }
     if (typeof fleetPollInterval !== 'undefined' && fleetPollInterval) { clearInterval(fleetPollInterval); fleetPollInterval = null; }
+    /* 清理知识图谱定时器 (C-03修复) */
+    if (window._kgIntervalIds && window._kgIntervalIds.length) {
+        window._kgIntervalIds.forEach(function(id) { clearInterval(id); });
+        window._kgIntervalIds = [];
+    }
     /* 停止数据引擎 */
     if (g_dataEngine && typeof g_dataEngine.stop === 'function') {
         g_dataEngine.stop();

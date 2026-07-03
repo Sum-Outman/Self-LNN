@@ -198,12 +198,28 @@ CfCNetwork* cfc_create(const CfCNetworkConfig* config) {
         network->out_adam_step = 0;
     }
     
-    // 检查内存分配
+    /* P1修复: 分配失败后完整清理检查
+     * 原检查遗漏了 W_out Adam动量缓冲区 和 层归一化缓冲区，
+     * 若这些分配失败会导致后续访问空指针。
+     * 现在逐层检查所有已分配的资源，确保失败时通过 cfc_free 完整释放。 */
+    int alloc_failed = 0;
     if (!network->layer_outputs || !network->layer_gradients ||
         !network->activation_buffer || !network->dropout_mask ||
         !param_block || !grad_block ||
         !network->per_layer_w_offset || !network->per_layer_b_offset ||
         !network->per_layer_w_size) {
+        alloc_failed = 1;
+    }
+    /* 检查输出投影Adam动量缓冲区 —— 仅当存在输出投影时检查 */
+    if (!alloc_failed && out_proj_param_size > 0) {
+        if (!network->W_out_m || !network->W_out_v ||
+            !network->b_out_m || !network->b_out_v) {
+            alloc_failed = 1;
+        }
+    }
+    if (alloc_failed) {
+        selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
+                              "CfC网络内存分配失败: 参数块或缓冲区分配失败");
         cfc_free(network);
         return NULL;
     }

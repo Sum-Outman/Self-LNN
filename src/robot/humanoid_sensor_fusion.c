@@ -666,7 +666,7 @@ static void update_orientation_from_imu(FusionImuData* imu,
 
 HumanoidSensorFusion* humanoid_sensor_fusion_create(const FusionConfig* config)
 {
-    HumanoidSensorFusion* fusion = (HumanoidSensorFusion*)calloc(1, sizeof(HumanoidSensorFusion));
+    HumanoidSensorFusion* fusion = (HumanoidSensorFusion*)safe_calloc(1, sizeof(HumanoidSensorFusion));
     if (!fusion) return NULL;
 
     memset(&fusion->state, 0, sizeof(FusionHumanoidState));
@@ -728,7 +728,7 @@ HumanoidSensorFusion* humanoid_sensor_fusion_create(const FusionConfig* config)
 
 void humanoid_sensor_fusion_destroy(HumanoidSensorFusion* fusion)
 {
-    free(fusion);
+    safe_free((void**)&fusion);
 }
 
 int humanoid_sensor_fusion_init(HumanoidSensorFusion* fusion)
@@ -1781,7 +1781,7 @@ int humanoid_sensor_fusion_create_fault_detector(HumanoidSensorFusion* fusion)
     memset(fd, 0, sizeof(FusionFaultDetector));
 
     fd->fault_events_capacity = 256;
-    fd->fault_events = (FusionSensorFaultEvent*)calloc(fd->fault_events_capacity,
+    fd->fault_events = (FusionSensorFaultEvent*)safe_calloc(fd->fault_events_capacity,
                                                          sizeof(FusionSensorFaultEvent));
     if (!fd->fault_events) return -1;
 
@@ -1802,7 +1802,7 @@ void humanoid_sensor_fusion_destroy_fault_detector(HumanoidSensorFusion* fusion)
     if (!fusion || !fusion->fault_detector_created) return;
 
     if (fusion->fault_detector.fault_events) {
-        free(fusion->fault_detector.fault_events);
+        safe_free((void**)&fusion->fault_detector.fault_events);
         fusion->fault_detector.fault_events = NULL;
     }
     fusion->fault_detector_created = 0;

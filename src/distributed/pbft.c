@@ -140,7 +140,7 @@ void pbft_default_config(PbftConfig* config) {
 
 static int log_entry_init(PbftSystem* system) {
     system->log_capacity = 1024;
-    system->log_entries = (PbftLogEntry*)calloc(system->log_capacity, sizeof(PbftLogEntry));
+    system->log_entries = (PbftLogEntry*)safe_calloc(system->log_capacity, sizeof(PbftLogEntry));
     if (!system->log_entries) return -1;
     system->log_count = 0;
     return 0;
@@ -158,7 +158,7 @@ static PbftLogEntry* log_create_entry(PbftSystem* system, uint32_t seq) {
     if (existing) return existing;
     if (system->log_count >= system->log_capacity) {
         system->log_capacity *= 2;
-        PbftLogEntry* new_log = (PbftLogEntry*)realloc(system->log_entries,
+        PbftLogEntry* new_log = (PbftLogEntry*)safe_realloc(system->log_entries,
             system->log_capacity * sizeof(PbftLogEntry));
         if (!new_log) return NULL;
         system->log_entries = new_log;
@@ -178,8 +178,7 @@ static void log_gc(PbftSystem* system, uint32_t up_to_seq) {
         } else {
             /* 释放被移除条目的payload */
             if (system->log_entries[i].payload) {
-                free(system->log_entries[i].payload);
-                system->log_entries[i].payload = NULL;
+                safe_free((void**)&system->log_entries[i].payload);
             }
         }
     }
@@ -303,7 +302,7 @@ static uint32_t pbft_sequence_number(PbftSystem* system) {
 
 PbftSystem* pbft_system_create(const PbftConfig* config) {
     if (!config) return NULL;
-    PbftSystem* system = (PbftSystem*)calloc(1, sizeof(PbftSystem));
+    PbftSystem* system = (PbftSystem*)safe_calloc(1, sizeof(PbftSystem));
     if (!system) return NULL;
     memcpy(&system->config, config, sizeof(PbftConfig));
     system->current_view = 0;
@@ -349,7 +348,7 @@ PbftSystem* pbft_system_create(const PbftConfig* config) {
         memset(&system->vc_records[i], 0, sizeof(PbftViewChangeRecord));
     }
     if (log_entry_init(system) != 0) {
-        free(system);
+        safe_free((void**)&system);
         return NULL;
     }
     
@@ -389,25 +388,24 @@ void pbft_system_destroy(PbftSystem* system) {
     pbft_disconnect_all(system);
     for (int i = 0; i < PBFT_MAX_NODES; i++) {
         if (system->view_change_msgs[i]) {
-            free(system->view_change_msgs[i]);
-            system->view_change_msgs[i] = NULL;
+            safe_free((void**)&system->view_change_msgs[i]);
         }
     }
-    if (system->pending_payload) free(system->pending_payload);
+    if (system->pending_payload) safe_free((void**)&system->pending_payload);
     /* result_buffer 是外部传入的指针，不由本模块分配，不能 free */
     system->result_buffer = NULL;
     if (system->log_entries) {
         for (int i = 0; i < (int)system->log_capacity; i++) {
-            if (system->log_entries[i].payload) free(system->log_entries[i].payload);
+            if (system->log_entries[i].payload) safe_free((void**)&system->log_entries[i].payload);
         }
-        free(system->log_entries);
+        safe_free((void**)&system->log_entries);
     }
     if (system->laplace_analyzer) {
         laplace_analyzer_free(system->laplace_analyzer);
         system->laplace_analyzer = NULL;
     }
     safe_free((void**)&system->laplace_spectrum_buffer);
-    free(system);
+    safe_free((void**)&system);
 }
 
 int pbft_add_node(PbftSystem* system, uint32_t node_id, const char* host, uint16_t port) {
@@ -486,7 +484,7 @@ int pbft_connect_all(PbftSystem* system) {
 #endif
 
     system->recv_buffer_size = PBFT_MAX_REQUEST_SIZE + sizeof(PbftMessageHeader) + 256;
-    system->recv_buffer = (uint8_t*)malloc(system->recv_buffer_size);
+    system->recv_buffer = (uint8_t*)safe_malloc(system->recv_buffer_size);
     if (!system->recv_buffer) {
 #ifdef _WIN32
         closesocket(system->listen_socket);
@@ -524,8 +522,7 @@ int pbft_disconnect_all(PbftSystem* system) {
 #endif
 
     if (system->recv_buffer) {
-        free(system->recv_buffer);
-        system->recv_buffer = NULL;
+        safe_free((void**)&system->recv_buffer);
     }
     system->recv_buffer_size = 0;
     system->server_initialized = 0;
@@ -578,10 +575,10 @@ int pbft_submit_request(PbftSystem* system, uint32_t client_id,
     system->pending_op_type = operation_type;
     system->pending_payload_size = payload_size;
     system->pending_timestamp = get_current_time_ms();
-    if (system->pending_payload) free(system->pending_payload);
+    if (system->pending_payload) safe_free((void**)&system->pending_payload);
     system->pending_payload = NULL;
     if (payload && payload_size > 0) {
-        system->pending_payload = (uint8_t*)malloc(payload_size);
+        system->pending_payload = (uint8_t*)safe_malloc(payload_size);
         if (!system->pending_payload) return PBFT_ERROR_OUT_OF_MEMORY;
         memcpy(system->pending_payload, payload, payload_size);
     }
@@ -618,7 +615,7 @@ int pbft_submit_request(PbftSystem* system, uint32_t client_id,
             copy_digest(entry->request_digest, pp.request_digest);
             /* 拷贝负载到per-entry字段 (避免并发提交覆盖全局pending_payload) */
             if (payload && payload_size > 0) {
-                entry->payload = (uint8_t*)malloc(payload_size);
+                entry->payload = (uint8_t*)safe_malloc(payload_size);
                 if (entry->payload) {
                     memcpy(entry->payload, payload, payload_size);
                     entry->payload_size = payload_size;
@@ -647,10 +644,10 @@ int pbft_submit_request_async(PbftSystem* system, uint32_t client_id,
     system->pending_op_type = operation_type;
     system->pending_payload_size = payload_size;
     system->pending_timestamp = get_current_time_ms();
-    if (system->pending_payload) free(system->pending_payload);
+    if (system->pending_payload) safe_free((void**)&system->pending_payload);
     system->pending_payload = NULL;
     if (payload && payload_size > 0) {
-        system->pending_payload = (uint8_t*)malloc(payload_size);
+        system->pending_payload = (uint8_t*)safe_malloc(payload_size);
         if (!system->pending_payload) return PBFT_ERROR_OUT_OF_MEMORY;
         memcpy(system->pending_payload, payload, payload_size);
     }
@@ -727,8 +724,7 @@ int pbft_trigger_view_change(PbftSystem* system) {
 
     for (int i = 0; i < PBFT_MAX_NODES; i++) {
         if (system->view_change_msgs[i]) {
-            free(system->view_change_msgs[i]);
-            system->view_change_msgs[i] = NULL;
+            safe_free((void**)&system->view_change_msgs[i]);
         }
     }
 
@@ -1039,8 +1035,7 @@ static int pbft_handle_view_change(PbftSystem* system, const PbftViewChange* msg
         system->vc_record_count = 0;
         for (int i = 0; i < PBFT_MAX_NODES; i++) {
             if (system->view_change_msgs[i]) {
-                free(system->view_change_msgs[i]);
-                system->view_change_msgs[i] = NULL;
+                safe_free((void**)&system->view_change_msgs[i]);
             }
         }
         int found = 0;
@@ -1054,8 +1049,8 @@ static int pbft_handle_view_change(PbftSystem* system, const PbftViewChange* msg
             system->vc_records[system->vc_record_count].validated = 1;
             system->vc_record_count++;
         }
-        if (system->view_change_msgs[sender]) free(system->view_change_msgs[sender]);
-        system->view_change_msgs[sender] = (PbftViewChange*)malloc(sizeof(PbftViewChange));
+        if (system->view_change_msgs[sender]) safe_free((void**)&system->view_change_msgs[sender]);
+        system->view_change_msgs[sender] = (PbftViewChange*)safe_malloc(sizeof(PbftViewChange));
         if (system->view_change_msgs[sender]) {
             memcpy(system->view_change_msgs[sender], msg, sizeof(PbftViewChange));
         }
@@ -1078,8 +1073,8 @@ static int pbft_handle_view_change(PbftSystem* system, const PbftViewChange* msg
             system->vc_record_count++;
             system->view_change_collected++;
         }
-        if (system->view_change_msgs[sender]) free(system->view_change_msgs[sender]);
-        system->view_change_msgs[sender] = (PbftViewChange*)malloc(sizeof(PbftViewChange));
+        if (system->view_change_msgs[sender]) safe_free((void**)&system->view_change_msgs[sender]);
+        system->view_change_msgs[sender] = (PbftViewChange*)safe_malloc(sizeof(PbftViewChange));
         if (system->view_change_msgs[sender]) {
             memcpy(system->view_change_msgs[sender], msg, sizeof(PbftViewChange));
         }

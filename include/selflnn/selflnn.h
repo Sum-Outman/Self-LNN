@@ -235,6 +235,15 @@ typedef struct {
     int max_concurrent_tasks;
     PowerMode power_mode;
     GpuBackend gpu_backend;
+    /**
+     * @brief 模型文件路径（悬空指针）
+     * 
+     * 【生命周期要求】此指针指向的内存必须由调用者管理，
+     * 且在 SystemConfig 使用期间保持有效。
+     * 调用者应确保 model_path 指向静态字符串、堆分配内存
+     * 或在整个系统生命周期内不被释放的字符串常量。
+     * 系统内部不会复制此字符串，仅存储指针引用。
+     */
     const char* model_path;
 /* 新增端口字段 — 原只在保存时写端口但从不加载 */
     int http_port;
@@ -306,6 +315,19 @@ typedef struct {
     double temperature_c;
 } EnergyDataPoint;
 
+/**
+ * @brief 产品设计标签数据结构
+ * 
+ * 【数组大小说明】以下数组大小与对应的计数字段存在严格对应关系：
+ * - type_labels[4]     <-> 无计数字段（固定4种类型标签）
+ * - style_suffixes[5]  <-> style_suffix_count（样式后缀实际数量，<=5）
+ * - feat_prefixes[16]  <-> feat_prefix_count（特征前缀实际数量，<=16）
+ * - feat_suffixes[12]  <-> feat_suffix_count（特征后缀实际数量，<=12）
+ * - default_features[3] <-> default_feature_count（默认特征实际数量，<=3）
+ * 
+ * 访问时必须以对应计数字段为准，不得超过数组边界。
+ * 所有数组大小均为编译期常量，不可动态调整。
+ */
 typedef struct {
     const char* type_labels[4];
     const char* style_suffixes[5];

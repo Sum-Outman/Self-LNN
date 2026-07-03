@@ -9,17 +9,42 @@
 #define SELFLNN_DP54_PSHRINK -0.25f
 #define SELFLNN_DP54_ERR_CTRL 0.9f /* 从0.5调整为0.9，保留自适应步长控制的有效性 */
 
+/* ODE求解器错误码 */
+#define ODE_ERR_NAN_INF -5  /* NaN/Inf检测到中间步骤 */
+
+/* 编译开关：启用快速验证模式（仅采样检测，非全量扫描） */
+#ifndef SELFLNN_ODE_FAST_VALIDATE
+#define SELFLNN_ODE_FAST_VALIDATE 0
+#endif
+
+/* ODE求解器中间步输出NaN/Inf检测
+ * 在每个RHS调用后检查中间量k1~k7，防止NaN/Inf传播 */
+static int ode_check_output_finite(const float* k, size_t n) {
+    if (!k || n == 0) return 0;
+    for (size_t i = 0; i < n; i++) {
+        if (!isfinite(k[i])) return -1;
+    }
+    return 0;
+}
+
 /* ODE求解器NaN/Inf输入快速检测
  * 在所有求解器入口处调用，防止NaN/Inf传播导致无限循环或数值崩溃 */
 static int ode_check_input_finite(const float* y, size_t n) {
     if (!y || n == 0) return 0;
-    /* 采样检测而非全量扫描：大维度状态向量全量扫描代价过高 */
+#if SELFLNN_ODE_FAST_VALIDATE
+    /* 采样检测：大维度状态向量全量扫描代价过高时启用 */
     size_t step = n > 100 ? n / 50 : 1;
     for (size_t i = 0; i < n; i += step) {
         if (!isfinite(y[i])) return -1;
     }
     /* 也要检测最后一个元素 */
     if (!isfinite(y[n - 1])) return -1;
+#else
+    /* 全量扫描：确保每个元素都经过有限性检测，防止漏检 */
+    for (size_t i = 0; i < n; i++) {
+        if (!isfinite(y[i])) return -1;
+    }
+#endif
     return 0;
 }
 
@@ -119,30 +144,37 @@ int ode_dp54_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void* ctx,
         if (h < h_min) h = h_min;
 
         if (rhs(t_current, y, k1, ctx) != 0) return -2;
+        if (ode_check_output_finite(k1, n) != 0) return ODE_ERR_NAN_INF;
 
         for (size_t i = 0; i < n; i++)
             y_temp[i] = y[i] + h * (0.2f * k1[i]);
         if (rhs(t_current + 0.2f * h, y_temp, k2, ctx) != 0) return -2;
+        if (ode_check_output_finite(k2, n) != 0) return ODE_ERR_NAN_INF;
 
         for (size_t i = 0; i < n; i++)
             y_temp[i] = y[i] + h * (3.0f/40.0f * k1[i] + 9.0f/40.0f * k2[i]);
         if (rhs(t_current + 0.3f * h, y_temp, k3, ctx) != 0) return -2;
+        if (ode_check_output_finite(k3, n) != 0) return ODE_ERR_NAN_INF;
 
         for (size_t i = 0; i < n; i++)
             y_temp[i] = y[i] + h * (44.0f/45.0f * k1[i] - 56.0f/15.0f * k2[i] + 32.0f/9.0f * k3[i]);
         if (rhs(t_current + 0.8f * h, y_temp, k4, ctx) != 0) return -2;
+        if (ode_check_output_finite(k4, n) != 0) return ODE_ERR_NAN_INF;
 
         for (size_t i = 0; i < n; i++)
             y_temp[i] = y[i] + h * (19372.0f/6561.0f * k1[i] - 25360.0f/2187.0f * k2[i] + 64448.0f/6561.0f * k3[i] - 212.0f/729.0f * k4[i]);
         if (rhs(t_current + 8.0f/9.0f * h, y_temp, k5, ctx) != 0) return -2;
+        if (ode_check_output_finite(k5, n) != 0) return ODE_ERR_NAN_INF;
 
         for (size_t i = 0; i < n; i++)
             y_temp[i] = y[i] + h * (9017.0f/3168.0f * k1[i] - 355.0f/33.0f * k2[i] + 46732.0f/5247.0f * k3[i] + 49.0f/176.0f * k4[i] - 5103.0f/18656.0f * k5[i]);
         if (rhs(t_current + h, y_temp, k6, ctx) != 0) return -2;
+        if (ode_check_output_finite(k6, n) != 0) return ODE_ERR_NAN_INF;
 
         for (size_t i = 0; i < n; i++)
             y_temp[i] = y[i] + h * (35.0f/384.0f * k1[i] + 500.0f/1113.0f * k3[i] + 125.0f/192.0f * k4[i] - 2187.0f/6784.0f * k5[i] + 11.0f/84.0f * k6[i]);
         if (rhs(t_current + h, y_temp, k7, ctx) != 0) return -2;
+        if (ode_check_output_finite(k7, n) != 0) return ODE_ERR_NAN_INF;
 
         float max_err = 0.0f;
         for (size_t i = 0; i < n; i++)
@@ -163,9 +195,13 @@ int ode_dp54_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void* ctx,
                 y[i] = y[i] + h * (35.0f/384.0f * k1[i] + 500.0f/1113.0f * k3[i] + 125.0f/192.0f * k4[i] - 2187.0f/6784.0f * k5[i] + 11.0f/84.0f * k6[i]);
             t_current += h;
 
+            /* 步接受后检查y的有限性 */
+            if (ode_check_input_finite(y, n) != 0) return ODE_ERR_NAN_INF;
+
             float h_new = h;
             if (max_err > SELFLNN_DP54_ERR_CTRL)
             {
+                if (max_err < 1e-30f) max_err = 1e-30f;
                 float factor = safety * (float)pow((double)max_err, (double)SELFLNN_DP54_PGROW);
                 h_new = h * fmaxf(0.2f, fminf(5.0f, factor));
             }
@@ -174,6 +210,7 @@ int ode_dp54_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void* ctx,
         }
         else
         {
+            if (max_err < 1e-30f) max_err = 1e-30f;
             float factor = safety * (float)pow((double)max_err, (double)SELFLNN_DP54_PSHRINK);
             h = h * fmaxf(0.1f, fminf(1.0f, factor));
             if (h < h_min) h = h_min;
@@ -336,30 +373,37 @@ int ode_dp54_solve_with_events(float* y, float t, float delta_t,
 
         /* ========== DP54 Butcher table 求值 ========== */
         if (rhs(t_current, y, k1, ctx) != 0) return -2;
+        if (ode_check_output_finite(k1, n) != 0) return ODE_ERR_NAN_INF;
 
         for (size_t i = 0; i < n; i++)
             y_temp[i] = y[i] + h * (0.2f * k1[i]);
         if (rhs(t_current + 0.2f * h, y_temp, k2, ctx) != 0) return -2;
+        if (ode_check_output_finite(k2, n) != 0) return ODE_ERR_NAN_INF;
 
         for (size_t i = 0; i < n; i++)
             y_temp[i] = y[i] + h * (3.0f/40.0f * k1[i] + 9.0f/40.0f * k2[i]);
         if (rhs(t_current + 0.3f * h, y_temp, k3, ctx) != 0) return -2;
+        if (ode_check_output_finite(k3, n) != 0) return ODE_ERR_NAN_INF;
 
         for (size_t i = 0; i < n; i++)
             y_temp[i] = y[i] + h * (44.0f/45.0f * k1[i] - 56.0f/15.0f * k2[i] + 32.0f/9.0f * k3[i]);
         if (rhs(t_current + 0.8f * h, y_temp, k4, ctx) != 0) return -2;
+        if (ode_check_output_finite(k4, n) != 0) return ODE_ERR_NAN_INF;
 
         for (size_t i = 0; i < n; i++)
             y_temp[i] = y[i] + h * (19372.0f/6561.0f * k1[i] - 25360.0f/2187.0f * k2[i] + 64448.0f/6561.0f * k3[i] - 212.0f/729.0f * k4[i]);
         if (rhs(t_current + 8.0f/9.0f * h, y_temp, k5, ctx) != 0) return -2;
+        if (ode_check_output_finite(k5, n) != 0) return ODE_ERR_NAN_INF;
 
         for (size_t i = 0; i < n; i++)
             y_temp[i] = y[i] + h * (9017.0f/3168.0f * k1[i] - 355.0f/33.0f * k2[i] + 46732.0f/5247.0f * k3[i] + 49.0f/176.0f * k4[i] - 5103.0f/18656.0f * k5[i]);
         if (rhs(t_current + h, y_temp, k6, ctx) != 0) return -2;
+        if (ode_check_output_finite(k6, n) != 0) return ODE_ERR_NAN_INF;
 
         for (size_t i = 0; i < n; i++)
             y_temp[i] = y[i] + h * (35.0f/384.0f * k1[i] + 500.0f/1113.0f * k3[i] + 125.0f/192.0f * k4[i] - 2187.0f/6784.0f * k5[i] + 11.0f/84.0f * k6[i]);
         if (rhs(t_current + h, y_temp, k7, ctx) != 0) return -2;
+        if (ode_check_output_finite(k7, n) != 0) return ODE_ERR_NAN_INF;
 
         /* ========== 误差估计 ========== */
         float max_err = 0.0f;
@@ -380,6 +424,9 @@ int ode_dp54_solve_with_events(float* y, float t, float delta_t,
             /* ========== 接受步：更新状态 ========== */
             for (size_t i = 0; i < n; i++)
                 y[i] = y[i] + h * (35.0f/384.0f * k1[i] + 500.0f/1113.0f * k3[i] + 125.0f/192.0f * k4[i] - 2187.0f/6784.0f * k5[i] + 11.0f/84.0f * k6[i]);
+
+            /* 步接受后检查y的有限性 */
+            if (ode_check_input_finite(y, n) != 0) return ODE_ERR_NAN_INF;
 
             /* 保存k7用于后续密集输出 */
             if (use_events) {
@@ -533,6 +580,7 @@ int ode_dp54_solve_with_events(float* y, float t, float delta_t,
             /* 步长控制 */
             float h_new = h_abs;
             if (max_err > 1.0e-12f) {
+                if (max_err < 1e-30f) max_err = 1e-30f;
                 float factor = safety * (float)pow((double)max_err, (double)(-0.2f));
                 h_new = h_abs * (factor > 5.0f ? 5.0f : (factor < 0.2f ? 0.2f : factor));
             }
@@ -543,6 +591,7 @@ int ode_dp54_solve_with_events(float* y, float t, float delta_t,
         else
         {
             /* 步长收缩 */
+            if (max_err < 1e-30f) max_err = 1e-30f;
             float factor = safety * (float)pow((double)max_err, (double)(-0.25f));
             h_abs = h_abs * (factor > 0.9f ? 0.9f : (factor < 0.1f ? 0.1f : factor));
             if (h_abs < h_min) h_abs = h_min;

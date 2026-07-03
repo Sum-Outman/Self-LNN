@@ -592,11 +592,11 @@ static GpuKernel* ascend_backend_kernel_create(GpuContext* context,
     k->context = context;
     if (kernel_name) {
         k->kernel_name = (char*)safe_malloc(strlen(kernel_name) + 1);
-        if (k->kernel_name) strcpy(k->kernel_name, kernel_name);
+        if (k->kernel_name) { size_t _kn_len = strlen(kernel_name); strncpy(k->kernel_name, kernel_name, _kn_len); k->kernel_name[_kn_len] = '\0'; }
     }
     if (kernel_source) {
         k->kernel_source = (char*)safe_malloc(strlen(kernel_source) + 1);
-        if (k->kernel_source) strcpy(k->kernel_source, kernel_source);
+        if (k->kernel_source) { size_t _ks_len = strlen(kernel_source); strncpy(k->kernel_source, kernel_source, _ks_len); k->kernel_source[_ks_len] = '\0'; }
     }
     k->arg_values = (void**)safe_calloc(8, sizeof(void*));
     k->arg_sizes = (size_t*)safe_calloc(8, sizeof(size_t));

@@ -2589,11 +2589,11 @@ static float detect_memory_bandwidth_gbps(void) {
     size_t num_runs = 5;
     float best_bw = 0.0f;
     
-    void* src = malloc(test_size);
-    void* dst = malloc(test_size);
+    void* src = safe_malloc(test_size);
+    void* dst = safe_malloc(test_size);
     if (!src || !dst) {
-        free(src);
-        free(dst);
+        safe_free((void**)&src);
+        safe_free((void**)&dst);
         return 0.0f;
     }
     
@@ -2613,8 +2613,8 @@ static float detect_memory_bandwidth_gbps(void) {
         }
     }
     
-    free(src);
-    free(dst);
+    safe_free((void**)&src);
+    safe_free((void**)&dst);
     return best_bw;
 }
 

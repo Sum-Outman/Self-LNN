@@ -1,6 +1,7 @@
 (function() {
     'use strict';
-    var trainingPollInterval = null;
+    /* M-10修复: trainingPollInterval 改为全局可清理，避免闭包内无法被外部清理 */
+    window._trainingPollInterval = window._trainingPollInterval || null;
     var trainingHistoryData = [];
     var hyperparamPoll = null;
     var selectedCheckpoint = null;
@@ -17,7 +18,7 @@
         5: 'task'
     };
 
-    function stopPolling() { if (trainingPollInterval) { clearInterval(trainingPollInterval); trainingPollInterval = null; } }
+    function stopPolling() { if (window._trainingPollInterval) { clearInterval(window._trainingPollInterval); window._trainingPollInterval = null; } }
     function stopHyperparamPoll() { if (hyperparamPoll) { clearInterval(hyperparamPoll); hyperparamPoll = null; } }
 
     async function startTraining() {
@@ -40,8 +41,8 @@
                 window.showNotification('训练已启动(' + mode + ')', 'success');
                 trainingHistoryData = [];
                 convergenceHistory = [];
-                if (trainingPollInterval) clearInterval(trainingPollInterval);
-                trainingPollInterval = setInterval(pollTraining, 2000);
+                if (window._trainingPollInterval) clearInterval(window._trainingPollInterval);
+                window._trainingPollInterval = setInterval(pollTraining, 2000);
                 pollTraining();
             } else {
                 window.showNotification('启动失败: ' + (data.error || ''), 'danger');
@@ -109,14 +110,18 @@
         var canvas = document.getElementById('train-history-chart');
         if (!canvas) return;
 
-/*: 优先使用WebSocket推送的实时数据缓冲
- *: 添加时效性验证，过期数据回退HTTP轮询 */
+/* M-08修复: 优先使用WebSocket推送的实时数据缓冲，添加完整空值检查 */
         var lossData = trainingHistoryData;
-        var pushAvailable = window.trainingPushManager && 
-                            window.trainingPushManager.dataBuffers &&
-                            window.trainingPushManager.dataBuffers.loss &&
-                            window.trainingPushManager.dataBuffers.loss.train &&
-                            window.trainingPushManager.dataBuffers.loss.train.length >= 2;
+        var pushAvailable = false;
+        /* 逐层检查推送数据结构的完整性 */
+        if (window.trainingPushManager && 
+            window.trainingPushManager.dataBuffers &&
+            window.trainingPushManager.dataBuffers.loss &&
+            window.trainingPushManager.dataBuffers.loss.train &&
+            Array.isArray(window.trainingPushManager.dataBuffers.loss.train) &&
+            window.trainingPushManager.dataBuffers.loss.train.length >= 2) {
+            pushAvailable = true;
+        }
         /* 检查WebSocket推送数据的时效性（超过10秒视为过期） */
         if (pushAvailable) {
             var pushTime = window.trainingPushManager.lastUpdateTime || 0;
@@ -125,9 +130,10 @@
                 pushAvailable = false;
             }
         }
+        /* BUG-12修复：对timestamps添加存在性检查，防止访问不存在的属性 */
         if (pushAvailable) {
             var pushTrain = window.trainingPushManager.dataBuffers.loss.train;
-            var pushTime = window.trainingPushManager.dataBuffers.loss.timestamps;
+            var pushTimestamps = window.trainingPushManager.dataBuffers.loss.timestamps || [];
             lossData = [];
             for (var i = 0; i < pushTrain.length; i++) {
                 lossData.push({ 
@@ -193,7 +199,9 @@
 /* 超参数搜索 */
     async function startHyperparameterSearch() {
         try {
-            var gridSize = parseInt((document.getElementById('hyper-grid-size') || {}).value || '10', 10);
+            /* BUG-5修复: 先获取DOM元素再取值，避免||运算符返回空对象导致parseInt报错 */
+            var gridEl = document.getElementById('hyper-grid-size');
+            var gridSize = gridEl ? parseInt(gridEl.value || '10', 10) : 10;
             /* FIX-7: search_type→method, grid_size→max_trials 匹配后端 */
             var params = { method: 'grid', max_trials: gridSize };
             var data = await window.SelfLnnApi.startHyperparameterSearch(params);  /* FIX-FRONTEND-002: 修正方法名 */
@@ -219,7 +227,10 @@
                 if (bestEl && d.best_score !== undefined) bestEl.textContent = '最佳: ' + d.best_score.toFixed(4);
                 if (d.status === 'completed') stopHyperparamPoll();
             }
-        } catch(e) { console.warn('超参数轮询失败:', e.message); }
+        } catch(e) {
+            console.warn('超参数轮询失败:', e.message);
+            window.showNotification('超参数搜索轮询失败: ' + e.message, 'warning');
+        }
     }
     window.pollHyperparameterSearch = pollHyperparameterSearch;
 
@@ -387,8 +398,8 @@
             var data = await window.SelfLnnApi.trainingResume();
             var ok = data && data.success;
             window.showNotification(ok ? '训练已恢复' : '恢复失败', ok ? 'success' : 'danger');
-            if (trainingPollInterval) clearInterval(trainingPollInterval);
-            trainingPollInterval = setInterval(pollTraining, 2000);
+            if (window._trainingPollInterval) clearInterval(window._trainingPollInterval);
+            window._trainingPollInterval = setInterval(pollTraining, 2000);
             pollTraining();
         } catch(e) { console.error('[训练中心] resumeTraining失败:', e.message); window.showNotification('操作失败', 'danger'); }
     };

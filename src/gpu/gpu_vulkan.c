@@ -1200,7 +1200,8 @@ static int vulkan_backend_get_device_info(int device_id, GpuDeviceInfo* info) {
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         memset(info, 0, sizeof(GpuDeviceInfo));
         info->device_id = device_id;
-        strcpy(info->name, "Vulkan设备（创建实例时崩溃）");
+        strncpy(info->name, "Vulkan设备（创建实例时崩溃）", sizeof(info->name)-1);
+        info->name[sizeof(info->name)-1] = '\0';
         info->type = GPU_DEVICE_TYPE_UNKNOWN;
         return 0;
     }
@@ -1210,7 +1211,8 @@ static int vulkan_backend_get_device_info(int device_id, GpuDeviceInfo* info) {
         // 实例创建失败，返回默认信息
         memset(info, 0, sizeof(GpuDeviceInfo));
         info->device_id = device_id;
-        strcpy(info->name, "Vulkan设备（实例创建失败）");
+        strncpy(info->name, "Vulkan设备（实例创建失败）", sizeof(info->name)-1);
+        info->name[sizeof(info->name)-1] = '\0';
         info->type = GPU_DEVICE_TYPE_UNKNOWN;
         return 0;
     }
@@ -1226,7 +1228,8 @@ static int vulkan_backend_get_device_info(int device_id, GpuDeviceInfo* info) {
         vkDestroyInstance(temp_instance, NULL);
         memset(info, 0, sizeof(GpuDeviceInfo));
         info->device_id = device_id;
-        strcpy(info->name, "Vulkan设备（枚举时崩溃）");
+        strncpy(info->name, "Vulkan设备（枚举时崩溃）", sizeof(info->name)-1);
+        info->name[sizeof(info->name)-1] = '\0';
         info->type = GPU_DEVICE_TYPE_UNKNOWN;
         return 0;
     }
@@ -1237,7 +1240,8 @@ static int vulkan_backend_get_device_info(int device_id, GpuDeviceInfo* info) {
         vkDestroyInstance(temp_instance, NULL);
         memset(info, 0, sizeof(GpuDeviceInfo));
         info->device_id = device_id;
-        strcpy(info->name, "无可用Vulkan设备");
+        strncpy(info->name, "无可用Vulkan设备", sizeof(info->name)-1);
+        info->name[sizeof(info->name)-1] = '\0';
         info->type = GPU_DEVICE_TYPE_UNKNOWN;
         return 0;
     }
@@ -1707,7 +1711,8 @@ static GpuContext* vulkan_backend_context_create(int device_id) {
     gpu_context->total_memory = vulkan_context->total_memory;
     gpu_context->free_memory = vulkan_context->free_memory;
     gpu_context->is_initialized = 1;
-    strcpy(gpu_context->device_name, "Vulkan计算设备");
+    strncpy(gpu_context->device_name, "Vulkan计算设备", sizeof(gpu_context->device_name)-1);
+    gpu_context->device_name[sizeof(gpu_context->device_name)-1] = '\0';
     gpu_context->backend_data = vulkan_context;  // 存储Vulkan上下文
     
     return gpu_context;
@@ -3861,8 +3866,10 @@ static unsigned int* compile_glsl_to_spirv(const char* glsl_source, size_t* spir
     snprintf(temp_spirv_path, sizeof(temp_spirv_path), 
              "%s\\selflnn_temp_%u.spv", temp_dir, temp_counter);
 #else
-    strcpy(temp_glsl_path, "/tmp/selflnn_temp.comp");
-    strcpy(temp_spirv_path, "/tmp/selflnn_temp.spv");
+    strncpy(temp_glsl_path, "/tmp/selflnn_temp.comp", sizeof(temp_glsl_path)-1);
+    temp_glsl_path[sizeof(temp_glsl_path)-1] = '\0';
+    strncpy(temp_spirv_path, "/tmp/selflnn_temp.spv", sizeof(temp_spirv_path)-1);
+    temp_spirv_path[sizeof(temp_spirv_path)-1] = '\0';
 #endif
     
     // 写入GLSL源代码到临时文件

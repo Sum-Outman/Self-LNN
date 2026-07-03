@@ -1727,7 +1727,8 @@ static int opencl_load_library(void) {
 #undef LOAD_OPENCL_FUNC
     
     g_opencl_initialized = 1;
-    strcpy(g_opencl_error_string, "OpenCL库加载成功");
+    strncpy(g_opencl_error_string, "OpenCL库加载成功", sizeof(g_opencl_error_string)-1);
+    g_opencl_error_string[sizeof(g_opencl_error_string)-1] = '\0';
     return 0;
 }
 
@@ -1740,7 +1741,8 @@ static void opencl_unload_library(void) {
         g_opencl_library = NULL;
     }
     g_opencl_initialized = 0;
-    strcpy(g_opencl_error_string, "OpenCL库已卸载");
+    strncpy(g_opencl_error_string, "OpenCL库已卸载", sizeof(g_opencl_error_string)-1);
+    g_opencl_error_string[sizeof(g_opencl_error_string)-1] = '\0';
 }
 
 /**
@@ -3105,7 +3107,8 @@ static GpuKernel* opencl_backend_kernel_create(GpuContext* context, const char* 
                 "内存分配失败：内核名称");
         return NULL;
     }
-    strcpy(opencl_kernel->kernel_name, kernel_name);
+    strncpy(opencl_kernel->kernel_name, kernel_name, name_len-1);
+    opencl_kernel->kernel_name[name_len-1] = '\0';
     
     return (GpuKernel*)opencl_kernel;
 }

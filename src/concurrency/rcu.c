@@ -112,7 +112,8 @@ static int rcu_allocate_thread_id(RcuDomain* domain) {
     if (!domain) return -1;
 /* 使用CAS原子操作保护槽位分配，防止多线程并发获取同一thread_id。
      * thread_active为volatile int，不使用atomic_cas(该宏用InterlockedCompareExchangePointer处理指针)。
-     * 改用InterlockedCompareExchange(Windows)/__sync_bool_compare_and_swap(Linux)处理整型CAS。 */
+     * 改用InterlockedCompareExchange(Windows)/__sync_bool_compare_and_swap(Linux)处理整型CAS。
+     * P2修复: reader_epochs写入使用atomic_store确保写入可见性。 */
     for (int i = 0; i < MAX_RCU_THREADS; i++) {
 #ifdef _WIN32
         if (InterlockedCompareExchange((LONG volatile*)&domain->thread_active[i], 1, 0) == 0) {
@@ -121,7 +122,8 @@ static int rcu_allocate_thread_id(RcuDomain* domain) {
 #endif
             domain->thread_in_read_section[i] = 0;
             domain->thread_reader_count[i] = 0;
-            domain->reader_epochs[i] = 0;  /* L-010: 新线程不在读侧 */
+            /* P2修复: 使用原子存储替代plain volatile写入 */
+            __sync_lock_test_and_set(&domain->reader_epochs[i], 0);
             atomic_increment(&domain->registered_thread_count);
             return i;
         }
@@ -133,7 +135,8 @@ static void rcu_release_thread_id(RcuDomain* domain, int thread_id) {
     if (!domain || thread_id < 0 || thread_id >= MAX_RCU_THREADS) return;
     domain->thread_active[thread_id] = 0;
     domain->thread_in_read_section[thread_id] = 0;
-    domain->reader_epochs[thread_id] = 0;
+    /* P2修复: 原子释放清除epoch */
+    __sync_lock_release(&domain->reader_epochs[thread_id]);
     atomic_decrement(&domain->registered_thread_count);
 }
 
@@ -169,7 +172,8 @@ static int rcu_wait_for_epoch(RcuDomain* domain, long old_epoch) {
         int all_done = 1;
         for (int i = 0; i < MAX_RCU_THREADS; i++) {
             if (domain->thread_active[i]) {
-                long rep = domain->reader_epochs[i];
+                /* P2修复: 使用atomic_load替代plain volatile读取 */
+                long rep = __sync_add_and_fetch(&domain->reader_epochs[i], 0);
                 /* 读者在旧epoch中：尚未退出 */
                 if (rep != 0 && rep == old_epoch) {
                     all_done = 0;
@@ -374,7 +378,8 @@ void rcu_read_lock(RcuDomain* domain) {
      * 确保写者能检测到该线程在读侧临界区中 */
     if (g_tls_rcu_thread_id >= 0 && g_tls_rcu_thread_id < MAX_RCU_THREADS) {
         domain->thread_in_read_section[g_tls_rcu_thread_id] = 1;
-        domain->reader_epochs[g_tls_rcu_thread_id] = domain->global_epoch;
+        /* P2修复: 原子存储确保epoch对写者可见 */
+        __sync_lock_test_and_set(&domain->reader_epochs[g_tls_rcu_thread_id], domain->global_epoch);
     }
     atomic_increment(&domain->active_readers);
     atomic_thread_fence();
@@ -386,7 +391,8 @@ void rcu_read_unlock(RcuDomain* domain) {
     /* L-010: 退出读侧时清除epoch记录（顺序重要：先清除标记再递减计数器） */
     if (g_tls_rcu_thread_id >= 0 && g_tls_rcu_thread_id < MAX_RCU_THREADS) {
         domain->thread_in_read_section[g_tls_rcu_thread_id] = 0;
-        domain->reader_epochs[g_tls_rcu_thread_id] = 0;
+        /* P2修复: 原子存储清除epoch，并用release语义确保写者可见 */
+        __sync_lock_release(&domain->reader_epochs[g_tls_rcu_thread_id]);
     }
     atomic_decrement(&domain->active_readers);
     atomic_thread_fence();
@@ -463,7 +469,7 @@ void rcu_synchronize(RcuDomain* domain) {
      *   - 因此epoch_{N-1}的回调可以安全释放
      */
     /* 递增全局epoch（原子操作防止多写者竞态） */
-    long old_epoch = __sync_fetch_and_add(&domain->global_epoch, 1);
+    long old_epoch = (long)atomic_increment(&domain->global_epoch) - 1;
     long new_epoch = old_epoch + 1;
 
     /* 步骤3: 等待所有在旧epoch中的读者退出 */

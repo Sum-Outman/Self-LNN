@@ -14,7 +14,16 @@
 typedef volatile LONG rw_map_lock_t;
 #else
 #include <stdatomic.h>
-#define rw_map_spin_lock(lock)    do { while (__sync_lock_test_and_set((lock), 1) != 0) { __builtin_ia32_pause(); } } while(0)
+/* P1修复: 平台兼容性 - x86的__builtin_ia32_pause()在ARM上不可用
+ * 添加条件编译，根据目标平台选择正确的CPU暂停指令 */
+#if defined(__x86_64__) || defined(__i386__)
+#define rw_map_cpu_pause() __builtin_ia32_pause()
+#elif defined(__aarch64__) || defined(__arm__)
+#define rw_map_cpu_pause() __asm__ volatile("yield")
+#else
+#define rw_map_cpu_pause() ((void)0)
+#endif
+#define rw_map_spin_lock(lock)    do { while (__sync_lock_test_and_set((lock), 1) != 0) { rw_map_cpu_pause(); } } while(0)
 #define rw_map_spin_unlock(lock)  __sync_lock_release((lock))
 #define rw_map_atomic_inc(ptr)    __sync_add_and_fetch((ptr), 1)
 typedef volatile int rw_map_lock_t;

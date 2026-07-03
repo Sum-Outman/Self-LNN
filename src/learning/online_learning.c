@@ -2628,7 +2628,7 @@ static int detect_concept_drift(OnlineLearner* learner, float loss, ConceptDrift
         default:
             result->drift_detected = 0;
             result->confidence = 0.0f;
-            strcpy(result->description, "无概念漂移检测");
+            memcpy(result->description, "无概念漂移检测", strlen("无概念漂移检测") + 1);
             return 0;
     }
 }

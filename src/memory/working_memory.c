@@ -225,7 +225,7 @@ WorkingMemoryConfig working_memory_config_default(void) {
 }
 
 WorkingMemory* working_memory_create(const WorkingMemoryConfig* config) {
-    WorkingMemory* wm = (WorkingMemory*)calloc(1, sizeof(WorkingMemory));
+    WorkingMemory* wm = (WorkingMemory*)safe_calloc(1, sizeof(WorkingMemory));
     if (!wm) return NULL;
 
     if (config) {
@@ -260,7 +260,7 @@ void working_memory_destroy(WorkingMemory* wm) {
     }
     wm->slot_count = 0;
     wm->initialized = 0;
-    free(wm);
+    safe_free((void**)&wm);
 }
 
 int working_memory_update(WorkingMemory* wm, const char* key,
@@ -275,7 +275,7 @@ int working_memory_update(WorkingMemory* wm, const char* key,
         WMCfcSlot* slot = &wm->slots[slot_idx];
 
         if (slot->data_size != data_size) {
-            float* new_data = (float*)realloc(slot->data, data_size * sizeof(float));
+            float* new_data = (float*)safe_realloc(slot->data, data_size * sizeof(float));
             if (!new_data) return -1;
             slot->data = new_data;
             slot->data_size = data_size;
@@ -317,7 +317,7 @@ int working_memory_update(WorkingMemory* wm, const char* key,
     strncpy(slot->key, key, WM_KEY_MAX - 1);
     slot->key[WM_KEY_MAX - 1] = '\0';
 
-    slot->data = (float*)malloc(data_size * sizeof(float));
+    slot->data = (float*)safe_malloc(data_size * sizeof(float));
     if (!slot->data) return -1;
     memcpy(slot->data, data, data_size * sizeof(float));
     slot->data_size = data_size;
@@ -582,7 +582,7 @@ int working_memory_get_slots(const WorkingMemory* wm,
         dst->key[WM_KEY_MAX - 1] = '\0';
 
         if (src->data && src->data_size > 0) {
-            dst->data = (float*)malloc(src->data_size * sizeof(float));
+            dst->data = (float*)safe_malloc(src->data_size * sizeof(float));
             if (dst->data) {
                 memcpy(dst->data, src->data, src->data_size * sizeof(float));
             }
@@ -817,7 +817,7 @@ int working_memory_deserialize(WorkingMemory* wm,
         if (wm->slots[i].data_size > 0) {
             size_t data_bytes = wm->slots[i].data_size * sizeof(float);
             if (pos + data_bytes > buffer_size) return -1;
-            wm->slots[i].data = (float*)malloc(data_bytes);
+            wm->slots[i].data = (float*)safe_malloc(data_bytes);
             if (!wm->slots[i].data) return -1;
             memcpy(wm->slots[i].data, buffer + pos, data_bytes);
             pos += data_bytes;

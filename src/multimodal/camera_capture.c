@@ -583,7 +583,7 @@ static void vfw_query_max_resolution(int device_index, int* max_w, int* max_h) {
 }
 
 static void* mf_camera_create(int dev_idx, int width, int height, int fps) {
-    VFWCameraContext* ctx = (VFWCameraContext*)calloc(1, sizeof(VFWCameraContext));
+    VFWCameraContext* ctx = (VFWCameraContext*)safe_calloc(1, sizeof(VFWCameraContext));
     if (!ctx) return NULL;
     ctx->device_index = dev_idx;
     ctx->width = width > 0 ? width : 640;
@@ -591,15 +591,15 @@ static void* mf_camera_create(int dev_idx, int width, int height, int fps) {
     ctx->fps = fps > 0 ? fps : 30;
     InitializeCriticalSection(&ctx->lock);
     ctx->rgb_buffer_size = (size_t)ctx->width * ctx->height * 3;
-    ctx->rgb_buffer = (uint8_t*)malloc(ctx->rgb_buffer_size);
-    if (!ctx->rgb_buffer) { DeleteCriticalSection(&ctx->lock); free(ctx); return NULL; }
+    ctx->rgb_buffer = (uint8_t*)safe_malloc(ctx->rgb_buffer_size);
+    if (!ctx->rgb_buffer) { DeleteCriticalSection(&ctx->lock); safe_free((void**)&ctx); return NULL; }
     HWND desktop = GetDesktopWindow();
     ctx->hwnd_capture = capCreateCaptureWindowA("CaptureWnd", WS_CHILD, 0, 0, ctx->width, ctx->height, desktop, 100);
-    if (!ctx->hwnd_capture) { free(ctx->rgb_buffer); DeleteCriticalSection(&ctx->lock); free(ctx); return NULL; }
+    if (!ctx->hwnd_capture) { safe_free((void**)&ctx->rgb_buffer); DeleteCriticalSection(&ctx->lock); safe_free((void**)&ctx); return NULL; }
     SetWindowLongPtrA(ctx->hwnd_capture, GWLP_USERDATA, (LONG_PTR)ctx);
     if (!SendMessageA(ctx->hwnd_capture, WM_CAP_DRIVER_CONNECT, (WPARAM)(WORD)dev_idx, 0)) {
-        DestroyWindow(ctx->hwnd_capture); free(ctx->rgb_buffer);
-        DeleteCriticalSection(&ctx->lock); free(ctx); return NULL;
+        DestroyWindow(ctx->hwnd_capture); safe_free((void**)&ctx->rgb_buffer);
+        DeleteCriticalSection(&ctx->lock); safe_free((void**)&ctx); return NULL;
     }
     CAPTUREPARMS cap_parms;
     if (capCaptureGetSetup(ctx->hwnd_capture, &cap_parms, sizeof(cap_parms))) {
@@ -619,8 +619,8 @@ static void* mf_camera_create(int dev_idx, int width, int height, int fps) {
     capSetVideoFormat(ctx->hwnd_capture, &bmp_info, sizeof(bmp_info));
     if (!capSetCallbackOnFrame(ctx->hwnd_capture, (FARPROC)vfw_frame_proc)) {
         capDriverDisconnect(ctx->hwnd_capture);
-        DestroyWindow(ctx->hwnd_capture); free(ctx->rgb_buffer);
-        DeleteCriticalSection(&ctx->lock); free(ctx); return NULL;
+        DestroyWindow(ctx->hwnd_capture); safe_free((void**)&ctx->rgb_buffer);
+        DeleteCriticalSection(&ctx->lock); safe_free((void**)&ctx); return NULL;
     }
     return ctx;
 }
@@ -666,9 +666,9 @@ static void mf_camera_free(void* ctx_ptr) {
         capDriverDisconnect(ctx->hwnd_capture);
         DestroyWindow(ctx->hwnd_capture);
     }
-    if (ctx->rgb_buffer) free(ctx->rgb_buffer);
+    if (ctx->rgb_buffer) safe_free((void**)&ctx->rgb_buffer);
     DeleteCriticalSection(&ctx->lock);
-    free(ctx);
+    safe_free((void**)&ctx);
 }
 
 #endif /* __cplusplus */

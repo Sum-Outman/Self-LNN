@@ -75,6 +75,8 @@ static int salted_verify_key(const uint8_t* stored_salt, const uint8_t* stored_s
     return memcmp(computed_hash, stored_salted_hash, AUTH_HASH_LEN) == 0 ? 1 : 0;
 }
 
+/* P2注释: 手动十六进制转换 - 避免依赖sprintf/printf系列函数，纯C实现
+ * 将哈希字节转换为 "sk-xxxx-xxxx-xxxx-xxxx..." 格式的人类可读密钥字符串 */
 static void key_to_string(const uint8_t* hash, char* str, size_t str_len) {
     const char hex[] = "0123456789abcdef";
     if (str_len < 3) return;

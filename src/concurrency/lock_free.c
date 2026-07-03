@@ -54,8 +54,8 @@ typedef long LONG;  /* 与Windows LONG兼容的类型定义 */
 #define atomic_thread_fence(memory_order) __sync_synchronize()
 #endif
 
-/* 前向声明：原子比较交换 */
-static int compare_and_swap_uintptr(volatile LONG* ptr, LONG expected, LONG desired);
+/* P2修复: 前向声明——原子比较交换，统一使用 intptr_t 避免LONG与指针大小不匹配 */
+static int compare_and_swap_uintptr(volatile intptr_t* ptr, intptr_t expected, intptr_t desired);
 
 /* ========== 标记指针（Tagged Pointer）ABA防护完整实现 ========== */
 /*
@@ -170,10 +170,17 @@ static int tp_pool_init(TaggedPtrNodePool* pool, size_t node_size, uint16_t capa
     return 0;
 }
 
-/* 从池中分配节点（返回原始指针，调用者需转换为对应节点类型） */
+/* P2修复: 从池中分配节点（使用原子操作防止竞态与溢出）
+ * 原实现 pool->used++ 存在竞态条件，且 uint16_t 溢出未被检测。
+ * 改用原子CAS确保每个线程获得唯一索引，并添加回绕溢出检测。 */
 static void* tp_pool_alloc_node(TaggedPtrNodePool* pool) {
-    if (!pool || !pool->initialized || pool->used >= pool->capacity) return NULL;
-    uint16_t idx = pool->used++;
+    if (!pool || !pool->initialized) return NULL;
+    uint16_t idx;
+    do {
+        idx = (uint16_t)__sync_fetch_and_add((volatile LONG*)&pool->used, 0);
+        if (idx >= pool->capacity) return NULL;
+        /* 原子CAS竞态分配：确保获取到的索引不被其他线程重复使用 */
+    } while (!__sync_bool_compare_and_swap((volatile LONG*)&pool->used, (LONG)idx, (LONG)(idx + 1)));
     return (char*)pool->base + (size_t)idx * pool->node_size;
 }
 
@@ -282,15 +289,16 @@ static HazardPointerTable g_hazard_tables[LF_MAX_THREADS];
 static volatile int g_hazard_table_count = 0;
 static volatile int g_hazard_init_flag = 0;
 
-/* 为当前线程分配独立的危险指针表槽位 */
+/* P2修复: 为当前线程分配独立的危险指针表槽位
+ * 移除非原子检查 in_use 的TOCTOU竞态条件。
+ * 直接使用CAS尝试获取槽位，失败则继续尝试下一个槽位。 */
 static int hazard_register_thread(void) {
     for (int i = 0; i < LF_MAX_THREADS; i++) {
-        if (!g_hazard_tables[i].in_use) {
-            if (compare_and_swap_uintptr((volatile LONG*)&g_hazard_tables[i].in_use, 0, 1)) {
-                g_hazard_tables[i].thread_id = i;
-                memset(g_hazard_tables[i].slots, 0, sizeof(g_hazard_tables[i].slots));
-                return i;
-            }
+        /* 直接使用原子CAS，消除TOCTOU竞态窗口 */
+        if (compare_and_swap_uintptr((volatile intptr_t*)&g_hazard_tables[i].in_use, 0, 1)) {
+            g_hazard_tables[i].thread_id = i;
+            memset(g_hazard_tables[i].slots, 0, sizeof(g_hazard_tables[i].slots));
+            return i;
         }
     }
     return -1;
@@ -750,7 +758,8 @@ int lock_free_queue_enqueue(LockFreeQueue* queue, const void* element,
 #endif
     
     if (element_size != queue->element_size) {
-        strcpy(result->error_message, "元素大小不匹配");
+        strncpy(result->error_message, "元素大小不匹配", sizeof(result->error_message) - 1);
+        result->error_message[sizeof(result->error_message) - 1] = '\0';
         result->success = 0;
         return -1;
     }
@@ -764,7 +773,8 @@ int lock_free_queue_enqueue(LockFreeQueue* queue, const void* element,
     /* 检查队列是否已满 */
     size_t current_size = (size_t)queue->size;
     if (current_size >= queue->capacity) {
-        strcpy(result->error_message, "队列已满");
+        strncpy(result->error_message, "队列已满", sizeof(result->error_message) - 1);
+        result->error_message[sizeof(result->error_message) - 1] = '\0';
         result->success = 0;
         return -1;
     }
@@ -772,7 +782,8 @@ int lock_free_queue_enqueue(LockFreeQueue* queue, const void* element,
     /* 创建新节点 */
     LockFreeQueueNode* new_node = create_queue_node(element, element_size);
     if (new_node == NULL) {
-        strcpy(result->error_message, "创建节点失败");
+        strncpy(result->error_message, "创建节点失败", sizeof(result->error_message) - 1);
+        result->error_message[sizeof(result->error_message) - 1] = '\0';
         result->success = 0;
         return -1;
     }
@@ -823,7 +834,8 @@ int lock_free_queue_enqueue(LockFreeQueue* queue, const void* element,
     
     if (!success) {
         free_queue_node(new_node);
-        strcpy(result->error_message, "入队操作失败，超过最大重试次数");
+        strncpy(result->error_message, "入队操作失败，超过最大重试次数", sizeof(result->error_message) - 1);
+        result->error_message[sizeof(result->error_message) - 1] = '\0';
         return -1;
     }
     
@@ -844,7 +856,8 @@ int lock_free_queue_dequeue(LockFreeQueue* queue, void* element,
 #endif
     
     if (element_size != queue->element_size) {
-        strcpy(result->error_message, "元素大小不匹配");
+        strncpy(result->error_message, "元素大小不匹配", sizeof(result->error_message) - 1);
+        result->error_message[sizeof(result->error_message) - 1] = '\0';
         result->success = 0;
         return -1;
     }
@@ -874,7 +887,8 @@ int lock_free_queue_dequeue(LockFreeQueue* queue, void* element,
                     /* 队列为空 */
                     hazard_ptr_clear(0);
                     hazard_ptr_clear(1);
-                    strcpy(result->error_message, "队列为空");
+                    strncpy(result->error_message, "队列为空", sizeof(result->error_message) - 1);
+                    result->error_message[sizeof(result->error_message) - 1] = '\0';
                     result->success = 0;
                     return -1;
                 }
@@ -934,7 +948,8 @@ int lock_free_queue_dequeue(LockFreeQueue* queue, void* element,
     result->backoff_count = retries;
     
     if (!success) {
-        strcpy(result->error_message, "出队操作失败，超过最大重试次数");
+        strncpy(result->error_message, "出队操作失败，超过最大重试次数", sizeof(result->error_message) - 1);
+        result->error_message[sizeof(result->error_message) - 1] = '\0';
         return -1;
     }
     
@@ -1130,7 +1145,8 @@ int lock_free_stack_push(LockFreeStack* stack, const void* element,
 #endif
     
     if (element_size != stack->element_size) {
-        strcpy(result->error_message, "元素大小不匹配");
+        strncpy(result->error_message, "元素大小不匹配", sizeof(result->error_message) - 1);
+        result->error_message[sizeof(result->error_message) - 1] = '\0';
         result->success = 0;
         return -1;
     }
@@ -1138,7 +1154,8 @@ int lock_free_stack_push(LockFreeStack* stack, const void* element,
     /* 检查栈是否已满 */
     size_t current_size = (size_t)stack->size;
     if (current_size >= stack->capacity) {
-        strcpy(result->error_message, "栈已满");
+        strncpy(result->error_message, "栈已满", sizeof(result->error_message) - 1);
+        result->error_message[sizeof(result->error_message) - 1] = '\0';
         result->success = 0;
         return -1;
     }
@@ -1146,7 +1163,8 @@ int lock_free_stack_push(LockFreeStack* stack, const void* element,
     /* 创建新节点 */
     LockFreeStackNode* new_node = create_stack_node(element, element_size);
     if (new_node == NULL) {
-        strcpy(result->error_message, "创建节点失败");
+        strncpy(result->error_message, "创建节点失败", sizeof(result->error_message) - 1);
+        result->error_message[sizeof(result->error_message) - 1] = '\0';
         result->success = 0;
         return -1;
     }
@@ -1180,7 +1198,8 @@ int lock_free_stack_push(LockFreeStack* stack, const void* element,
     
     if (!success) {
         free_stack_node(new_node);
-        strcpy(result->error_message, "压栈操作失败，超过最大重试次数");
+        strncpy(result->error_message, "压栈操作失败，超过最大重试次数", sizeof(result->error_message) - 1);
+        result->error_message[sizeof(result->error_message) - 1] = '\0';
         return -1;
     }
     
@@ -1201,7 +1220,8 @@ int lock_free_stack_pop(LockFreeStack* stack, void* element,
 #endif
     
     if (element_size != stack->element_size) {
-        strcpy(result->error_message, "元素大小不匹配");
+        strncpy(result->error_message, "元素大小不匹配", sizeof(result->error_message) - 1);
+        result->error_message[sizeof(result->error_message) - 1] = '\0';
         result->success = 0;
         return -1;
     }
@@ -1216,7 +1236,8 @@ int lock_free_stack_pop(LockFreeStack* stack, void* element,
         
         if (old_top == NULL) {
             /* 栈为空 */
-            strcpy(result->error_message, "栈为空");
+            strncpy(result->error_message, "栈为空", sizeof(result->error_message) - 1);
+            result->error_message[sizeof(result->error_message) - 1] = '\0';
             result->success = 0;
             return -1;
         }
@@ -1249,7 +1270,8 @@ int lock_free_stack_pop(LockFreeStack* stack, void* element,
     result->backoff_count = retries;
     
     if (!success) {
-        strcpy(result->error_message, "弹栈操作失败，超过最大重试次数");
+        strncpy(result->error_message, "弹栈操作失败，超过最大重试次数", sizeof(result->error_message) - 1);
+        result->error_message[sizeof(result->error_message) - 1] = '\0';
         return -1;
     }
     
@@ -1451,11 +1473,11 @@ static int compare_and_swap_pointer(void** ptr, void* expected, void* desired) {
 }
 
 /**
- * @brief 比较并交换uintptr
+ * @brief 比较并交换uintptr — P2修复: 使用intptr_t替代LONG以支持64位指针
  */
-static int compare_and_swap_uintptr(volatile LONG* ptr, LONG expected, LONG desired) {
+static int compare_and_swap_uintptr(volatile intptr_t* ptr, intptr_t expected, intptr_t desired) {
 #ifdef _WIN32
-    return InterlockedCompareExchange(ptr, desired, expected) == expected;
+    return InterlockedCompareExchange64((volatile LONGLONG*)ptr, (LONGLONG)desired, (LONGLONG)expected) == (LONGLONG)expected;
 #else
     return __sync_bool_compare_and_swap(ptr, expected, desired);
 #endif

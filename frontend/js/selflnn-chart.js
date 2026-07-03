@@ -38,6 +38,8 @@ class SelfLnnChart {
     }
 
     _initDpr() {
+        /* BUG-16修复：canvas或ctx不存在时直接返回，防止TypeError */
+        if (!this.canvas || !this.ctx) return;
         const rect = this.canvas.getBoundingClientRect();
         const w = rect.width;
         const h = rect.height;

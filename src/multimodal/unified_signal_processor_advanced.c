@@ -95,11 +95,11 @@ SELFLNN_API AdaptiveRouterConfig adaptive_router_get_default_config(void)
 
 SELFLNN_API AdaptiveRouter* adaptive_router_create(const AdaptiveRouterConfig* config)
 {
-    AdaptiveRouter* router = (AdaptiveRouter*)calloc(1, sizeof(AdaptiveRouter));
+    AdaptiveRouter* router = (AdaptiveRouter*)safe_calloc(1, sizeof(AdaptiveRouter));
     if (!router) return NULL;
     router->lock = mutex_create();
     if (!router->lock) {
-        free(router);
+        safe_free((void**)&router);
         return NULL;
     }
     if (config) {
@@ -125,14 +125,14 @@ SELFLNN_API void adaptive_router_free(AdaptiveRouter* router)
     if (!router) return;
     ADAPTIVE_LOCK(router);
     for (int m = 0; m < SELFLNN_MAX_MODALITIES; m++) {
-        free(router->prev_features[m]);
+        safe_free((void**)&router->prev_features[m]);
         router->prev_features[m] = NULL;
-        free(router->quality_buffer[m]);
+        safe_free((void**)&router->quality_buffer[m]);
         router->quality_buffer[m] = NULL;
     }
     ADAPTIVE_UNLOCK(router);
     mutex_destroy(router->lock);
-    free(router);
+    safe_free((void**)&router);
 }
 
 SELFLNN_API int adaptive_router_compute_quality(
@@ -166,7 +166,7 @@ SELFLNN_API int adaptive_router_compute_quality(
     float snr;
     {
         float signal_power = energy;
-        float* sorted = (float*)malloc(feature_dim * sizeof(float));
+        float* sorted = (float*)safe_malloc(feature_dim * sizeof(float));
         if (!sorted) { ADAPTIVE_UNLOCK(router); return -1; }
         memcpy(sorted, features, feature_dim * sizeof(float));
         for (size_t i = 0; i < feature_dim; i++) {
@@ -184,7 +184,7 @@ SELFLNN_API int adaptive_router_compute_quality(
         if (noise_power < 1e-12f) noise_power = 1e-12f;
         snr = 10.0f * log10f((signal_power + 1e-12f) / noise_power);
         snr = internal_clampf((snr + 20.0f) / 60.0f, 0.0f, 1.0f);
-        free(sorted);
+        safe_free((void**)&sorted);
     }
 
     float temporal_consistency = 0.0f;
@@ -209,7 +209,7 @@ SELFLNN_API int adaptive_router_compute_quality(
     int win = router->config.quality_window;
     if (win > 0) {
         if (!router->quality_buffer[modality_idx]) {
-            router->quality_buffer[modality_idx] = (float*)calloc((size_t)win, sizeof(float));
+            router->quality_buffer[modality_idx] = (float*)safe_calloc((size_t)win, sizeof(float));
             if (!router->quality_buffer[modality_idx]) { ADAPTIVE_UNLOCK(router); return -1; }
             for (int i = 0; i < win; i++) router->quality_buffer[modality_idx][i] = overall;
             router->quality_buffer_count[modality_idx] = win;
@@ -236,11 +236,11 @@ SELFLNN_API int adaptive_router_compute_quality(
     router->smoothed_qualities[modality_idx] = *metrics;
 
     if (router->prev_features[modality_idx] && router->prev_feature_dims[modality_idx] != feature_dim) {
-        free(router->prev_features[modality_idx]);
+        safe_free((void**)&router->prev_features[modality_idx]);
         router->prev_features[modality_idx] = NULL;
     }
     if (!router->prev_features[modality_idx]) {
-        router->prev_features[modality_idx] = (float*)malloc(feature_dim * sizeof(float));
+        router->prev_features[modality_idx] = (float*)safe_malloc(feature_dim * sizeof(float));
         if (!router->prev_features[modality_idx]) { ADAPTIVE_UNLOCK(router); return -1; }
     }
     memcpy(router->prev_features[modality_idx], features, feature_dim * sizeof(float));

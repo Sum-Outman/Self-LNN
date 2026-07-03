@@ -8,11 +8,8 @@
 (function() {
     'use strict';
 
-/* 前端配置 - 可在页面加载前覆盖 */
-var SELFLNN_CONFIG = window.SELFLNN_CONFIG || {
-    port: 8080,
-    host: 'localhost'
-};
+/* BUG-23修复：使用Object.assign合并默认值和用户配置，确保所有默认字段都被保留 */
+var SELFLNN_CONFIG = Object.assign({ port: 8080, host: 'localhost' }, window.SELFLNN_CONFIG || {});
 
 /* 端点→子系统映射表（配置驱动，替代字符串匹配） */
 var SUBSYSTEM_ENDPOINT_MAP = {
@@ -24,6 +21,7 @@ var SUBSYSTEM_ENDPOINT_MAP = {
     '/training':      'training',
     '/knowledge':     'knowledge',
     '/robot':         'robot',
+    '/robots':        'robot',
     '/ros':           'robot',
     '/gazebo':        'robot',
     '/simulation':    'simulation',
@@ -45,7 +43,21 @@ var SUBSYSTEM_ENDPOINT_MAP = {
     '/product':       'product_design',
     '/skills':        'knowledge',
     '/logs':          'system',
-    '/api':           'system'
+    '/api':           'system',
+    '/agents':        'agent',
+    '/keys':          'key',
+    '/key':           'key',
+    '/datasets':      'dataset',
+    '/stereo':        'stereo',
+    '/agi':           'agi',
+    '/hardware':      'hardware',
+    '/imitation':     'imitation',
+    '/teach':         'teach',
+    '/audio':         'audio',
+    '/camera':        'camera',
+    '/laplace':       'laplace',
+    '/auto-learn':    'auto_learn',
+    '/capability':    'capability'
 };
 
 class ApiService {
@@ -213,7 +225,10 @@ class ApiService {
         if (!endpoint) return 'unknown';
 /* 配置驱动查找 */
         var path = endpoint.replace(/^https?:\/\/[^\/]+/, '');
-        for (var prefix in SUBSYSTEM_ENDPOINT_MAP) {
+        /* BUG-15修复：使用Object.keys避免for...in遍历原型链上的属性 */
+        var keys = Object.keys(SUBSYSTEM_ENDPOINT_MAP);
+        for (var i = 0; i < keys.length; i++) {
+            var prefix = keys[i];
             if (path.indexOf(prefix) === 0) {
                 return SUBSYSTEM_ENDPOINT_MAP[prefix];
             }
@@ -1425,8 +1440,7 @@ class ApiService {
     async runSelfDiagnostic() {
         try {
             const response = await this.request('/system/diagnostic', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' }
+                method: 'GET'
             });
 
             if (!response.ok) {
@@ -1823,12 +1837,12 @@ class ApiService {
 
     /**
      * 查询知识库
-     * API路径标准化 (M-039): /api/knowledge
-     * 注: 后端知识库主查询端点为 /api/knowledge (非 /api/knowledge/query)
+     * API路径标准化 (M-039): /knowledge
+     * 注: 后端知识库主查询端点为 /knowledge (非 /knowledge/query)
      */
     async queryKnowledge(query) {
         try {
-            const response = await this.request('/api/knowledge' + (query ? '?q=' + encodeURIComponent(query) : ''));
+            const response = await this.request('/knowledge' + (query ? '?q=' + encodeURIComponent(query) : ''));
             if (!response.ok) {
                 throw new Error('HTTP错误: ' + response.status);
             }
@@ -1867,6 +1881,190 @@ class ApiService {
             return { success: true, data: data };
         } catch (error) {
             console.error('添加知识失败:', error);
+            return { success: false, error: error.message, data: null };
+        }
+    }
+
+    /**
+     * 知识图谱统计信息 (P3修复)
+     * GET /kg/stats → 返回节点数、边数、密度、聚类系数等统计指标
+     */
+    async kgStats() {
+        try {
+            const response = await this.request('/kg/stats', { method: 'GET' });
+            if (!response.ok) throw new Error('HTTP错误: ' + response.status);
+            const data = await response.json();
+            return { success: true, data: data };
+        } catch (error) {
+            console.error('知识图谱统计失败:', error);
+            return { success: false, error: error.message, data: null };
+        }
+    }
+
+    /**
+     * 知识图谱可视化数据 (P3修复)
+     * GET /kg/visualize → 返回完整图谱可视化数据(节点坐标+边关系+布局信息)
+     */
+    async kgVisualize() {
+        try {
+            const response = await this.request('/kg/visualize', { method: 'GET' });
+            if (!response.ok) throw new Error('HTTP错误: ' + response.status);
+            const data = await response.json();
+            return { success: true, data: data };
+        } catch (error) {
+            console.error('知识图谱可视化数据获取失败:', error);
+            return { success: false, error: error.message, data: null };
+        }
+    }
+
+    /**
+     * 知识图谱语义搜索 (P3修复)
+     * POST /kg/search → body: { query: "...", top_k: N }
+     */
+    async kgSearch(query, topK) {
+        try {
+            const response = await this.request('/kg/search', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ query: query || '', top_k: topK || 20 })
+            });
+            if (!response.ok) throw new Error('HTTP错误: ' + response.status);
+            const data = await response.json();
+            return { success: true, data: data };
+        } catch (error) {
+            console.error('知识图谱语义搜索失败:', error);
+            return { success: false, error: error.message, data: null };
+        }
+    }
+
+    /* ==================== I-S01: 知识图谱扩展API ==================== */
+
+    /**
+     * 添加知识图谱节点/边
+     * POST /api/kg/add → body: { nodes: [...], edges: [...] }
+     */
+    async addKnowledgeGraph(data) {
+        try {
+            const response = await this.request('/kg/add', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data || {})
+            });
+            if (!response.ok) throw new Error('HTTP错误: ' + response.status);
+            const result = await response.json();
+            return { success: true, data: result };
+        } catch (error) {
+            console.error('添加知识图谱失败:', error);
+            return { success: false, error: error.message, data: null };
+        }
+    }
+
+    /**
+     * 查询知识图谱
+     * GET /api/kg/query?q=... → 返回匹配的节点和边
+     */
+    async queryKnowledgeGraph(query) {
+        try {
+            const q = (query && query.trim()) ? '?q=' + encodeURIComponent(query) : '';
+            const response = await this.request('/kg/query' + q, { method: 'GET' });
+            if (!response.ok) throw new Error('HTTP错误: ' + response.status);
+            const data = await response.json();
+            return { success: true, data: data };
+        } catch (error) {
+            console.error('查询知识图谱失败:', error);
+            return { success: false, error: error.message, data: null };
+        }
+    }
+
+    /**
+     * 删除知识图谱节点/边
+     * DELETE /api/kg/delete → body: { id: "..." }
+     */
+    async deleteKnowledgeGraph(id) {
+        try {
+            const response = await this.request('/kg/delete', {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: id })
+            });
+            if (!response.ok) throw new Error('HTTP错误: ' + response.status);
+            const data = await response.json();
+            return { success: true, data: data };
+        } catch (error) {
+            console.error('删除知识图谱失败:', error);
+            return { success: false, error: error.message, data: null };
+        }
+    }
+
+    /**
+     * 扩展知识图谱
+     * POST /api/kg/expand → body: { seed: "...", depth: N }
+     */
+    async expandKnowledgeGraph(data) {
+        try {
+            const response = await this.request('/kg/expand', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data || {})
+            });
+            if (!response.ok) throw new Error('HTTP错误: ' + response.status);
+            const result = await response.json();
+            return { success: true, data: result };
+        } catch (error) {
+            console.error('扩展知识图谱失败:', error);
+            return { success: false, error: error.message, data: null };
+        }
+    }
+
+    /**
+     * 合并知识图谱
+     * POST /api/kg/merge → body: { graphs: [...], strategy: "..." }
+     */
+    async mergeKnowledgeGraph(data) {
+        try {
+            const response = await this.request('/kg/merge', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data || {})
+            });
+            if (!response.ok) throw new Error('HTTP错误: ' + response.status);
+            const result = await response.json();
+            return { success: true, data: result };
+        } catch (error) {
+            console.error('合并知识图谱失败:', error);
+            return { success: false, error: error.message, data: null };
+        }
+    }
+
+    /**
+     * 知识图谱可视化数据
+     * GET /api/kg/visualize → 返回完整图谱可视化数据
+     */
+    async visualizeKnowledgeGraph() {
+        try {
+            const response = await this.request('/kg/visualize', { method: 'GET' });
+            if (!response.ok) throw new Error('HTTP错误: ' + response.status);
+            const data = await response.json();
+            return { success: true, data: data };
+        } catch (error) {
+            console.error('知识图谱可视化失败:', error);
+            return { success: false, error: error.message, data: null };
+        }
+    }
+
+    /**
+     * 知识图谱搜索
+     * GET /api/kg/search?q=... → 返回匹配的节点和边
+     */
+    async searchKnowledgeGraph(query) {
+        try {
+            const q = (query && query.trim()) ? '?q=' + encodeURIComponent(query) : '';
+            const response = await this.request('/kg/search' + q, { method: 'GET' });
+            if (!response.ok) throw new Error('HTTP错误: ' + response.status);
+            const data = await response.json();
+            return { success: true, data: data };
+        } catch (error) {
+            console.error('知识图谱搜索失败:', error);
             return { success: false, error: error.message, data: null };
         }
     }
@@ -1961,6 +2159,20 @@ class ApiService {
             });
             var data = await resp.json();
             return { success: resp.ok, data: data, message: data && data.message };
+        } catch (e) {
+            return { success: false, error: e.message };
+        }
+    }
+
+    /**
+     * I-S04: 获取安全边界配置
+     * GET /api/safety/boundary-config → 返回当前安全边界参数
+     */
+    async getSafetyBoundaryConfig() {
+        try {
+            var resp = await this.request('/safety/boundary-config', { method: 'GET' });
+            var data = await resp.json();
+            return { success: resp.ok, data: data };
         } catch (e) {
             return { success: false, error: e.message };
         }
@@ -2085,11 +2297,11 @@ class ApiService {
 
     /**
      * 发送对话消息
-     * API路径标准化 (M-037): /api/dialogue/send - 后端已注册此别名路由
+     * API路径标准化 (M-037): /dialogue/send - 后端已注册此别名路由
      */
     async sendDialogueMessage(message, config) {
         try {
-            const response = await this.request('/api/dialogue/send', {
+            const response = await this.request('/dialogue/send', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
@@ -2122,11 +2334,11 @@ class ApiService {
 
     /**
      * 获取对话历史
-     * API路径标准化 (M-038): /api/dialogue/history
+     * API路径标准化 (M-038): /dialogue/history
      */
     async getDialogueHistory() {
         try {
-            const response = await this.request('/api/dialogue/history');
+            const response = await this.request('/dialogue/history');
             if (!response.ok) {
                 throw new Error(`HTTP错误: ${response.status}`);
             }
@@ -2147,11 +2359,11 @@ class ApiService {
 
     /**
      * 清空对话历史
-     * API路径标准化 (M-038): /api/dialogue/clear
+     * API路径标准化 (M-038): /dialogue/clear
      */
     async clearDialogueHistory() {
         try {
-            const response = await this.request('/api/dialogue/clear', {
+            const response = await this.request('/dialogue/clear', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
@@ -2204,7 +2416,7 @@ class ApiService {
      */
     async toggleAgiFeature(feature, enabled) {
         try {
-            const response = await this.request('/agi/features/toggle', {
+            const response = await this.request('/agi/feature/toggle', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
@@ -2275,6 +2487,18 @@ class ApiService {
         }
     }
 
+    /**
+     * I-L02: 获取音频设备列表
+     * GET /api/audio/devices → 返回可用音频输入/输出设备列表
+     */
+    async getAudioDevices() {
+        try {
+            var resp = await this.request('/audio/devices', { method: 'GET' });
+            var data = await resp.json();
+            return { success: resp.ok, data: data };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
     // ================================================================
     // 多模态对话API
     // ================================================================
@@ -2297,8 +2521,8 @@ class ApiService {
             if (options.audio && options.audio.length > 0) {
                 payload.audio = options.audio;
             }
-            /* API路径标准化 (M-038): /api/dialogue/multimodal */
-            const response = await this.request('/api/dialogue/multimodal', {
+            /* API路径标准化 (M-038): /dialogue/multimodal */
+            const response = await this.request('/dialogue/multimodal', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
@@ -2594,11 +2818,11 @@ class ApiService {
 
     /**
      * 列出所有可用设备
-     * API路径标准化 (M-040): /api/devices/list
+     * API路径标准化 (M-040): /devices/list
      */
     async listDevices() {
         try {
-            const response = await this.request('/api/devices/list', { method: 'GET' });
+            const response = await this.request('/devices/list', { method: 'GET' });
             if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
             const data = await response.json();
             return { success: true, data: data };
@@ -2816,20 +3040,20 @@ class ApiService {
                     this.audioTimer = null;
                 }
                 if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
-                    this.mediaRecorder.stop;
+                    this.mediaRecorder.stop();
                 }
             }
         };
         var self = this;
         if (type === 'video' || type === 'audiovideo') {
-            var videoTrack = stream.getVideoTracks[0];
+            var videoTrack = stream.getVideoTracks()[0];
             if (videoTrack) {
                 handle.canvas.width = options.width || 640;
                 handle.canvas.height = options.height || 480;
                 var ctx = handle.canvas.getContext('2d');
                 var tempVideo = document.createElement('video');
                 tempVideo.srcObject = new MediaStream([videoTrack]);
-                tempVideo.play;
+                tempVideo.play();
                 handle.videoTimer = setInterval(function() {
                     if (!handle.running) return;
                     try {
@@ -3599,6 +3823,86 @@ class ApiService {
         } catch (e) { return { success: false, error: e.message }; }
     }
 
+    /* ==================== I-S02: 仿真高级控制API ==================== */
+
+    /**
+     * 3D重建
+     * POST /api/simulation/3d-reconstruct → body: { point_cloud: [...] }
+     */
+    async simulation3dReconstruct(data) {
+        try {
+            var resp = await this.request('/simulation/3d-reconstruct', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(data || {})
+            });
+            var data = await resp.json();
+            return { success: resp.ok, data: data };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /**
+     * 路径规划
+     * POST /api/robot/path/plan → body: { start: [...], goal: [...], constraints: {} }
+     */
+    async simulationPathPlan(data) {
+        try {
+            var resp = await this.request('/robot/path/plan', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(data || {})
+            });
+            var data = await resp.json();
+            return { success: resp.ok, data: data };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /**
+     * 重置仿真视图
+     * POST /api/simulation/view/reset
+     */
+    async simulationViewReset() {
+        try {
+            var resp = await this.request('/simulation/view/reset', { method: 'POST' });
+            var data = await resp.json();
+            return { success: resp.ok, data: data };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /**
+     * 切换网格显示
+     * POST /api/simulation/view/toggle_grid
+     */
+    async simulationGridToggle() {
+        try {
+            var resp = await this.request('/simulation/view/toggle_grid', { method: 'POST' });
+            var data = await resp.json();
+            return { success: resp.ok, data: data };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /**
+     * 清除场景
+     * POST /api/simulation/clear
+     */
+    async simulationClearScene() {
+        try {
+            var resp = await this.request('/simulation/clear', { method: 'POST' });
+            var data = await resp.json();
+            return { success: resp.ok, data: data };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /**
+     * 导出仿真场景
+     * GET /api/simulation/export → 返回场景数据文件
+     */
+    async simulationExport() {
+        try {
+            var resp = await this.request('/simulation/export', { method: 'GET' });
+            var data = await resp.json();
+            return { success: resp.ok, data: data };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
     // ==================== 多模态学习 API ====================
 
     async multimodalLearn(learnMode, architecture) {
@@ -3732,10 +4036,10 @@ class ApiService {
 
     // ==================== 设备控制 API ====================
 
-    /* API路径标准化 (M-040): /api/devices/list */
+    /* API路径标准化 (M-040): /devices/list */
     async devicesList() {
         try {
-            var resp = await this.request('/api/devices/list', {method: 'GET'});
+            var resp = await this.request('/devices/list', {method: 'GET'});
             var data = await resp.json();
             return { success: resp.ok, data: data };
         } catch (e) { return { success: false, error: e.message }; }
@@ -4136,6 +4440,21 @@ class ApiService {
         } catch (e) { return { success: false, error: e.message }; }
     }
 
+    /**
+     * I-M06: 多机器人同步（别名方法）
+     * POST /api/multi_robot/sync → body: { targets: [...], config: {} }
+     */
+    async syncMultiRobot() {
+        try {
+            var resp = await this.request('/multi_robot/sync', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({})
+            });
+            var data = await resp.json();
+            return { success: resp.ok, data: data };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
     /* ==================== AGI 功能列表 API ==================== */
 
     async getAgiFeatureList() {
@@ -4291,6 +4610,18 @@ class ApiService {
     /* ==================== 演化帕累托前沿 API ==================== */
 
     async getEvolutionPareto() {
+        try {
+            var resp = await this.request('/evolution/pareto', {method: 'GET'});
+            var data = await resp.json();
+            return { success: resp.ok, data: data };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /**
+     * I-L03: 获取帕累托前沿
+     * GET /api/evolution/pareto → 返回多目标优化的帕累托前沿数据
+     */
+    async getParetoFront() {
         try {
             var resp = await this.request('/evolution/pareto', {method: 'GET'});
             var data = await resp.json();
@@ -4619,6 +4950,21 @@ class ApiService {
         } catch (e) { return { success: false, error: e.message }; }
     }
 
+    /**
+     * I-L05: 超参数搜索（别名方法）
+     * POST /api/training/hyperparameter-search → body: { search_space: {}, trials: N }
+     */
+    async hyperparameterSearch() {
+        try {
+            var resp = await this.request('/training/hyperparameter-search', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({})
+            });
+            var data = await resp.json();
+            return { success: resp.ok, data: data };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
     async getHyperparameterStatus() {
         try {
             var resp = await this.request('/hyperparameter/status', { method: 'GET' });
@@ -4775,9 +5121,20 @@ class ApiService {
 
     /**
      * 获取认知系统状态（自我认知、元认知、深度反思）
+     * GET /api/agi/cognition/state
      */
     async getCognitionState() {
-        return this.getCognitionStatus;
+        try {
+            const response = await this.request('/agi/cognition/state');
+            if (!response.ok) {
+                throw new Error(`HTTP错误: ${response.status}`);
+            }
+            const data = await response.json();
+            return { success: true, data: data };
+        } catch (error) {
+            console.error('获取认知状态失败:', error);
+            return { success: false, error: error.message, data: null };
+        }
     }
 
     /**
@@ -4889,6 +5246,22 @@ class ApiService {
             console.error('停止多模态处理失败:', error);
             return { success: false, error: error.message, data: null };
         }
+    }
+
+    /**
+     * I-L04: 停止多模态处理（别名方法）
+     * POST /api/multimodal/stop → 停止多模态处理流程
+     */
+    async stopMultimodal() {
+        try {
+            var resp = await this.request('/multimodal/stop', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: 'stop' })
+            });
+            var data = await resp.json();
+            return { success: resp.ok, data: data };
+        } catch (e) { return { success: false, error: e.message }; }
     }
 
     /**
@@ -5175,11 +5548,11 @@ class ApiService {
 
     /**
      * 获取训练状态（/5修复: 添加缺失的API方法）
-     * API路径标准化 (M-039): GET /api/training/status
+     * API路径标准化 (M-039): GET /training/status
      */
     async getTrainingStatus() {
         try {
-            const response = await this.request('/api/training/status');
+            const response = await this.request('/training/status');
             if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
             const data = await response.json();
             return { success: true, data: data };
@@ -5191,12 +5564,12 @@ class ApiService {
 
     /**
      * 恢复/继续AGI任务
-     * API路径标准化: POST /api/task/resume
+     * API路径标准化: POST /task/resume
      * @param {string|number} taskId - 任务ID
      */
     async resumeTask(taskId) {
         try {
-            const response = await this.request('/api/task/resume', {
+            const response = await this.request('/task/resume', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ task_id: taskId })
@@ -5212,13 +5585,13 @@ class ApiService {
 
     /**
      * 导入知识库数据（添加缺失的API方法）
-     * API路径标准化 (M-039): POST /api/knowledge/import
+     * API路径标准化 (M-039): POST /knowledge/import
      * @param {string} fileContent - 文件内容
      * @param {string} fileName - 文件名
      */
     async importKnowledge(fileContent, fileName) {
         try {
-            const response = await this.request('/api/knowledge/import', {
+            const response = await this.request('/knowledge/import', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ content: fileContent, file_name: fileName || 'import.json' })
@@ -5316,7 +5689,40 @@ class ApiService {
         catch(e) { return { success: false, error: e.message }; }
     }
     async multiAgentTask(task) {
-        try { var r = await this.request('/multi-agent/task', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(task||{}) }); var d = await r.json(); return { success: true, data: d }; }
+        try { var r = await this.request('/multi-agent/task', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(task||{}) }); var d = await r.json(); return { success: true, data: d }; } catch(e) { return { success: false, error: e.message }; }
+    }
+
+    /* ==================== I-S03: 多智能体协商API ==================== */
+
+    /**
+     * 智能体协商
+     * POST /api/agents/negotiate → body: { agents: [...], proposal: ... }
+     */
+    async negotiateAgents(data) {
+        try {
+            var r = await this.request('/agents/negotiate', {
+                method:'POST', headers:{'Content-Type':'application/json'},
+                body:JSON.stringify(data || {})
+            });
+            var d = await r.json();
+            return { success: true, data: d };
+        }
+        catch(e) { return { success: false, error: e.message }; }
+    }
+
+    /**
+     * 智能体达成共识
+     * POST /api/agents/consensus → body: { votes: [...], proposals: ... }
+     */
+    async consensusAgents(data) {
+        try {
+            var r = await this.request('/agents/consensus', {
+                method:'POST', headers:{'Content-Type':'application/json'},
+                body:JSON.stringify(data || {})
+            });
+            var d = await r.json();
+            return { success: true, data: d };
+        }
         catch(e) { return { success: false, error: e.message }; }
     }
 
@@ -5420,12 +5826,12 @@ class ApiService {
 /* 补充前端缺失的关键API调用 */
     /**
      * 获取元认知系统状态
-     * 对应后端 /api/metacognition/state (GET)
-     * API路径标准化: /api/metacognition/state
+     * 对应后端 /metacognition/state (GET)
+     * API路径标准化: /metacognition/state
      */
     async getMetacognitionState() {
         try {
-            const response = await this.request('/api/metacognition/state', { method: 'GET' });
+            const response = await this.request('/metacognition/state', { method: 'GET' });
             if (!response.ok) throw new Error('HTTP错误: ' + response.status);
             const data = await response.json();
             return { success: true, data: data };
@@ -5437,12 +5843,12 @@ class ApiService {
 
     /**
      * 启动训练管线
-     * 对应后端 /api/training/pipeline (POST)
-     * API路径标准化: /api/training/pipeline
+     * 对应后端 /training/pipeline (POST)
+     * API路径标准化: /training/pipeline
      */
     async postTrainingPipeline(config) {
         try {
-            const response = await this.request('/api/training/pipeline', {
+            const response = await this.request('/training/pipeline', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(config || {})
@@ -5458,12 +5864,12 @@ class ApiService {
 
     /**
      * 获取检查点列表
-     * 对应后端 /api/checkpoint/list (GET)
-     * API路径标准化: /api/checkpoint/list
+     * 对应后端 /checkpoint/list (GET)
+     * API路径标准化: /checkpoint/list
      */
     async getCheckpointList() {
         try {
-            const response = await this.request('/api/checkpoint/list', { method: 'GET' });
+            const response = await this.request('/checkpoint/list', { method: 'GET' });
             if (!response.ok) throw new Error('HTTP错误: ' + response.status);
             const data = await response.json();
             return { success: true, data: data };
@@ -5475,12 +5881,12 @@ class ApiService {
 
     /**
      * 加载检查点
-     * 对应后端 /api/checkpoint/load (POST)
-     * API路径标准化: /api/checkpoint/load
+     * 对应后端 /checkpoint/load (POST)
+     * API路径标准化: /checkpoint/load
      */
     async postCheckpointLoad(checkpointId) {
         try {
-            const response = await this.request('/api/checkpoint/load', {
+            const response = await this.request('/checkpoint/load', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ checkpoint_id: checkpointId || '' })
@@ -5492,6 +5898,730 @@ class ApiService {
             console.error(' 加载检查点失败:', error);
             return { success: false, error: error.message, data: null };
         }
+    }
+
+    /* ==================== I-03~I-18 集成缺陷修复: 补充缺失的前端API方法 ==================== */
+
+    /* --- I-03: 记忆系统补充方法 --- */
+    /* clearMemory: 清空所有记忆 */
+    async clearMemory() {
+        try {
+            var r = await this.request('/memory/clear', { method: 'POST' });
+            var d = await r.json();
+            return { success: true, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* searchMemory: 按查询字符串搜索记忆 (GET方式) */
+    async searchMemory(query) {
+        try {
+            var r = await this.request('/memory/search?q=' + encodeURIComponent(query || ''));
+            var d = await r.json();
+            return { success: true, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* --- I-04: 推理引擎补充方法 --- */
+    /* testReasoning: 测试推理引擎 */
+    async testReasoning(data) {
+        try {
+            var r = await this.request('/reasoning/test', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data || {})
+            });
+            var d = await r.json();
+            return { success: true, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* --- I-05: 学习状态补充方法 --- */
+    /* learnFromDialogue: 从对话中学习 */
+    async learnFromDialogue(data) {
+        try {
+            var r = await this.request('/learning/from-dialogue', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data || {})
+            });
+            var d = await r.json();
+            return { success: true, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* learnFromManual: 从说明书/教学文本学习 */
+    async learnFromManual(data) {
+        try {
+            var r = await this.request('/learning/from-manual', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data || {})
+            });
+            var d = await r.json();
+            return { success: true, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* checkConsistency: 知识一致性检查 */
+    async checkConsistency() {
+        try {
+            var r = await this.request('/learning/consistency', { method: 'POST' });
+            var d = await r.json();
+            return { success: true, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* --- I-06: 编程工作台 - 所有方法已存在(programmingAnalyze/Generate/Execute/Optimize/Compile/Status) --- */
+
+    /* --- I-07: 产品设计补充方法 --- */
+    /* getProductSpec: 获取产品规格 */
+    async getProductSpec(id) {
+        try {
+            var r = await this.request('/product/spec?id=' + encodeURIComponent(id || ''));
+            var d = await r.json();
+            return { success: true, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* getProductStatus: 获取产品设计引擎状态 */
+    async getProductStatus() {
+        try {
+            var r = await this.request('/product/status');
+            var d = await r.json();
+            return { success: true, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* designProduct: 启动产品设计 */
+    async designProduct(data) {
+        try {
+            var r = await this.request('/product/design', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data || {})
+            });
+            var d = await r.json();
+            return { success: true, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* --- I-08: 技能库补充方法 --- */
+    /* getSkills: 获取所有技能 */
+    async getSkills() {
+        try {
+            var r = await this.request('/skills');
+            var d = await r.json();
+            return { success: true, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* searchSkills: 按查询搜索技能 (GET方式) */
+    async searchSkills(query) {
+        try {
+            var r = await this.request('/skills/search?q=' + encodeURIComponent(query || ''));
+            var d = await r.json();
+            return { success: true, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* composeSkills: 组合技能 */
+    async composeSkills(data) {
+        try {
+            var r = await this.request('/skills/compose', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data || {})
+            });
+            var d = await r.json();
+            return { success: true, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* getSkillStats: 获取技能统计 */
+    async getSkillStats() {
+        try {
+            var r = await this.request('/skills/stats');
+            var d = await r.json();
+            return { success: true, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* --- I-09: LNN控制面板补充方法 --- */
+    /* getLnnStatus: 获取LNN状态 */
+    async getLnnStatus() {
+        try {
+            var r = await this.request('/lnn');
+            var d = await r.json();
+            return { success: true, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* updateLnnConfig: 更新LNN配置 */
+    async updateLnnConfig(data) {
+        try {
+            var r = await this.request('/lnn', {
+                method: 'PUT', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data || {})
+            });
+            var d = await r.json();
+            return { success: true, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* calibrateLnn: 校准LNN */
+    async calibrateLnn() {
+        try {
+            var r = await this.request('/lnn/calibrate', { method: 'POST' });
+            var d = await r.json();
+            return { success: true, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* --- I-10: 数据集管理补充方法 --- */
+    /* getDatasets: 获取所有数据集 */
+    async getDatasets() {
+        try {
+            var r = await this.request('/datasets');
+            var d = await r.json();
+            return { success: true, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* createDataset: 创建数据集 */
+    async createDataset(data) {
+        try {
+            var r = await this.request('/datasets', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data || {})
+            });
+            var d = await r.json();
+            return { success: true, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* deleteDataset: 删除数据集 */
+    async deleteDataset(id) {
+        try {
+            var r = await this.request('/datasets/' + encodeURIComponent(id), { method: 'DELETE' });
+            var d = await r.json();
+            return { success: true, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* --- I-11: 多机器人补充方法 --- */
+    /* getRobots: 获取所有机器人列表 */
+    async getRobots() {
+        try {
+            var r = await this.request('/robots');
+            var d = await r.json();
+            return { success: true, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* createRobot: 创建/注册机器人 */
+    async createRobot(data) {
+        try {
+            var r = await this.request('/robots', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data || {})
+            });
+            var d = await r.json();
+            return { success: true, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* controlRobotGroup: 多机器人编组控制 */
+    async controlRobotGroup(data) {
+        try {
+            var r = await this.request('/robots/group', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data || {})
+            });
+            var d = await r.json();
+            return { success: true, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* --- I-12: 知识库 - 所有方法已存在(getKnowledgeStats/exportKnowledge/importKnowledge) --- */
+
+    /* --- I-13: 仿真控制补充方法 --- */
+    /* getSimulationView: 获取仿真视图 */
+    async getSimulationView() {
+        try {
+            var r = await this.request('/simulation/view');
+            var d = await r.json();
+            return { success: true, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* --- I-14: 设备管理补充方法 --- */
+    /* getDevices: 获取所有设备列表 */
+    async getDevices() {
+        try {
+            var r = await this.request('/devices');
+            var d = await r.json();
+            return { success: true, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* discoverDevices: 发现/扫描设备 */
+    async discoverDevices() {
+        try {
+            var r = await this.request('/devices/discover', { method: 'POST' });
+            var d = await r.json();
+            return { success: true, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* --- I-15: API密钥补充方法 --- */
+    /* getApiKeys: 获取所有API密钥 */
+    async getApiKeys() {
+        try {
+            var r = await this.request('/keys');
+            var d = await r.json();
+            return { success: true, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* createApiKey: 创建API密钥 */
+    async createApiKey(data) {
+        try {
+            var r = await this.request('/keys', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data || {})
+            });
+            var d = await r.json();
+            return { success: true, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* getKeyStats: 获取API密钥统计 */
+    async getKeyStats() {
+        try {
+            var r = await this.request('/keys/stats');
+            var d = await r.json();
+            return { success: true, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* --- I-16: 多智能体补充方法 --- */
+    /* getAgents: 获取所有智能体 */
+    async getAgents() {
+        try {
+            var r = await this.request('/agents');
+            var d = await r.json();
+            return { success: true, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* createAgent: 创建智能体 */
+    async createAgent(data) {
+        try {
+            var r = await this.request('/agents', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data || {})
+            });
+            var d = await r.json();
+            return { success: true, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* agentMessage: 向智能体发送消息 */
+    async agentMessage(data) {
+        try {
+            var r = await this.request('/agents/message', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data || {})
+            });
+            var d = await r.json();
+            return { success: true, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* --- I-17: AGI诊断补充方法 --- */
+    /* getAgiDiagnostic: 获取AGI系统诊断 */
+    async getAgiDiagnostic() {
+        try {
+            var r = await this.request('/agi/diagnostic');
+            var d = await r.json();
+            return { success: true, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* runAgiTest: 运行AGI测试 */
+    async runAgiTest(data) {
+        try {
+            var r = await this.request('/agi/test', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data || {})
+            });
+            var d = await r.json();
+            return { success: true, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* I-M05: exportAgiDiagnostic: 导出AGI诊断报告 */
+    /* GET /api/agi/diagnostic/export → 返回完整的AGI诊断数据 */
+    async exportAgiDiagnostic() {
+        try {
+            var r = await this.request('/agi/diagnostic/export', { method: 'GET' });
+            var d = await r.json();
+            return { success: true, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* --- I-18: 双目感知补充方法 --- */
+    /* getStereoStatus: 获取双目感知状态 */
+    async getStereoStatus() {
+        try {
+            var r = await this.request('/stereo');
+            var d = await r.json();
+            return { success: true, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* calibrateStereo: 校准双目摄像头 */
+    async calibrateStereo() {
+        try {
+            var r = await this.request('/stereo/calibrate', { method: 'POST' });
+            var d = await r.json();
+            return { success: true, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* ==================== v4修复: 补全缺失端点 ==================== */
+
+    /* --- AGI模块补充 --- */
+    /* getCognitionTom: 获取认知TOM(心理理论)状态 */
+    /* GET /api/cognition/tom */
+    async getCognitionTom() {
+        try {
+            var r = await this.request('/cognition/tom', { method: 'GET' });
+            var d = await r.json();
+            return { success: r.ok, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* getAgiTasks: 获取AGI任务列表 */
+    /* GET /api/agi/tasks */
+    async getAgiTasks() {
+        try {
+            var r = await this.request('/agi/tasks', { method: 'GET' });
+            var d = await r.json();
+            return { success: r.ok, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* createAgentCoalition: 创建多智能体联盟 */
+    /* POST /api/multi-agent/coalition */
+    async createAgentCoalition(data) {
+        try {
+            var r = await this.request('/multi-agent/coalition', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data || {})
+            });
+            var d = await r.json();
+            return { success: r.ok, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* --- 多模态补充 --- */
+    /* stereoPerception: 双目空间感知处理 */
+    /* POST /api/stereo/perception */
+    async stereoPerception(data) {
+        try {
+            var r = await this.request('/stereo/perception', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data || {})
+            });
+            var d = await r.json();
+            return { success: r.ok, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* processMultimodal: 多模态数据处理 */
+    /* POST /api/multimodal/process */
+    async processMultimodal(data) {
+        try {
+            var r = await this.request('/multimodal/process', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data || {})
+            });
+            var d = await r.json();
+            return { success: r.ok, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* resetMultimodal: 重置多模态系统 */
+    /* POST /api/multimodal/reset */
+    async resetMultimodal() {
+        try {
+            var r = await this.request('/multimodal/reset', { method: 'POST' });
+            var d = await r.json();
+            return { success: r.ok, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* --- 训练模块补充 --- */
+    /* scheduleTraining: 调度训练任务 */
+    /* POST /api/training/schedule */
+    async scheduleTraining(data) {
+        try {
+            var r = await this.request('/training/schedule', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data || {})
+            });
+            var d = await r.json();
+            return { success: r.ok, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* --- 仿真模块补充 --- */
+    /* simulationReconstruct: 仿真场景重建 */
+    /* POST /api/simulation/reconstruct */
+    async simulationReconstruct(data) {
+        try {
+            var r = await this.request('/simulation/reconstruct', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data || {})
+            });
+            var d = await r.json();
+            return { success: r.ok, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* simulationCommand: 仿真控制命令 */
+    /* POST /api/simulation/command */
+    async simulationCommand(data) {
+        try {
+            var r = await this.request('/simulation/command', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data || {})
+            });
+            var d = await r.json();
+            return { success: r.ok, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* simulationReconstruct3d: 3D仿真重建 */
+    /* POST /api/simulation/reconstruct3d */
+    async simulationReconstruct3d(data) {
+        try {
+            var r = await this.request('/simulation/reconstruct3d', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data || {})
+            });
+            var d = await r.json();
+            return { success: r.ok, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* --- 机器人模块补充 --- */
+    /* robotPathPlan: 机器人路径规划 */
+    /* POST /api/robot/path/plan */
+    async robotPathPlan(data) {
+        try {
+            var r = await this.request('/robot/path/plan', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data || {})
+            });
+            var d = await r.json();
+            return { success: r.ok, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* getRobotParams: 获取机器人参数 */
+    /* GET /api/robot/params */
+    async getRobotParams() {
+        try {
+            var r = await this.request('/robot/params', { method: 'GET' });
+            var d = await r.json();
+            return { success: r.ok, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* --- 知识图谱补充 --- */
+    /* getKgPagerank: 获取知识图谱PageRank */
+    /* GET /api/kg/pagerank */
+    async getKgPagerank() {
+        try {
+            var r = await this.request('/kg/pagerank', { method: 'GET' });
+            var d = await r.json();
+            return { success: r.ok, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* getKgCommunities: 获取知识图谱社区结构 */
+    /* GET /api/kg/communities */
+    async getKgCommunities() {
+        try {
+            var r = await this.request('/kg/communities', { method: 'GET' });
+            var d = await r.json();
+            return { success: r.ok, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* getKgPath: 知识图谱路径查询 */
+    /* POST /api/kg/path */
+    async getKgPath(data) {
+        try {
+            var r = await this.request('/kg/path', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data || {})
+            });
+            var d = await r.json();
+            return { success: r.ok, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* queryKgSparql: SPARQL知识图谱查询 */
+    /* POST /api/kg/sparql */
+    async queryKgSparql(query) {
+        try {
+            var r = await this.request('/kg/sparql', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ query: query })
+            });
+            var d = await r.json();
+            return { success: r.ok, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* --- 音频/摄像头模块补充 --- */
+    /* startAudioCapture: 启动音频采集 */
+    /* POST /api/audio/capture/start */
+    async startAudioCapture() {
+        try {
+            var r = await this.request('/audio/capture/start', { method: 'POST' });
+            var d = await r.json();
+            return { success: r.ok, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* stopAudioCapture: 停止音频采集 */
+    /* POST /api/audio/capture/stop */
+    async stopAudioCapture() {
+        try {
+            var r = await this.request('/audio/capture/stop', { method: 'POST' });
+            var d = await r.json();
+            return { success: r.ok, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* getCameraDevices: 获取摄像头设备列表 */
+    /* GET /api/camera/devices */
+    async getCameraDevices() {
+        try {
+            var r = await this.request('/camera/devices', { method: 'GET' });
+            var d = await r.json();
+            return { success: r.ok, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* startCameraCapture: 启动摄像头采集 */
+    /* POST /api/camera/capture/start */
+    async startCameraCapture() {
+        try {
+            var r = await this.request('/camera/capture/start', { method: 'POST' });
+            var d = await r.json();
+            return { success: r.ok, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* stopCameraCapture: 停止摄像头采集 */
+    /* POST /api/camera/capture/stop */
+    async stopCameraCapture() {
+        try {
+            var r = await this.request('/camera/capture/stop', { method: 'POST' });
+            var d = await r.json();
+            return { success: r.ok, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* --- GPU模块补充 --- */
+    /* getGpuDiagnostic: 获取GPU诊断信息 */
+    /* GET /api/gpu/diagnostic */
+    async getGpuDiagnostic() {
+        try {
+            var r = await this.request('/gpu/diagnostic', { method: 'GET' });
+            var d = await r.json();
+            return { success: r.ok, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* runGpuBenchmark: 运行GPU基准测试 */
+    /* POST /api/gpu/benchmark */
+    async runGpuBenchmark() {
+        try {
+            var r = await this.request('/gpu/benchmark', { method: 'POST' });
+            var d = await r.json();
+            return { success: r.ok, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* --- 数据集模块补充 --- */
+    /* importDataset: 导入数据集 */
+    /* POST /api/dataset/import */
+    async importDataset(data) {
+        try {
+            var r = await this.request('/dataset/import', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data || {})
+            });
+            var d = await r.json();
+            return { success: r.ok, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* augmentDataset: 数据增强 */
+    /* POST /api/dataset/augment */
+    async augmentDataset(data) {
+        try {
+            var r = await this.request('/dataset/augment', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data || {})
+            });
+            var d = await r.json();
+            return { success: r.ok, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* --- 系统模块补充 --- */
+    /* getSystemLogs: 获取系统日志 */
+    /* GET /api/system/logs */
+    async getSystemLogs() {
+        try {
+            var r = await this.request('/system/logs', { method: 'GET' });
+            var d = await r.json();
+            return { success: r.ok, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* getKeyRateLimit: 获取API密钥速率限制 */
+    /* GET /api/key/rate-limit */
+    async getKeyRateLimit() {
+        try {
+            var r = await this.request('/key/rate-limit', { method: 'GET' });
+            var d = await r.json();
+            return { success: r.ok, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* --- 串口模块补充 --- */
+    /* receiveSerial: 接收串口数据 */
+    /* GET /api/serial/receive */
+    async receiveSerial() {
+        try {
+            var r = await this.request('/serial/receive', { method: 'GET' });
+            var d = await r.json();
+            return { success: r.ok, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* --- 自学习模块补充 --- */
+    /* exportAutoLearn: 导出自动学习结果 */
+    /* POST /api/auto-learn/export */
+    async exportAutoLearn() {
+        try {
+            var r = await this.request('/auto-learn/export', { method: 'POST' });
+            var d = await r.json();
+            return { success: r.ok, data: d };
+        } catch (e) { return { success: false, error: e.message }; }
     }
 
 }
@@ -5539,8 +6669,8 @@ class WebSocketManager {
             return;
         }
         if (typeof navigator !== 'undefined' && navigator.onLine === false) {
-            console.warn('设备处于离线状态，跳过WebSocket重连');
-            this._scheduleReconnect;
+            console.warn('设备处于离线状态，等待网络恢复后将自动重连');
+            this._scheduleReconnect();
             return;
         }
         this.isManualDisconnect = false;
@@ -5552,7 +6682,11 @@ class WebSocketManager {
             this.ws.onmessage = (message) => this._onMessage(message);
         } catch (error) {
             console.error('WebSocket连接创建失败:', error);
-            this._scheduleReconnect;
+            /* L-12修复: WebSocket初始化失败时向用户提示 */
+            if (typeof showNotification === 'function') {
+                showNotification('WebSocket连接失败，将自动重连。离线功能仍可用。', 'warning');
+            }
+            this._scheduleReconnect();
         }
     }
 
@@ -5583,7 +6717,7 @@ class WebSocketManager {
         this.pendingMessages.push(data);
         this.pendingMessageTimestamps.push(timestamp);
         /* 清理超过30秒的过期待发送消息 */
-        this._cleanExpiredPending;
+        this._cleanExpiredPending();
         return false;
     }
 
@@ -5632,26 +6766,30 @@ class WebSocketManager {
             clearTimeout(this.reconnectTimer);
             this.reconnectTimer = null;
         }
-        this._startHeartbeat;
-        this._flushPendingMessages;
+        this._startHeartbeat();
+        this._flushPendingMessages();
         this._notifyStatus({ connected: true });
     }
 
     /** WebSocket关闭事件 */
     _onClose(event) {
         this.isConnected = false;
-        this._stopHeartbeat;
-        this._clearPongTimer;
+        this._stopHeartbeat();
+        this._clearPongTimer();
         this._notifyStatus({ connected: false, code: event.code, reason: event.reason });
         /* 正常关闭(code 1000) 或 手动断开 不自动重连 */
         if (!this.isManualDisconnect && event.code !== 1000) {
-            this._scheduleReconnect;
+            this._scheduleReconnect();
         }
     }
 
     /** WebSocket错误事件 */
     _onError(error) {
         console.error('WebSocket连接错误:', error);
+        /* L-12修复: WebSocket错误时向用户提示 */
+        if (typeof showNotification === 'function') {
+            showNotification('WebSocket通信错误，正在重连...', 'warning');
+        }
         this._notifyStatus({ connected: false, reason: 'error' });
     }
 
@@ -5745,7 +6883,7 @@ class WebSocketManager {
                 this.pongReceived = false;
                 this.ws.send(JSON.stringify({ type: 'ping', timestamp: this.lastPingTimestamp }));
                 /* 设置Pong超时检测 */
-                this._clearPongTimer;
+                this._clearPongTimer();
                 this.pongTimer = setTimeout(() => {
                     if (!this.pongReceived) {
                         console.warn('Pong响应超时, 判定连接断开, 触发重连');
@@ -5756,7 +6894,7 @@ class WebSocketManager {
                         }
                         this.isConnected = false;
                         if (!this.isManualDisconnect) {
-                            this._scheduleReconnect;
+                            this._scheduleReconnect();
                         }
                     }
                 }, this.pongTimeout);
@@ -5770,7 +6908,7 @@ class WebSocketManager {
             clearInterval(this.heartbeatInterval);
             this.heartbeatInterval = null;
         }
-        this._clearPongTimer;
+        this._clearPongTimer();
     }
 
     /** 清理Pong超时定时器 */
@@ -5926,7 +7064,8 @@ window.SelfLnnWebSocket = new WebSocketManager;
                         window.SelfLnnWebSocket.connect();
                     }
                 };
-                if (document.body) document.body.appendChild(banner);
+                /* 插入到body最前面，避免影响布局（position:fixed不影响文档流，但放在前面更规范） */
+                if (document.body) document.body.insertBefore(banner, document.body.firstChild);
             }
         }
         return banner;

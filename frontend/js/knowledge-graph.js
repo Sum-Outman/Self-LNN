@@ -8,7 +8,7 @@
 
     /* ==================== 模块级变量 ==================== */
     var _kgCleanupList = []; /* 事件监听器清理列表 */
-    var _kgIntervalIds = []; /* 定时器ID清理列表 */
+    window._kgIntervalIds = window._kgIntervalIds || []; /* 定时器ID清理列表，暴露到全局便于main.js清理 */
     var graphState = {
         nodes: [],
         edges: [],
@@ -29,6 +29,7 @@
 
     var knowledgeEntries = [];
 
+    /* BUG-19修复：canvas和ctx是模块级变量，在initCanvas()中初始化，被drawGraph()等2D渲染函数共享使用 */
     var canvas, ctx;
     var isDragging = false;
     var dragStartX, dragStartY;
@@ -50,7 +51,7 @@
     function switchKnowledgeTab(name) {
         document.querySelectorAll('#knowledge .tab-btn').forEach(function(b) { b.classList.remove('active'); });
         document.querySelectorAll('#knowledge .tab-content').forEach(function(c) { c.classList.remove('active'); });
-        var btn = document.querySelector('#knowledge .tab-btn[onclick*="' + name + '"]');
+        var btn = document.querySelector('#knowledge .tab-btn[data-tab="' + name + '"]');
         if (btn) btn.classList.add('active');
         var tabEl = document.getElementById('tab-' + name);
         if (tabEl) tabEl.classList.add('active');
@@ -73,7 +74,8 @@
             setTimeout(connectKnowledgeWebSocket, 2000);
             return;
         }
-        if (ws.isConnected) {
+        /* BUG-10修复：添加readyState严格检查，确保WebSocket真正处于OPEN状态 */
+        if (ws.isConnected && ws._ws && ws._ws.readyState === WebSocket.OPEN) {
             graphState.backendOnline = true;
             showConnectionBanner('已连接知识图谱服务', 'connected');
             fetchKnowledgeFromBackend();
@@ -107,18 +109,32 @@
         graphState.backendOnline = ws.isConnected;
     }
 
+    /* 统一使用全局连接横幅（与api-service.js共享global-connection-banner），
+     * 避免创建两个fixed定位的banner导致重叠覆盖。 */
+    /* BUG-5修复: 存储setTimeout返回值，防止多个超时同时运行 */
+    var _kgBannerTimeoutId = null;
     function showConnectionBanner(msg, status) {
-        var banner = document.getElementById('connection-banner');
+        /* BUG-6修复: document.body可能为null（脚本在DOM完全加载前执行），提前返回 */
+        if (!document.body) return;
+        var banner = document.getElementById('global-connection-banner');
         if (!banner) {
             banner = document.createElement('div');
-            banner.id = 'connection-banner';
+            banner.id = 'global-connection-banner';
             banner.className = 'connection-banner';
+            banner.style.cursor = 'pointer';
+            banner.onclick = function() {
+                if (window.SelfLnnWebSocket && !window.SelfLnnWebSocket.isConnected) {
+                    window.SelfLnnWebSocket.connect();
+                }
+            };
             document.body.insertBefore(banner, document.body.firstChild);
         }
         banner.textContent = msg;
-        banner.className = 'connection-banner ' + status;
+        banner.className = 'connection-banner js-ready ' + status;
+        /* 清除之前的超时再创建新的，防止多个超时同时运行 */
+        if (_kgBannerTimeoutId) { clearTimeout(_kgBannerTimeoutId); _kgBannerTimeoutId = null; }
         if (status === 'connected') {
-            setTimeout(function() { banner.className = 'connection-banner'; }, 3000);
+            _kgBannerTimeoutId = setTimeout(function() { banner.className = 'connection-banner'; _kgBannerTimeoutId = null; }, 3000);
         }
     }
 
@@ -174,12 +190,16 @@
     /* ==================== 页面交互 ==================== */
 
     function fillExample(s, p, o) {
-        document.getElementById('input-subject').value = s;
+        var subjEl = document.getElementById('input-subject');
+        if (subjEl) subjEl.value = s;
         var sel = document.getElementById('input-predicate');
-        for (var i = 0; i < sel.options.length; i++) {
-            if (sel.options[i].value === p) { sel.selectedIndex = i; break; }
+        if (sel) {
+            for (var i = 0; i < sel.options.length; i++) {
+                if (sel.options[i].value === p) { sel.selectedIndex = i; break; }
+            }
         }
-        document.getElementById('input-object').value = o;
+        var objEl = document.getElementById('input-object');
+        if (objEl) objEl.value = o;
     }
 
     function showStatus(id, msg, type) {
@@ -246,8 +266,10 @@
             showStatus('add-status', '后端未连接——知识添加失败（遵循禁止虚假数据原则，不写入本地存储）', 'error');
         });
 
-        document.getElementById('input-subject').value = '';
-        document.getElementById('input-object').value = '';
+        var subjClearEl = document.getElementById('input-subject');
+        if (subjClearEl) subjClearEl.value = '';
+        var objClearEl = document.getElementById('input-object');
+        if (objClearEl) objClearEl.value = '';
     }
 
     function deleteEntry(id) {
@@ -264,12 +286,21 @@
             });
     }
 
+    /* BUG-14修复：searchKnowledge添加搜索查询输入框的trim预处理，过滤纯空白查询 */
     function searchKnowledge() {
+        var searchInput = document.getElementById('search-query');
+        /* 对搜索输入进行trim预处理，空白查询直接显示全部条目 */
+        var rawQuery = searchInput ? searchInput.value : '';
+        if (searchInput) {
+            searchInput.value = rawQuery.trim();
+        }
         renderEntryList();
     }
 
     function renderEntryList() {
         var container = document.getElementById('entry-list');
+        /* F4-H03修复: 添加空指针检查 */
+        if (!container) return;
         var searchInput = document.getElementById('search-query');
         var query = searchInput ? searchInput.value.trim().toLowerCase() : '';
 
@@ -294,7 +325,7 @@
             html += '<div class="entry-item">';
 /* onclick中的id值做JS转义，防止XSS攻击 */
             var escapedId = String(e.id).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'\\"');
-            html += '<button class="del-btn" onclick="deleteEntry(\'' + escapedId + '\')" title="删除">✕</button>';
+            html += '<button class="del-btn" data-entry-id="' + escapedId + '" title="删除">✕</button>';
             html += '<div class="triple">';
             html += '<span class="s">' + escapeHtml(e.subject) + '</span>';
             html += '<span style="color:rgba(255,255,255,0.2);font-size:0.6rem;">──</span>';
@@ -439,9 +470,12 @@
     }
 
     function updateGraphStyle() {
-        graphState.nodeSize = parseFloat(document.getElementById('node-size').value);
-        graphState.edgeWidth = parseFloat(document.getElementById('edge-width').value);
-        graphState.showLabels = document.getElementById('show-labels').value;
+        var nodeSizeEl = document.getElementById('node-size');
+        if (nodeSizeEl) graphState.nodeSize = parseFloat(nodeSizeEl.value);
+        var edgeWidthEl = document.getElementById('edge-width');
+        if (edgeWidthEl) graphState.edgeWidth = parseFloat(edgeWidthEl.value);
+        var showLabelsEl = document.getElementById('show-labels');
+        if (showLabelsEl) graphState.showLabels = showLabelsEl.value;
         drawGraph();
     }
 
@@ -565,7 +599,8 @@
             canvas.style.cursor = node ? 'pointer' : 'default';
             if (node) {
                 var tooltip = document.getElementById('node-tooltip');
-                if (!tooltip) return;
+                /* F4-L01修复: 找不到tooltip时清理悬停状态 */
+                if (!tooltip) { hoveredNode = null; return; }
                 tooltip.style.display = 'block';
                 tooltip.style.left = (e.clientX - rect.left + 10) + 'px';
                 tooltip.style.top = (e.clientY - rect.top + 10) + 'px';
@@ -964,7 +999,8 @@
             gl3d.animId = requestAnimationFrame(loop);
         }
         loop();
-        document.getElementById('graph-info').textContent = '3D模式 · ' + nodes3d.length + '节点 · 拖动旋转/滚轮缩放';
+        var graphInfoEl = document.getElementById('graph-info');
+        if (graphInfoEl) graphInfoEl.textContent = '3D模式 · ' + nodes3d.length + '节点 · 拖动旋转/滚轮缩放';
     }
 
     function stop3DView() {
@@ -1108,6 +1144,62 @@
         }
     }
 
+    /**
+     * @brief 知识图谱统计信息
+     * GET /api/kg/stats → 返回节点数、边数、密度等
+     */
+    async function kgStats() {
+        try {
+            var resp = await window.SelfLnnApi.kgStats();
+            if (resp && resp.success) {
+                showAdvancedResult('知识图谱统计', resp.data);
+            } else {
+                showAdvancedResult('知识图谱统计失败', { error: resp.error || '未知错误' });
+            }
+        } catch(e) {
+            showAdvancedResult('知识图谱统计失败', { error: e.message });
+        }
+    }
+
+    /**
+     * @brief 知识图谱可视化数据
+     * GET /api/kg/visualize → 返回完整图谱可视化数据(节点+边+布局)
+     */
+    async function kgVisualize() {
+        try {
+            var resp = await window.SelfLnnApi.kgVisualize();
+            if (resp && resp.success) {
+                var data = resp.data;
+                /* 如果后端返回了可视化布局数据，直接更新图谱状态 */
+                if (data && data.nodes && data.edges) {
+                    graphState.nodes = data.nodes.map(function(n) {
+                        return { id: n.id, label: n.label || n.id, x: n.x || 0, y: n.y || 0, vx: 0, vy: 0, connections: n.connections || 0, type: n.type || 'entity' };
+                    });
+                    graphState.edges = data.edges.map(function(e) {
+                        return { source: e.source, target: e.target, label: e.label || '', weight: e.weight !== undefined ? e.weight : -1 };
+                    });
+                    refreshGraph();
+                    showAdvancedResult('可视化数据已加载', { nodes: graphState.nodes.length, edges: graphState.edges.length });
+                } else {
+                    showAdvancedResult('可视化数据', data);
+                }
+            } else {
+                showAdvancedResult('可视化数据获取失败', { error: (resp && resp.error) || '未知错误' });
+            }
+        } catch(e) {
+            showAdvancedResult('可视化数据获取失败', { error: e.message });
+        }
+    }
+
+    /**
+     * @brief 语义搜索(简化入口)
+     * POST /api/kg/search → body: { query: "...", top_k: N }
+     * 内部调用 kgSemanticSearch，提供简化的函数名暴露
+     */
+    async function kgSearch() {
+        return kgSemanticSearch();
+    }
+
     /* ==================== 暴露给全局window的函数（供onclick调用） ==================== */
     window.switchKnowledgeTab = switchKnowledgeTab;
     window.fillExample = fillExample;
@@ -1130,6 +1222,10 @@
     window.kgCommunityDetect = kgCommunityDetect;
     window.kgSemanticSearch = kgSemanticSearch;
     window.kgFindPath = kgFindPath;
+    /* P3修复: 知识图谱统计/搜索/可视化 */
+    window.kgStats = kgStats;
+    window.kgSearch = kgSearch;
+    window.kgVisualize = kgVisualize;
 
     /* ==================== 自动初始化（延迟加载） ==================== */
     document.addEventListener('DOMContentLoaded', function() {
@@ -1148,7 +1244,7 @@
             g_dataEngine.registerModule('knowledge_graph_poll', 60000, fetchKnowledgeFromBackend);
         } else {
             var kgInterval = setInterval(function() { fetchKnowledgeFromBackend(); }, 60000);
-            _kgIntervalIds.push(kgInterval);
+            window._kgIntervalIds.push(kgInterval);
         }
 
         /* 3秒后初始化Canvas（DOM已渲染完成，原16秒延迟过长） */
@@ -1157,13 +1253,23 @@
                 initCanvas();
             }
         }, 3000);
+
+        /* BUG-1修复: 使用事件委托替代内联onclick，避免deleteEntry作用域问题 */
+        document.addEventListener('click', function(e) {
+            var delBtn = e.target.closest('.del-btn');
+            if (!delBtn) return;
+            var entryId = delBtn.getAttribute('data-entry-id');
+            if (entryId) {
+                deleteEntry(entryId);
+            }
+        });
     });
 
 /* 知识图谱清理函数，移除所有事件监听器和定时器 */
     window.destroyKnowledgeGraph = function() {
         /* 清除所有setInterval */
-        _kgIntervalIds.forEach(function(id) { clearInterval(id); });
-        _kgIntervalIds = [];
+        window._kgIntervalIds.forEach(function(id) { clearInterval(id); });
+        window._kgIntervalIds = [];
         /* 清除resize监听器 */
         try { window.removeEventListener('resize', resizeCanvas); } catch(e) {}
         try { window.removeEventListener('resize', resize3D); } catch(e) {}

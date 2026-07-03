@@ -3985,13 +3985,14 @@ static int apply_correction(SelfCognitionSystem* system, SelfCorrectionResult* c
                     float* params = lnn_get_parameters(lnn_instance);
                     
                     if (params && param_count > 0) {
-                        float* params_before = (float*)malloc(param_count * sizeof(float));
+                        /* P1修复: 原生malloc/free替换为safe_malloc/safe_free，确保内存跟踪和检查 */
+                        float* params_before = (float*)safe_malloc(param_count * sizeof(float));
                         if (params_before) {
                             memcpy(params_before, params, param_count * sizeof(float));
                             
                             size_t output_size = lnn_get_output_size(lnn_instance);
                             if (output_size > 0 && output_size <= 4096) {
-                                float* correction_target = (float*)malloc(output_size * sizeof(float));
+                                float* correction_target = (float*)safe_malloc(output_size * sizeof(float));
                                 if (correction_target) {
                                     if (lnn_get_output(lnn_instance, correction_target, (int)output_size) == 0) {
                                         float perturb_scale = correction->correction_strength * 0.005f;
@@ -4015,10 +4016,11 @@ static int apply_correction(SelfCognitionSystem* system, SelfCorrectionResult* c
                                             correction_applied = 1;
                                         }
                                     }
-                                    free(correction_target);
+                                    /* P1修复: 替换原生free为safe_free */
+                                    safe_free((void**)&correction_target);
                                 }
                             }
-                            free(params_before);
+                            safe_free((void**)&params_before);
                         }
                     }
                 }
@@ -6801,7 +6803,7 @@ void self_model_state_free(SelfModelState* state) {
     
     /* 释放编码后的状态向量 */
     if (state->encoded_state) {
-        free(state->encoded_state);
+        safe_free((void**)&state->encoded_state);
         state->encoded_state = NULL;
     }
     
@@ -10112,10 +10114,10 @@ int self_cognition_deep_thought_self_reflection(SelfCognitionSystem* system,
                         entry.weight = insight_scores_arr[i];
                         entry.timestamp = (long)time(NULL);
                         knowledge_base_add(kb, &entry);
-                        /* 释放strdup分配的临时字符串 */
-                        free(entry.subject);
-                        free(entry.predicate);
-                        free(entry.object);
+                        /* 释放strdup分配的临时字符串 —— P1修复: 替换原生free为safe_free */
+                        safe_free((void**)&entry.subject);
+                        safe_free((void**)&entry.predicate);
+                        safe_free((void**)&entry.object);
                     }
                     log_info("M-021: 深度思维链已写入%d条知识到知识库", (int)ni);
                 }

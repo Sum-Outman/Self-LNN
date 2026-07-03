@@ -329,7 +329,9 @@ int task_scheduler_tick(TaskScheduler* s) {
                     s->thread_pool_submit(s->thread_pool, task_wrapper_execute, t);
                 } else {
                     int ret = t->func(t->context);
-                    time_t elapsed = time(NULL) - t->start_time;
+                    /* P2修复: 显式初始化elapsed避免编译器警告 */
+                    time_t elapsed = 0;
+                    elapsed = time(NULL) - t->start_time;
 
                     if (t->timeout_seconds > 0 && elapsed > t->timeout_seconds) {
                         t->status = TASK_PREEMPTED;

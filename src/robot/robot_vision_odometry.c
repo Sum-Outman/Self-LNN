@@ -199,7 +199,7 @@ static void extract_patch_descriptor(const unsigned char* img, int x, int y,
     int hist_stride = orient_bins;
     int total_hist = sub_regions * sub_regions * hist_stride;
 
-    float* hist = (float*)calloc((size_t)total_hist, sizeof(float));
+    float* hist = (float*)safe_calloc((size_t)total_hist, sizeof(float));
     if (!hist) return;
 
     for (int dy = -half_size; dy < half_size; dy++) {
@@ -241,7 +241,7 @@ static void extract_patch_descriptor(const unsigned char* img, int x, int y,
     int copy_len = total_hist < VO_DESC_LENGTH ? total_hist : VO_DESC_LENGTH;
     for (int i = 0; i < copy_len; i++) desc[i] = hist[i];
 
-    free(hist);
+    safe_free((void**)&hist);
 
     /* L2归一化 + 截断阈值0.2 */
     float norm = 0.0f;

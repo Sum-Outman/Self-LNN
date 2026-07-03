@@ -717,12 +717,12 @@ static int rosbridge_publish_data(ROS2Manager* rm, const char* topic, const char
      * 这里使用base64编码二进制数据，确保任意数据类型都能传递
      */
     size_t b64_max = ((size * 4) / 3) + 4;
-    char* b64_buf = (char*)malloc(b64_max);
+    char* b64_buf = (char*)safe_malloc(b64_max);
     if (!b64_buf) return -1;
 
     int b64_len = ws_base64_encode((const uint8_t*)data, size, b64_buf, b64_max);
     if (b64_len < 0) {
-        free(b64_buf);
+        safe_free((void**)&b64_buf);
         return -1;
     }
 
@@ -732,7 +732,7 @@ static int rosbridge_publish_data(ROS2Manager* rm, const char* topic, const char
         "{\"op\":\"publish\",\"id\":\"pub_%d\",\"topic\":\"%s\",\"msg\":{\"data\":\"%s\"}}",
         rm->rosbridge.request_id, topic, b64_buf);
 
-    free(b64_buf);
+    safe_free((void**)&b64_buf);
     return rosbridge_send_json(rm->rosbridge.socket_fd, msg);
 }
 
@@ -854,7 +854,7 @@ ROS2Manager* ros2_manager_create(void) {
     }
 #endif
 
-    ROS2Manager* rm = (ROS2Manager*)calloc(1, sizeof(ROS2Manager));
+    ROS2Manager* rm = (ROS2Manager*)safe_calloc(1, sizeof(ROS2Manager));
     if (!rm) {
 #if defined(_WIN32)
         WSACleanup();
@@ -943,7 +943,7 @@ void ros2_manager_free(ROS2Manager* rm) {
         }
     }
 
-    free(rm);
+    safe_free((void**)&rm);
 #if defined(_WIN32)
     WSACleanup();
 #endif

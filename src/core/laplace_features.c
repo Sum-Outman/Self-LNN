@@ -52,7 +52,7 @@
 /* ==================== 内部工具函数 ==================== */
 
 static float* alloc_2d(int rows, int cols) {
-    return (float*)calloc((size_t)rows * cols, sizeof(float));
+    return (float*)safe_calloc((size_t)rows * cols, sizeof(float));
 }
 
 static void mat_mul(const float* A, const float* B, float* C, int m, int n, int k) {
@@ -156,16 +156,16 @@ int laplace_build_gaussian_pyramid(const float* input, int width, int height, in
 
     pyramid->num_levels = num_levels;
     pyramid->channels = channels;
-    pyramid->pyramid = (float**)calloc((size_t)num_levels, sizeof(float*));
-    pyramid->widths = (int*)calloc((size_t)num_levels, sizeof(int));
-    pyramid->heights = (int*)calloc((size_t)num_levels, sizeof(int));
+    pyramid->pyramid = (float**)safe_calloc((size_t)num_levels, sizeof(float*));
+    pyramid->widths = (int*)safe_calloc((size_t)num_levels, sizeof(int));
+    pyramid->heights = (int*)safe_calloc((size_t)num_levels, sizeof(int));
     if (!pyramid->pyramid || !pyramid->widths || !pyramid->heights) {
         laplace_pyramid_free(pyramid); return -1;
     }
 
     int kw = 5, kh = 5;
     float sigma = 1.0f;
-    float* kernel = (float*)calloc((size_t)(kw * kh), sizeof(float));
+    float* kernel = (float*)safe_calloc((size_t)(kw * kh), sizeof(float));
     if (!kernel) { laplace_pyramid_free(pyramid); return -1; }
     float ksum = 0.0f;
     for (int ky = -kh / 2; ky <= kh / 2; ky++)
@@ -178,8 +178,8 @@ int laplace_build_gaussian_pyramid(const float* input, int width, int height, in
     int w = width, h = height;
     size_t total = (size_t)w * h * channels;
     pyramid->widths[0] = w; pyramid->heights[0] = h;
-    pyramid->pyramid[0] = (float*)malloc(total * sizeof(float));
-    if (!pyramid->pyramid[0]) { free(kernel); laplace_pyramid_free(pyramid); return -1; }
+    pyramid->pyramid[0] = (float*)safe_malloc(total * sizeof(float));
+    if (!pyramid->pyramid[0]) { safe_free((void**)&kernel); laplace_pyramid_free(pyramid); return -1; }
     memcpy(pyramid->pyramid[0], input, total * sizeof(float));
 
     for (int level = 1; level < num_levels; level++) {
@@ -192,11 +192,11 @@ int laplace_build_gaussian_pyramid(const float* input, int width, int height, in
         pyramid->widths[level] = nw; pyramid->heights[level] = nh;
 
         size_t ntotal = (size_t)nw * nh * channels;
-        pyramid->pyramid[level] = (float*)calloc(ntotal, sizeof(float));
-        if (!pyramid->pyramid[level]) { free(kernel); laplace_pyramid_free(pyramid); return -1; }
+        pyramid->pyramid[level] = (float*)safe_calloc(ntotal, sizeof(float));
+        if (!pyramid->pyramid[level]) { safe_free((void**)&kernel); laplace_pyramid_free(pyramid); return -1; }
 
-        float* blurred = (float*)calloc((size_t)pw * ph * channels, sizeof(float));
-        if (!blurred) { free(kernel); laplace_pyramid_free(pyramid); return -1; }
+        float* blurred = (float*)safe_calloc((size_t)pw * ph * channels, sizeof(float));
+        if (!blurred) { safe_free((void**)&kernel); laplace_pyramid_free(pyramid); return -1; }
 
         for (int c = 0; c < channels; c++) {
             for (int y = 0; y < ph; y++)
@@ -221,9 +221,9 @@ int laplace_build_gaussian_pyramid(const float* input, int width, int height, in
                     if (sx >= pw) sx = pw - 1; if (sy >= ph) sy = ph - 1;
                     pyramid->pyramid[level][(y * nw + x) * channels + c] = blurred[(sy * pw + sx) * channels + c];
                 }
-        free(blurred);
+        safe_free((void**)&blurred);
     }
-    free(kernel);
+    safe_free((void**)&kernel);
     return 0;
 }
 
@@ -240,7 +240,7 @@ int laplace_build_laplacian_pyramid(const float* input, int width, int height, i
         float* curr = pyramid->pyramid[level];
         float* next = pyramid->pyramid[level + 1];
 
-        float* upsampled = (float*)calloc((size_t)cw * ch * channels, sizeof(float));
+        float* upsampled = (float*)safe_calloc((size_t)cw * ch * channels, sizeof(float));
         if (!upsampled) return -1;
 
         for (int c = 0; c < channels; c++)
@@ -264,7 +264,7 @@ int laplace_build_laplacian_pyramid(const float* input, int width, int height, i
         for (size_t i = 0; i < (size_t)cw * ch * channels; i++)
             pyramid->pyramid[level][i] = curr[i] - upsampled[i];
 
-        free(upsampled);
+        safe_free((void**)&upsampled);
     }
     return 0;
 }
@@ -286,16 +286,16 @@ int laplace_reconstruct_from_pyramid(const LaplacianPyramid* pyramid, float* out
     int n = pyramid->num_levels;
     int channels = pyramid->channels;
 
-    float** levels = (float**)calloc((size_t)n, sizeof(float*));
+    float** levels = (float**)safe_calloc((size_t)n, sizeof(float*));
     if (!levels) return -1;
 
     for (int l = 0; l < n; l++) {
         int w = pyramid->widths[l], h = pyramid->heights[l];
         size_t sz = (size_t)w * h * channels;
-        levels[l] = (float*)malloc(sz * sizeof(float));
+        levels[l] = (float*)safe_malloc(sz * sizeof(float));
         if (!levels[l]) {
-            for (int k = 0; k < l; k++) free(levels[k]);
-            free(levels); return -1;
+            for (int k = 0; k < l; k++) safe_free((void**)&levels[k]);
+            safe_free((void**)&levels); return -1;
         }
         memcpy(levels[l], pyramid->pyramid[l], sz * sizeof(float));
     }
@@ -303,10 +303,10 @@ int laplace_reconstruct_from_pyramid(const LaplacianPyramid* pyramid, float* out
     for (int l = n - 2; l >= 0; l--) {
         int cw = pyramid->widths[l], ch = pyramid->heights[l];
         int nw = pyramid->widths[l + 1], nh = pyramid->heights[l + 1];
-        float* upsampled = (float*)calloc((size_t)cw * ch * channels, sizeof(float));
+        float* upsampled = (float*)safe_calloc((size_t)cw * ch * channels, sizeof(float));
         if (!upsampled) {
-            for (int k = 0; k < n; k++) free(levels[k]);
-            free(levels); return -1;
+            for (int k = 0; k < n; k++) safe_free((void**)&levels[k]);
+            safe_free((void**)&levels); return -1;
         }
 
         for (int c = 0; c < channels; c++)
@@ -330,13 +330,13 @@ int laplace_reconstruct_from_pyramid(const LaplacianPyramid* pyramid, float* out
         for (size_t i = 0; i < (size_t)cw * ch * channels; i++)
             levels[l][i] += upsampled[i];
 
-        free(upsampled);
+        safe_free((void**)&upsampled);
     }
 
     size_t out_size = (size_t)pyramid->widths[0] * pyramid->heights[0] * channels;
     memcpy(output, levels[0], out_size * sizeof(float));
-    for (int k = 0; k < n; k++) free(levels[k]);
-    free(levels);
+    for (int k = 0; k < n; k++) safe_free((void**)&levels[k]);
+    safe_free((void**)&levels);
     return 0;
 }
 
@@ -344,12 +344,12 @@ void laplace_pyramid_free(LaplacianPyramid* pyramid) {
     if (!pyramid) return;
     if (pyramid->pyramid) {
         for (int i = 0; i < pyramid->num_levels; i++) {
-            free(pyramid->pyramid[i]);
+            safe_free((void**)&pyramid->pyramid[i]);
         }
-        free(pyramid->pyramid);
+        safe_free((void**)&pyramid->pyramid);
     }
-    free(pyramid->widths);
-    free(pyramid->heights);
+    safe_free((void**)&pyramid->widths);
+    safe_free((void**)&pyramid->heights);
     memset(pyramid, 0, sizeof(LaplacianPyramid));
 }
 
@@ -361,11 +361,11 @@ int laplace_graph_laplacian_build(const float* adjacency, int n, int use_normali
     gl->n = n;
     gl->use_normalized = use_normalized;
 
-    gl->laplacian_matrix = (float*)calloc((size_t)n * n, sizeof(float));
+    gl->laplacian_matrix = (float*)safe_calloc((size_t)n * n, sizeof(float));
     if (!gl->laplacian_matrix) return -1;
 
-    float* degree = (float*)calloc((size_t)n, sizeof(float));
-    if (!degree) { free(gl->laplacian_matrix); return -1; }
+    float* degree = (float*)safe_calloc((size_t)n, sizeof(float));
+    if (!degree) { safe_free((void**)&gl->laplacian_matrix); return -1; }
 
     for (int i = 0; i < n; i++) {
         for (int j = 0; j < n; j++) {
@@ -399,7 +399,7 @@ int laplace_graph_laplacian_build(const float* adjacency, int n, int use_normali
         }
     }
 
-    free(degree);
+    safe_free((void**)&degree);
     gl->eigenvalues = NULL;
     gl->eigenvectors = NULL;
     return 0;
@@ -409,23 +409,23 @@ int laplace_graph_laplacian_decompose(GraphLaplacian* gl) {
     if (!gl || !gl->laplacian_matrix || gl->n < 1) return -1;
 
     size_t n = (size_t)gl->n;
-    free(gl->eigenvalues); gl->eigenvalues = NULL;
-    free(gl->eigenvectors); gl->eigenvectors = NULL;
+    safe_free((void**)&gl->eigenvalues); gl->eigenvalues = NULL;
+    safe_free((void**)&gl->eigenvectors); gl->eigenvectors = NULL;
 
-    gl->eigenvalues = (float*)calloc(n, sizeof(float));
-    gl->eigenvectors = (float*)calloc(n * n, sizeof(float));
+    gl->eigenvalues = (float*)safe_calloc(n, sizeof(float));
+    gl->eigenvectors = (float*)safe_calloc(n * n, sizeof(float));
     if (!gl->eigenvalues || !gl->eigenvectors) {
-        free(gl->eigenvalues); free(gl->eigenvectors);
+        safe_free((void**)&gl->eigenvalues); safe_free((void**)&gl->eigenvectors);
         gl->eigenvalues = NULL; gl->eigenvectors = NULL;
         return -1;
     }
 
     /* R4-001修复: 将拉普拉斯矩阵复制到A后再进行特征分解 */
-    float* A = (float*)malloc((size_t)n * n * sizeof(float));
+    float* A = (float*)safe_malloc((size_t)n * (size_t)n * sizeof(float));
     if (!A) return -1;
-    memcpy(A, gl->laplacian_matrix, (size_t)n * n * sizeof(float));
+    memcpy(A, gl->laplacian_matrix, (size_t)n * (size_t)n * sizeof(float));
     jacobi_eigen(A, gl->eigenvectors, gl->eigenvalues, gl->n, 100);
-    free(A);
+    safe_free((void**)&A);
     return 0;
 }
 
@@ -440,10 +440,10 @@ int laplace_graph_conv_chebyshev(const GraphLaplacian* gl, const float* features
     for (int f = 0; f < num_features; f++) {
         size_t offset = (size_t)f * n;
 
-        float* T0 = (float*)malloc((size_t)n * sizeof(float));
-        float* T1 = (float*)malloc((size_t)n * sizeof(float));
-        float* Tk = (float*)malloc((size_t)n * sizeof(float));
-        if (!T0 || !T1 || !Tk) { free(T0); free(T1); free(Tk); return -1; }
+        float* T0 = (float*)safe_malloc((size_t)n * sizeof(float));
+        float* T1 = (float*)safe_malloc((size_t)n * sizeof(float));
+        float* Tk = (float*)safe_malloc((size_t)n * sizeof(float));
+        if (!T0 || !T1 || !Tk) { safe_free((void**)&T0); safe_free((void**)&T1); safe_free((void**)&Tk); return -1; }
 
         for (int i = 0; i < n; i++) T0[i] = features[offset + i];
         memset(T1, 0, (size_t)n * sizeof(float));
@@ -476,7 +476,7 @@ int laplace_graph_conv_chebyshev(const GraphLaplacian* gl, const float* features
             float* tmp = T0; T0 = T1; T1 = Tk; Tk = tmp;
         }
 
-        free(T0); free(T1); free(Tk);
+        safe_free((void**)&T0); safe_free((void**)&T1); safe_free((void**)&Tk);
     }
     return 0;
 }
@@ -487,15 +487,15 @@ int laplace_graph_conv_spectral(const GraphLaplacian* gl, const float* features,
     int n = gl->n;
     if (n < 1 || num_features < 1) return -1;
 
-    float* UT = (float*)malloc((size_t)n * n * sizeof(float));
+    float* UT = (float*)safe_malloc((size_t)n * (size_t)n * sizeof(float));
     if (!UT) return -1;
     mat_transpose(gl->eigenvectors, UT, n, n);
 
     for (int f = 0; f < num_features; f++) {
         size_t offset = (size_t)f * n;
 
-        float* coeff = (float*)malloc((size_t)n * sizeof(float));
-        if (!coeff) { free(UT); return -1; }
+        float* coeff = (float*)safe_malloc((size_t)n * sizeof(float));
+        if (!coeff) { safe_free((void**)&UT); return -1; }
         for (int i = 0; i < n; i++) coeff[i] = vec_dot(&UT[i * n], &features[offset], n);
 
         for (int i = 0; i < n; i++) coeff[i] *= spectral_filter[i];
@@ -505,17 +505,17 @@ int laplace_graph_conv_spectral(const GraphLaplacian* gl, const float* features,
             for (int j = 0; j < n; j++)
                 output[offset + i] += gl->eigenvectors[i * n + j] * coeff[j];
         }
-        free(coeff);
+        safe_free((void**)&coeff);
     }
-    free(UT);
+    safe_free((void**)&UT);
     return 0;
 }
 
 void laplace_graph_laplacian_free(GraphLaplacian* gl) {
     if (!gl) return;
-    free(gl->laplacian_matrix);
-    free(gl->eigenvalues);
-    free(gl->eigenvectors);
+    safe_free((void**)&gl->laplacian_matrix);
+    safe_free((void**)&gl->eigenvalues);
+    safe_free((void**)&gl->eigenvectors);
     memset(gl, 0, sizeof(GraphLaplacian));
 }
 
@@ -530,7 +530,7 @@ int laplace_eigenmap_compute(const float* data, int num_points, int data_dim, in
     map->data_dim = data_dim;
     map->sigma = sigma;
 
-    map->distance_matrix = (float*)calloc((size_t)num_points * num_points, sizeof(float));
+    map->distance_matrix = (float*)safe_calloc((size_t)num_points * num_points, sizeof(float));
     if (!map->distance_matrix) return -1;
 
     for (int i = 0; i < num_points; i++)
@@ -543,8 +543,8 @@ int laplace_eigenmap_compute(const float* data, int num_points, int data_dim, in
             map->distance_matrix[i * num_points + j] = d2;
         }
 
-    float* adjacency = (float*)calloc((size_t)num_points * num_points, sizeof(float));
-    if (!adjacency) { free(map->distance_matrix); return -1; }
+    float* adjacency = (float*)safe_calloc((size_t)num_points * num_points, sizeof(float));
+    if (!adjacency) { safe_free((void**)&map->distance_matrix); return -1; }
 
     for (int i = 0; i < num_points; i++) {
         for (int j = 0; j < num_points; j++) {
@@ -564,23 +564,23 @@ int laplace_eigenmap_compute(const float* data, int num_points, int data_dim, in
 
     GraphLaplacian gl;
     if (laplace_graph_laplacian_build(adjacency, num_points, 0, &gl) != 0) {
-        free(adjacency); free(map->distance_matrix); return -1;
+        safe_free((void**)&adjacency); safe_free((void**)&map->distance_matrix); return -1;
     }
 
     if (laplace_graph_laplacian_decompose(&gl) != 0) {
-        laplace_graph_laplacian_free(&gl); free(adjacency); return -1;
+        laplace_graph_laplacian_free(&gl); safe_free((void**)&adjacency); return -1;
     }
 
-    map->embedding = (float*)calloc((size_t)num_points * embedding_dim, sizeof(float));
-    map->eigenvalues = (float*)calloc((size_t)embedding_dim, sizeof(float));
+    map->embedding = (float*)safe_calloc((size_t)num_points * embedding_dim, sizeof(float));
+    map->eigenvalues = (float*)safe_calloc((size_t)embedding_dim, sizeof(float));
     if (!map->embedding || !map->eigenvalues) {
-        free(adjacency); laplace_graph_laplacian_free(&gl); return -1;
+        safe_free((void**)&adjacency); laplace_graph_laplacian_free(&gl); return -1;
     }
 
 /* 保存原始训练数据用于新样本投影 */
-    map->training_data = (float*)calloc((size_t)num_points * data_dim, sizeof(float));
+    map->training_data = (float*)safe_calloc((size_t)num_points * data_dim, sizeof(float));
     if (!map->training_data) {
-        free(adjacency); laplace_graph_laplacian_free(&gl); return -1;
+        safe_free((void**)&adjacency); laplace_graph_laplacian_free(&gl); return -1;
     }
     memcpy(map->training_data, data, (size_t)num_points * data_dim * sizeof(float));
 
@@ -603,7 +603,7 @@ int laplace_eigenmap_compute(const float* data, int num_points, int data_dim, in
         }
 
     laplace_graph_laplacian_free(&gl);
-    free(adjacency);
+    safe_free((void**)&adjacency);
     return 0;
 }
 
@@ -613,7 +613,7 @@ int laplace_eigenmap_transform(const LaplacianEigenmap* map, const float* new_po
     int n = map->num_points, d = map->data_dim, em = map->embedding_dim;
     if (n < 1 || d < 1 || em < 1) return -1;
 
-    float* weights = (float*)calloc((size_t)n, sizeof(float));
+    float* weights = (float*)safe_calloc((size_t)n, sizeof(float));
     if (!weights) return -1;
     float wsum = 0.0f;
 
@@ -634,16 +634,16 @@ int laplace_eigenmap_transform(const LaplacianEigenmap* map, const float* new_po
         for (int j = 0; j < em; j++)
             embedding[j] += weights[i] * map->embedding[i * em + j];
 
-    free(weights);
+    safe_free((void**)&weights);
     return 0;
 }
 
 void laplace_eigenmap_free(LaplacianEigenmap* map) {
     if (!map) return;
-    free(map->embedding);
-    free(map->eigenvalues);
-    free(map->distance_matrix);
-    free(map->training_data); /* 释放训练数据 */
+    safe_free((void**)&map->embedding);
+    safe_free((void**)&map->eigenvalues);
+    safe_free((void**)&map->distance_matrix);
+    safe_free((void**)&map->training_data); /* 释放训练数据 */
     memset(map, 0, sizeof(LaplacianEigenmap));
 }
 
@@ -652,7 +652,7 @@ void laplace_eigenmap_free(LaplacianEigenmap* map) {
 LaplacianSparseCoder* laplace_sparse_coder_create(int data_dim, int dict_size, float lambda, float laplacian_reg) {
     if (data_dim < 1 || dict_size < 1) return NULL;
 
-    LaplacianSparseCoder* coder = (LaplacianSparseCoder*)calloc(1, sizeof(LaplacianSparseCoder));
+    LaplacianSparseCoder* coder = (LaplacianSparseCoder*)safe_calloc(1, sizeof(LaplacianSparseCoder));
     if (!coder) return NULL;
 
     coder->data_dim = data_dim;
@@ -661,8 +661,8 @@ LaplacianSparseCoder* laplace_sparse_coder_create(int data_dim, int dict_size, f
     coder->laplacian_reg = laplacian_reg;
     coder->use_laplacian = laplacian_reg > 0.0f;
 
-    coder->dictionary = (float*)calloc((size_t)data_dim * dict_size, sizeof(float));
-    coder->gram_matrix = (float*)calloc((size_t)dict_size * dict_size, sizeof(float));
+    coder->dictionary = (float*)safe_calloc((size_t)data_dim * dict_size, sizeof(float));
+    coder->gram_matrix = (float*)safe_calloc((size_t)dict_size * dict_size, sizeof(float));
     if (!coder->dictionary || !coder->gram_matrix) {
         laplace_sparse_coder_free(coder); return NULL;
     }
@@ -679,7 +679,7 @@ LaplacianSparseCoder* laplace_sparse_coder_create(int data_dim, int dict_size, f
     }
 
     if (coder->use_laplacian) {
-        coder->laplacian_matrix = (float*)calloc((size_t)dict_size * dict_size, sizeof(float));
+        coder->laplacian_matrix = (float*)safe_calloc((size_t)dict_size * dict_size, sizeof(float));
         if (!coder->laplacian_matrix) { laplace_sparse_coder_free(coder); return NULL; }
     }
 
@@ -700,10 +700,10 @@ int laplace_sparse_encode(const LaplacianSparseCoder* coder, const float* data_p
 
     memset(code, 0, (size_t)k * sizeof(float));
 
-    float* residual = (float*)malloc((size_t)d * sizeof(float));
-    float* DTr = (float*)malloc((size_t)k * sizeof(float));
-    float* Lc = (float*)malloc((size_t)k * sizeof(float));
-    if (!residual || !DTr || !Lc) { free(residual); free(DTr); free(Lc); return -1; }
+    float* residual = (float*)safe_malloc((size_t)d * sizeof(float));
+    float* DTr = (float*)safe_malloc((size_t)k * sizeof(float));
+    float* Lc = (float*)safe_malloc((size_t)k * sizeof(float));
+    if (!residual || !DTr || !Lc) { safe_free((void**)&residual); safe_free((void**)&DTr); safe_free((void**)&Lc); return -1; }
 
     float t = 1.0f / (1.0f + coder->laplacian_reg);
 
@@ -739,7 +739,7 @@ int laplace_sparse_encode(const LaplacianSparseCoder* coder, const float* data_p
         if (sqrtf(conv / k) < tol) break;
     }
 
-    free(residual); free(DTr); free(Lc);
+    safe_free((void**)&residual); safe_free((void**)&DTr); safe_free((void**)&Lc);
     return 0;
 }
 
@@ -757,21 +757,21 @@ int laplace_sparse_dict_update(LaplacianSparseCoder* coder, const float* data, i
     int d = coder->data_dim, k = coder->dict_size;
 
     for (int j = 0; j < k; j++) {
-        float* grad = (float*)calloc((size_t)d, sizeof(float));
+        float* grad = (float*)safe_calloc((size_t)d, sizeof(float));
         if (!grad) return -1;
 
         for (int i = 0; i < num_samples; i++) {
             float c = codes[i * k + j];
             if (fabsf(c) < FLOAT_EPS) continue;
-            float* residual = (float*)malloc((size_t)d * sizeof(float));
-            if (!residual) { free(grad); return -1; }
+            float* residual = (float*)safe_malloc((size_t)d * sizeof(float));
+            if (!residual) { safe_free((void**)&grad); return -1; }
             for (int p = 0; p < d; p++) {
                 residual[p] = data[i * d + p];
                 for (int q = 0; q < k; q++)
                     residual[p] -= coder->dictionary[q * d + p] * codes[i * k + q];
             }
             for (int p = 0; p < d; p++) grad[p] += c * residual[p];
-            free(residual);
+            safe_free((void**)&residual);
         }
 
         for (int p = 0; p < d; p++)
@@ -782,7 +782,7 @@ int laplace_sparse_dict_update(LaplacianSparseCoder* coder, const float* data, i
             for (int p = 0; p < d; p++)
                 coder->dictionary[j * d + p] /= norm;
 
-        free(grad);
+        safe_free((void**)&grad);
     }
 
     /* 更新Gram矩阵 */
@@ -808,10 +808,10 @@ int laplace_sparse_dict_update(LaplacianSparseCoder* coder, const float* data, i
 
 void laplace_sparse_coder_free(LaplacianSparseCoder* coder) {
     if (!coder) return;
-    free(coder->dictionary);
-    free(coder->gram_matrix);
-    free(coder->laplacian_matrix);
-    free(coder);
+    safe_free((void**)&coder->dictionary);
+    safe_free((void**)&coder->gram_matrix);
+    safe_free((void**)&coder->laplacian_matrix);
+    safe_free((void**)&coder);
 }
 
 /* ==================== A01.3.2 拉普拉斯字典学习 ==================== */
@@ -819,16 +819,16 @@ void laplace_sparse_coder_free(LaplacianSparseCoder* coder) {
 LaplacianDictLearner* laplace_dict_learner_create(int data_dim, int dict_size, float sparsity_target) {
     if (data_dim < 1 || dict_size < 1) return NULL;
 
-    LaplacianDictLearner* learner = (LaplacianDictLearner*)calloc(1, sizeof(LaplacianDictLearner));
+    LaplacianDictLearner* learner = (LaplacianDictLearner*)safe_calloc(1, sizeof(LaplacianDictLearner));
     if (!learner) return NULL;
 
     float lambda = sparsity_target > 0.0f ? sparsity_target : 0.15f;
     learner->coder = laplace_sparse_coder_create(data_dim, dict_size, lambda, 0.01f);
-    if (!learner->coder) { free(learner); return NULL; }
+    if (!learner->coder) { safe_free((void**)&learner); return NULL; }
 
     learner->sparsity_target = sparsity_target > 0.0f ? sparsity_target : 0.15f;
     learner->max_atoms = dict_size;
-    learner->atom_norms = (float*)calloc((size_t)dict_size, sizeof(float));
+    learner->atom_norms = (float*)safe_calloc((size_t)dict_size, sizeof(float));
     if (!learner->atom_norms) { laplace_dict_learner_free(learner); return NULL; }
 
     return learner;
@@ -839,15 +839,15 @@ int laplace_dict_learn_batch(LaplacianDictLearner* learner, const float* data, i
     LaplacianSparseCoder* coder = learner->coder;
     int d = coder->data_dim, k = coder->dict_size;
 
-    float* codes = (float*)calloc((size_t)num_samples * k, sizeof(float));
+    float* codes = (float*)safe_calloc((size_t)num_samples * k, sizeof(float));
     if (!codes) return -1;
 
     for (int iter = 0; iter < num_iterations; iter++) {
         int ret = laplace_sparse_encode_batch(coder, data, num_samples, codes, 50, 1e-4f);
-        if (ret != 0) { free(codes); return -1; }
+        if (ret != 0) { safe_free((void**)&codes); return -1; }
 
         ret = laplace_sparse_dict_update(coder, data, num_samples, codes, learning_rate);
-        if (ret != 0) { free(codes); return -1; }
+        if (ret != 0) { safe_free((void**)&codes); return -1; }
 
         float avg_sparsity = 0.0f;
         for (int i = 0; i < num_samples; i++) {
@@ -876,7 +876,7 @@ int laplace_dict_learn_batch(LaplacianDictLearner* learner, const float* data, i
     for (int j = 0; j < k; j++)
         learner->atom_norms[j] = vec_norm2(&coder->dictionary[j * d], d);
 
-    free(codes);
+    safe_free((void**)&codes);
     return 0;
 }
 
@@ -895,8 +895,8 @@ int laplace_dict_get_atom(const LaplacianDictLearner* learner, int atom_idx, flo
 void laplace_dict_learner_free(LaplacianDictLearner* learner) {
     if (!learner) return;
     laplace_sparse_coder_free(learner->coder);
-    free(learner->atom_norms);
-    free(learner);
+    safe_free((void**)&learner->atom_norms);
+    safe_free((void**)&learner);
 }
 
 /* ==================== A01.3.2 L-009: KD树加速最近邻搜索 ==================== */
@@ -972,7 +972,7 @@ static KdNode* kd_build_recursive(KdTree* tree, int* indices, int start, int end
     /* 找中位数并分区 */
     int mid = kd_select_median(indices, tree->data, dim, stride, start, end);
 
-    KdNode* node = (KdNode*)calloc(1, sizeof(KdNode));
+    KdNode* node = (KdNode*)safe_calloc(1, sizeof(KdNode));
     if (!node) return NULL;
     node->point_index = indices[mid];
     node->split_dim = dim;
@@ -987,15 +987,15 @@ static KdNode* kd_build_recursive(KdTree* tree, int* indices, int start, int end
 static KdTree* kd_build(const float* data, int num_points, int data_dim) {
     if (!data || num_points < 1 || data_dim < 1) return NULL;
 
-    KdTree* tree = (KdTree*)calloc(1, sizeof(KdTree));
+    KdTree* tree = (KdTree*)safe_calloc(1, sizeof(KdTree));
     if (!tree) return NULL;
 
     tree->data = data;
     tree->num_points = num_points;
     tree->data_dim = data_dim;
 
-    tree->point_indices = (int*)malloc((size_t)num_points * sizeof(int));
-    if (!tree->point_indices) { free(tree); return NULL; }
+    tree->point_indices = (int*)safe_malloc((size_t)num_points * sizeof(int));
+    if (!tree->point_indices) { safe_free((void**)&tree); return NULL; }
     for (int i = 0; i < num_points; i++) tree->point_indices[i] = i;
 
     tree->root = kd_build_recursive(tree, tree->point_indices, 0, num_points, 0);
@@ -1008,14 +1008,14 @@ static void kd_node_free(KdNode* node) {
     if (!node) return;
     kd_node_free(node->left);
     kd_node_free(node->right);
-    free(node);
+    safe_free((void**)&node);
 }
 
 static void kd_free(KdTree* tree) {
     if (!tree) return;
     kd_node_free(tree->root);
-    free(tree->point_indices);
-    free(tree);
+    safe_free((void**)&tree->point_indices);
+    safe_free((void**)&tree);
 }
 
 /* 计算两点间平方欧氏距离 */
@@ -1093,7 +1093,7 @@ static void kd_query_knn_recursive(const KdTree* tree, const KdNode* node,
 static int kd_query_knn(const KdTree* tree, const float* query, int k, int* out_indices, float* out_dist_sq) {
     if (!tree || !query || !out_indices || k < 1) return -1;
 
-    KdNeighbor* neighbors = (KdNeighbor*)malloc((size_t)k * sizeof(KdNeighbor));
+    KdNeighbor* neighbors = (KdNeighbor*)safe_malloc((size_t)k * sizeof(KdNeighbor));
     if (!neighbors) return -1;
 
     int count = 0;
@@ -1116,7 +1116,7 @@ static int kd_query_knn(const KdTree* tree, const float* query, int k, int* out_
         neighbors[min_idx] = neighbors[count - i - 1];
     }
 
-    free(neighbors);
+    safe_free((void**)&neighbors);
     return count;
 }
 
@@ -1127,14 +1127,14 @@ int laplace_lle(const float* data, int num_points, int data_dim, int embedding_d
     if (n_neighbors < 2 || n_neighbors >= num_points) n_neighbors = (int)(num_points - 1 < 10 ? num_points - 1 : 10);
     if (reg <= 0.0f) reg = 1e-3f;
 
-    int* neighbors = (int*)calloc((size_t)num_points * n_neighbors, sizeof(int));
-    float* distances = (float*)calloc((size_t)num_points * n_neighbors, sizeof(float));
-    float* W = (float*)calloc((size_t)num_points * num_points, sizeof(float));
-    float* Z = (float*)calloc((size_t)n_neighbors * n_neighbors, sizeof(float));
-    float* G = (float*)calloc((size_t)num_points * embedding_dim, sizeof(float));
-    float* M = (float*)calloc((size_t)num_points * num_points, sizeof(float));
+    int* neighbors = (int*)safe_calloc((size_t)num_points * n_neighbors, sizeof(int));
+    float* distances = (float*)safe_calloc((size_t)num_points * n_neighbors, sizeof(float));
+    float* W = (float*)safe_calloc((size_t)num_points * num_points, sizeof(float));
+    float* Z = (float*)safe_calloc((size_t)n_neighbors * n_neighbors, sizeof(float));
+    float* G = (float*)safe_calloc((size_t)num_points * embedding_dim, sizeof(float));
+    float* M = (float*)safe_calloc((size_t)num_points * num_points, sizeof(float));
     if (!neighbors || !distances || !W || !Z || !G || !M) {
-        free(neighbors); free(distances); free(W); free(Z); free(G); free(M); return -1;
+        safe_free((void**)&neighbors); safe_free((void**)&distances); safe_free((void**)&W); safe_free((void**)&Z); safe_free((void**)&G); safe_free((void**)&M); return -1;
     }
 
     /* L-009: 使用KD树加速K近邻搜索，替代O(N²)暴力搜索
@@ -1142,8 +1142,8 @@ int laplace_lle(const float* data, int num_points, int data_dim, int embedding_d
     KdTree* kdtree = kd_build(data, num_points, data_dim);
     if (kdtree) {
         int query_k = n_neighbors + 1; /* 查询k+1个邻居以排除自身 */
-        int* knn_indices = (int*)malloc((size_t)query_k * sizeof(int));
-        float* knn_dists = (float*)malloc((size_t)query_k * sizeof(float));
+        int* knn_indices = (int*)safe_malloc((size_t)query_k * sizeof(int));
+        float* knn_dists = (float*)safe_malloc((size_t)query_k * sizeof(float));
         if (knn_indices && knn_dists) {
             for (int i = 0; i < num_points; i++) {
                 const float* query_pt = &data[(size_t)i * data_dim];
@@ -1165,8 +1165,8 @@ int laplace_lle(const float* data, int num_points, int data_dim, int embedding_d
                 }
             }
         }
-        free(knn_indices);
-        free(knn_dists);
+        safe_free((void**)&knn_indices);
+        safe_free((void**)&knn_dists);
         kd_free(kdtree);
     } else {
         /* KD树构建失败时回退到暴力搜索 */
@@ -1261,12 +1261,12 @@ int laplace_lle(const float* data, int num_points, int data_dim, int embedding_d
                 M[i * num_points + j] /= row_sum;
     }
 
-    float* MT = (float*)malloc((size_t)num_points * num_points * sizeof(float));
-    float* V = (float*)malloc((size_t)num_points * num_points * sizeof(float));
-    float* eig = (float*)malloc((size_t)num_points * sizeof(float));
+    float* MT = (float*)safe_malloc((size_t)num_points * (size_t)num_points * sizeof(float));
+    float* V = (float*)safe_malloc((size_t)num_points * (size_t)num_points * sizeof(float));
+    float* eig = (float*)safe_malloc((size_t)num_points * sizeof(float));
     if (!MT || !V || !eig) {
-        free(neighbors); free(distances); free(W); free(Z); free(G); free(M);
-        free(MT); free(V); free(eig); return -1;
+        safe_free((void**)&neighbors); safe_free((void**)&distances); safe_free((void**)&W); safe_free((void**)&Z); safe_free((void**)&G); safe_free((void**)&M);
+        safe_free((void**)&MT); safe_free((void**)&V); safe_free((void**)&eig); return -1;
     }
 
     mat_transpose(M, MT, num_points, num_points);
@@ -1283,8 +1283,8 @@ int laplace_lle(const float* data, int num_points, int data_dim, int embedding_d
                 embedding[i * embedding_dim + j] = V[i * num_points + ev_idx];
     }
 
-    free(neighbors); free(distances); free(W); free(Z); free(G); free(M);
-    free(MT); free(V); free(eig);
+    safe_free((void**)&neighbors); safe_free((void**)&distances); safe_free((void**)&W); safe_free((void**)&Z); safe_free((void**)&G); safe_free((void**)&M);
+    safe_free((void**)&MT); safe_free((void**)&V); safe_free((void**)&eig);
     return 0;
 }
 
@@ -1296,9 +1296,9 @@ int laplace_manifold_learn(const float* data, int num_points, int data_dim, int 
     result->num_points = num_points;
     result->embedding_dim = embedding_dim;
 
-    result->embedding = (float*)calloc((size_t)num_points * embedding_dim, sizeof(float));
-    result->stress = (float*)calloc(1, sizeof(float));
-    result->local_errors = (float*)calloc((size_t)num_points, sizeof(float));
+    result->embedding = (float*)safe_calloc((size_t)num_points * embedding_dim, sizeof(float));
+    result->stress = (float*)safe_calloc(1, sizeof(float));
+    result->local_errors = (float*)safe_calloc((size_t)num_points, sizeof(float));
     if (!result->embedding || !result->stress || !result->local_errors) {
         laplace_manifold_free(result); return -1;
     }
@@ -1345,9 +1345,9 @@ int laplace_manifold_learn(const float* data, int num_points, int data_dim, int 
 
 void laplace_manifold_free(LaplaceManifold* result) {
     if (!result) return;
-    free(result->embedding);
-    free(result->stress);
-    free(result->local_errors);
+    safe_free((void**)&result->embedding);
+    safe_free((void**)&result->stress);
+    safe_free((void**)&result->local_errors);
     memset(result, 0, sizeof(LaplaceManifold));
 }
 
@@ -1367,7 +1367,7 @@ static LaplacianEigenmap* laplace_eigenmap_create(const LaplaceEigenmapConfig* c
     if (!cfg || cfg->num_points < 2 || cfg->data_dim < 1 || cfg->embedding_dim < 1) {
         return NULL;
     }
-    LaplacianEigenmap* map = (LaplacianEigenmap*)calloc(1, sizeof(LaplacianEigenmap));
+    LaplacianEigenmap* map = (LaplacianEigenmap*)safe_calloc(1, sizeof(LaplacianEigenmap));
     if (!map) return NULL;
     map->num_points = cfg->num_points;
     map->data_dim = cfg->data_dim;
@@ -1403,7 +1403,7 @@ int laplace_features_train_bridge(void* lnn_instance, const float* data,
         return 0;
     }
     /* 使用拉普拉斯特征映射进行监督降维 */
-    float* embedding = (float*)calloc((size_t)rows * target_dim, sizeof(float));
+    float* embedding = (float*)safe_calloc((size_t)rows * target_dim, sizeof(float));
     if (!embedding) return 0;
 
     LaplaceEigenmapConfig cfg;
@@ -1415,7 +1415,7 @@ int laplace_features_train_bridge(void* lnn_instance, const float* data,
     cfg.sigma = 1.0f;
 
     LaplacianEigenmap* map = laplace_eigenmap_create(&cfg);
-    if (!map) { free(embedding); return 0; }
+    if (!map) { safe_free((void**)&embedding); return 0; }
 
     int ret = laplace_eigenmap_fit(map, data, rows, cols, embedding);
     if (ret == 0) {
@@ -1423,6 +1423,6 @@ int laplace_features_train_bridge(void* lnn_instance, const float* data,
     }
 
     laplace_eigenmap_free(map);
-    free(embedding);
+    safe_free((void**)&embedding);
     return ret;
 }

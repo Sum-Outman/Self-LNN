@@ -36,12 +36,12 @@ int system_mutex_trylock(void* mutex_ptr) {
 
 void* system_mutex_create(void) {
 #ifdef _WIN32
-    CRITICAL_SECTION* cs = (CRITICAL_SECTION*)malloc(sizeof(CRITICAL_SECTION));
+    CRITICAL_SECTION* cs = (CRITICAL_SECTION*)safe_malloc(sizeof(CRITICAL_SECTION));
     if (!cs) return NULL;
     InitializeCriticalSection(cs);
     return cs;
 #else
-    pthread_mutex_t* mtx = (pthread_mutex_t*)malloc(sizeof(pthread_mutex_t));
+    pthread_mutex_t* mtx = (pthread_mutex_t*)safe_malloc(sizeof(pthread_mutex_t));
     if (!mtx) return NULL;
     pthread_mutex_init(mtx, NULL);
     return mtx;
@@ -55,5 +55,5 @@ void system_mutex_destroy(void* mutex_ptr) {
 #else
     pthread_mutex_destroy((pthread_mutex_t*)mutex_ptr);
 #endif
-    free(mutex_ptr);
+    safe_free((void**)&mutex_ptr);
 }

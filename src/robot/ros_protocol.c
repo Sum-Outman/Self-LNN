@@ -728,7 +728,7 @@ int ros_deserialize_image(const uint8_t* buffer, size_t buffer_size, size_t* rea
     if (image->data_size > buffer_size - (size_t)(ptr - buffer)) return ROS_ERROR_DESERIALIZE;
 
     if (image->data_size > 0) {
-        image->data = (uint8_t*)malloc(image->data_size);
+        image->data = (uint8_t*)safe_malloc(image->data_size);
         if (!image->data) return ROS_ERROR_NO_MEMORY;
         memcpy(image->data, ptr, image->data_size);
         ptr += image->data_size;
@@ -1079,7 +1079,7 @@ static void ros_msg_hash_compute(const char* data, size_t len, char* output, siz
         6,10,15,21,6,10,15,21,6,10,15,21,6,10,15,21
     };
     size_t padded_len = ((len + 8) / 64 + 1) * 64;
-    uint8_t* padded = (uint8_t*)calloc(padded_len, 1);
+    uint8_t* padded = (uint8_t*)safe_calloc(padded_len, 1);
     if (!padded) { output[0] = '\0'; return; }
     memcpy(padded, data, len);
     padded[len] = 0x80;
@@ -1106,7 +1106,7 @@ static void ros_msg_hash_compute(const char* data, size_t len, char* output, siz
         }
         h0 += a; h1 += b; h2 += c; h3 += d;
     }
-    free(padded);
+    safe_free((void**)&padded);
     snprintf(output, output_size, "%08x%08x%08x%08x", h0, h1, h2, h3);
 }
 
@@ -1424,7 +1424,7 @@ int ros_tcp_subscribe_loop(int (*callback)(const uint8_t*, size_t, void*), void*
     if (!callback) return ROS_ERROR_INVALID_PARAM;
     if (!g_ros_tcp_ctx.connected) return ROS_ERROR_NOT_CONNECTED;
 
-    uint8_t* recv_buffer = (uint8_t*)malloc(ROS_TCP_BUF_SIZE);
+    uint8_t* recv_buffer = (uint8_t*)safe_malloc(ROS_TCP_BUF_SIZE);
     if (!recv_buffer) return ROS_ERROR_NO_MEMORY;
 
     log_info("[ROS-TCP] 订阅循环开始");
@@ -1437,7 +1437,7 @@ int ros_tcp_subscribe_loop(int (*callback)(const uint8_t*, size_t, void*), void*
 
         int ret = select((int)(g_ros_tcp_ctx.sock + 1), &read_fds, NULL, NULL, &tv);
         if (ret < 0) {
-            free(recv_buffer);
+            safe_free((void**)&recv_buffer);
             return ROS_ERROR_CONNECTION;
         }
         if (ret == 0) continue;
@@ -1450,7 +1450,7 @@ int ros_tcp_subscribe_loop(int (*callback)(const uint8_t*, size_t, void*), void*
                 log_info("[ROS-TCP] 发布者关闭连接");
                 break;
             }
-            free(recv_buffer);
+            safe_free((void**)&recv_buffer);
             return ROS_ERROR_CONNECTION;
         }
 
@@ -1471,7 +1471,7 @@ int ros_tcp_subscribe_loop(int (*callback)(const uint8_t*, size_t, void*), void*
                               (char*)(recv_buffer + total_recvd),
                               (int)(msg_size - total_recvd), 0);
             if (recvd <= 0) {
-                free(recv_buffer);
+                safe_free((void**)&recv_buffer);
                 return ROS_ERROR_CONNECTION;
             }
             total_recvd += (size_t)recvd;
@@ -1485,7 +1485,7 @@ int ros_tcp_subscribe_loop(int (*callback)(const uint8_t*, size_t, void*), void*
         }
     }
 
-    free(recv_buffer);
+    safe_free((void**)&recv_buffer);
     log_info("[ROS-TCP] 订阅循环结束");
     return ROS_OK;
 }
@@ -1569,7 +1569,7 @@ DDSContext* dds_context_create(uint32_t domain_id, const char* node_name,
         return NULL;
     }
 
-    DDSContext* ctx = (DDSContext*)calloc(1, sizeof(DDSContext));
+    DDSContext* ctx = (DDSContext*)safe_calloc(1, sizeof(DDSContext));
     if (!ctx) {
         network_cleanup();
         return NULL;
@@ -1680,7 +1680,7 @@ void dds_context_free(DDSContext* ctx) {
         sockclose(ctx->user_traffic_socket);
     }
 
-    free(ctx);
+    safe_free((void**)&ctx);
     network_cleanup();
     log_info("[DDS] DDS上下文已释放");
 }

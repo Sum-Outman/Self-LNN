@@ -20,7 +20,7 @@
         .fa-check-circle:before { content: "✅"; }
     </style>
 
-    <script src="js/api-service.js?v=15"></script>
+    <script src="js/api-service.js?v=16"></script>
     <script src="js/selflnn-chart.js?v=1"></script>
     <script>
         window.__PAGE_READY = false;
@@ -91,7 +91,7 @@
             <div class="logo">
                 <h1>SELF-LNN</h1>
             </div>
-            <div id="hamburger-menu" onclick="var n=document.getElementById('main-nav');if(n){n.classList.toggle('collapsed');n.classList.toggle('visible');}">
+            <div id="hamburger-menu" onclick="window.toggleHamburgerMenu()">
                  <span></span><span></span><span></span>
              </div>
             <nav class="nav" id="main-nav">
@@ -1290,6 +1290,7 @@
                                                 <div class="circle-progress" data-percent="0">
                                                     <svg width="80" height="80" viewBox="0 0 80 80">
                                                         <circle class="circle-bg" cx="40" cy="40" r="36"></circle>
+                                                        <!-- BUG-17说明：stroke-dashoffset=226.19为圆周长(2*PI*36≈226.19)，stroke-dasharray同步设置可实现进度环效果 -->
                                                         <circle class="circle-fill" id="model-accuracy-fill" cx="40" cy="40" r="36" style="stroke-dashoffset: 226.19;"></circle>
                                                     </svg>
                                                     <div class="circle-text" id="model-accuracy">未连接</div>
@@ -3659,7 +3660,7 @@
                                     </div>
                                     <div class="form-group">
                                         <label>WebSocket端口:</label>
-                                        <input type="number" class="form-input" id="setting-ws-port" value="8080" min="1024" max="65535" onchange="updateNetworkSetting('ws_port', this.value)">
+                                        <input type="number" class="form-input" id="setting-ws-port" value="8081" min="1024" max="65535" onchange="updateNetworkSetting('ws_port', this.value)">
                                     </div>
                                     <div class="form-group">
                                         <label>最大并发连接数:</label>
@@ -4168,7 +4169,6 @@ response = requests.get(
                             </table>
                         </div>
                     </div>
-                </div>
                 </div>
 
                 <!-- FIX-2: 添加训练中心缺失的9个DOM元素 -->
@@ -5321,10 +5321,10 @@ response = requests.get(
                 </div>
             </div>
             <div class="tab-bar">
-                <button class="tab-btn active" onclick="switchKnowledgeTab('add')">添加知识</button>
-                <button class="tab-btn" onclick="switchKnowledgeTab('list')">知识列表</button>
-                <button class="tab-btn" onclick="switchKnowledgeTab('graph')">图谱控制</button>
-                <button class="tab-btn" onclick="switchKnowledgeTab('advanced')">高级分析</button>
+                <button class="tab-btn active" data-tab="add" onclick="switchKnowledgeTab('add')">添加知识</button>
+                <button class="tab-btn" data-tab="list" onclick="switchKnowledgeTab('list')">知识列表</button>
+                <button class="tab-btn" data-tab="graph" onclick="switchKnowledgeTab('graph')">图谱控制</button>
+                <button class="tab-btn" data-tab="advanced" onclick="switchKnowledgeTab('advanced')">高级分析</button>
             </div>
             <div class="tab-content active" id="tab-add">
                 <div class="form-group">
@@ -5610,7 +5610,6 @@ response = requests.get(
                     </div>
                 </div>
             </div>
-        </div>
     <script>
         /* 移除重复定义 startMultimodalLearn，统一由 main.js 管理 */
         var multimodalPollTimer = null;
@@ -6522,6 +6521,67 @@ response = requests.get(
             </div>
         </section>
 
+        <!-- F-S03修复：路由导航占位section -->
+        <section id="stereo" class="section">
+            <div class="card full-width">
+                <div class="card-header"><h3>双目空间识别</h3></div>
+                <div class="card-content">
+                    <div class="section-placeholder">
+                        <div class="placeholder-spinner"></div>
+                        <p>双目空间识别模块加载中...</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="robots" class="section">
+            <div class="card full-width">
+                <div class="card-header"><h3>机器人管理</h3></div>
+                <div class="card-content">
+                    <div class="section-placeholder">
+                        <div class="placeholder-spinner"></div>
+                        <p>机器人管理模块加载中...</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="agents" class="section">
+            <div class="card full-width">
+                <div class="card-header"><h3>智能代理</h3></div>
+                <div class="card-content">
+                    <div class="section-placeholder">
+                        <div class="placeholder-spinner"></div>
+                        <p>智能代理模块加载中...</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="datasets" class="section">
+            <div class="card full-width">
+                <div class="card-header"><h3>数据集管理</h3></div>
+                <div class="card-content">
+                    <div class="section-placeholder">
+                        <div class="placeholder-spinner"></div>
+                        <p>数据集管理模块加载中...</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="agi-diagnostic" class="section">
+            <div class="card full-width">
+                <div class="card-header"><h3>AGI诊断</h3></div>
+                <div class="card-content">
+                    <div class="section-placeholder">
+                        <div class="placeholder-spinner"></div>
+                        <p>AGI诊断模块加载中...</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
     </main>
 
         <!-- 底部状态栏 -->
@@ -6559,12 +6619,14 @@ response = requests.get(
     <script src="js/agi-controller.js"></script>
     <script src="js/dialogue-enhanced.js"></script>
     <script src="js/knowledge-graph.js"></script>
-    <script src="js/main.js?v=15"></script>
     <script src="js/training-push.js"></script>
+    <script src="js/main.js?v=211"></script>
     <script>
         // 更新当前时间
         function updateTime() {
-            const now = new Date;
+            const now = new Date();
+            const timeEl = document.getElementById('current-time');
+            if (!timeEl) return;
             const timeString = now.toLocaleString('zh-CN', {
                 year: 'numeric',
                 month: '2-digit',
@@ -6573,27 +6635,8 @@ response = requests.get(
                 minute: '2-digit',
                 second: '2-digit'
             });
-            document.getElementById('current-time').textContent = timeString;
+            timeEl.textContent = timeString;
         }
-        
-        // 导航切换
-        document.querySelectorAll('.nav a').forEach(link => {
-            link.addEventListener('click', function(e) {
-                e.preventDefault;
-                
-                // 更新活动状态
-                document.querySelectorAll('.nav a').forEach(l => l.classList.remove('active'));
-                this.classList.add('active');
-                
-                // 显示对应部分
-                const targetId = this.getAttribute('href').substring(1);
-                document.querySelectorAll('.section').forEach(section => {
-                    section.classList.remove('active');
-                });
-                var targetSection = document.getElementById(targetId);
-                if (targetSection) targetSection.classList.add('active');
-            });
-        });
         
         // API服务实例（复用全局SelfLnnApi）
         var apiService = window.SelfLnnApi;
@@ -7169,7 +7212,11 @@ response = requests.get(
             
             // 更新时间
             updateTime();
-            setInterval(updateTime, 1000);
+            var _timeUpdateIntervalId = setInterval(updateTime, 1000);
+            /* 页面卸载时清除定时器，防止内存泄漏 */
+            window.addEventListener('beforeunload', function() {
+                if (_timeUpdateIntervalId) { clearInterval(_timeUpdateIntervalId); _timeUpdateIntervalId = null; }
+            });
             
             // 初始化状态指示器
             initStatusIndicators();

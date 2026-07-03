@@ -203,7 +203,7 @@ static void alloc_track_unlock(void) {
 static void alloc_track_add(void* data_ptr, size_t size, size_t alloc_id,
                             const char* file, int line) {
     if (!data_ptr) return;
-    AllocTrackNode* node = (AllocTrackNode*)malloc(sizeof(AllocTrackNode));
+    AllocTrackNode* node = (AllocTrackNode*)safe_malloc(sizeof(AllocTrackNode));
     if (!node) return;
     node->data_ptr = data_ptr;
     node->size = size;
@@ -228,7 +228,7 @@ static void alloc_track_remove(void* data_ptr) {
             AllocTrackNode* to_free = *pp;
             *pp = (*pp)->next;
             alloc_track_unlock();
-            free(to_free);
+            safe_free((void**)&to_free);
             return;
         }
         pp = &(*pp)->next;
@@ -654,7 +654,7 @@ void safe_free(void** ptr) {
     }
     
     if (footer->magic != MEMORY_MAGIC) {
-        /* P6-R90: 尾部损坏 = 堆已损坏, free(header)扩散破坏。
+        /* P6-R90: 尾部损坏 = 堆已损坏, safe_free((void**)&header)扩散破坏。
          * 只记录, 不释放。 */
         fprintf(stderr, "内存损坏: 尾部魔法不匹配 %p size=%zu gm=%d (skipping free)\n",
                data_ptr, header->size, guard_corrupted);
@@ -817,7 +817,7 @@ MemoryPool* memory_pool_create(const MemoryPoolConfig* config) {
     }
     
     // 分配内存池结构
-    MemoryPool* pool = (MemoryPool*)malloc(sizeof(MemoryPool));
+    MemoryPool* pool = (MemoryPool*)safe_malloc(sizeof(MemoryPool));
     if (!pool) {
         return NULL;
     }
@@ -831,7 +831,7 @@ MemoryPool* memory_pool_create(const MemoryPoolConfig* config) {
     if (alignment > 0) {
         pool->base_ptr = _aligned_malloc(total_size, alignment);
     } else {
-        pool->base_ptr = malloc(total_size);
+        pool->base_ptr = safe_malloc(total_size);
     }
 #else
     if (alignment > 0) {
@@ -839,28 +839,28 @@ MemoryPool* memory_pool_create(const MemoryPoolConfig* config) {
             pool->base_ptr = NULL;
         }
     } else {
-        pool->base_ptr = malloc(total_size);
+        pool->base_ptr = safe_malloc(total_size);
     }
 #endif
     
     if (!pool->base_ptr) {
-        free(pool);
+        safe_free((void**)&pool);
         return NULL;
     }
     
     // 分配块状态数组
-    pool->block_status = (int*)calloc(config->num_blocks, sizeof(int));
+    pool->block_status = (int*)safe_calloc(config->num_blocks, sizeof(int));
     if (!pool->block_status) {
 #ifdef _WIN32
         if (alignment > 0) {
             _aligned_free(pool->base_ptr);
         } else {
-            free(pool->base_ptr);
+            safe_free((void**)&pool->base_ptr);
         }
 #else
-        free(pool->base_ptr);
+        safe_free((void**)&pool->base_ptr);
 #endif
-        free(pool);
+        safe_free((void**)&pool);
         return NULL;
     }
     
@@ -878,7 +878,7 @@ MemoryPool* memory_pool_create(const MemoryPoolConfig* config) {
     g_memory_stats.pool_count++;
     
     // 注册到全局池链表
-    PoolNode* node = (PoolNode*)malloc(sizeof(PoolNode));
+    PoolNode* node = (PoolNode*)safe_malloc(sizeof(PoolNode));
     if (node) {
         node->pool = pool;
         node->next = g_pool_list;
@@ -1007,14 +1007,14 @@ void memory_pool_destroy(MemoryPool* pool) {
     if (pool->config.alignment > 0) {
         _aligned_free(pool->base_ptr);
     } else {
-        free(pool->base_ptr);
+        safe_free((void**)&pool->base_ptr);
     }
 #else
-    free(pool->base_ptr);
+    safe_free((void**)&pool->base_ptr);
 #endif
     
     // 释放状态数组
-    free(pool->block_status);
+    safe_free((void**)&pool->block_status);
     
     // 更新统计
     g_memory_stats.pool_count--;
@@ -1025,14 +1025,14 @@ void memory_pool_destroy(MemoryPool* pool) {
         if ((*pp)->pool == pool) {
             PoolNode* to_free = *pp;
             *pp = (*pp)->next;
-            free(to_free);
+            safe_free((void**)&to_free);
             break;
         }
         pp = &(*pp)->next;
     }
     
     // 释放池结构
-    free(pool);
+    safe_free((void**)&pool);
 }
 
 /**

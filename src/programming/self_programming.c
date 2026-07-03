@@ -2207,6 +2207,15 @@ char* self_improve_code(SelfProgrammingEngine* engine,
 static char* search_path_for_executable(const char* executable) {
     if (!executable) return NULL;
 
+    /* B-L04: 验证可执行文件名只包含安全字符，防止命令注入 */
+    for (size_t i = 0; executable[i]; i++) {
+        unsigned char c = (unsigned char)executable[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.')) {
+            return NULL;
+        }
+    }
+
 #ifdef _WIN32
     char found_path[MAX_PATH];
     DWORD ret = SearchPathA(NULL, executable, ".exe", MAX_PATH, found_path, NULL);
@@ -2362,14 +2371,14 @@ CompilationResult verify_code_compilation(SelfProgrammingEngine* engine,
 #ifdef _WIN32
     char temp_path[MAX_PATH];
     if (GetTempPathA(sizeof(temp_path), temp_path) == 0) {
-        strcpy(temp_path, ".");
+        snprintf(temp_path, sizeof(temp_path), ".");
     }
     snprintf(temp_dir, sizeof(temp_dir), "%s", temp_path);
     unsigned int uid = (unsigned int)time(NULL) ^ (unsigned int)(size_t)source_code;
     snprintf(source_file, sizeof(source_file), "%s\\selflnn_verify_%u.c", temp_dir, uid);
     snprintf(output_file, sizeof(output_file), "%s\\selflnn_verify_%u.exe", temp_dir, uid);
 #else
-    strcpy(temp_dir, "/tmp");
+    snprintf(temp_dir, sizeof(temp_dir), "/tmp");
     unsigned int uid = (unsigned int)time(NULL) ^ (unsigned int)(size_t)source_code;
     snprintf(source_file, sizeof(source_file), "/tmp/selflnn_verify_%u.c", uid);
     snprintf(output_file, sizeof(output_file), "/tmp/selflnn_verify_%u", uid);
@@ -2396,7 +2405,26 @@ CompilationResult verify_code_compilation(SelfProgrammingEngine* engine,
                  "\"%s\" -fsyntax-only -Wall -Wextra -o \"%s\" \"%s\" 2>&1",
                  compiler_path, output_file, source_file);
     }
-    
+
+    /* B-L04: 在执行popen之前验证编译器路径的安全性 */
+    {
+        int compiler_safe = 1;
+        for (size_t i = 0; compiler_path[i] && compiler_safe; i++) {
+            unsigned char c = (unsigned char)compiler_path[i];
+            if (c == ';' || c == '&' || c == '|' || c == '`' || c == '$' ||
+                c == '%' || c == '^' || c == '\n' || c == '\r') {
+                compiler_safe = 0;
+            }
+        }
+        if (!compiler_safe) {
+            remove(source_file);
+            safe_free((void**)&compiler_path);
+            result.success = 0;
+            snprintf(result.error_message, sizeof(result.error_message), "编译器路径包含不安全字符");
+            return result;
+        }
+    }
+
     FILE* pipe = popen(command, "r");
     if (!pipe) {
         remove(source_file);
@@ -2405,7 +2433,7 @@ CompilationResult verify_code_compilation(SelfProgrammingEngine* engine,
         snprintf(result.error_message, sizeof(result.error_message), "无法执行编译器命令");
         return result;
     }
-    
+
     char output_buf[4096] = {0};
     size_t total_read = 0;
     char line[1024];
@@ -2548,7 +2576,25 @@ int execute_code_sandboxed(SelfProgrammingEngine* engine,
                  "\"%s\" \"%s\" -o \"%s\" -static -nostartfiles -nostdlib 2>&1",
                  compiler, source_file, exe_file);
     }
-    
+
+    /* B-L04: 验证编译器路径的安全性 */
+    {
+        int compiler_safe = 1;
+        for (size_t i = 0; compiler[i] && compiler_safe; i++) {
+            unsigned char c = (unsigned char)compiler[i];
+            if (c == ';' || c == '&' || c == '|' || c == '`' || c == '$' ||
+                c == '%' || c == '^' || c == '\n' || c == '\r') {
+                compiler_safe = 0;
+            }
+        }
+        if (!compiler_safe) {
+            safe_free((void**)&compiler);
+            remove(source_file);
+            remove(exe_file);
+            return -1;
+        }
+    }
+
     // 使用popen替代system，避免Shell注入，同时可捕获编译输出
     FILE* compile_pipe = popen(compile_cmd, "r");
     safe_free((void**)&compiler);
@@ -2681,9 +2727,30 @@ int execute_code_sandboxed(SelfProgrammingEngine* engine,
     fprintf(f, "%s", code);
     fclose(f);
     
+    /* B-L04: 预定义硬编码安全编译器路径gcc，避免命令注入 */
+    /* 使用硬编码默认gcc路径，搜索结果已经过安全验证 */
+    static const char* safe_gcc_paths[] = {
+        "/usr/bin/gcc",
+        "/usr/local/bin/gcc",
+        "gcc"
+    };
+    int gcc_found = 0;
+    const char* safe_gcc = NULL;
+    for (size_t p = 0; p < sizeof(safe_gcc_paths)/sizeof(safe_gcc_paths[0]); p++) {
+        if (access(safe_gcc_paths[p], X_OK) == 0) {
+            safe_gcc = safe_gcc_paths[p];
+            gcc_found = 1;
+            break;
+        }
+    }
+    if (!gcc_found) {
+        remove(source_file);
+        return -1;
+    }
+
     char compile_cmd[1024];
     snprintf(compile_cmd, sizeof(compile_cmd),
-             "gcc -O0 -fPIE -fstack-protector-strong -o %s %s 2>&1", exe_file, source_file);
+             "%s -O0 -fPIE -fstack-protector-strong -o %s %s 2>&1", safe_gcc, exe_file, source_file);
     FILE* compile_pipe = popen(compile_cmd, "r");
     if (!compile_pipe) {
         remove(source_file);

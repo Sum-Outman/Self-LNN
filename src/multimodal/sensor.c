@@ -578,7 +578,7 @@ int sensor_calibrate_noise(SensorProcessor* processor,
     int channels = (int)num_values;
     int samples_needed = num_calibration_samples > 0 ? num_calibration_samples : 100;
 
-    CalibrationBuffer** ch_bufs = (CalibrationBuffer**)calloc((size_t)channels, sizeof(CalibrationBuffer*));
+    CalibrationBuffer** ch_bufs = (CalibrationBuffer**)safe_calloc((size_t)channels, sizeof(CalibrationBuffer*));
     if (!ch_bufs) return -1;
 
     for (int c = 0; c < channels; c++) {
@@ -595,6 +595,8 @@ int sensor_calibrate_noise(SensorProcessor* processor,
 
     if (channels <= 3 && processor->calibration_offset && processor->calibration_scale) {
         for (int c = 0; c < channels; c++) {
+            /* P1修复: count可能为0时跳过计算，防止除零 */
+            if (ch_bufs[c]->count == 0) continue;
             float sum = 0.0f;
             for (int i = 0; i < ch_bufs[c]->count; i++)
                 sum += ch_bufs[c]->buffer[i];

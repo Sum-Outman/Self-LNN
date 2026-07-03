@@ -286,14 +286,30 @@ int shard_system_add_shard(ParameterShardSystem* system, const ShardDescriptor* 
 
         ShardDescriptor* new_shards = (ShardDescriptor*)realloc(system->shards,
             new_capacity * sizeof(ShardDescriptor));
-        ShardPerformanceMetrics* new_metrics = (ShardPerformanceMetrics*)realloc(system->metrics,
-            new_capacity * sizeof(ShardPerformanceMetrics));
-        float** new_param_ptrs = (float**)realloc(system->shard_param_ptrs,
-            new_capacity * sizeof(float*));
-        float** new_grad_ptrs = (float**)realloc(system->shard_grad_ptrs,
-            new_capacity * sizeof(float*));
+        ShardPerformanceMetrics* new_metrics = NULL;
+        float** new_param_ptrs = NULL;
+        float** new_grad_ptrs = NULL;
+
+        /* 两步法：先全部realloc到临时变量，任一失败释放所有已成功的 */
+        if (new_shards) {
+            new_metrics = (ShardPerformanceMetrics*)realloc(system->metrics,
+                new_capacity * sizeof(ShardPerformanceMetrics));
+            if (new_metrics) {
+                new_param_ptrs = (float**)realloc(system->shard_param_ptrs,
+                    new_capacity * sizeof(float*));
+                if (new_param_ptrs) {
+                    new_grad_ptrs = (float**)realloc(system->shard_grad_ptrs,
+                        new_capacity * sizeof(float*));
+                }
+            }
+        }
 
         if (!new_shards || !new_metrics || !new_param_ptrs || !new_grad_ptrs) {
+            /* 释放所有已成功的临时缓冲区 */
+            if (new_shards) free(new_shards);
+            if (new_metrics) free(new_metrics);
+            if (new_param_ptrs) free(new_param_ptrs);
+            if (new_grad_ptrs) free(new_grad_ptrs);
             thread_mutex_unlock((thread_mutex_t*)&system->sync_mutex);
             return SELFLNN_ERROR_OUT_OF_MEMORY;
         }
@@ -449,7 +465,7 @@ int shard_system_synchronize_gradients(ParameterShardSystem* system)
         }
     }
 
-    float* reduce_buffer = (float*)malloc(max_shard_size * sizeof(float));
+    float* reduce_buffer = (float*)malloc((size_t)max_shard_size * sizeof(float));
     if (!reduce_buffer) return SELFLNN_ERROR_OUT_OF_MEMORY;
 
     for (size_t i = 0; i < system->num_shards; i++) {
@@ -488,7 +504,7 @@ int shard_system_allreduce_gradients(ParameterShardSystem* system, float* buffer
     if (!system || !buffer) return SELFLNN_ERROR_INVALID_ARGUMENT;
     if (!system->is_initialized) return SELFLNN_ERROR_NOT_INITIALIZED;
 
-    float* allreduce_buffer = (float*)malloc(size * sizeof(float));
+    float* allreduce_buffer = (float*)malloc((size_t)size * sizeof(float));
     if (!allreduce_buffer) return SELFLNN_ERROR_OUT_OF_MEMORY;
 
     memset(allreduce_buffer, 0, size * sizeof(float));
@@ -568,7 +584,7 @@ int shard_system_compress_topk(ParameterShardSystem* system,
     if (!system || !gradient || !compressed_buffer || !compressed_size) return -1;
     if (top_k == 0 || top_k > gradient_size) return -1;
 
-    GradIndexPair* pairs = (GradIndexPair*)malloc(gradient_size * sizeof(GradIndexPair));
+    GradIndexPair* pairs = (GradIndexPair*)malloc((size_t)gradient_size * sizeof(GradIndexPair));
     if (!pairs) return -1;
 
     for (size_t i = 0; i < gradient_size; i++) {
@@ -628,7 +644,7 @@ int shard_system_sync_compressed(ParameterShardSystem* system,
     if (top_k < 1) top_k = 1;
     if (top_k > gradient_size) top_k = gradient_size;
 
-    float* compressed = (float*)malloc(top_k * 2 * sizeof(float));
+    float* compressed = (float*)malloc((size_t)top_k * 2 * sizeof(float));
     if (!compressed) return -1;
 
     size_t compressed_size = 0;
@@ -649,7 +665,7 @@ int shard_system_sync_compressed(ParameterShardSystem* system,
     shard_system_decompress_topk(compressed, compressed_size,
                                    global_buffer, gradient_size, top_k);
 
-    float* all_reduced = (float*)malloc(gradient_size * sizeof(float));
+    float* all_reduced = (float*)malloc((size_t)gradient_size * sizeof(float));
     if (!all_reduced) {
         free(compressed);
         free(global_buffer);
@@ -810,7 +826,7 @@ int shard_system_rebalance(ParameterShardSystem* system)
     size_t new_base = total_params / system->num_shards;
     size_t remainder = total_params % system->num_shards;
 
-    float* all_params = (float*)malloc(total_params * sizeof(float));
+    float* all_params = (float*)malloc((size_t)total_params * sizeof(float));
     if (!all_params) return SELFLNN_ERROR_OUT_OF_MEMORY;
 
     if (shard_system_gather_parameters(system, all_params, total_params) != SELFLNN_SUCCESS) {
@@ -1076,7 +1092,7 @@ int shard_system_sync_over_socket(ParameterShardSystem* system,
         if (send(sock, (const char*)header, sizeof(header), 0) == sizeof(header)) {
             if (send(sock, (const char*)grads, (int)payload_size, 0) == (int)payload_size) {
                 /* 接收远程梯度并求平均 */
-                float* remote = (float*)malloc(param_count * sizeof(float));
+                float* remote = (float*)malloc((size_t)param_count * sizeof(float));
                 if (remote) {
                     size_t received = 0;
                     char* rbuf = (char*)remote;

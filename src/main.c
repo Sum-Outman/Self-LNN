@@ -493,7 +493,7 @@ static void agi_bg_online_learning(void) {
                 static int stable_counter = 0;
 
                 /* 指数移动平均追踪损失趋势 */
-                if (loss_ema == 0.0f) {
+                if (fabsf(loss_ema) < 1e-6f) {
                     loss_ema = loss;
                 } else {
                     loss_ema = 0.9f * loss_ema + 0.1f * loss;
@@ -2273,9 +2273,15 @@ static void print_system_info(int port, int ws_port)
 }
 
 /* ================================================================
- * ZSFOOO-E002: 最小HTTP状态服务器
+ * ZSFOOO-E002: 最小HTTP状态服务器 (已废弃)
+ * 
+ * @deprecated 此函数已废弃，由 backend_server 模块替代。
+ *            仅保留供参考，默认不编译。如需启用，请定义
+ *            SELFLNN_LEGACY_MINI_HTTP 宏。
+ * 
  * 在端口8080监听，返回JSON状态，与主循环并发运行
  * ================================================================ */
+#ifdef SELFLNN_LEGACY_MINI_HTTP
 static int g_mini_http_running = 0;
 
 static unsigned __stdcall mini_http_thread(void* arg) {
@@ -2366,7 +2372,7 @@ static unsigned __stdcall mini_http_thread(void* arg) {
                 snprintf(filepath, sizeof(filepath), "../frontend%s", decoded_path);
             
             /* 安全检查：防止目录穿越 */
-            if (strstr(filepath, "/../")) {
+            if (strstr(filepath, "/../") || strstr(filepath, "\\..\\")) {
                 snprintf(response, sizeof(response),
                     "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
                 send(client, response, (int)strlen(response), 0);
@@ -2424,6 +2430,7 @@ static void start_minimal_http_server(int port) {
     HANDLE h = (HANDLE)_beginthreadex(NULL, 0, mini_http_thread, (void*)(intptr_t)port, 0, NULL);
     if (h) CloseHandle(h);
 }
+#endif /* SELFLNN_LEGACY_MINI_HTTP */
 
 int main(int argc, char** argv)
 {

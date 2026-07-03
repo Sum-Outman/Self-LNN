@@ -10,7 +10,7 @@
     var sim3dLastFrame = 0;
     var sim3dAnimId = null;
 
-    function escapeHtml(str) { if (!str) return ''; var d = document.createElement('div'); d.textContent = str; return d.innerHTML; }
+    /* BUG-20修复：escapeHtml已在main.js中定义为window.escapeHtml，此处删除重复定义，统一使用window.escapeHtml */
     function safeCoord(v) { return (typeof v === 'number' && !isNaN(v) && isFinite(v)) ? v.toFixed(1) : '?'; }
 
     /* 顶点着色器：3D变换 + 光照 */
@@ -346,14 +346,16 @@
         }
         initSim3D();
         startRenderLoop();
+        /* BUG-9修复：在调用simulationStatus前检查方法是否存在，防止TypeError */
+        if (typeof window.SelfLnnApi.simulationStatus !== 'function') return;
         window.SelfLnnApi.simulationStatus().then(function(resp) {
             var data = (resp && resp.data) ? resp.data : resp;
             if (data && data.robots && data.robots.length > 0) {
                 var robotList = document.getElementById('sim-robot-list');
                 if (robotList) {
                     robotList.innerHTML = data.robots.map(function(r, i) {
-                        return '<tr><td>' + escapeHtml(r.name || ('机器人' + (i + 1))) + '</td>' +
-                            '<td>' + escapeHtml(r.status || '活跃') + '</td>' +
+                        return '<tr><td>' + window.escapeHtml(r.name || ('机器人' + (i + 1))) + '</td>' +
+                            '<td>' + window.escapeHtml(r.status || '活跃') + '</td>' +
                             '<td>' + (r.position ? 'x=' + safeCoord(r.position.x) + ',y=' + safeCoord(r.position.y) + ',z=' + safeCoord(r.position.z) : '--') + '</td></tr>';
                     }).join('');
                 }
@@ -435,8 +437,8 @@
                     var robotList = document.getElementById('sim-robot-list');
                     if (robotList) {
                         robotList.innerHTML = data.robots.map(function(r, i) {
-                            return '<tr><td>' + escapeHtml(r.name || ('机器人' + (i + 1))) + '</td>' +
-                                '<td>' + escapeHtml(r.status || '活跃') + '</td>' +
+                            return '<tr><td>' + window.escapeHtml(r.name || ('机器人' + (i + 1))) + '</td>' +
+                                '<td>' + window.escapeHtml(r.status || '活跃') + '</td>' +
                                 '<td>' + (r.position ? 'x=' + safeCoord(r.position.x) + ',y=' + safeCoord(r.position.y) + ',z=' + safeCoord(r.position.z) : '--') + '</td></tr>';
                         }).join('');
                     }

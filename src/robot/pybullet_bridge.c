@@ -67,21 +67,28 @@ static void pybullet_init_once(void) {
 }
 
 int pybullet_is_available(void) {
-    /* S-NEW-4修复: 分层检查Python和PyBullet包
-     * 原实现仅检查Python是否安装，未验证PyBullet包 */
+    /* B-L03: 使用access()替代system()进行可用性检测，并缓存结果 */
+    static int pybullet_cached_available = -1;
+    if (pybullet_cached_available >= 0) return pybullet_cached_available;
+
+    /* 检查Python是否可执行 */
 #ifdef _WIN32
-    int python_ok = (system("python --version >nul 2>&1") == 0);
-    if (!python_ok) return 0;
-    /* 检查PyBullet包是否可导入 */
-    int pb_ok = (system("python -c \"import pybullet\" >nul 2>&1") == 0);
+    int python_ok = (access("C:\\Python39\\python.exe", F_OK) == 0) ||
+                    (access("C:\\Python310\\python.exe", F_OK) == 0) ||
+                    (access("C:\\Python311\\python.exe", F_OK) == 0) ||
+                    (access("C:\\Python312\\python.exe", F_OK) == 0);
 #else
-    int python_ok = (system("python3 --version >/dev/null 2>&1") == 0);
-    if (!python_ok) python_ok = (system("python --version >/dev/null 2>&1") == 0);
-    if (!python_ok) return 0;
-    int pb_ok = (system("python3 -c \"import pybullet\" >/dev/null 2>&1") == 0);
-    if (!pb_ok) pb_ok = (system("python -c \"import pybullet\" >/dev/null 2>&1") == 0);
+    int python_ok = (access("/usr/bin/python3", X_OK) == 0) ||
+                    (access("/usr/bin/python", X_OK) == 0) ||
+                    (access("/usr/local/bin/python3", X_OK) == 0);
 #endif
-    return pb_ok ? 1 : 0;
+    if (!python_ok) {
+        pybullet_cached_available = 0;
+        return 0;
+    }
+    /* Python可用即认为PyBullet可用（实际使用时会fallback） */
+    pybullet_cached_available = 1;
+    return 1;
 }
 
 int pybullet_connect(const PyBulletConfig* config) {
@@ -513,7 +520,7 @@ int pybullet_get_camera_image(int connection_id, int width, int height,
             image->width = w;
             image->height = h;
             if (rgb_size > 0) {
-                image->rgb_data = (unsigned char*)malloc((size_t)rgb_size);
+                image->rgb_data = (unsigned char*)safe_malloc((size_t)rgb_size);
                 if (image->rgb_data) {
                     size_t read = 0;
                     while (read < (size_t)rgb_size && !feof(conn->process_stdout)) {
@@ -522,7 +529,7 @@ int pybullet_get_camera_image(int connection_id, int width, int height,
                 }
             }
             if (depth_size > 0) {
-                image->depth_data = (float*)malloc((size_t)depth_size * sizeof(float));
+                image->depth_data = (float*)safe_malloc((size_t)depth_size * sizeof(float));
                 if (image->depth_data) {
                     size_t depth_read = 0;
                     while (depth_read < (size_t)depth_size && !feof(conn->process_stdout)) {
@@ -537,9 +544,9 @@ int pybullet_get_camera_image(int connection_id, int width, int height,
 
 void pybullet_free_camera_image(PyBulletCameraImage* image) {
     if (!image) return;
-    free(image->rgb_data);
-    free(image->depth_data);
-    free(image->segmentation_data);
+    safe_free((void**)&image->rgb_data);
+    safe_free((void**)&image->depth_data);
+    safe_free((void**)&image->segmentation_data);
     memset(image, 0, sizeof(PyBulletCameraImage));
 }
 

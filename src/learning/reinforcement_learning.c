@@ -2190,7 +2190,7 @@ static void rl_cfc_rainbow_project_distribution(const RLAgent* agent,
 
     for (int i = 0; i < num_atoms; i++)
     {
-        if (next_dist[i] == 0.0f) continue;
+        if (fabsf(next_dist[i]) < 1e-6f) continue;
 
         /* 计算Bellman更新后的原子位置 */
         float tz = reward + gamma * (v_min + (float)i * delta);
@@ -2928,7 +2928,7 @@ RLConfig rl_config_default(RLAlgorithm algorithm, int state_dim, int action_dim)
     cfg.explore_config = rl_explore_config_default(RL_EXPLORE_EPSILON_GREEDY);
     cfg.seed = (int)time(NULL);
     cfg.verbose = 0;
-    strcpy(cfg.name, "rl_agent");
+    memcpy(cfg.name, "rl_agent", strlen("rl_agent") + 1);
 
     switch (algorithm)
     {

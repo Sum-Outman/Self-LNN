@@ -5,14 +5,66 @@
  * 提供HTTP API接口，允许前端与SELF-LNN系统交互。
  */
 
-// 禁用Windows CRT安全警告
+/* 禁用Windows CRT安全警告 - 已移除全局抑制，改为需要处使用 push/pop
 #ifdef _MSC_VER
 #pragma warning(disable:4477 4313 4047 4702 4133 5286 4113)
 #endif
+*/
 
 /* 前向声明：JSON安全函数 */
 static char* json_escape_str(const char* src);
 /* API处理器前向声明见文件尾部 init_handler_table 前 */
+
+/* ====================================================================
+ * JSON 安全解析辅助函数
+ * 替代 atoi/atof，提供输入验证和错误回报
+ * ==================================================================== */
+
+/**
+ * @brief 安全字符串转整数（替代 atoi）
+ * @param str 输入字符串
+ * @param default_val 解析失败时的默认值
+ * @param error 输出参数：0=成功，非0=解析失败
+ * @return 解析后的整数值
+ */
+static int json_get_int_safe(const char* str, int default_val, int* error) {
+    if (!str || !str[0]) {
+        if (error) *error = 1;
+        return default_val;
+    }
+    char* endptr = NULL;
+    long val = strtol(str, &endptr, 10);
+    if (endptr == str || *endptr != '\0') {
+        if (error) *error = 1;
+        return default_val;
+    }
+    if (val > INT_MAX) val = INT_MAX;
+    if (val < INT_MIN) val = INT_MIN;
+    if (error) *error = 0;
+    return (int)val;
+}
+
+/**
+ * @brief 安全字符串转浮点数（替代 atof）
+ * @param str 输入字符串
+ * @param default_val 解析失败时的默认值
+ * @param error 输出参数：0=成功，非0=解析失败
+ * @return 解析后的浮点数值
+ */
+static float json_get_float_safe(const char* str, float default_val, int* error) {
+    if (!str || !str[0]) {
+        if (error) *error = 1;
+        return default_val;
+    }
+    char* endptr = NULL;
+    float val = strtof(str, &endptr);
+    if (endptr == str || *endptr != '\0') {
+        if (error) *error = 1;
+        return default_val;
+    }
+    if (error) *error = 0;
+    return val;
+}
 
 #define ROS_ROBOT_CONNECTION_CONNECTED 1
 #define ROS_ROBOT_CONNECTION_ACTIVE 2
@@ -302,6 +354,7 @@ static const struct {
     {"/api/device/control", "POST", "设备开关控制", "device"},
     {"/api/devices/list", "GET", "列出所有可用设备", "device"},
     {"/api/devices/register", "POST", "注册前端设备", "device"},
+    {"/api/devices/discover", "POST", "发现/扫描设备", "device"},
     {"/api/devices/unregister", "POST", "注销前端设备", "device"},
     {"/api/devices/status", "POST", "获取设备状态", "device"},
     {"/api/files/read", "POST", "读取文件", "files"},
@@ -425,8 +478,8 @@ static const struct {
     {"/api/training/log/clear", "POST", "清除训练日志", "training"},
     {"/api/training/schedule", "POST", "创建训练计划", "training"},
     {"/api/voice/history", "GET", "获取语音交互历史", "voice"},
-    {"/api/voice/recognize", "POST", "语音识别", "voice"},
-    {"/api/voice/synthesize", "POST", "语音合成", "voice"},
+    {"/api/voice/recognize", "POST", "语音识别（已弃用，请使用 /api/audio/recognize）", "voice"},
+    {"/api/voice/synthesize", "POST", "语音合成（已弃用，请使用 /api/tts/synthesize）", "voice"},
     {"/api/audio/devices", "GET", "枚举音频采集设备(麦克风)", "audio"},
     {"/api/audio/capture/start", "POST", "启动音频实时采集", "audio"},
     {"/api/audio/capture/stop", "POST", "停止音频实时采集", "audio"},
@@ -444,7 +497,7 @@ static const struct {
     {"/api/knowledge/entry/{id}", "GET", "查询知识条目", "knowledge"},
     {"/api/knowledge/entry/{id}", "DELETE", "删除知识条目", "knowledge"},
     {"/api/knowledge/stats", "GET", "知识库统计信息", "knowledge"},
-    {"/api/knowledge/export", "GET", "导出知识库", "knowledge"},
+    {"/api/knowledge/export", "POST", "导出知识库", "knowledge"},
     {"/api/kg/stats", "GET", "知识图谱统计", "knowledge_graph"},
     {"/api/kg/pagerank", "GET", "PageRank排名", "knowledge_graph"},
     {"/api/kg/communities", "GET", "社区检测", "knowledge_graph"},
@@ -477,8 +530,8 @@ static const struct {
     {"/api/cognition/state", "GET", "获取AGI认知详细状态", "agi"},
     {"/api/multimodal/test", "POST", "多模态能力测试", "multimodal"},
     {"/api/agi/tasks", "GET", "获取AGI活动任务列表", "agi"},
-    {"/api/agi/diagnostic", "POST", "执行AGI系统诊断", "agi"},
-    {"/api/agi/diagnostic/export", "POST", "导出AGI系统诊断报告", "agi"},
+    {"/api/agi/diagnostic", "GET", "执行AGI系统诊断", "agi"},
+    {"/api/agi/diagnostic/export", "GET", "导出AGI系统诊断报告", "agi"},
 /* 前端-后端API端点对齐 - 新增端点 */
     {"/api/programming/sample", "GET", "获取编程示例代码", "programming"},
     {"/api/command/prefixes", "GET", "获取AGI命令前缀列表", "system"},
@@ -538,6 +591,7 @@ static const struct {
     {"/api/capability/diagnose", "POST", "能力开关诊断", "agi"},
 /* 产品设计端点注册 */
     {"/api/product/spec", "POST", "产品规格生成", "product"},
+    {"/api/product/design", "POST", "产品设计生成", "product"},
     {"/api/product/status", "GET", "产品设计引擎状态", "product"},
 };
 #define g_api_endpoints_count (sizeof(g_api_endpoints) / sizeof(g_api_endpoints[0]))
@@ -675,6 +729,11 @@ static int parse_json_string(const char* json, const char* key, char* value, siz
     const char* end = start;
     
     while (*end != '\0' && *end != '"') {
+        /* 处理转义序列：跳过反斜杠后的下一个字符 */
+        if (*end == '\\' && *(end + 1) != '\0') {
+            end += 2;  /* 跳过转义字符和被转义的字符 */
+            continue;
+        }
         end++;
     }
     
@@ -1587,6 +1646,9 @@ static int handle_api_post_multimodal_teach(BackendServer* server,
         parse_json_string(request_data, "label", concept_label, sizeof(concept_label));
         parse_json_string(request_data, "modality", modality, sizeof(modality));
     }
+    /* B4-M04: 字符串截断保护，防止缓冲区溢出导致的未终止字符串 */
+    concept_name[sizeof(concept_name) - 1] = '\0';
+    concept_label[sizeof(concept_label) - 1] = '\0';
     if (concept_name[0] && server->multimodal_manager) {
         float concept_embed[1024];
         memset(concept_embed, 0, sizeof(concept_embed));
@@ -3145,7 +3207,7 @@ static void* server_thread_func(void* param) {
                 if (strchr(path, '\\') != NULL) {
                     path_safe = 0;
                 }
-                if (strlen(path) != strnlen(path, 1024)) {
+                if (strlen(path) != selflnn_strnlen(path, 1024)) {
                     path_safe = 0;
                 }
 /* 拒绝URL编码路径防止%2e%2e%2f绕过..检查 */
@@ -3190,7 +3252,8 @@ static void* server_thread_func(void* param) {
                             }
                         }
                         if (cached_frontend_path[0] == '\0') {
-                            strcpy(cached_frontend_path, "frontend");
+                            strncpy(cached_frontend_path, "frontend", sizeof(cached_frontend_path) - 1);
+                            cached_frontend_path[sizeof(cached_frontend_path) - 1] = '\0';
                             /* L-006: 前端文件目录探测失败，输出当前工作目录以帮助用户诊断 */
                             char cwd_buf[1024] = {0};
 #ifdef _WIN32
@@ -3208,7 +3271,7 @@ static void* server_thread_func(void* param) {
                     const char* best_dir = cached_frontend_path;
                     const char* file_path = path;
                     char full_path[512];
-                    char mime_type[64];
+                    char mime_type[64] = "application/octet-stream";
 
                     if (strcmp(path, "/") == 0) {
                         snprintf(full_path, sizeof(full_path), "%s/index.html", best_dir);
@@ -3231,14 +3294,14 @@ static void* server_thread_func(void* param) {
                     if (file_path && full_path[0]) {
                         const char* ext = strrchr(full_path, '.');
                         if (ext) {
-                            if (strcmp(ext, ".html") == 0) strcpy(mime_type, "text/html; charset=utf-8");
-                            else if (strcmp(ext, ".css") == 0) strcpy(mime_type, "text/css; charset=utf-8");
-                            else if (strcmp(ext, ".js") == 0) strcpy(mime_type, "application/javascript; charset=utf-8");
-                            else if (strcmp(ext, ".json") == 0) strcpy(mime_type, "application/json; charset=utf-8");
-                            else if (strcmp(ext, ".png") == 0) strcpy(mime_type, "image/png");
-                            else if (strcmp(ext, ".svg") == 0) strcpy(mime_type, "image/svg+xml");
-                            else if (strcmp(ext, ".ico") == 0) strcpy(mime_type, "image/x-icon");
-                            else strcpy(mime_type, "text/plain; charset=utf-8");
+                            if (strcmp(ext, ".html") == 0) { strncpy(mime_type, "text/html; charset=utf-8", sizeof(mime_type) - 1); mime_type[sizeof(mime_type) - 1] = '\0'; }
+                            else if (strcmp(ext, ".css") == 0) { strncpy(mime_type, "text/css; charset=utf-8", sizeof(mime_type) - 1); mime_type[sizeof(mime_type) - 1] = '\0'; }
+                            else if (strcmp(ext, ".js") == 0) { strncpy(mime_type, "application/javascript; charset=utf-8", sizeof(mime_type) - 1); mime_type[sizeof(mime_type) - 1] = '\0'; }
+                            else if (strcmp(ext, ".json") == 0) { strncpy(mime_type, "application/json; charset=utf-8", sizeof(mime_type) - 1); mime_type[sizeof(mime_type) - 1] = '\0'; }
+                            else if (strcmp(ext, ".png") == 0) { strncpy(mime_type, "image/png", sizeof(mime_type) - 1); mime_type[sizeof(mime_type) - 1] = '\0'; }
+                            else if (strcmp(ext, ".svg") == 0) { strncpy(mime_type, "image/svg+xml", sizeof(mime_type) - 1); mime_type[sizeof(mime_type) - 1] = '\0'; }
+                            else if (strcmp(ext, ".ico") == 0) { strncpy(mime_type, "image/x-icon", sizeof(mime_type) - 1); mime_type[sizeof(mime_type) - 1] = '\0'; }
+                            else { strncpy(mime_type, "text/plain; charset=utf-8", sizeof(mime_type) - 1); mime_type[sizeof(mime_type) - 1] = '\0'; }
 
                             FILE* fp = fopen(full_path, "rb");
                             if (fp) {
@@ -6797,19 +6860,25 @@ static int handle_api_kg_endpoint(BackendServer* server,
     case 301: { /* /api/kg/pagerank */
         size_t nc = 0, ec = 0, mem = 0;
         knowledge_graph_get_stats(kg, &nc, &ec, &mem);
-        float* scores = (float*)safe_calloc(nc > 0 ? nc : 1, sizeof(float));
-        if (scores && nc > 0) {
-            knowledge_graph_pagerank(kg, scores, nc);
-            json_data = (char*)safe_malloc(32768);
-            if (json_data) {
-                int pos = snprintf(json_data, 32768, "{\"pagerank\":[");
-                size_t top = (nc > 10) ? 10 : nc;
-                for (size_t i = 0; i < top; i++)
-                    pos += snprintf(json_data + pos, 32768 - (size_t)pos, "%s%.6f", (i>0?",":""), scores[i]);
-                snprintf(json_data + pos, 32768 - (size_t)pos, "]}");
+        /* B4-M03: 当nc==0时直接输出空数组，不分配scores内存 */
+        if (nc == 0) {
+            json_data = (char*)safe_malloc(64);
+            if (json_data) snprintf(json_data, 64, "{\"pagerank\":[]}");
+        } else {
+            float* scores = (float*)safe_calloc(nc, sizeof(float));
+            if (scores) {
+                knowledge_graph_pagerank(kg, scores, nc);
+                json_data = (char*)safe_malloc(32768);
+                if (json_data) {
+                    int pos = snprintf(json_data, 32768, "{\"pagerank\":[");
+                    size_t top = (nc > 10) ? 10 : nc;
+                    for (size_t i = 0; i < top; i++)
+                        pos += snprintf(json_data + pos, 32768 - (size_t)pos, "%s%.6f", (i>0?",":""), scores[i]);
+                    snprintf(json_data + pos, 32768 - (size_t)pos, "]}");
+                }
             }
+            safe_free((void**)&scores);
         }
-        safe_free((void**)&scores);
         break; }
     case 302: { /* /api/kg/communities */
         size_t nc = 0, ec = 0, mem = 0;
@@ -7566,6 +7635,7 @@ static int handle_api_post_evolution(BackendServer* server,
             response->data_length = strlen(json_data);
             response->status_code = 503;
         }
+        return 0;
     }
 
     /* 解析适应度分数 */
@@ -7639,6 +7709,7 @@ static int handle_api_post_evolution_pareto(BackendServer* server,
             response->data_length = strlen(json_data);
             response->status_code = 503;
         }
+        return 0;
     }
 
     int num_objectives = 3;
@@ -8197,6 +8268,7 @@ static int handle_api_post_robot_connect(BackendServer* server,
             response->data_length = strlen(json_data);
             response->status_code = 503;
         }
+        return 0;
     }
     int robot_id = 0;
     int connect_gazebo = 0;
@@ -8252,6 +8324,7 @@ static int handle_api_post_robot_disconnect(BackendServer* server,
             response->data_length = strlen(json_data);
             response->status_code = 503;
         }
+        return 0;
     }
     int robot_id = 0;
     int disconnect_gazebo = 0;
@@ -8301,6 +8374,7 @@ static int handle_api_get_robot_list(BackendServer* server,
             response->data_length = strlen(json_data);
             response->status_code = 503;
         }
+        return 0;
     }
     int total_count = 0;
     int connected = 0;
@@ -8488,6 +8562,7 @@ static int handle_api_post_ros_configure(BackendServer* server,
             response->data_length = strlen(json_data);
             response->status_code = 503;
         }
+        return 0;
     }
     char master_host[256] = "localhost";
     int master_port = SELFLNN_ROS_MASTER_PORT;
@@ -8595,6 +8670,7 @@ static int handle_api_get_sensor_pipeline_status(BackendServer* server,
             response->data_length = strlen(json_data);
             response->status_code = 503;
         }
+        return 0;
     }
     int sensor_count = sensor_pipeline_get_sensor_count(server->sensor_pipeline);
     int registered_ids[64];
@@ -8836,9 +8912,15 @@ static int handle_api_post_model_load(BackendServer* server,
             response->data = json_data;
             response->data_length = strlen(json_data);
             response->status_code = 200;
+            /* B4-S01: 成功路径替换server->lnn_instance，先释放旧实例 */
+            if (server->lnn_instance) {
+                lnn_free(server->lnn_instance);
+            }
+            server->lnn_instance = loaded_model;
+        } else {
+            /* B4-S01: json_data分配失败，释放loaded_model避免内存泄漏 */
+            lnn_free(loaded_model);
         }
-                
-        lnn_free(loaded_model);
     } else {
         char* json_data = (char*)safe_malloc(256);
         if (json_data) {
@@ -8910,7 +8992,7 @@ static int handle_api_get_dialogue_history(BackendServer* server,
     /* 无活跃对话上下文或无历史 */
     char* json_data = (char*)safe_malloc(256);
     if (json_data) {
-        snprintf(json_data, 256, "{\"dialogue_history\":{\"history\":,\"count\":0,\"status\":\"no_active_session\"}}");
+        snprintf(json_data, 256, "{\"dialogue_history\":{\"history\":[],\"count\":0,\"status\":\"no_active_session\"}}");
         response->data = json_data;
         response->data_length = strlen(json_data);
         response->status_code = 200;
@@ -9210,7 +9292,14 @@ static int handle_api_get_knowledge(BackendServer* server,
                     "\"confidence\":%.2f,\"type\":%d,\"weight\":%.2f}",
                     (i > 0 ? "," : ""), subj, pred, obj,
                     results[i].confidence, (int)results[i].type, results[i].weight);
-                if (n > 0) p += n;
+                if (n > 0) {
+                    /* B4-M02: 缓冲区满时停止添加并加省略号 */
+                    if (p + n >= end - 10) {
+                        snprintf(p, end - p, "...");
+                        break;
+                    }
+                    p += n;
+                }
             }
         }
         /* P1-002: 集成knowledge_self_check获取真实知识库统计 */
@@ -9288,6 +9377,11 @@ static int handle_api_get_knowledge(BackendServer* server,
         response->data = json_data;
         response->data_length = strlen(json_data);
         response->status_code = 200;
+    } else {
+        /* B4-S02: json_data分配失败，设置错误响应 */
+        response->data = string_duplicate("{\"success\":false,\"error\":\"内存分配失败\"}");
+        response->data_length = strlen(response->data);
+        response->status_code = 500;
     }
     return 0;
 }
@@ -9424,12 +9518,12 @@ static int handle_api_post_knowledge(BackendServer* server,
     const char* conf_str = strstr(request_data, "\"confidence\"");
     if (conf_str) {
         conf_str = strchr(conf_str, ':');
-        if (conf_str) confidence = (float)atof(conf_str + 1);
+        if (conf_str) { int _err = 0; confidence = json_get_float_safe(conf_str + 1, 0.5f, &_err); }
     }
     const char* weight_str = strstr(request_data, "\"weight\"");
     if (weight_str) {
         weight_str = strchr(weight_str, ':');
-        if (weight_str) weight = (float)atof(weight_str + 1);
+        if (weight_str) { int _err = 0; weight = json_get_float_safe(weight_str + 1, 0.5f, &_err); }
     }
             
     /* 构建知识条目 */
@@ -9592,13 +9686,13 @@ static int handle_api_post_tts_synthesize(BackendServer* server,
             
     parse_json_string(request_data, "text", tts_text, sizeof(tts_text));
     const char* speed_str = strstr(request_data, "\"speed\"");
-    if (speed_str) { speed_str = strchr(speed_str, ':'); if (speed_str) speed = (float)atof(speed_str + 1); }
+    if (speed_str) { speed_str = strchr(speed_str, ':'); if (speed_str) { int _err = 0; speed = json_get_float_safe(speed_str + 1, 1.0f, &_err); } }
     const char* pitch_str = strstr(request_data, "\"pitch\"");
-    if (pitch_str) { pitch_str = strchr(pitch_str, ':'); if (pitch_str) pitch = (float)atof(pitch_str + 1); }
+    if (pitch_str) { pitch_str = strchr(pitch_str, ':'); if (pitch_str) { int _err = 0; pitch = json_get_float_safe(pitch_str + 1, 1.0f, &_err); } }
     const char* vol_str = strstr(request_data, "\"volume\"");
-    if (vol_str) { vol_str = strchr(vol_str, ':'); if (vol_str) volume = (float)atof(vol_str + 1); }
+    if (vol_str) { vol_str = strchr(vol_str, ':'); if (vol_str) { int _err = 0; volume = json_get_float_safe(vol_str + 1, 1.0f, &_err); } }
     const char* fmt_str = strstr(request_data, "\"format\"");
-    if (fmt_str) { fmt_str = strchr(fmt_str, ':'); if (fmt_str) { int f = atoi(fmt_str + 1); if (f == 0) format_json = 0; } }
+    if (fmt_str) { fmt_str = strchr(fmt_str, ':'); if (fmt_str) { int _err = 0; int f = json_get_int_safe(fmt_str + 1, 1, &_err); if (f == 0) format_json = 0; } }
             
     if (strlen(tts_text) == 0) {
         json_data = (char*)safe_malloc(256);
@@ -10263,25 +10357,28 @@ static int handle_api_post_agi_execute(BackendServer* server,
             confidence = routput.confidence;
             
             /* 如果知识库可用，补充知识上下文 */
+            KnowledgeEntry* kres = NULL;
             if (server->knowledge_base && strlen(result_desc) > 0) {
                 KnowledgeQuery kq;
                 memset(&kq, 0, sizeof(kq));
                 kq.subject_pattern = task_desc;
                 kq.type_filter = -1;
                 size_t maxr = 10;
-                KnowledgeEntry* kres = (KnowledgeEntry*)safe_malloc(
+                kres = (KnowledgeEntry*)safe_malloc(
                     maxr * sizeof(KnowledgeEntry));
                 if (kres) {
                     size_t nr = knowledge_base_query(
                         server->knowledge_base, &kq, kres, maxr);
                     if (nr > 0) has_knowledge = 1;
-                    safe_free((void**)&kres);
+                    /* B4-S03: kres在snprintf输出后统一释放 */
                 }
             }
             
             size_t tpos = snprintf(reasoning_trace, sizeof(reasoning_trace),
                 "[决策]推理模式:%d,结论:%s,置信度:%.4f;",
                 REASONING_DEDUCTIVE, routput.conclusion, routput.confidence);
+            /* B4-S03: 在snprintf输出后释放kres */
+            safe_free((void**)&kres);
             
             /* 如果LNN可用，用LNN状态演化增强决策置信度评估 */
             if (server->lnn_instance) {
@@ -11445,10 +11542,23 @@ static int handle_api_post_computer_launch(BackendServer* server,
     parse_json_string(request_data, "name", app_name, sizeof(app_name));
     int launch_result = -1;
     if (strlen(app_name) > 0) {
-        /* 安全校验：禁止路径遍历和shell注入 */
-        if (!strstr(app_name, "..") && !strchr(app_name, ';') &&
+        /* 安全校验：只允许字母数字、空格、连字符、下划线、点号 */
+        int app_safe = 1;
+        for (size_t i = 0; app_name[i] && app_safe; i++) {
+            unsigned char c = (unsigned char)app_name[i];
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                  (c >= '0' && c <= '9') || c == ' ' || c == '-' ||
+                  c == '_' || c == '.')) {
+                app_safe = 0;
+                break;
+            }
+        }
+        /* 额外检查：禁止路径遍历注入字符 */
+        if (app_safe && !strstr(app_name, "..") && !strchr(app_name, ';') &&
             !strchr(app_name, '&') && !strchr(app_name, '|') &&
-            !strchr(app_name, '`') && !strchr(app_name, '$')) {
+            !strchr(app_name, '`') && !strchr(app_name, '$') &&
+            !strchr(app_name, '%') && !strchr(app_name, '^') &&
+            !strchr(app_name, '"') && !strchr(app_name, '\\')) {
             char cmd[512] = {0};
 #ifdef _WIN32
             snprintf(cmd, sizeof(cmd), "start \"\" \"%s\"", app_name);
@@ -11485,10 +11595,23 @@ static int handle_api_post_computer_close(BackendServer* server,
     parse_json_string(request_data, "name", app_name, sizeof(app_name));
     int close_result = -1;
     if (strlen(app_name) > 0) {
-        /* 安全校验：禁止路径遍历和shell注入 */
-        if (!strstr(app_name, "..") && !strchr(app_name, ';') &&
+        /* 安全校验：只允许字母数字、空格、连字符、下划线、点号 */
+        int app_safe = 1;
+        for (size_t i = 0; app_name[i] && app_safe; i++) {
+            unsigned char c = (unsigned char)app_name[i];
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                  (c >= '0' && c <= '9') || c == ' ' || c == '-' ||
+                  c == '_' || c == '.')) {
+                app_safe = 0;
+                break;
+            }
+        }
+        /* 额外检查：禁止路径遍历注入字符 */
+        if (app_safe && !strstr(app_name, "..") && !strchr(app_name, ';') &&
             !strchr(app_name, '&') && !strchr(app_name, '|') &&
-            !strchr(app_name, '`') && !strchr(app_name, '$')) {
+            !strchr(app_name, '`') && !strchr(app_name, '$') &&
+            !strchr(app_name, '%') && !strchr(app_name, '^') &&
+            !strchr(app_name, '"') && !strchr(app_name, '\\')) {
             char cmd[512] = {0};
 #ifdef _WIN32
             snprintf(cmd, sizeof(cmd), "taskkill /IM \"%s\" /F 2>nul", app_name);
@@ -11536,12 +11659,27 @@ static int handle_api_post_computer_type(BackendServer* server,
         si++;
     }
     sanitized_text[di] = '\0';
+
+    /* K-198: 在cmd.exe中%有特殊含义，%%表示字面% */
+    char cmd_safe_text[4096] = {0};
+    size_t ci = 0, co = 0;
+    while (sanitized_text[ci] && co < sizeof(cmd_safe_text) - 2) {
+        if (sanitized_text[ci] == '%') {
+            cmd_safe_text[co++] = '%';
+            cmd_safe_text[co++] = '%';
+        } else {
+            cmd_safe_text[co++] = sanitized_text[ci];
+        }
+        ci++;
+    }
+    cmd_safe_text[co] = '\0';
+
 #ifdef _WIN32
     char cmd[8192] = {0};
     snprintf(cmd, sizeof(cmd),
             "powershell -Command \"Add-Type -AssemblyName System.Windows.Forms; "
             "[System.Windows.Forms.SendKeys]::SendWait('%s')\"",
-            sanitized_text);
+            cmd_safe_text);
     system(cmd);
 #endif
     json_data = (char*)safe_malloc(512);
@@ -11582,12 +11720,53 @@ static int handle_api_post_computer_screenshot(BackendServer* server,
             "screenshot_%ld.png",
             (long)time(NULL));
         HDC hdcScreen = GetDC(NULL);
+        if (!hdcScreen) {
+            response->data = string_duplicate("{\"success\":false,\"error\":\"无法获取屏幕DC\"}");
+            response->data_length = strlen(response->data);
+            response->status_code = 500;
+            return 0;
+        }
         HDC hdcMem = CreateCompatibleDC(hdcScreen);
+        if (!hdcMem) {
+            ReleaseDC(NULL, hdcScreen);
+            response->data = string_duplicate("{\"success\":false,\"error\":\"无法创建兼容DC\"}");
+            response->data_length = strlen(response->data);
+            response->status_code = 500;
+            return 0;
+        }
         int screenX = GetDeviceCaps(hdcScreen, HORZRES);
         int screenY = GetDeviceCaps(hdcScreen, VERTRES);
+        /* B-M04: 检查screenX/screenY合理性（1-16384），防止异常值 */
+        if (screenX < 1 || screenX > 16384 || screenY < 1 || screenY > 16384) {
+            DeleteDC(hdcMem);
+            ReleaseDC(NULL, hdcScreen);
+            response->data = string_duplicate("{\"success\":false,\"error\":\"屏幕分辨率异常\"}");
+            response->data_length = strlen(response->data);
+            response->status_code = 500;
+            return 0;
+        }
         HBITMAP hBitmap = CreateCompatibleBitmap(hdcScreen, screenX, screenY);
-        SelectObject(hdcMem, hBitmap);
-        BitBlt(hdcMem, 0, 0, screenX, screenY, hdcScreen, 0, 0, SRCCOPY);
+        if (!hBitmap) {
+            DeleteDC(hdcMem);
+            ReleaseDC(NULL, hdcScreen);
+            response->data = string_duplicate("{\"success\":false,\"error\":\"无法创建位图\"}");
+            response->data_length = strlen(response->data);
+            response->status_code = 500;
+            return 0;
+        }
+        /* B4-C01: 保存SelectObject返回的旧位图句柄，用于后续正确恢复GDI资源 */
+        HBITMAP hOldBitmap = (HBITMAP)SelectObject(hdcMem, hBitmap);
+        if (!BitBlt(hdcMem, 0, 0, screenX, screenY, hdcScreen, 0, 0, SRCCOPY)) {
+            /* B4-C01: 恢复旧位图后再删除hBitmap，防止GDI资源泄漏 */
+            SelectObject(hdcMem, hOldBitmap);
+            DeleteObject(hBitmap);
+            DeleteDC(hdcMem);
+            ReleaseDC(NULL, hdcScreen);
+            response->data = string_duplicate("{\"success\":false,\"error\":\"BitBlt操作失败\"}");
+            response->data_length = strlen(response->data);
+            response->status_code = 500;
+            return 0;
+        }
 
         BITMAPFILEHEADER bmf;
         BITMAPINFOHEADER bi;
@@ -11599,11 +11778,46 @@ static int handle_api_post_computer_screenshot(BackendServer* server,
         bi.biBitCount = 24;
         bi.biCompression = BI_RGB;
 
-        DWORD dwBmpSize = ((screenX * bi.biBitCount + 31) / 32) * 4 * screenY;
+        DWORD dwBmpSize = (DWORD)(((size_t)screenX * (size_t)bi.biBitCount + 31) / 32) * 4 * (size_t)screenY;
         HANDLE hDIB = GlobalAlloc(GHND, dwBmpSize);
+        if (!hDIB) {
+            /* B4-C01: 恢复旧位图后释放GDI资源 */
+            SelectObject(hdcMem, hOldBitmap);
+            DeleteObject(hBitmap);
+            DeleteDC(hdcMem);
+            ReleaseDC(NULL, hdcScreen);
+            response->data = string_duplicate("{\"success\":false,\"error\":\"GlobalAlloc失败\"}");
+            response->data_length = strlen(response->data);
+            response->status_code = 500;
+            return 0;
+        }
         char* lpbitmap = (char*)GlobalLock(hDIB);
+        if (!lpbitmap) {
+            GlobalFree(hDIB);
+            /* B4-C01: 恢复旧位图后释放GDI资源 */
+            SelectObject(hdcMem, hOldBitmap);
+            DeleteObject(hBitmap);
+            DeleteDC(hdcMem);
+            ReleaseDC(NULL, hdcScreen);
+            response->data = string_duplicate("{\"success\":false,\"error\":\"GlobalLock失败\"}");
+            response->data_length = strlen(response->data);
+            response->status_code = 500;
+            return 0;
+        }
 
-        GetDIBits(hdcScreen, hBitmap, 0, (UINT)screenY, lpbitmap, (BITMAPINFO*)&bi, DIB_RGB_COLORS);
+        if (!GetDIBits(hdcScreen, hBitmap, 0, (UINT)screenY, lpbitmap, (BITMAPINFO*)&bi, DIB_RGB_COLORS)) {
+            GlobalUnlock(hDIB);
+            GlobalFree(hDIB);
+            /* B4-C01: 恢复旧位图后释放GDI资源 */
+            SelectObject(hdcMem, hOldBitmap);
+            DeleteObject(hBitmap);
+            DeleteDC(hdcMem);
+            ReleaseDC(NULL, hdcScreen);
+            response->data = string_duplicate("{\"success\":false,\"error\":\"GetDIBits失败\"}");
+            response->data_length = strlen(response->data);
+            response->status_code = 500;
+            return 0;
+        }
 
         FILE* fp = fopen(screenshot_path, "wb");
         if (fp) {
@@ -11618,6 +11832,8 @@ static int handle_api_post_computer_screenshot(BackendServer* server,
 
         GlobalUnlock(hDIB);
         GlobalFree(hDIB);
+        /* B4-C01: 成功路径恢复旧位图后释放GDI资源 */
+        SelectObject(hdcMem, hOldBitmap);
         DeleteObject(hBitmap);
         DeleteDC(hdcMem);
         ReleaseDC(NULL, hdcScreen);
@@ -11645,6 +11861,8 @@ static int handle_api_post_computer_execute(BackendServer* server,
             ":{ :|:& };:", "chmod 777 /", "> /dev/sda",
             "shutdown", "reboot", "halt",
             "DEL /F /S /Q C:", "del /f /s /q C:",
+            "cmd ", "powershell", "pwsh", "COMSPEC",
+            "del ", "rmdir ", "format", "fdisk",
             NULL
         };
         char cmd_lower[4096];
@@ -11658,8 +11876,9 @@ static int handle_api_post_computer_execute(BackendServer* server,
                 break;
             }
         }
-        /* 校验：禁止包含shell元字符组合（管道、反引号、变量展开） */
-        if (strchr(exec_cmd, '`') || strstr(exec_cmd, "$(") || strstr(exec_cmd, "${")) {
+        /* 校验：禁止包含shell元字符组合（管道、反引号、变量展开）和环境变量展开 */
+        if (strchr(exec_cmd, '`') || strchr(exec_cmd, '%') ||
+            strstr(exec_cmd, "$(") || strstr(exec_cmd, "${")) {
             safe_cmd = 0;
         }
         if (safe_cmd) {
@@ -11670,10 +11889,35 @@ static int handle_api_post_computer_execute(BackendServer* server,
     }
     json_data = (char*)safe_malloc(1024);
     if (json_data) {
+        /* B-S04: 对exec_cmd进行JSON字符串转义 */
+        char json_escaped_cmd[8192] = {0};
+        size_t si = 0, di = 0;
+        while (exec_cmd[si] && di < sizeof(json_escaped_cmd) - 2) {
+            if (exec_cmd[si] == '"') {
+                json_escaped_cmd[di++] = '\\';
+                json_escaped_cmd[di++] = '"';
+            } else if (exec_cmd[si] == '\\') {
+                json_escaped_cmd[di++] = '\\';
+                json_escaped_cmd[di++] = '\\';
+            } else if (exec_cmd[si] == '\n') {
+                json_escaped_cmd[di++] = '\\';
+                json_escaped_cmd[di++] = 'n';
+            } else if (exec_cmd[si] == '\r') {
+                json_escaped_cmd[di++] = '\\';
+                json_escaped_cmd[di++] = 'r';
+            } else if (exec_cmd[si] == '\t') {
+                json_escaped_cmd[di++] = '\\';
+                json_escaped_cmd[di++] = 't';
+            } else {
+                json_escaped_cmd[di++] = exec_cmd[si];
+            }
+            si++;
+        }
+        json_escaped_cmd[di] = '\0';
         snprintf(json_data, 1024,
                 "{\"success\":%s,\"command\":\"%s\",\"exit_code\":%d}",
                 exec_result == 0 ? "true" : "false",
-                exec_cmd, exec_result);
+                json_escaped_cmd, exec_result);
         response->data = json_data;
         response->data_length = strlen(json_data);
         response->status_code = 200;
@@ -11741,7 +11985,7 @@ static int handle_api_post_robot_parameters(BackendServer* server,
     float linear_speed = 0.5f;
     char speed_str[32] = {0};
     parse_json_string(request_data, "linear_speed", speed_str, sizeof(speed_str));
-    if (strlen(speed_str) > 0) linear_speed = (float)atof(speed_str);
+    if (strlen(speed_str) > 0) { int _err = 0; linear_speed = json_get_float_safe(speed_str, 0.5f, &_err); }
     json_data = (char*)safe_malloc(512);
     if (json_data) {
         snprintf(json_data, 512,
@@ -11772,10 +12016,11 @@ static int handle_api_post_robot_coordinate(BackendServer* server,
     parse_json_string(request_data, "y", coord_y, sizeof(coord_y));
     parse_json_string(request_data, "z", coord_z, sizeof(coord_z));
     parse_json_string(request_data, "robot_id", robot_id_str, sizeof(robot_id_str));
-    if (strlen(robot_id_str) > 0) robot_id = atoi(robot_id_str);
-    float fx = strlen(coord_x) > 0 ? (float)atof(coord_x) : 0.0f;
-    float fy = strlen(coord_y) > 0 ? (float)atof(coord_y) : 0.0f;
-    float fz = strlen(coord_z) > 0 ? (float)atof(coord_z) : 0.0f;
+    if (strlen(robot_id_str) > 0) { int _err = 0; robot_id = json_get_int_safe(robot_id_str, 0, &_err); }
+    { int _err_x = 0, _err_y = 0, _err_z = 0;
+    float fx = strlen(coord_x) > 0 ? json_get_float_safe(coord_x, 0.0f, &_err_x) : 0.0f;
+    float fy = strlen(coord_y) > 0 ? json_get_float_safe(coord_y, 0.0f, &_err_y) : 0.0f;
+    float fz = strlen(coord_z) > 0 ? json_get_float_safe(coord_z, 0.0f, &_err_z) : 0.0f; }
 
     /* V-005修复: 通过ROS控制器发送真实坐标命令 */
     int send_ok = 0;
@@ -12087,6 +12332,24 @@ static int handle_api_post_files_delete(BackendServer* server,
     }
     char del_path[1024] = {0};
     parse_json_string(request_data, "path", del_path, sizeof(del_path));
+    /* 路径遍历防护：与写入处理器相同的安全检查逻辑 */
+    if (strlen(del_path) > 0) {
+        if (strstr(del_path, "..") != NULL ||
+            strncmp(del_path, "/etc", 4) == 0 ||
+            strncmp(del_path, "/proc", 5) == 0 ||
+            strncmp(del_path, "/sys", 4) == 0 ||
+            strncmp(del_path, "/dev", 4) == 0 ||
+            strncmp(del_path, "/boot", 5) == 0 ||
+            strncmp(del_path, "/root", 5) == 0 ||
+            strncmp(del_path, "C:\\Windows", 10) == 0 ||
+            strncmp(del_path, "C:\\Program", 10) == 0 ||
+            strncmp(del_path, "/Windows", 8) == 0) {
+            response->data = string_duplicate("{\"success\":false,\"error\":\"禁止删除系统路径\"}");
+            response->data_length = strlen(response->data);
+            response->status_code = 403;
+            return 0;
+        }
+    }
     int del_ok = 0;
     if (strlen(del_path) > 0) {
         del_ok = (remove(del_path) == 0) ? 1 : 0;
@@ -15410,11 +15673,11 @@ static int handle_api_post_training_start(BackendServer* server,
     if (request_data && request_length > 0) {
         parse_json_string(request_data, "mode", train_mode, sizeof(train_mode));
         const char* lr_ptr = strstr(request_data, "\"learning_rate\"");
-        if (lr_ptr) { lr_ptr = strchr(lr_ptr, ':'); if (lr_ptr) learning_rate = (float)atof(lr_ptr + 1); }
+        if (lr_ptr) { lr_ptr = strchr(lr_ptr, ':'); if (lr_ptr) { int _err = 0; learning_rate = json_get_float_safe(lr_ptr + 1, 0.001f, &_err); } }
         const char* bs_ptr = strstr(request_data, "\"batch_size\"");
-        if (bs_ptr) { bs_ptr = strchr(bs_ptr, ':'); if (bs_ptr) batch_size = atoi(bs_ptr + 1); }
+        if (bs_ptr) { bs_ptr = strchr(bs_ptr, ':'); if (bs_ptr) { int _err = 0; batch_size = json_get_int_safe(bs_ptr + 1, 32, &_err); } }
         const char* ep_ptr = strstr(request_data, "\"num_epochs\"");
-        if (ep_ptr) { ep_ptr = strchr(ep_ptr, ':'); if (ep_ptr) num_epochs = atoi(ep_ptr + 1); }
+        if (ep_ptr) { ep_ptr = strchr(ep_ptr, ':'); if (ep_ptr) { int _err = 0; num_epochs = json_get_int_safe(ep_ptr + 1, 10, &_err); } }
         parse_json_string(request_data, "dataset_path", dataset_path, sizeof(dataset_path));
     }
     if (!server->lnn_instance) {
@@ -17015,11 +17278,30 @@ static int handle_api_get_safety_bounds(BackendServer* server,
      * 否则作为GET读取请求返回当前边界配置 */
     int is_post_update = 0;
     if (request_data && request_length > 0) {
+        /* 使用parse_json_string逐个解析JSON字段，避免sscanf硬编码格式不匹配 */
+        char max_speed_str[64] = {0};
+        char max_accel_str[64] = {0};
+        char max_torque_str[64] = {0};
+        char safety_zone_str[64] = {0};
+        char collision_dist_str[64] = {0};
         float new_max_speed = 0.0f, new_max_accel = 0.0f, new_max_torque = 0.0f;
         float new_safety_zone = 0.0f, new_collision_dist = 0.0f;
-        int parsed = sscanf(request_data,
-            "{\"maxSpeed\":%f,\"maxAccel\":%f,\"maxTorque\":%f,\"safetyZoneRadius\":%f,\"collisionDistance\":%f}",
-            &new_max_speed, &new_max_accel, &new_max_torque, &new_safety_zone, &new_collision_dist);
+        int parsed = 0;
+        if (parse_json_string(request_data, "maxSpeed", max_speed_str, sizeof(max_speed_str)) == 0) {
+            new_max_speed = (float)atof(max_speed_str); parsed++;
+        }
+        if (parse_json_string(request_data, "maxAccel", max_accel_str, sizeof(max_accel_str)) == 0) {
+            new_max_accel = (float)atof(max_accel_str); parsed++;
+        }
+        if (parse_json_string(request_data, "maxTorque", max_torque_str, sizeof(max_torque_str)) == 0) {
+            new_max_torque = (float)atof(max_torque_str); parsed++;
+        }
+        if (parse_json_string(request_data, "safetyZoneRadius", safety_zone_str, sizeof(safety_zone_str)) == 0) {
+            new_safety_zone = (float)atof(safety_zone_str); parsed++;
+        }
+        if (parse_json_string(request_data, "collisionDistance", collision_dist_str, sizeof(collision_dist_str)) == 0) {
+            new_collision_dist = (float)atof(collision_dist_str); parsed++;
+        }
         if (parsed >= 1) {
             /* 有效的POST请求：解析JSON并更新安全边界 */
             is_post_update = 1;
@@ -20452,7 +20734,7 @@ static int handle_api_get_knowledge_stats_api(BackendServer* server,
     return 0;
 }
 
-static int handle_api_get_knowledge_export(BackendServer* server,
+static int handle_api_post_knowledge_export(BackendServer* server,
         ApiRequestType rt, const char* data, size_t len, ApiResponse* resp) {
     (void)rt; (void)len;
     if (!server->knowledge_base) {
@@ -22201,23 +22483,31 @@ static int handle_api_get_multi_system_topology(BackendServer* server,
     char* j = NULL;
     int node_count = 0;
     int robot_count = 0;
-    char nodes_json[4096] = "[";
+    char nodes_json[4096];
+    int nodes_json_offset = 0;
+    /* 使用snprintf动态构建JSON数组，避免strcat溢出 */
+    nodes_json_offset += snprintf(nodes_json + nodes_json_offset,
+        sizeof(nodes_json) - nodes_json_offset, "[");
     if (server->ros_controller) {
         robot_count = ros_robot_controller_get_robot_count(server->ros_controller);
         for (int i = 0; i < robot_count && i < 16; i++) {
             RosRobotInfo info;
             memset(&info, 0, sizeof(info));
             if (ros_robot_controller_get_robot_info(server->ros_controller, i, &info) == 0) {
-                if (i > 0) strcat(nodes_json, ",");
-                char node_entry[256];
-                snprintf(node_entry, sizeof(node_entry),
+                if (nodes_json_offset >= (int)sizeof(nodes_json) - 2) break;
+                if (i > 0) {
+                    nodes_json_offset += snprintf(nodes_json + nodes_json_offset,
+                        sizeof(nodes_json) - nodes_json_offset, ",");
+                }
+                nodes_json_offset += snprintf(nodes_json + nodes_json_offset,
+                    sizeof(nodes_json) - nodes_json_offset,
                     "{\"id\":%d,\"name\":\"robot_%d\",\"type\":\"robot\",\"state\":%d}", i, i, (int)info.connection_state);
-                strcat(nodes_json, node_entry);
                 node_count++;
             }
         }
     }
-    strcat(nodes_json, "]");
+    nodes_json_offset += snprintf(nodes_json + nodes_json_offset,
+        sizeof(nodes_json) - nodes_json_offset, "]");
     j = (char*)safe_malloc(6144);
     if (j) {
         snprintf(j, 6144,
@@ -25037,7 +25327,7 @@ static void init_handler_table(RequestHandler* table) {
     table[220] = handle_api_post_knowledge_add;
     table[221] = handle_api_get_knowledge_entry;
     table[222] = handle_api_get_knowledge_stats_api;
-    table[223] = handle_api_get_knowledge_export;
+    table[223] = handle_api_post_knowledge_export;
     table[224] = handle_api_post_knowledge_delete;
     table[225] = handle_api_post_knowledge_search;
     table[226] = handle_api_post_knowledge_import;
@@ -25554,25 +25844,42 @@ ApiResponse* backend_handle_request(BackendServer* server,
         if (request_type == API_POST_AGI_THINK || request_type == API_POST_AGI_DECIDE ||
             request_type == API_POST_AGI_PLAN || request_type == API_POST_AGI_MEMORY) {
             char missing_list[128] = {0};
+            int missing_list_offset = 0;
             int has_missing = 0;
             if (!server->reasoning_engine) {
-                if (has_missing) strcat(missing_list, ",");
-                strcat(missing_list, "reasoning_engine");
+                if (has_missing) {
+                    missing_list_offset += snprintf(missing_list + missing_list_offset,
+                        sizeof(missing_list) - missing_list_offset, ",");
+                }
+                missing_list_offset += snprintf(missing_list + missing_list_offset,
+                    sizeof(missing_list) - missing_list_offset, "reasoning_engine");
                 has_missing = 1;
             }
             if (!server->memory_manager) {
-                if (has_missing) strcat(missing_list, ",");
-                strcat(missing_list, "memory_manager");
+                if (has_missing) {
+                    missing_list_offset += snprintf(missing_list + missing_list_offset,
+                        sizeof(missing_list) - missing_list_offset, ",");
+                }
+                missing_list_offset += snprintf(missing_list + missing_list_offset,
+                    sizeof(missing_list) - missing_list_offset, "memory_manager");
                 has_missing = 1;
             }
             if (!server->knowledge_base) {
-                if (has_missing) strcat(missing_list, ",");
-                strcat(missing_list, "knowledge_base");
+                if (has_missing) {
+                    missing_list_offset += snprintf(missing_list + missing_list_offset,
+                        sizeof(missing_list) - missing_list_offset, ",");
+                }
+                missing_list_offset += snprintf(missing_list + missing_list_offset,
+                    sizeof(missing_list) - missing_list_offset, "knowledge_base");
                 has_missing = 1;
             }
             if (!server->unified_signal_processor) {
-                if (has_missing) strcat(missing_list, ",");
-                strcat(missing_list, "unified_signal_processor");
+                if (has_missing) {
+                    missing_list_offset += snprintf(missing_list + missing_list_offset,
+                        sizeof(missing_list) - missing_list_offset, ",");
+                }
+                missing_list_offset += snprintf(missing_list + missing_list_offset,
+                    sizeof(missing_list) - missing_list_offset, "unified_signal_processor");
                 has_missing = 1;
             }
             if (has_missing) {

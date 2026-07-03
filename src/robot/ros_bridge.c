@@ -163,7 +163,7 @@ int ros2_bridge_is_available(void) {
 RosBridge* ros_bridge_create(const RosBridgeConfig* config) {
     if (!config) return NULL;
     
-    RosBridge* bridge = (RosBridge*)calloc(1, sizeof(RosBridge));
+    RosBridge* bridge = (RosBridge*)safe_calloc(1, sizeof(RosBridge));
     if (!bridge) return NULL;
     
     memcpy(&bridge->config, config, sizeof(RosBridgeConfig));
@@ -190,7 +190,7 @@ RosBridge* ros_bridge_create(const RosBridgeConfig* config) {
     bridge->socket_fd = (int)socket(AF_INET, SOCK_STREAM, 0);
     if (bridge->socket_fd < 0) {
         log_error("ROS桥接: 无法创建socket\n");
-        free(bridge);
+        safe_free((void**)&bridge);
         return NULL;
     }
     
@@ -214,7 +214,7 @@ RosBridge* ros_bridge_create(const RosBridgeConfig* config) {
 #else
         close(bridge->socket_fd);
 #endif
-        free(bridge);
+        safe_free((void**)&bridge);
         return NULL;
     }
     
@@ -261,7 +261,7 @@ RosBridge* ros_bridge_create(const RosBridgeConfig* config) {
 #else
         close(bridge->socket_fd);
 #endif
-        free(bridge);
+        safe_free((void**)&bridge);
         return NULL;
     }
     
@@ -280,7 +280,7 @@ void ros_bridge_free(RosBridge* bridge) {
 #endif
     }
     
-    free(bridge);
+    safe_free((void**)&bridge);
 }
 
 RosConnectionState ros_bridge_get_state(RosBridge* bridge) {

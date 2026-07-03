@@ -1,6 +1,7 @@
 #include "selflnn/core/cma_es.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/logging.h"
+#include "selflnn/utils/memory_utils.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -42,7 +43,7 @@ static void cmaes_jacobi_eigen(float* C, size_t n, float* diag, float* Q) {
     for (size_t i = 0; i < n; i++) Q[i * n + i] = 1.0f;
     memcpy(diag, C, n * sizeof(float));
 
-    float* offdiag = (float*)malloc(n * sizeof(float));
+    float* offdiag = (float*)safe_malloc(n * sizeof(float));
     if (!offdiag) return;
     for (size_t i = 1; i < n; i++) offdiag[i] = C[i * n + (i - 1)];
 
@@ -92,7 +93,7 @@ static void cmaes_jacobi_eigen(float* C, size_t n, float* diag, float* Q) {
             Q[i * n + q] = s * qip + c * qiq;
         }
     }
-    free(offdiag);
+    safe_free((void**)&offdiag);
 
     for (size_t i = 0; i < n; i++) {
         if (diag[i] < 0) diag[i] = 0;
@@ -105,12 +106,12 @@ static void cmaes_jacobi_eigen(float* C, size_t n, float* diag, float* Q) {
  * inv_sqrt(C) = Q * inv_sqrt(D) * Q^T
  * 原代码错误: sqrt_d_i被用于所有k而非sqrt_d_k，且Q^T用Q[k][i]替代Q[i][k] */
 static void cmaes_sym_matrix_sqrt(const float* C, size_t n, float* sqrt_C, float* inv_sqrt_C) {
-    float* work = (float*)malloc(n * n * sizeof(float));
-    float* diag = (float*)malloc(n * sizeof(float));
-    float* Q = (float*)malloc(n * n * sizeof(float));
-    float* temp_inv = (float*)malloc(n * n * sizeof(float));
+    float* work = (float*)safe_malloc(n * n * sizeof(float));
+    float* diag = (float*)safe_malloc(n * sizeof(float));
+    float* Q = (float*)safe_malloc(n * n * sizeof(float));
+    float* temp_inv = (float*)safe_malloc(n * n * sizeof(float));
     if (!work || !diag || !Q || !temp_inv) {
-        free(work); free(diag); free(Q); free(temp_inv);
+        safe_free((void**)&work); safe_free((void**)&diag); safe_free((void**)&Q); safe_free((void**)&temp_inv);
         return;
     }
     memcpy(work, C, n * n * sizeof(float));
@@ -139,15 +140,15 @@ static void cmaes_sym_matrix_sqrt(const float* C, size_t n, float* sqrt_C, float
         }
     }
 
-    free(work); free(diag); free(Q); free(temp_inv);
+    safe_free((void**)&work); safe_free((void**)&diag); safe_free((void**)&Q); safe_free((void**)&temp_inv);
 }
 
 CMAESState* cmaes_alloc(size_t dimension, float sigma, int lambda, int seed) {
     if (dimension == 0 || dimension > CMAES_MAX_DIM) return NULL;
-    CMAESState* state = (CMAESState*)calloc(1, sizeof(CMAESState));
+    CMAESState* state = (CMAESState*)safe_calloc(1, sizeof(CMAESState));
     if (!state) return NULL;
     if (cmaes_init(state, dimension, sigma, lambda, seed) != 0) {
-        free(state);
+        safe_free((void**)&state);
         return NULL;
     }
     return state;
@@ -155,24 +156,24 @@ CMAESState* cmaes_alloc(size_t dimension, float sigma, int lambda, int seed) {
 
 void cmaes_free(CMAESState* state) {
     if (!state) return;
-    free(state->mean);
-    free(state->covariance);
-    free(state->evolution_path_sigma);
-    free(state->evolution_path_cov);
-    free(state->temp_vec);
-    free(state->temp_vec2);
-    free(state->weights);
-    free(state->sample_pop);
-    free(state->fitness);
-    free(state->index_order);
-    free(state->eigen_values);
-    free(state->eigen_vectors);
-    free(state->inv_sqrt_cov);
-    free(state->best_solution);
-    free(state->lower_bounds);
-    free(state->upper_bounds);
+    safe_free((void**)&state->mean);
+    safe_free((void**)&state->covariance);
+    safe_free((void**)&state->evolution_path_sigma);
+    safe_free((void**)&state->evolution_path_cov);
+    safe_free((void**)&state->temp_vec);
+    safe_free((void**)&state->temp_vec2);
+    safe_free((void**)&state->weights);
+    safe_free((void**)&state->sample_pop);
+    safe_free((void**)&state->fitness);
+    safe_free((void**)&state->index_order);
+    safe_free((void**)&state->eigen_values);
+    safe_free((void**)&state->eigen_vectors);
+    safe_free((void**)&state->inv_sqrt_cov);
+    safe_free((void**)&state->best_solution);
+    safe_free((void**)&state->lower_bounds);
+    safe_free((void**)&state->upper_bounds);
     memset(state, 0, sizeof(CMAESState));
-    free(state);
+    safe_free((void**)&state);
 }
 
 int cmaes_init(CMAESState* state, size_t dimension, float sigma, int lambda, int seed) {
@@ -217,20 +218,20 @@ int cmaes_init(CMAESState* state, size_t dimension, float sigma, int lambda, int
     state->termination_reason = CMAES_TERM_NONE;
     state->use_boundary = 0;
 
-    state->mean = (float*)calloc(dimension, sizeof(float));
-    state->covariance = (float*)calloc(dimension * dimension, sizeof(float));
-    state->evolution_path_sigma = (float*)calloc(dimension, sizeof(float));
-    state->evolution_path_cov = (float*)calloc(dimension, sizeof(float));
-    state->temp_vec = (float*)calloc(dimension, sizeof(float));
-    state->temp_vec2 = (float*)calloc(dimension, sizeof(float));
-    state->weights = (float*)calloc(state->mu, sizeof(float));
-    state->sample_pop = (float*)calloc((size_t)state->lambda * dimension, sizeof(float));
-    state->fitness = (float*)calloc((size_t)state->lambda, sizeof(float));
-    state->index_order = (int*)calloc((size_t)state->lambda, sizeof(int));
-    state->eigen_values = (float*)calloc(dimension, sizeof(float));
-    state->eigen_vectors = (float*)calloc(dimension * dimension, sizeof(float));
-    state->inv_sqrt_cov = (float*)calloc(dimension * dimension, sizeof(float));
-    state->best_solution = (float*)calloc(dimension, sizeof(float));
+    state->mean = (float*)safe_calloc(dimension, sizeof(float));
+    state->covariance = (float*)safe_calloc(dimension * dimension, sizeof(float));
+    state->evolution_path_sigma = (float*)safe_calloc(dimension, sizeof(float));
+    state->evolution_path_cov = (float*)safe_calloc(dimension, sizeof(float));
+    state->temp_vec = (float*)safe_calloc(dimension, sizeof(float));
+    state->temp_vec2 = (float*)safe_calloc(dimension, sizeof(float));
+    state->weights = (float*)safe_calloc(state->mu, sizeof(float));
+    state->sample_pop = (float*)safe_calloc((size_t)state->lambda * dimension, sizeof(float));
+    state->fitness = (float*)safe_calloc((size_t)state->lambda, sizeof(float));
+    state->index_order = (int*)safe_calloc((size_t)state->lambda, sizeof(int));
+    state->eigen_values = (float*)safe_calloc(dimension, sizeof(float));
+    state->eigen_vectors = (float*)safe_calloc(dimension * dimension, sizeof(float));
+    state->inv_sqrt_cov = (float*)safe_calloc(dimension * dimension, sizeof(float));
+    state->best_solution = (float*)safe_calloc(dimension, sizeof(float));
 
     if (!state->mean || !state->covariance || !state->evolution_path_sigma ||
         !state->evolution_path_cov || !state->temp_vec || !state->temp_vec2 ||
@@ -286,10 +287,10 @@ int cmaes_init(CMAESState* state, size_t dimension, float sigma, int lambda, int
 void cmaes_set_bounds(CMAESState* state, const float* lower, const float* upper) {
     if (!state || !lower || !upper) return;
     if (!state->lower_bounds) {
-        state->lower_bounds = (float*)calloc(state->dimension, sizeof(float));
+        state->lower_bounds = (float*)safe_calloc(state->dimension, sizeof(float));
     }
     if (!state->upper_bounds) {
-        state->upper_bounds = (float*)calloc(state->dimension, sizeof(float));
+        state->upper_bounds = (float*)safe_calloc(state->dimension, sizeof(float));
     }
     if (state->lower_bounds && state->upper_bounds) {
         memcpy(state->lower_bounds, lower, state->dimension * sizeof(float));
@@ -646,7 +647,7 @@ int cmaes_ipop_optimize(CMAESState* state, CMAESFitnessFunction func, void* user
     if (max_restarts > CMAES_IPOP_MAX_RESTARTS) max_restarts = CMAES_IPOP_MAX_RESTARTS;
 
     float global_best_fitness = FLT_MAX;
-    float* global_best_solution = (float*)malloc(state->dimension * sizeof(float));
+    float* global_best_solution = (float*)safe_malloc(state->dimension * sizeof(float));
     if (!global_best_solution) return -1;
 
     int old_lambda = state->lambda;
@@ -664,7 +665,7 @@ int cmaes_ipop_optimize(CMAESState* state, CMAESFitnessFunction func, void* user
             if (new_lambda <= state->lambda) new_lambda = state->lambda + CMAES_MIN_POP;
 
             /* 保存当前最优均值作为重启种子 */
-            float* old_mean = (float*)malloc(saved_dim * sizeof(float));
+            float* old_mean = (float*)safe_malloc(saved_dim * sizeof(float));
             if (old_mean) {
                 memcpy(old_mean, state->mean, saved_dim * sizeof(float));
             }
@@ -678,8 +679,8 @@ int cmaes_ipop_optimize(CMAESState* state, CMAESFitnessFunction func, void* user
 
             /* S-002: 使用保存的dimension初始化新状态 */
             if (cmaes_init(state, saved_dim, saved_sigma_restart, new_lambda, seed) != 0) {
-                free(global_best_solution);
-                if (old_mean) free(old_mean);
+                safe_free((void**)&global_best_solution);
+                if (old_mean) safe_free((void**)&old_mean);
                 return -1;
             }
 
@@ -689,7 +690,7 @@ int cmaes_ipop_optimize(CMAESState* state, CMAESFitnessFunction func, void* user
             /* 从旧最优均值继续搜索 */
             if (old_mean) {
                 memcpy(state->mean, old_mean, saved_dim * sizeof(float));
-                free(old_mean);
+                safe_free((void**)&old_mean);
             }
         }
 
@@ -722,7 +723,7 @@ int cmaes_ipop_optimize(CMAESState* state, CMAESFitnessFunction func, void* user
 
     state->best_fitness = global_best_fitness;
     memcpy(state->best_solution, global_best_solution, saved_dim * sizeof(float));
-    free(global_best_solution);
+    safe_free((void**)&global_best_solution);
 
     return 0;
 }
@@ -746,7 +747,7 @@ int cmaes_bipop_optimize(CMAESState* state, CMAESFitnessFunction func, void* use
     if (max_restarts > CMAES_BIPOP_MAX_RESTARTS) max_restarts = CMAES_BIPOP_MAX_RESTARTS;
 
     float global_best_fitness = FLT_MAX;
-    float* global_best_solution = (float*)malloc(state->dimension * sizeof(float));
+    float* global_best_solution = (float*)safe_malloc(state->dimension * sizeof(float));
     if (!global_best_solution) return -1;
 
     int base_lambda = CMAES_BIPOP_LAMBDA_DEFAULT;
@@ -776,7 +777,7 @@ int cmaes_bipop_optimize(CMAESState* state, CMAESFitnessFunction func, void* use
             if (new_lambda == state->lambda) new_lambda = state->lambda + 1;
 
             /* 保存当前最优均值作为重启种子 */
-            float* old_mean = (float*)malloc(saved_dim * sizeof(float));
+            float* old_mean = (float*)safe_malloc(saved_dim * sizeof(float));
             if (old_mean) {
                 memcpy(old_mean, state->mean, saved_dim * sizeof(float));
             }
@@ -790,8 +791,8 @@ int cmaes_bipop_optimize(CMAESState* state, CMAESFitnessFunction func, void* use
 
             /* S-002: 使用保存的dimension初始化新状态 */
             if (cmaes_init(state, saved_dim, saved_sigma, new_lambda, seed) != 0) {
-                free(global_best_solution);
-                if (old_mean) free(old_mean);
+                safe_free((void**)&global_best_solution);
+                if (old_mean) safe_free((void**)&old_mean);
                 return -1;
             }
 
@@ -801,7 +802,7 @@ int cmaes_bipop_optimize(CMAESState* state, CMAESFitnessFunction func, void* use
             /* 从旧最优均值继续搜索 */
             if (old_mean) {
                 memcpy(state->mean, old_mean, saved_dim * sizeof(float));
-                free(old_mean);
+                safe_free((void**)&old_mean);
             }
         }
 
@@ -832,6 +833,6 @@ int cmaes_bipop_optimize(CMAESState* state, CMAESFitnessFunction func, void* use
 
     state->best_fitness = global_best_fitness;
     memcpy(state->best_solution, global_best_solution, saved_dim * sizeof(float));
-    free(global_best_solution);
+    safe_free((void**)&global_best_solution);
     return 0;
 }

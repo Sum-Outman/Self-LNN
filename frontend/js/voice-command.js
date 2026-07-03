@@ -64,7 +64,7 @@ var VOICE_FEATURE_MAP = {
     '重新启动': 'restart'
 };
 /* M024: 映射表自检——启动时验证映射表完整性 */
-voiceCommandCheckFeatureMap = function() {
+var voiceCommandCheckFeatureMap = function() {
     var expected = ['self_learning','self_decision','self_execution','imitation_learning',
                     'self_correction','reflection','planning','self_evolution',
                     /* P2-003修复: 验证扩展后的映射表 */
@@ -352,6 +352,8 @@ class CommandEngine {
         this.maxHistorySize = 100;
         this.safetyEnabled = true;
         this.allowedCommands = ['robot', 'computer', 'device', 'system', 'camera', 'microphone', 'speaker'];
+        /* BUG-18修复：初始化_pendingConfirm，防止高危操作确认时访问未定义属性 */
+        this._pendingConfirm = null;
     }
 
     _initCommands() {
@@ -617,42 +619,42 @@ class CommandEngine {
     async _callSystemApi(action, params) {
         if (!window.SelfLnnApi) return { success: false, error: '系统API服务未加载' };
         const apiMap = {
-            'launch_app': async () => window.SelfLnnApi.systemCommand ? await window.SelfLnnApi.systemCommand('launch_app', {name:params.name}) : null,
-            'close_app': async () => window.SelfLnnApi.systemCommand ? await window.SelfLnnApi.systemCommand('close_app', {name:params.name}) : null,
-            'type_text': async () => window.SelfLnnApi.systemCommand ? await window.SelfLnnApi.systemCommand('type_text', {text:params.text}) : null,
-            'screenshot': async () => window.SelfLnnApi.sendCommand ? await window.SelfLnnApi.sendCommand('system','screenshot',{}) : null,
-            'restart': async () => window.SelfLnnApi.sendCommand ? await window.SelfLnnApi.sendCommand('system','restart',{}) : null,
-            'shutdown': async () => window.SelfLnnApi.sendCommand ? await window.SelfLnnApi.sendCommand('system','shutdown',{}) : null,
-            'sleep': async () => window.SelfLnnApi.sendCommand ? await window.SelfLnnApi.sendCommand('system','sleep',{}) : null,
-            'lock': async () => window.SelfLnnApi.sendCommand ? await window.SelfLnnApi.sendCommand('system','lock',{}) : null,
-            'volume_up': async () => window.SelfLnnApi.sendCommand ? await window.SelfLnnApi.sendCommand('system','volume_up',{value:params.value}) : null,
-            'volume_down': async () => window.SelfLnnApi.sendCommand ? await window.SelfLnnApi.sendCommand('system','volume_down',{value:params.value}) : null,
-            'mute_toggle': async () => window.SelfLnnApi.sendCommand ? await window.SelfLnnApi.sendCommand('system','mute_toggle',{}) : null,
-            'start_training': async () => window.SelfLnnApi.startTraining ? await window.SelfLnnApi.startTraining(params) : null,
+            'launch_app': async () => window.SelfLnnApi.systemCommand ? await window.SelfLnnApi.systemCommand('launch_app', {name:params.name}) : { success: false, error: 'API不可用' },
+            'close_app': async () => window.SelfLnnApi.systemCommand ? await window.SelfLnnApi.systemCommand('close_app', {name:params.name}) : { success: false, error: 'API不可用' },
+            'type_text': async () => window.SelfLnnApi.systemCommand ? await window.SelfLnnApi.systemCommand('type_text', {text:params.text}) : { success: false, error: 'API不可用' },
+            'screenshot': async () => window.SelfLnnApi.sendCommand ? await window.SelfLnnApi.sendCommand('system','screenshot',{}) : { success: false, error: 'API不可用' },
+            'restart': async () => window.SelfLnnApi.sendCommand ? await window.SelfLnnApi.sendCommand('system','restart',{}) : { success: false, error: 'API不可用' },
+            'shutdown': async () => window.SelfLnnApi.sendCommand ? await window.SelfLnnApi.sendCommand('system','shutdown',{}) : { success: false, error: 'API不可用' },
+            'sleep': async () => window.SelfLnnApi.sendCommand ? await window.SelfLnnApi.sendCommand('system','sleep',{}) : { success: false, error: 'API不可用' },
+            'lock': async () => window.SelfLnnApi.sendCommand ? await window.SelfLnnApi.sendCommand('system','lock',{}) : { success: false, error: 'API不可用' },
+            'volume_up': async () => window.SelfLnnApi.sendCommand ? await window.SelfLnnApi.sendCommand('system','volume_up',{value:params.value}) : { success: false, error: 'API不可用' },
+            'volume_down': async () => window.SelfLnnApi.sendCommand ? await window.SelfLnnApi.sendCommand('system','volume_down',{value:params.value}) : { success: false, error: 'API不可用' },
+            'mute_toggle': async () => window.SelfLnnApi.sendCommand ? await window.SelfLnnApi.sendCommand('system','mute_toggle',{}) : { success: false, error: 'API不可用' },
+            'start_training': async () => window.SelfLnnApi.startTraining ? await window.SelfLnnApi.startTraining(params) : { success: false, error: 'API不可用' },
             /* ZSF-088修复：统一API命名，stopTraining替代stopTrainingJob */
             'stop_training': async () => {
                 if (window.SelfLnnApi.stopTraining) return await window.SelfLnnApi.stopTraining();
                 if (window.SelfLnnApi.stopTrainingJob) return await window.SelfLnnApi.stopTrainingJob();
-                return null;
+                return { success: false, error: 'API不可用' };
             },
-            'pause_training': async () => window.SelfLnnApi.pauseTraining ? await window.SelfLnnApi.pauseTraining() : null,
+            'pause_training': async () => window.SelfLnnApi.pauseTraining ? await window.SelfLnnApi.pauseTraining() : { success: false, error: 'API不可用' },
             'start_evolution': async () => {
                 if (window.SelfLnnApi && typeof window.SelfLnnApi.toggleAgiFeature === 'function') {
                     return await window.SelfLnnApi.toggleAgiFeature('self_evolution', true);
                 }
-                return null;
+                return { success: false, error: 'API不可用' };
             },
             'stop_evolution': async () => {
                 if (window.SelfLnnApi && typeof window.SelfLnnApi.toggleAgiFeature === 'function') {
                     return await window.SelfLnnApi.toggleAgiFeature('self_evolution', false);
                 }
-                return null;
+                return { success: false, error: 'API不可用' };
             },
             'save_model': async () => {
                 if (window.SelfLnnApi && typeof window.SelfLnnApi.saveModelConfig === 'function') {
                     return await window.SelfLnnApi.saveModelConfig({ action: 'voice_command_save' });
                 }
-                return null;
+                return { success: false, error: 'API不可用' };
             },
             'load_model': async () => {
                 if (window.SelfLnnApi && typeof window.SelfLnnApi.loadModel === 'function') {
@@ -662,20 +664,20 @@ class CommandEngine {
                     }
                     return await window.SelfLnnApi.loadModel(loadParams.modelId || loadParams.model_id);
                 }
-                return null;
+                return { success: false, error: 'API不可用' };
             },
-            'get_status': async () => window.SelfLnnApi.getSystemStatus ? await window.SelfLnnApi.getSystemStatus() : null,
+            'get_status': async () => window.SelfLnnApi.getSystemStatus ? await window.SelfLnnApi.getSystemStatus() : { success: false, error: 'API不可用' },
             'enable_feature': async () => {
                 if (window.SelfLnnApi && typeof window.SelfLnnApi.toggleAgiFeature === 'function') {
                     return await window.SelfLnnApi.toggleAgiFeature(params.feature, true);
                 }
-                return null;
+                return { success: false, error: 'API不可用' };
             },
             'disable_feature': async () => {
                 if (window.SelfLnnApi && typeof window.SelfLnnApi.toggleAgiFeature === 'function') {
                     return await window.SelfLnnApi.toggleAgiFeature(params.feature, false);
                 }
-                return null;
+                return { success: false, error: 'API不可用' };
             }
         };
         const handler = apiMap[action];

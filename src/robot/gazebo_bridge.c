@@ -49,17 +49,32 @@ int gazebo_is_available(void) {
      */
     return 0;
 #else
-    int result = system("which gz >/dev/null 2>&1");
-    if (result == 0) return 1;
-    result = system("which gzserver >/dev/null 2>&1");
-    return (result == 0) ? 1 : 0;
+    /* B-L03: 使用access()替代system()进行可用性检测，避免shell注入 */
+    static int gazebo_cached_available = -1;
+    if (gazebo_cached_available >= 0) return gazebo_cached_available;
+    
+    /* 检查常见Gazebo安装路径 */
+    if (access("/usr/bin/gz", X_OK) == 0) {
+        gazebo_cached_available = 1;
+        return 1;
+    }
+    if (access("/usr/bin/gzserver", X_OK) == 0) {
+        gazebo_cached_available = 1;
+        return 1;
+    }
+    if (access("/usr/local/bin/gz", X_OK) == 0) {
+        gazebo_cached_available = 1;
+        return 1;
+    }
+    gazebo_cached_available = 0;
+    return 0;
 #endif
 }
 
 GazeboBridge* gazebo_connect(const GazeboConfig* config) {
     if (!config) return NULL;
     
-    GazeboBridge* bridge = (GazeboBridge*)calloc(1, sizeof(GazeboBridge));
+    GazeboBridge* bridge = (GazeboBridge*)safe_calloc(1, sizeof(GazeboBridge));
     if (!bridge) return NULL;
     
     memcpy(&bridge->config, config, sizeof(GazeboConfig));
@@ -177,7 +192,7 @@ void gazebo_disconnect(GazeboBridge* bridge) {
 #endif
     }
     bridge->state = GAZEBO_DISCONNECTED;
-    free(bridge);
+    safe_free((void**)&bridge);
 }
 
 GazeboConnectionState gazebo_get_state(GazeboBridge* bridge) {

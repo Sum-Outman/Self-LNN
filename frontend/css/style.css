@@ -6,6 +6,20 @@
  * L400 = 模态/对话框, L500 = 通知/Toast, L600 = 全屏加载/确认
  */
 :root {
+    /* L-11修复: 添加默认主题CSS变量，确保在body等元素引用前已定义 */
+    --theme-bg-primary: #000000;
+    --theme-bg-secondary: #111111;
+    --theme-bg-card: rgba(255, 255, 255, 0.05);
+    --theme-bg-card-hover: rgba(255, 255, 255, 0.08);
+    --theme-text-primary: #e0e0e0;
+    --theme-text-secondary: #a0a0a0;
+    --theme-accent: #00d4ff;
+    --theme-accent-secondary: #ff6b9d;
+    --theme-danger: #ff4444;
+    --theme-success: #22c55e;
+    --theme-warning: #eab308;
+    --theme-info: #3b82f6;
+    /* z-index层级 */
     --z-content: 100;
     --z-dropdown: 200;
     --z-fixed-header: 300;
@@ -15,6 +29,13 @@
     --z-notification: 500;
     --z-fullscreen: 600;
     --z-max: 999;
+    /* F-L02修复：高层级z-index变量，避免硬编码冲突 */
+    --z-notify: 10000;
+    --z-modal-overlay: 9999;
+    --z-tooltip: 10001;
+    --z-loading: 10001;
+    --z-confirm: 100000;
+    --z-toast-high: 100001;
 }
 * {
     margin: 0;
@@ -45,7 +66,7 @@ body {
     left: 0;
     right: 0;
     height: 36px;
-    z-index: 9999;
+    z-index: var(--z-fullscreen);
     display: none;
     align-items: center;
     justify-content: center;
@@ -111,7 +132,7 @@ body {
     border-bottom: 1px solid var(--theme-border);
     position: sticky;
     top: 0;
-    z-index: 1000;
+    z-index: var(--z-fixed-header);
     gap: 1rem;
 }
 
@@ -196,7 +217,7 @@ body {
     border: 1px solid rgba(0, 255, 136, 0.15);
     border-radius: 8px;
     padding: 6px 0;
-    z-index: 2000;
+    z-index: var(--z-dropdown);
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(0, 255, 136, 0.05) inset;
     animation: dropdownIn 0.2s ease;
 }
@@ -259,10 +280,13 @@ body {
 
 .section {
     display: none;
+    /* L-13修复: 添加contain属性优化渲染性能，限制重排/重绘范围 */
+    contain: content;
 }
 
 .section.active {
     display: block;
+    contain: content;
     animation: fadeIn 0.5s ease;
 }
 
@@ -1202,7 +1226,7 @@ body {
 .enh-api-console {
     position: fixed;
     inset: 0;
-    z-index: 5000;
+    z-index: var(--z-modal);
     display: none;
     background: rgba(0, 0, 0, 0.8);
 }
@@ -1569,6 +1593,15 @@ body {
     .detail-grid {
         grid-template-columns: 1fr;
     }
+    .metrics-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+
+@media (max-width: 576px) {
+    .metrics-grid {
+        grid-template-columns: 1fr;
+    }
 }
 
 .detail-item {
@@ -1595,18 +1628,6 @@ body {
     gap: 1.5rem;
     justify-items: center;
     margin-bottom: 2rem;
-}
-
-@media (max-width: 768px) {
-    .metrics-grid {
-        grid-template-columns: repeat(2, 1fr);
-    }
-}
-
-@media (max-width: 576px) {
-    .metrics-grid {
-        grid-template-columns: 1fr;
-    }
 }
 
 .metric-circle {
@@ -3429,12 +3450,12 @@ body {
     border-radius: 8px;
 }
 
-/* Toast通知 */
+/* Toast通知 - F-S04修复：z-index提升至100001，避免被selflnn-notify遮挡 */
 .toast-container {
     position: fixed;
     top: 20px;
     right: 20px;
-    z-index: 10001;
+    z-index: var(--z-toast-high);
     display: flex;
     flex-direction: column;
     gap: 10px;
@@ -3575,7 +3596,7 @@ body {
     display: flex;
     justify-content: center;
     align-items: center;
-    z-index: 10001;
+    z-index: var(--z-loading);
     color: white;
     font-size: 18px;
 }
@@ -5433,12 +5454,11 @@ body {
     left: 0;
     right: 0;
     bottom: 0;
-    z-index: 10002;
+    z-index: var(--z-modal-overlay);
     display: flex;
     align-items: center;
     justify-content: center;
 }
-
 .device-selector-overlay {
     position: absolute;
     top: 0;
@@ -5723,7 +5743,7 @@ body {
     padding: 0.6rem 1rem;
     border-radius: 8px;
     font-size: 0.85rem;
-    z-index: 10000;
+    z-index: var(--z-notify);
     animation: slideIn 0.3s ease;
     max-width: 400px;
     backdrop-filter: blur(8px);
@@ -7308,18 +7328,6 @@ body {
 .legend-dot.correction-after { background: #4a9eff; }
 .legend-dot.correction-improvement { background: #00ff88; }
 
-@media (max-width: 768px) {
-    .tom-agent-container {
-        grid-template-columns: 1fr 1fr;
-    }
-}
-
-@media (max-width: 480px) {
-    .tom-agent-container {
-        grid-template-columns: 1fr;
-    }
-}
-
 /* ================================================================
  * 全局加载动画 (P3-05修复: 页面初始化和API请求时的视觉反馈)
  * ================================================================ */
@@ -7333,7 +7341,7 @@ body {
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    z-index: 100000;
+    z-index: var(--z-confirm);
     animation: overlayFadeIn 0.3s ease;
 }
 
@@ -7424,7 +7432,7 @@ body {
         display: flex;
         position: fixed;
         top: 10px; right: 10px;
-        z-index: 1000;
+        z-index: var(--z-loading);
         width: 40px; height: 40px;
         background: rgba(0,200,255,0.15);
         border: 1px solid rgba(0,200,255,0.3);
@@ -7447,7 +7455,7 @@ body {
         position: fixed;
         top: 56px; left: 0; right: 0; bottom: 0;
         background: rgba(0,0,0,0.95);
-        z-index: 999;
+        z-index: var(--z-modal-overlay);
         overflow-y: auto;
         padding: 1rem;
     }
@@ -7520,12 +7528,13 @@ body {
     position: fixed;
     top: 20px;
     right: 20px;
-    z-index: 99999;
+    z-index: var(--z-notify);
     display: flex;
     flex-direction: column;
     gap: 10px;
     max-width: 420px;
 }
+
 .selflnn-notify {
     background: rgba(10, 10, 20, 0.96);
     border: 1px solid rgba(100, 180, 255, 0.3);
@@ -7563,11 +7572,12 @@ body {
     position: fixed;
     top: 0; left: 0; right: 0; bottom: 0;
     background: rgba(0,0,0,0.65);
-    z-index: 100000;
+    z-index: var(--z-confirm);
     display: flex;
     align-items: center;
     justify-content: center;
 }
+
 .selflnn-confirm-box {
     background: rgba(15, 15, 30, 0.98);
     border: 1px solid rgba(100, 180, 255, 0.25);
@@ -7889,6 +7899,37 @@ body {
 .tab-btn.active{background:rgba(0,200,255,.1);color:#00c8ff;border-color:rgba(0,200,255,.3)}
 .tab-content{display:none;border:1px solid rgba(255,255,255,.08);border-radius:0 6px 6px 6px;padding:16px}
 .tab-content.active{display:block}
-.node-tooltip{position:absolute;background:rgba(0,20,40,.95);border:1px solid rgba(0,200,255,.4);border-radius:6px;padding:8px 12px;font-size:.75rem;color:#ccc;pointer-events:none;z-index:9999}
-.graph-info{position:absolute;bottom:12px;left:12px;background:rgba(0,20,40,.9);border:1px solid rgba(255,255,255,.1);border-radius:6px;padding:8px 14px;font-size:.75rem;color:#888;z-index:100}
+.node-tooltip{position:absolute;background:rgba(0,20,40,.95);border:1px solid rgba(0,200,255,.4);border-radius:6px;padding:8px 12px;font-size:.75rem;color:#ccc;pointer-events:none;z-index:var(--z-tooltip)}
+.graph-info{position:absolute;bottom:12px;left:12px;background:rgba(0,20,40,.9);border:1px solid rgba(255,255,255,.1);border-radius:6px;padding:8px 14px;font-size:.75rem;color:#888;z-index:var(--z-notify)}
 .main-area{position:relative;flex:1;min-height:400px}
+
+/* ================================================================
+ * F-L03修复：空section占位符样式
+ * ================================================================ */
+.section-placeholder {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 60px 20px;
+    text-align: center;
+    color: rgba(255, 255, 255, 0.5);
+    font-size: 0.9rem;
+}
+.section-placeholder p {
+    margin-top: 16px;
+    color: #888;
+}
+.placeholder-spinner {
+    width: 48px;
+    height: 48px;
+    border: 4px solid rgba(0, 212, 255, 0.15);
+    border-top: 4px solid #00d4ff;
+    border-right: 4px solid #00ff88;
+    border-radius: 50%;
+    animation: placeholderSpin 1.2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+@keyframes placeholderSpin {
+    from { transform: rotate(0deg); }
+    to   { transform: rotate(360deg); }
+}

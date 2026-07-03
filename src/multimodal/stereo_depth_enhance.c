@@ -263,7 +263,7 @@ static void _median_filter_2d(float* data, int w, int h, int ksize,
                                float* out)
 {
     int half = ksize / 2;
-    int* values = (int*)malloc(ksize * ksize * sizeof(int));
+    int* values = (int*)malloc((size_t)ksize * (size_t)ksize * sizeof(int));
     if (!values) return;
 
     for (int y = 0; y < h; y++) {

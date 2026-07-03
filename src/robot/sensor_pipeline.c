@@ -260,7 +260,7 @@ static SensorInfo* pipeline_find_sensor(SensorPipeline* pipeline, int sensor_id)
 static int ring_buffer_init(SensorRingBuffer* rb, const SensorRingBufferConfig* config)
 {
     rb->capacity = (config->max_entries > 0) ? config->max_entries : SENSOR_PIPELINE_RING_BUFFER_SIZE;
-    rb->entries = (SensorPipelineEntry*)calloc(rb->capacity, sizeof(SensorPipelineEntry));
+    rb->entries = (SensorPipelineEntry*)safe_calloc(rb->capacity, sizeof(SensorPipelineEntry));
     if (!rb->entries) return -1;
     for (int i = 0; i < rb->capacity; i++)
     {
@@ -274,7 +274,7 @@ static int ring_buffer_init(SensorRingBuffer* rb, const SensorRingBufferConfig* 
     rb->compression_level = config->compression_level;
     rb->enable_dedup = config->enable_dedup;
     rb->dedup_threshold = config->dedup_threshold;
-    rb->last_unique = (SensorPipelineEntry*)calloc(1, sizeof(SensorPipelineEntry));
+    rb->last_unique = (SensorPipelineEntry*)safe_calloc(1, sizeof(SensorPipelineEntry));
     if (rb->last_unique)
     {
         rb->last_unique->data = NULL;
@@ -287,7 +287,7 @@ static void ring_buffer_entry_free(SensorPipelineEntry* entry)
 {
     if (entry && entry->data)
     {
-        free(entry->data);
+        safe_free((void**)&entry->data);
         entry->data = NULL;
         entry->data_size = 0;
     }
@@ -302,13 +302,13 @@ static void ring_buffer_destroy(SensorRingBuffer* rb)
         {
             ring_buffer_entry_free(&rb->entries[i]);
         }
-        free(rb->entries);
+        safe_free((void**)&rb->entries);
         rb->entries = NULL;
     }
     if (rb->last_unique)
     {
         ring_buffer_entry_free(rb->last_unique);
-        free(rb->last_unique);
+        safe_free((void**)&rb->last_unique);
         rb->last_unique = NULL;
     }
     rb->capacity = 0;
@@ -351,7 +351,7 @@ static int ring_buffer_push(SensorRingBuffer* rb, const SensorPipelineEntry* ent
 
     if (entry->data && entry->data_size > 0)
     {
-        dest->data = (uint8_t*)malloc(entry->data_size);
+        dest->data = (uint8_t*)safe_malloc(entry->data_size);
         if (!dest->data) return -1;
         memcpy(dest->data, entry->data, entry->data_size);
         dest->data_size = entry->data_size;
@@ -362,7 +362,7 @@ static int ring_buffer_push(SensorRingBuffer* rb, const SensorPipelineEntry* ent
         ring_buffer_entry_free(rb->last_unique);
         if (dest->data && dest->data_size > 0)
         {
-            rb->last_unique->data = (uint8_t*)malloc(dest->data_size);
+            rb->last_unique->data = (uint8_t*)safe_malloc(dest->data_size);
             if (rb->last_unique->data)
             {
                 memcpy(rb->last_unique->data, dest->data, dest->data_size);
@@ -718,7 +718,7 @@ static void notify_subscribers(SensorPipeline* pipeline, const SensorPipelineEnt
 
 SensorPipeline* sensor_pipeline_create(const SensorPipelineConfig* config)
 {
-    SensorPipeline* pipeline = (SensorPipeline*)calloc(1, sizeof(SensorPipeline));
+    SensorPipeline* pipeline = (SensorPipeline*)safe_calloc(1, sizeof(SensorPipeline));
     if (!pipeline) return NULL;
 
     if (config)
@@ -750,7 +750,7 @@ SensorPipeline* sensor_pipeline_create(const SensorPipelineConfig* config)
 
     if (ring_buffer_init(&pipeline->ring_buffer, &pipeline->config.ring_buffer_config) != 0)
     {
-        free(pipeline);
+        safe_free((void**)&pipeline);
         return NULL;
     }
     pipeline->ring_initialized = 1;
@@ -771,7 +771,7 @@ void sensor_pipeline_destroy(SensorPipeline* pipeline)
         pipeline->ring_initialized = 0;
     }
 
-    free(pipeline);
+    safe_free((void**)&pipeline);
 }
 
 int sensor_pipeline_start(SensorPipeline* pipeline)
@@ -1056,7 +1056,7 @@ int sensor_pipeline_push_lidar(SensorPipeline* pipeline, int sensor_id,
         return SENSOR_PIPELINE_ERROR_INVALID;
 
     size_t data_size = (size_t)num_points * sizeof(float) * 2;
-    uint8_t* buffer = (uint8_t*)malloc(data_size);
+    uint8_t* buffer = (uint8_t*)safe_malloc(data_size);
     if (!buffer) return SENSOR_PIPELINE_ERROR_NO_MEMORY;
 
     memcpy(buffer, ranges, (size_t)num_points * sizeof(float));
@@ -1078,7 +1078,7 @@ int sensor_pipeline_push_lidar(SensorPipeline* pipeline, int sensor_id,
     entry.range_max = (float)num_points;
 
     int ret = sensor_pipeline_push_data(pipeline, &entry);
-    free(buffer);
+    safe_free((void**)&buffer);
     return ret;
 }
 
@@ -1377,14 +1377,14 @@ int sensor_pipeline_get_pipeline_load(SensorPipeline* pipeline, double* buffer_u
 
 SensorPipelineConfig* sensor_pipeline_config_create(void)
 {
-    SensorPipelineConfig* config = (SensorPipelineConfig*)calloc(1, sizeof(SensorPipelineConfig));
+    SensorPipelineConfig* config = (SensorPipelineConfig*)safe_calloc(1, sizeof(SensorPipelineConfig));
     if (config) sensor_pipeline_config_set_defaults(config);
     return config;
 }
 
 void sensor_pipeline_config_destroy(SensorPipelineConfig* config)
 {
-    free(config);
+    safe_free((void**)&config);
 }
 
 void sensor_pipeline_config_set_defaults(SensorPipelineConfig* config)
@@ -1529,12 +1529,12 @@ int sensor_pipeline_import_from_file(SensorPipeline* pipeline, const char* filen
         uint8_t* data = NULL;
         if (dsize > 0)
         {
-            data = (uint8_t*)malloc(dsize);
+            data = (uint8_t*)safe_malloc(dsize);
             if (data)
             {
                 if (fread(data, 1, dsize, fp) != dsize)
                 {
-                    free(data);
+                    safe_free((void**)&data);
                     break;
                 }
             }
@@ -1550,7 +1550,7 @@ int sensor_pipeline_import_from_file(SensorPipeline* pipeline, const char* filen
         entry.is_valid = 1;
         entry.confidence = conf;
         ring_buffer_push(&pipeline->ring_buffer, &entry);
-        free(data);
+        safe_free((void**)&data);
     }
 
     fclose(fp);

@@ -2191,11 +2191,17 @@ int audio_semantic_process_text(AudioSemanticProcessor* processor,
                                 num_start--;
                             }
                             int num_len = (int)(pos - num_start);
-                            memcpy(time_value, num_start, num_len);
+                            /* P1修复: 边界检查，防止num_len+pattern_len超出time_value缓冲区(64字节) */
+                            if ((size_t)num_len + pattern_len >= sizeof(time_value)) {
+                                num_len = (int)(sizeof(time_value) - pattern_len - 1);
+                                if (num_len < 0) num_len = 0;
+                            }
+                            memcpy(time_value, num_start, (size_t)num_len);
                             memcpy(time_value + num_len, pattern, pattern_len);
                             time_value[num_len + pattern_len] = '\0';
                         } else {
-                            strcpy(time_value, pattern);
+                            strncpy(time_value, pattern, sizeof(time_value) - 1);
+                            time_value[sizeof(time_value) - 1] = '\0';
                         }
                         result->slots[result->num_slots].value = audio_semanticstring_duplicate(time_value);
                         result->slots[result->num_slots].confidence = 0.85f;

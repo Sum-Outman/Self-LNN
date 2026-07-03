@@ -136,7 +136,7 @@ static MemoryItem* memory_item_create(const char* key, const float* data,
         safe_free((void**)&item);
         return NULL;
     }
-    strcpy(item->key, key);
+    memcpy(item->key, key, strlen(key) + 1);
     
     // 复制数据
     if (data_size > 0) {

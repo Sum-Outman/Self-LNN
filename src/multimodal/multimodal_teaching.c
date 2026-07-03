@@ -159,7 +159,7 @@ static int mt_get_or_create_sequence(MultimodalTeachingSystem* system) {
 
     size_t idx = system->num_sequences;
     system->sequences[idx].max_frames = 1024;
-    system->sequences[idx].frames = (TeachModalFrame*)calloc(system->sequences[idx].max_frames, sizeof(TeachModalFrame));
+    system->sequences[idx].frames = (TeachModalFrame*)safe_calloc(system->sequences[idx].max_frames, sizeof(TeachModalFrame));
     system->sequences[idx].num_frames = 0;
     system->sequences[idx].is_complete = 0;
     system->sequences[idx].visual_width = 0;
@@ -170,7 +170,7 @@ static int mt_get_or_create_sequence(MultimodalTeachingSystem* system) {
 }
 
 MultimodalTeachingSystem* multimodal_teaching_create(TeachFusionConfig config) {
-    MultimodalTeachingSystem* system = (MultimodalTeachingSystem*)calloc(1, sizeof(MultimodalTeachingSystem));
+    MultimodalTeachingSystem* system = (MultimodalTeachingSystem*)safe_calloc(1, sizeof(MultimodalTeachingSystem));
     if (!system) return NULL;
 
     system->config = config;
@@ -212,9 +212,9 @@ MultimodalTeachingSystem* multimodal_teaching_create(TeachFusionConfig config) {
 void multimodal_teaching_destroy(MultimodalTeachingSystem* system) {
     if (!system) return;
     for (size_t i = 0; i < MT_MAX_SEQUENCES; i++) {
-        free(system->sequences[i].frames);
+        safe_free((void**)&system->sequences[i].frames);
     }
-    free(system);
+    safe_free((void**)&system);
 }
 
 int multimodal_teaching_ingest_frame(MultimodalTeachingSystem* system,
@@ -269,7 +269,7 @@ int multimodal_teaching_ingest_frame(MultimodalTeachingSystem* system,
     if (seq->num_frames >= seq->max_frames) {
         size_t new_max = seq->max_frames * 2;
         if (new_max > MT_MAX_FRAMES_PER_SEQUENCE) new_max = MT_MAX_FRAMES_PER_SEQUENCE;
-        TeachModalFrame* new_frames = (TeachModalFrame*)realloc(seq->frames, new_max * sizeof(TeachModalFrame));
+        TeachModalFrame* new_frames = (TeachModalFrame*)safe_realloc(seq->frames, new_max * sizeof(TeachModalFrame));
         if (!new_frames) return -3;
         memset(new_frames + seq->max_frames, 0, (new_max - seq->max_frames) * sizeof(TeachModalFrame));
         seq->frames = new_frames;
@@ -482,7 +482,7 @@ int multimodal_teaching_encode_teaching(MultimodalTeachingSystem* system,
     memcpy(teaching_embedding, avg_obs, copy_dim * sizeof(float));
 
     if (system->use_lnn && system->lnn_network) {
-        float* lnn_output = (float*)malloc(embed_dim * sizeof(float));
+        float* lnn_output = (float*)safe_malloc(embed_dim * sizeof(float));
         if (lnn_output) {
             memset(lnn_output, 0, embed_dim * sizeof(float));
             lnn_forward((LNN*)system->lnn_network, teaching_embedding, lnn_output);
@@ -490,7 +490,7 @@ int multimodal_teaching_encode_teaching(MultimodalTeachingSystem* system,
             for (size_t i = 0; i < embed_dim; i++) {
                 teaching_embedding[i] = teaching_embedding[i] * (1.0f - blend) + lnn_output[i] * blend;
             }
-            free(lnn_output);
+            safe_free((void**)&lnn_output);
         }
     }
 
@@ -603,7 +603,7 @@ int multimodal_teaching_clear(MultimodalTeachingSystem* system) {
     if (!system) return -1;
 
     for (size_t i = 0; i < MT_MAX_SEQUENCES; i++) {
-        free(system->sequences[i].frames);
+        safe_free((void**)&system->sequences[i].frames);
         system->sequences[i].frames = NULL;
         system->sequences[i].num_frames = 0;
         system->sequences[i].max_frames = 0;
@@ -956,7 +956,7 @@ int multimodal_teaching_incremental_learn(MultimodalTeachingSystem* system, cons
         if (seq->num_frames >= seq->max_frames) {
             size_t new_max = seq->max_frames * 2;
             if (new_max > MT_MAX_FRAMES_PER_SEQUENCE) new_max = MT_MAX_FRAMES_PER_SEQUENCE;
-            TeachModalFrame* new_frames = (TeachModalFrame*)realloc(seq->frames, new_max * sizeof(TeachModalFrame));
+            TeachModalFrame* new_frames = (TeachModalFrame*)safe_realloc(seq->frames, new_max * sizeof(TeachModalFrame));
             if (!new_frames) break;
             memset(new_frames + seq->max_frames, 0, (new_max - seq->max_frames) * sizeof(TeachModalFrame));
             seq->frames = new_frames;

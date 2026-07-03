@@ -60,7 +60,7 @@ void lb_default_config(LbConfig* config) {
 }
 
 LbBalancer* lb_create(const LbConfig* config) {
-    LbBalancer* balancer = (LbBalancer*)calloc(1, sizeof(LbBalancer));
+    LbBalancer* balancer = (LbBalancer*)safe_calloc(1, sizeof(LbBalancer));
     if (!balancer) return NULL;
     if (config) memcpy(&balancer->config, config, sizeof(LbConfig));
     else lb_default_config(&balancer->config);
@@ -110,14 +110,14 @@ LbBalancer* lb_create(const LbConfig* config) {
 void lb_destroy(LbBalancer* balancer) {
     if (!balancer) return;
     for (int i = 0; i < balancer->task_count; i++) {
-        if (balancer->tasks[i]) free(balancer->tasks[i]);
+        if (balancer->tasks[i]) safe_free((void**)&balancer->tasks[i]);
     }
     if (balancer->laplace_analyzer) {
         laplace_analyzer_free(balancer->laplace_analyzer);
         balancer->laplace_analyzer = NULL;
     }
     safe_free((void**)&balancer->laplace_spectrum_buffer);
-    free(balancer);
+    safe_free((void**)&balancer);
 }
 
 static int find_node_index(LbBalancer* balancer, uint32_t node_id) {
@@ -234,7 +234,7 @@ uint64_t lb_submit_task(LbBalancer* balancer, LbTaskPriority priority,
                         void* user_data) {
     if (!balancer) return TASK_ID_NONE;
     if (balancer->task_count >= (int)balancer->config.max_tasks) return TASK_ID_NONE;
-    LbTask* task = (LbTask*)calloc(1, sizeof(LbTask));
+    LbTask* task = (LbTask*)safe_calloc(1, sizeof(LbTask));
     if (!task) return TASK_ID_NONE;
     task->task_id = balancer->next_task_id++;
     task->priority = priority;
@@ -262,7 +262,7 @@ int lb_cancel_task(LbBalancer* balancer, uint64_t task_id) {
     if (!balancer) return LB_ERROR_INVALID_PARAM;
     for (int i = 0; i < balancer->task_count; i++) {
         if (balancer->tasks[i] && balancer->tasks[i]->task_id == task_id) {
-            free(balancer->tasks[i]);
+            safe_free((void**)&balancer->tasks[i]);
             balancer->tasks[i] = balancer->tasks[--balancer->task_count];
             return LB_ERROR_NONE;
         }
@@ -296,7 +296,7 @@ int lb_complete_task(LbBalancer* balancer, uint64_t task_id, int failed) {
                     (balancer->stats.avg_execution_time_ms * (balancer->stats.total_tasks_completed - 1) +
                      exec_time) / balancer->stats.total_tasks_completed;
             }
-            free(t);
+            safe_free((void**)&t);
             balancer->tasks[i] = balancer->tasks[--balancer->task_count];
             return LB_ERROR_NONE;
         }

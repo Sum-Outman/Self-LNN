@@ -1360,53 +1360,61 @@ int knowledge_base_save(KnowledgeBase* kb, const char* filename) {
     }
     
     const char* header = "SELFKNOWLEDGE";
-    fwrite(header, 1, strlen(header), file);
+    /* P2修复: 检查fwrite返回值，防止写入失败静默丢失数据 */
+    if (fwrite(header, 1, strlen(header), file) != strlen(header)) goto save_error;
     
     int version = 1;
-    fwrite(&version, sizeof(int), 1, file);
+    if (fwrite(&version, sizeof(int), 1, file) != 1) goto save_error;
     
     int entry_count = (int)kb->size;
-    fwrite(&entry_count, sizeof(int), 1, file);
+    if (fwrite(&entry_count, sizeof(int), 1, file) != 1) goto save_error;
     
     for (int i = 0; i < entry_count; i++) {
         InternalKnowledgeEntry* internal_entry = &kb->entries[i];
         KnowledgeEntry* entry = &internal_entry->entry;
         
-        fwrite(&internal_entry->id, sizeof(int), 1, file);
+        if (fwrite(&internal_entry->id, sizeof(int), 1, file) != 1) goto save_error;
         
         int subject_len = entry->subject ? (int)strlen(entry->subject) : 0;
-        fwrite(&subject_len, sizeof(int), 1, file);
+        if (fwrite(&subject_len, sizeof(int), 1, file) != 1) goto save_error;
         if (subject_len > 0) {
-            fwrite(entry->subject, 1, subject_len, file);
+            if (fwrite(entry->subject, 1, subject_len, file) != (size_t)subject_len) goto save_error;
         }
         
         int predicate_len = entry->predicate ? (int)strlen(entry->predicate) : 0;
-        fwrite(&predicate_len, sizeof(int), 1, file);
+        if (fwrite(&predicate_len, sizeof(int), 1, file) != 1) goto save_error;
         if (predicate_len > 0) {
-            fwrite(entry->predicate, 1, predicate_len, file);
+            if (fwrite(entry->predicate, 1, predicate_len, file) != (size_t)predicate_len) goto save_error;
         }
         
         int object_len = entry->object ? (int)strlen(entry->object) : 0;
-        fwrite(&object_len, sizeof(int), 1, file);
+        if (fwrite(&object_len, sizeof(int), 1, file) != 1) goto save_error;
         if (object_len > 0) {
-            fwrite(entry->object, 1, object_len, file);
+            if (fwrite(entry->object, 1, object_len, file) != (size_t)object_len) goto save_error;
         }
         
-        fwrite(&entry->type, sizeof(KnowledgeType), 1, file);
-        fwrite(&entry->confidence, sizeof(KnowledgeConfidence), 1, file);
-        fwrite(&entry->source, sizeof(KnowledgeSource), 1, file);
-        fwrite(&entry->weight, sizeof(float), 1, file);
-        fwrite(&entry->timestamp, sizeof(long), 1, file);
+        if (fwrite(&entry->type, sizeof(KnowledgeType), 1, file) != 1) goto save_error;
+        if (fwrite(&entry->confidence, sizeof(KnowledgeConfidence), 1, file) != 1) goto save_error;
+        if (fwrite(&entry->source, sizeof(KnowledgeSource), 1, file) != 1) goto save_error;
+        if (fwrite(&entry->weight, sizeof(float), 1, file) != 1) goto save_error;
+        if (fwrite(&entry->timestamp, sizeof(long), 1, file) != 1) goto save_error;
         
-        fwrite(&entry->metadata_size, sizeof(size_t), 1, file);
+        if (fwrite(&entry->metadata_size, sizeof(size_t), 1, file) != 1) goto save_error;
         if (entry->metadata_size > 0) {
-            fwrite(entry->metadata, 1, entry->metadata_size, file);
+            if (fwrite(entry->metadata, 1, entry->metadata_size, file) != entry->metadata_size) goto save_error;
         }
     }
     
     fclose(file);
     KB_RUNLOCK(kb);
     return 0;
+
+save_error:
+    fclose(file);
+    /* B-M05/B-L05: 写入失败时删除已写入部分数据的文件，避免残留损坏文件 */
+    remove(filename);
+    KB_RUNLOCK(kb);
+    return -1;
 }
 
 int knowledge_base_auto_save(KnowledgeBase* kb) {
@@ -6063,7 +6071,13 @@ int knowledge_base_import_seed_json(KnowledgeBase* kb, const char* filepath) {
 
     char* raw = (char*)safe_malloc((size_t)fsize + 1);
     if (!raw) { fclose(fp); return -1; }
+    /* P2修复: 检查fread返回值 */
     size_t read_len = fread(raw, 1, (size_t)fsize, fp);
+    if (read_len == 0 && (size_t)fsize > 0) {
+        fclose(fp);
+        safe_free((void**)&raw);
+        return -1;
+    }
     fclose(fp);
     raw[read_len] = '\0';
 

@@ -539,7 +539,9 @@ int robot_get_status(Robot* robot, RobotStatus* status) {
                 // 电池耗尽时进入错误状态
                 if (robot->status.state != ROBOT_STATE_ERROR) {
                     robot->status.state = ROBOT_STATE_ERROR;
-                    strcpy(robot->status.error_message, "电池耗尽");
+                    strncpy(robot->status.error_message, "电池耗尽",
+                            sizeof(robot->status.error_message) - 1);
+                    robot->status.error_message[sizeof(robot->status.error_message) - 1] = '\0';
                 }
             }
         }
@@ -564,7 +566,9 @@ int robot_get_status(Robot* robot, RobotStatus* status) {
             // 过热保护
             if (robot->status.state != ROBOT_STATE_ERROR) {
                 robot->status.state = ROBOT_STATE_ERROR;
-                strcpy(robot->status.error_message, "电机过热");
+                strncpy(robot->status.error_message, "电机过热",
+                        sizeof(robot->status.error_message) - 1);
+                robot->status.error_message[sizeof(robot->status.error_message) - 1] = '\0';
             }
         }
         

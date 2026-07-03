@@ -907,10 +907,12 @@ static GpuKernel* gpu_cpu_kernel_create(GpuContext* context, const char* kernel_
     kern->context = context;
     kern->kernel_source = (char*)safe_malloc(strlen(kernel_source) + 1);
     if (!kern->kernel_source) { safe_free((void**)&kern); return NULL; }
-    strcpy(kern->kernel_source, kernel_source);
+    strncpy(kern->kernel_source, kernel_source, strlen(kernel_source));
+    kern->kernel_source[strlen(kernel_source)] = '\0';
     kern->kernel_name = (char*)safe_malloc(strlen(kernel_name) + 1);
     if (!kern->kernel_name) { safe_free((void**)&kern->kernel_source); safe_free((void**)&kern); return NULL; }
-    strcpy(kern->kernel_name, kernel_name);
+    strncpy(kern->kernel_name, kernel_name, strlen(kernel_name));
+    kern->kernel_name[strlen(kernel_name)] = '\0';
     kern->arg_count = 0;
     kern->arg_capacity = 0;
     kern->arg_values = NULL;

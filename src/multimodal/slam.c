@@ -9833,7 +9833,7 @@ SlamFrameReader* slam_frame_reader_create(const char* directory,
                     _findclose(find_handle);
                     return NULL;
                 }
-                strcpy(names[count], fname);
+                memcpy(names[count], fname, strlen(fname) + 1);
                 numbers[count] = frame_num;
                 count++;
             }
@@ -9902,7 +9902,7 @@ SlamFrameReader* slam_frame_reader_create(const char* directory,
             closedir(dir);
             return NULL;
         }
-        strcpy(names[count], entry->d_name);
+        memcpy(names[count], entry->d_name, strlen(entry->d_name) + 1);
         numbers[count] = frame_num;
         count++;
     }

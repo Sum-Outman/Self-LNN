@@ -10,6 +10,7 @@
 #include "selflnn/learning/multi_agent.h" /* 多智能体系统启停控制 */
 #include <string.h>
 #include <stdio.h>
+#include <stdatomic.h>  /* P2修复: atomic_int替代volatile，确保原子性 */
 
 /* P2-007修复: 跨平台互斥锁保护全局能力状态 */
 #ifdef _WIN32
@@ -404,14 +405,16 @@ static int cap_set_multi_agent(int enable) {
 }
 
 /* 初始化时自动注册所有回调 */
-/* L-021: 使用原子操作保护一次性注册，避免多线程竞态条件 */
+/* L-021: 使用原子操作保护一次性注册，避免多线程竞态条件
+ * P2修复: volatile不保证原子性，改用atomic_int */
 static void ensure_callbacks_registered(void) {
 #ifdef _WIN32
-    static volatile LONG registered_lock = 0;
-    if (InterlockedCompareExchange(&registered_lock, 1, 0) != 0) return;
+    static atomic_int registered_lock = 0;
+    if (InterlockedCompareExchange((LONG volatile*)&registered_lock, 1, 0) != 0) return;
 #else
-    static volatile int registered_lock = 0;
-    if (__sync_lock_test_and_set(&registered_lock, 1)) return;
+    static atomic_int registered_lock = 0;
+    int expected = 0;
+    if (!atomic_compare_exchange_strong(&registered_lock, &expected, 1)) return;
 #endif
     capability_register_module(CAP_SELF_COGNITION,       cap_check_self_cognition,    cap_set_self_cognition);
     capability_register_module(CAP_SELF_DECISION,         cap_check_self_decision,     cap_set_self_decision);
@@ -430,7 +433,8 @@ static void ensure_callbacks_registered(void) {
 #ifdef _WIN32
     registered_lock = 0;
 #else
-    __sync_lock_release(&registered_lock);
+    /* P2修复: 使用atomic_store替代__sync_lock_release */
+    atomic_store(&registered_lock, 0);
 #endif
 }
 

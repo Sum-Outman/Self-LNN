@@ -284,7 +284,8 @@
 
 /* 重命名全局暴露避免与skills/knowledge的switchTab冲突 */
     window.switchProgrammingTab = switchTab;
-    window.switchTab = undefined;
+    /* BUG-8修复: 使用delete移除属性，避免将window.switchTab设为undefined破坏其他模块 */
+    delete window.switchTab;
     window.clearOutput = clearOutput;
 
 })();
