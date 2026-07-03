@@ -75,6 +75,7 @@ struct DynamicsSystem {
     float* ode_input_buf;       /**< P1-021修复：预分配ODE RHS输入缓冲区，避免每步堆分配 */
     float* external_input; /**< 真实外部输入（传感器/控制信号），NULL=无外部力 */
     int bdf2_initialized;       /**< BDF-2初始化标记（需要两步历史） */
+    int bdf2_warm_start;        /**< M-15: BDF-2温启动状态机（0=未启动, 1=已完成隐式欧拉引导, 2=全BDF-2运行） */
     int is_initialized;         /**< 是否已初始化 */
     float time;                 /**< 当前时间 */
     float dt;                   /**< 当前时间步长（自适应调整） */
@@ -144,7 +145,8 @@ DynamicsSystem* dynamics_create(const DynamicsConfig* config) {
     }
 
     // 分配ODE求解器工作区（最大需求：Rosenbrock需要11*state_size个float）
-    system->workspace = (float*)safe_calloc(11 * state_size, sizeof(float));
+    system->workspace = (float*)safe_calloc(15 * state_size, sizeof(float));
+    /* H-3修复：扩展workspace从11→15，为DP54各级速度保存(v3/v4/v5/v6)提供空间 */
     if (!system->workspace) {
         dynamics_free(system);
         return NULL;
@@ -159,6 +161,7 @@ DynamicsSystem* dynamics_create(const DynamicsConfig* config) {
 
     // BDF-2初始化
     system->bdf2_initialized = 0;
+    system->bdf2_warm_start = 0;  /* M-15: 初始未启动温引导 */
     
     // 初始化状态
     for (size_t i = 0; i < state_size; i++) {
@@ -505,14 +508,29 @@ static void compute_derivatives(const DynamicsSystem* system,
     
     size_t state_size = system->config.state_size;
     
-    /* 使用共享力计算函数(ZSFJJJ-H001) */
-    float zero_noise[256] = {0};
-    const float* noise = system->config.enable_noise ? system->noise_buffer : zero_noise;
+    /* 使用共享力计算函数(ZSFJJJ-H001)
+     * H-2修复：zero_noise使用动态分配替代硬编码256大小，防止state_size>256时越界 */
+    float* zero_noise = NULL;
+    float* noise = NULL;
+    int need_free = 0;
+    if (system->config.enable_noise) {
+        noise = system->noise_buffer;
+    } else {
+        zero_noise = (float*)calloc(state_size, sizeof(float));
+        if (!zero_noise) return; /* 内存分配失败，安全退出 */
+        noise = zero_noise;
+        need_free = 1;
+    }
     
     for (size_t i = 0; i < state_size; i++) {
         dstate_dt[i] = velocity[i];
         dvelocity_dt[i] = dynamics_compute_force_internal(
             system, state, velocity, noise, input[i], i, state_size);
+    }
+    
+    if (need_free) {
+        free(zero_noise);
+        zero_noise = NULL;
     }
 }
 
@@ -1099,11 +1117,51 @@ static void dynamics_internal_solve_implicit_euler(DynamicsSystem* system, const
  */
 static void dynamics_internal_solve_bdf2(DynamicsSystem* system, const float* input, float dt, const float* prev_state) {
     size_t state_size = system->config.state_size;
+    const float* effective_prev = prev_state;
+
+    /* M-15: BDF-2温启动状态机
+     * 当prev_state不可用时（NULL传入），不复用简单的1阶隐式欧拉回退。
+     * 改为二阶段引导：第一步用隐式欧拉得到伪历史，保存到系统内部缓冲区；
+     * 第二步及之后使用完整的2阶BDF-2公式，避免因缺失历史而长期降级为1阶。
+     *
+     * 状态机：bdf2_warm_start
+     *   0 = 未启动，需要引导
+     *   1 = 已完成隐式欧拉引导，下一步可用完整BDF-2
+     *   2 = 全BDF-2运行中（正常模式）
+     */
+    if (!prev_state) {
+        if (system->bdf2_warm_start == 0) {
+            /* 阶段0：无历史数据可用，使用隐式欧拉引导第一步 */
+            log_debug("[BDF2温启动] prev_state=NULL，bdf2_warm_start=0，"
+                      "使用隐式欧拉引导第一步（state_size=%zu, dt=%.6f）",
+                      state_size, dt);
+            dynamics_internal_solve_implicit_euler(system, input, dt);
+            /* 将引导后的当前状态保存为伪历史，供后续BDF-2步使用 */
+            memcpy(system->prev_state, system->state, state_size * sizeof(float));
+            system->bdf2_warm_start = 1;
+            return;
+        } else {
+            /* 阶段1：已通过隐式欧拉获得引导历史，使用完整BDF-2 */
+            log_debug("[BDF2温启动] prev_state=NULL但已有引导历史"
+                      "（warm_start=%d），使用系统内部prev_state启动BDF-2",
+                      system->bdf2_warm_start);
+            effective_prev = system->prev_state;
+            system->bdf2_warm_start = 2;
+        }
+    } else {
+        /* prev_state有效：记录温启动完成 */
+        if (system->bdf2_warm_start < 2) {
+            system->bdf2_warm_start = 2;
+        }
+    }
 
     /* BDF-2需要两步历史，第一步用隐式欧拉启动 */
-    if (!system->bdf2_initialized || !prev_state) {
-        /* 第一步使用隐式欧拉作为BDF-2的启动器 */
+    if (!system->bdf2_initialized && system->bdf2_warm_start < 2) {
+        /* 温启动尚未完成且bdf2未初始化：先做隐式欧拉 */
+        log_debug("[BDF2温启动] bdf2未初始化，使用隐式欧拉启动");
         dynamics_internal_solve_implicit_euler(system, input, dt);
+        memcpy(system->prev_state, system->state, state_size * sizeof(float));
+        system->bdf2_warm_start = 1;
         return;
     }
 
@@ -1119,8 +1177,8 @@ static void dynamics_internal_solve_bdf2(DynamicsSystem* system, const float* in
     memcpy(initial_state, system->state, state_size * sizeof(float));
     memcpy(initial_velocity, system->velocity, state_size * sizeof(float));
 
-    /* 从prev_state获取y_n的状态 */
-    memcpy(state_n_minus_1, prev_state, state_size * sizeof(float));
+    /* 从effective_prev（外部传入或温引导内部）获取y_n的状态 */
+    memcpy(state_n_minus_1, effective_prev, state_size * sizeof(float));
     for (size_t i = 0; i < state_size; i++) {
         vel_n_minus_1[i] = initial_velocity[i] - (initial_state[i] - state_n_minus_1[i]) / (dt + 1e-10f);
         if (vel_n_minus_1[i] > 5.0f) vel_n_minus_1[i] = 5.0f;
@@ -1241,6 +1299,11 @@ static float dynamics_internal_solve_dp54(DynamicsSystem* system, const float* i
     float* temp_vel = system->workspace + 8 * state_size;
     /* F-010修复: 独立的dstate_dt缓冲区，避免compute_derivatives覆盖输入状态 */
     float* temp_dstate = system->workspace + 9 * state_size;
+    /* H-3修复: 保存各级速度用于正确的位置更新 */
+    float* v3_save = system->workspace + 11 * state_size;
+    float* v4_save = system->workspace + 12 * state_size;
+    float* v5_save = system->workspace + 13 * state_size;
+    float* v6_save = system->workspace + 14 * state_size;
 
     /* 初始导数：k1 = f(y_n) */
     compute_derivatives(system, system->state, system->velocity, input, temp_dstate, temp_vel);
@@ -1264,6 +1327,8 @@ static float dynamics_internal_solve_dp54(DynamicsSystem* system, const float* i
             temp_vel[i] = system->velocity[i] + actual_h * (DP54_A31 * k1[i] + DP54_A32 * k2[i]);
         }
         compute_derivatives(system, temp_state, temp_vel, input, temp_dstate, k3);
+        /* H-3修复: 保存第三级速度用于正确的位置更新 */
+        memcpy(v3_save, temp_vel, state_size * sizeof(float));
 
         /* k4: f(y_n + h*(DP54_A41*k1 + DP54_A42*k2 + DP54_A43*k3)) */
         for (size_t i = 0; i < state_size; i++) {
@@ -1273,6 +1338,8 @@ static float dynamics_internal_solve_dp54(DynamicsSystem* system, const float* i
                 DP54_A41 * k1[i] + DP54_A42 * k2[i] + DP54_A43 * k3[i]);
         }
         compute_derivatives(system, temp_state, temp_vel, input, temp_dstate, k4);
+        /* H-3修复: 保存第四级速度 */
+        memcpy(v4_save, temp_vel, state_size * sizeof(float));
 
         /* k5: f(y_n + h*(DP54_A51*k1 + DP54_A52*k2 + DP54_A53*k3 + DP54_A54*k4)) */
         for (size_t i = 0; i < state_size; i++) {
@@ -1282,6 +1349,8 @@ static float dynamics_internal_solve_dp54(DynamicsSystem* system, const float* i
                 DP54_A51 * k1[i] + DP54_A52 * k2[i] + DP54_A53 * k3[i] + DP54_A54 * k4[i]);
         }
         compute_derivatives(system, temp_state, temp_vel, input, temp_dstate, k5);
+        /* H-3修复: 保存第五级速度 */
+        memcpy(v5_save, temp_vel, state_size * sizeof(float));
 
         /* k6: f(y_n + h*(DP54_A61*k1 + DP54_A62*k2 + DP54_A63*k3 + DP54_A64*k4 + DP54_A65*k5)) */
         for (size_t i = 0; i < state_size; i++) {
@@ -1292,6 +1361,8 @@ static float dynamics_internal_solve_dp54(DynamicsSystem* system, const float* i
                 DP54_A61 * k1[i] + DP54_A62 * k2[i] + DP54_A63 * k3[i] + DP54_A64 * k4[i] + DP54_A65 * k5[i]);
         }
         compute_derivatives(system, temp_state, temp_vel, input, temp_dstate, k6);
+        /* H-3修复: 保存第六级速度 */
+        memcpy(v6_save, temp_vel, state_size * sizeof(float));
 
         /* k7: f(y_n + h*(DP54_A71*k1 + DP54_A73*k3 + DP54_A74*k4 + DP54_A75*k5 + DP54_A76*k6)) */
         for (size_t i = 0; i < state_size; i++) {
@@ -1303,22 +1374,25 @@ static float dynamics_internal_solve_dp54(DynamicsSystem* system, const float* i
         }
         compute_derivatives(system, temp_state, temp_vel, input, temp_dstate, k7);
 
-        /* 5阶解（位置和速度） */
+        /* 5阶解（位置和速度）
+         * H-3修复: 位置更新使用正确保存的各级速度而非加速度值 */
         for (size_t i = 0; i < state_size; i++) {
             float new_state = system->state[i] + actual_h * (
-                DP54_B1 * system->velocity[i] + DP54_B3 * temp_vel[i] + DP54_B4 * k3[i] +
-                DP54_B5 * k5[i] + DP54_B6 * k6[i]);
+                DP54_B1 * system->velocity[i] + DP54_B3 * v3_save[i] + DP54_B4 * v4_save[i] +
+                DP54_B5 * v5_save[i] + DP54_B6 * v6_save[i]);
             float new_vel = system->velocity[i] + actual_h * (
-                DP54_B1 * k1[i] + DP54_B3 * k2[i] + DP54_B4 * k3[i] + DP54_B5 * k5[i] + DP54_B6 * k6[i]);
+                DP54_B1 * k1[i] + DP54_B3 * k3[i] + DP54_B4 * k4[i] + DP54_B5 * k5[i] + DP54_B6 * k6[i]);
             temp_state[i] = new_state;
             temp_vel[i] = new_vel;
         }
 
-        /* 4阶解（用于误差估计） */
+        /* 4阶解（用于误差估计）
+         * H-3修复: 使用正确的k级数索引 */
         float max_error = 0.0f;
         for (size_t i = 0; i < state_size; i++) {
             float y4 = system->velocity[i] + actual_h * (
-                DP54_BE1 * k1[i] + DP54_BE3 * k2[i] + DP54_BE4 * k3[i] + DP54_BE5 * k5[i] + DP54_BE6 * k6[i] + DP54_BE7 * k7[i]);
+                DP54_BE1 * k1[i] + DP54_BE3 * k3[i] + DP54_BE4 * k4[i] + 
+                DP54_BE5 * k5[i] + DP54_BE6 * k6[i] + DP54_BE7 * k7[i]);
             float error = fabsf(temp_vel[i] - y4);
             float scale = fabsf(temp_vel[i]) + fabsf(y4) + 1e-10f;
             float rel_error = error / scale;

@@ -571,7 +571,7 @@ int ws_push_broadcast(WSPushServer* srv, WSMessageType type, const char* data)
         [WS_MSG_KNOWLEDGE_STATUS] = "knowledge_status",
         [WS_MSG_PREDICTION_RESULT] = "prediction_result",
         [WS_MSG_CONCEPT_EVOLUTION] = "concept_evolution",
-        [WS_MSG_STATE_ACTIVATION] = "state_activation_data",
+        [WS_MSG_STATE_ACTIVATION_DATA] = "state_activation_data",
         [WS_MSG_WEIGHT_DISTRIBUTION] = "weight_distribution",
         [WS_MSG_ACTIVATION_STATS] = "activation_stats",
         [WS_MSG_LNN_STATE] = "lnn_state",

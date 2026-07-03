@@ -336,14 +336,24 @@
     }
 
     var _simInitDone = false;
+    var _simInitRetries = 0;
+    var _simInitMaxRetries = 30; /* 最多重试30次（约30秒） */
     function _ensureSimInit() {
         if (_simInitDone) return;
-        _simInitDone = true;
         if (!window.SelfLnnApi || !window.SelfLnnApi.connected) {
-            var statusEl = document.getElementById('sim-status');
-            if (statusEl) statusEl.textContent = '后端未连接';
+            _simInitRetries++;
+            if (_simInitRetries < _simInitMaxRetries) {
+                var statusEl = document.getElementById('sim-status');
+                if (statusEl) statusEl.textContent = '等待后端连接...(' + _simInitRetries + '/' + _simInitMaxRetries + ')';
+                /* Z7-H05修复: 延迟1秒后重试，直到连接成功 */
+                setTimeout(_ensureSimInit, 1000);
+            } else {
+                var statusEl2 = document.getElementById('sim-status');
+                if (statusEl2) statusEl2.textContent = '后端未连接（已达最大重试次数）';
+            }
             return;
         }
+        _simInitDone = true;
         initSim3D();
         startRenderLoop();
         /* BUG-9修复：在调用simulationStatus前检查方法是否存在，防止TypeError */

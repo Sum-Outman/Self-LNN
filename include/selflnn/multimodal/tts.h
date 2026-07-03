@@ -111,6 +111,9 @@ typedef struct {
     /* 文本嵌入参数 */
     int vocab_size;                      /**< 文本词汇表大小（含特殊token），默认128 */
     int embedding_dim;                   /**< 字符嵌入维度，默认64 */
+
+    /* M-8修复: 质量守卫参数 */
+    float quality_threshold;             /**< 质量阈值（0.0~1.0），低于此阈值时合成返回错误码；默认0.0（不限制） */
 } TTSConfig;
 
 /**

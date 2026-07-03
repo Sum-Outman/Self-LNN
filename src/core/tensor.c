@@ -361,7 +361,7 @@ int tensor_reshape(Tensor* tensor, const int* new_shape, int new_ndim) {
         selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
                               "分配新步幅数组失败");
         // 恢复旧形状（完整实现：old_shape尚未释放，可以安全恢复）
-        safe_free(&tensor->shape);
+        safe_free((void**)&tensor->shape);
         tensor->shape = old_shape; // 安全恢复，因为old_shape尚未释放
         tensor->strides = old_strides;
         return -1;
@@ -1552,8 +1552,8 @@ int tensor_softmax(const Tensor* input, Tensor* output, int axis) {
                 sum += val;
             }
 
-            /* 3. 归一化 */
-            float inv_sum = (sum > 0.0f) ? (1.0f / sum) : 0.0f;
+            /* 3. 归一化 —— L-5修复: sum为0时返回均匀分布1/axis_size，而非0 */
+            float inv_sum = (sum > 0.0f) ? (1.0f / sum) : (1.0f / (float)axis_size);
             for (int ai = 0; ai < axis_size; ai++) {
                 data_out[base + (size_t)ai * axis_stride] *= inv_sum;
             }

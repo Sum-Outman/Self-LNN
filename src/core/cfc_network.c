@@ -75,7 +75,8 @@ CfCNetwork* cfc_create(const CfCNetworkConfig* config) {
     cell_config.enable_adaptation = config->enable_adaptation;
     cell_config.ode_solver_type = config->ode_solver_type;
     cell_config.use_auto_solver = 1;
-    cell_config.delta_t = 1.0f;  // 默认时间步长1.0秒
+    /* L-12修复: delta_t从网络配置读取，不再硬编码为1.0f */
+    cell_config.delta_t = (config->delta_t > 0.0f) ? config->delta_t : 1.0f;  /* 默认时间步长1.0秒 */
     
     // 第一层的输入大小是网络的输入大小
     // 后续层的输入大小是前一层的隐藏大小

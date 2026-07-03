@@ -193,3 +193,6 @@ class VoiceCaptureUtil {
         }
     }
 }
+
+/* L-1修复: 显式挂载到window，确保跨模块可访问 */
+window.VoiceCaptureUtil = VoiceCaptureUtil;

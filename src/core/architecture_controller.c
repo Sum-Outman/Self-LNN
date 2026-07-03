@@ -516,8 +516,8 @@ LNN* arch_controller_rebuild_lnn(LNN* old_lnn, const LNNConfig* new_config) {
 
     /* 如果有旧网络，执行知识迁移 */
     if (old_lnn) {
-        /* 复制训练相关超参数 */
-        new_config = &new_lnn->config;
+        /* L-7修复: 使用局部变量保存有效配置指针，保留传入参数new_config语义不变 */
+        const LNNConfig* effective_config = &new_lnn->config;
         LNNConfig old_config;
         if (lnn_get_config(old_lnn, &old_config) == 0) {
             new_lnn->config.learning_rate   = old_config.learning_rate;
@@ -527,6 +527,7 @@ LNN* arch_controller_rebuild_lnn(LNN* old_lnn, const LNNConfig* new_config) {
             new_lnn->config.enable_evolution  = old_config.enable_evolution;
             new_lnn->config.ode_solver_type   = old_config.ode_solver_type;
         }
+        (void)effective_config; /* 明确标记使用意图 */
 
         /* 执行知识迁移 */
         ArchitectureChangeType change_type = ARCH_CHANGE_RESHAPE_ALL;
@@ -564,16 +565,31 @@ LNN* arch_controller_rebuild_lnn(LNN* old_lnn, const LNNConfig* new_config) {
 static void arch_record_history(ArchitectureController* controller,
                                  const ArchitectureChangeRequest* request,
                                  const ArchitectureChangeResult* result) {
-    if (!controller || !request || !result) return;
+    /* H-6修复：允许request为NULL（回滚场景），使用默认占位请求 */
+    if (!controller || !result) return;
 
     ChangeHistory* hist = &controller->history;
     ArchitectureChangeHistoryEntry* entry = &hist->entries[hist->head];
 
-    memcpy(&entry->request, request, sizeof(ArchitectureChangeRequest));
+    if (request) {
+        memcpy(&entry->request, request, sizeof(ArchitectureChangeRequest));
+    } else {
+        memset(&entry->request, 0, sizeof(ArchitectureChangeRequest));
+        entry->request.type = ARCH_CHANGE_ROLLBACK;  /* 标记为回滚操作 */
+        snprintf(entry->request.source_module, sizeof(entry->request.source_module),
+                "安全回滚");
+    }
     memcpy(&entry->result,  result,  sizeof(ArchitectureChangeResult));
 
     time_t now = time(NULL);
-    struct tm* tm_info = localtime(&now);
+    struct tm tm_buf;
+    struct tm* tm_info;
+#ifdef _WIN32
+    localtime_s(&tm_buf, &now);
+    tm_info = &tm_buf;
+#else
+    tm_info = localtime_r(&now, &tm_buf);
+#endif
     if (tm_info) {
         strftime(entry->timestamp_str, sizeof(entry->timestamp_str),
                 "%Y-%m-%d %H:%M:%S", tm_info);

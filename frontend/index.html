@@ -4501,15 +4501,15 @@ response = requests.get(
         async function toggleVoice() {
             /* 如果对话页面已初始化语音输入，委托给它（统一处理） */
             if (typeof toggleVoiceInput === 'function' && window.g_dialogueEnhanced && window.g_deviceManager) {
-                toggleVoiceInput;
+                toggleVoiceInput();
                 return;
             }
             var btn = document.getElementById('voice-btn');
             if (_voiceCapture && _voiceCapture.isRecording) {
-                _voiceCapture.stop;
+                _voiceCapture.stop();
                 return;
             }
-            if (_voiceCapture) { _voiceCapture.destroy; _voiceCapture = null; }
+            if (_voiceCapture) { _voiceCapture.destroy(); _voiceCapture = null; }
             if (typeof VoiceCaptureUtil === 'undefined' || !VoiceCaptureUtil.quickCapture) {
                 showNotification('语音采集模块未加载，请刷新页面', 'warning');
                 return;
@@ -5646,7 +5646,7 @@ response = requests.get(
         var g_cameraStream = null, g_cameraActive = false;
 
         async function toggleCameraPreview() {
-            if (g_cameraActive) { stopCameraPreview; return; }
+            if (g_cameraActive) { stopCameraPreview(); return; }
             try {
                 var stream = await navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240 } });
                 g_cameraStream = stream;
@@ -5664,7 +5664,7 @@ response = requests.get(
 
         function stopCameraPreview() {
             g_cameraActive = false;
-            if (g_cameraStream) { g_cameraStream.getTracks.forEach(function(t) { t.stop; }); g_cameraStream = null; }
+            if (g_cameraStream) { g_cameraStream.getTracks().forEach(function(t) { t.stop(); }); g_cameraStream = null; }
             var video = document.getElementById('camera-preview');
             var fallback = document.getElementById('camera-preview-fallback');
             video.srcObject = null;
@@ -5680,13 +5680,13 @@ response = requests.get(
 
         function initAudioWaveform(stream) {
             if (!stream) return;
-            g_audioCtx = new (window.AudioContext || window.webkitAudioContext);
-            g_analyser = g_audioCtx.createAnalyser;
+            g_audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            g_analyser = g_audioCtx.createAnalyser();
             g_analyser.fftSize = 256;
             var source = g_audioCtx.createMediaStreamSource(stream);
             source.connect(g_analyser);
             document.getElementById('waveform-status').textContent = '波形显示中';
-            drawWaveform;
+            drawWaveform();
         }
 
         function drawWaveform() {
@@ -5702,7 +5702,7 @@ response = requests.get(
                 ctx.fillRect(0, 0, canvas.width, canvas.height);
                 ctx.lineWidth = 2;
                 ctx.strokeStyle = '#00ff88';
-                ctx.beginPath;
+                ctx.beginPath();
                 var sliceW = canvas.width / bufferLen;
                 var x = 0;
                 for (var i = 0; i < bufferLen; i++) {
@@ -5711,9 +5711,9 @@ response = requests.get(
                     if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
                     x += sliceW;
                 }
-                ctx.stroke;
+                ctx.stroke();
             }
-            frame;
+            frame();
         }
 
         /* 移除重复定义 toggleMultimodalVoiceInput，统一由 main.js 管理 */
@@ -5722,7 +5722,7 @@ response = requests.get(
 
         function stopVoiceInput() {
             if (window._mmLearnCapturer) {
-                window._mmLearnCapturer.stop;
+                window._mmLearnCapturer.stop();
                 window._mmLearnCapturer = null;
             }
             isRecording = false;

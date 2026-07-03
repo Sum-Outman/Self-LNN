@@ -1985,6 +1985,20 @@ static int tts_is_untrained(TTSEngine* engine) {
 
 static int generate_waveform(TTSEngine* engine, const int* tokens, int num_tokens,
                               float* waveform, int max_samples) {
+    /* =============================================================== *
+     * M-8修复: TTS未训练时添加质量守卫
+     * =============================================================== */
+    if (!engine->is_trained) {
+        log_warning("[TTS质量守卫] 语音合成引擎未训练（is_trained=0），"
+                    "生成的音频质量不可控。建议先调用 tts_load_model 加载预训练权重。");
+        /* 如果配置了质量阈值且不为0，拒绝未训练合成 */
+        if (engine->config.quality_threshold > 0.0f) {
+            log_error("[TTS质量守卫] 质量阈值=%.2f，未训练引擎合成被拒绝", 
+                      engine->config.quality_threshold);
+            return -2; /* 特殊错误码：未训练拒绝 */
+        }
+    }
+
     int hs = (int)engine->config.hidden_size;
     int ed = engine->config.embedding_dim;
     int sr = engine->config.sample_rate;

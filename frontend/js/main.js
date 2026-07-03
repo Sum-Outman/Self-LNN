@@ -2334,7 +2334,8 @@ function setupEventListeners() {
         }
         
         // 机器人控制快捷键
-        if (document.getElementById('robot-control')?.classList.contains('active')) {
+        var robotControlEl = document.getElementById('robot-control');
+        if (robotControlEl && robotControlEl.classList.contains('active')) {
             // W键 - 前进
             if (e.key === 'w' || e.key === 'W') {
                 e.preventDefault();

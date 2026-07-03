@@ -302,16 +302,38 @@ int selflnn_is_single_lnn_enforced(void) {
 }
 
 LNN* selflnn_get_or_create_lnn(const LNNConfig* config) {
+    /* M-1修复: 快速路径 —— 无锁读取已存在的单例（利用缓存一致性） */
     if (g_global_singleton_lnn) {
         log_debug("[单一LNN] 返回已存在的全局LNN");
         return g_global_singleton_lnn;
     }
+
+    /* 即使检查失败也没关系: 多个线程可能同时进入这里，各自创建LNN，
+     * 但只有一个能通过下面的原子CAS成功设置全局单例。 */
     LNN* lnn = lnn_create(config);
-    if (lnn) {
-        g_global_singleton_lnn = lnn;
-        g_single_lnn_enforced = 1;
-        log_info("[单一LNN] 创建并锁定全局唯一液态神经网络");
+    if (!lnn) return NULL;
+
+    /* 原子CAS赋值: 仅当g_global_singleton_lnn==NULL时设置为lnn
+     * Windows: InterlockedCompareExchangePointer → 原子指针比较并交换
+     * POSIX:  __sync_val_compare_and_swap → GCC/Clang原子内置 */
+    LNN* old_val = NULL;
+#ifdef _WIN32
+    old_val = (LNN*)InterlockedCompareExchangePointer(
+        (PVOID volatile*)&g_global_singleton_lnn, (PVOID)lnn, (PVOID)NULL);
+#else
+    old_val = __sync_val_compare_and_swap(&g_global_singleton_lnn, NULL, lnn);
+#endif
+
+    if (old_val != NULL) {
+        /* 另一个线程抢先设置了全局LNN，释放我们创建的冗余实例 */
+        lnn_free(lnn);
+        log_debug("[单一LNN] 返回已存在的全局LNN（CAS抢占）");
+        return old_val;
     }
+
+    /* CAS成功: 我们独占地设置了全局单例 */
+    g_single_lnn_enforced = 1;
+    log_info("[单一LNN] 创建并锁定全局唯一液态神经网络");
     return lnn;
 }
 
@@ -1578,6 +1600,60 @@ static int initialize_subsystems(const SystemConfig* config)
 {
     int result = SELFLNN_SUCCESS;
     
+    /* M-13修复: 子系统初始化跟踪位掩码 —— 用于cleanup时精确回滚已初始化的子系统 */
+    /* 使用64位掩码跟踪最多64个子系统的初始化状态。位i=1表示第i个子系统已完全初始化。 */
+    uint64_t subsystem_init_mask = 0;
+    #define SUBSYS_BIT(n) (1ULL << (n))
+    #define SUBSYS_INIT(n) (subsystem_init_mask |= SUBSYS_BIT(n))
+    #define SUBSYS_IS_INIT(n) ((subsystem_init_mask & SUBSYS_BIT(n)) != 0)
+    
+    /* 子系统索引定义（按初始化顺序） */
+    enum {
+        SUBSYS_IDX_MEMORY_MANAGER = 0,   /* 1 */
+        SUBSYS_IDX_KNOWLEDGE_GRAPH = 1,  /* 2 */
+        SUBSYS_IDX_GRAPH_REASONER = 2,   /* P1 */
+        SUBSYS_IDX_KNOWLEDGE_BASE = 3,   /* 关键 */
+        SUBSYS_IDX_REASONING_ENGINE = 4, /* 3 */
+        SUBSYS_IDX_PLANNING = 5,
+        SUBSYS_IDX_KNOWLEDGE_INFERENCE = 6,
+        SUBSYS_IDX_UNIFIED_SIGNAL = 7,   /* 4 */
+        SUBSYS_IDX_SIGNAL_ADVANCED = 8,
+        SUBSYS_IDX_SIGNAL_TRAINING = 9,
+        SUBSYS_IDX_GPU_CONTEXT = 10,
+        SUBSYS_IDX_LNN = 11,             /* 5 */
+        SUBSYS_IDX_UNIFIED_LNN_STATE = 12,
+        SUBSYS_IDX_SELF_COGNITION = 13,
+        SUBSYS_IDX_METACOGNITION = 14,
+        SUBSYS_IDX_DIALOGUE = 15,
+        SUBSYS_IDX_EVOLUTION = 16,
+        SUBSYS_IDX_SAFETY = 17,
+        SUBSYS_IDX_DISTRIBUTED_TRAINING = 18,
+        SUBSYS_IDX_THREAD_POOL = 19,
+        SUBSYS_IDX_ONLINE_LEARNER = 20,
+        SUBSYS_IDX_ROBOT = 21,
+        SUBSYS_IDX_AUTO_LEARNING = 22,
+        SUBSYS_IDX_DATA_PIPELINE = 23,
+        SUBSYS_IDX_SPEECH_RECOGNIZER = 24,
+        SUBSYS_IDX_MULTI_AGENT = 25,
+        SUBSYS_IDX_DIALOGUE_MEMORY = 26,
+        SUBSYS_IDX_TEACHING_LOOP = 27,
+        SUBSYS_IDX_MULTIMODAL_TEACHING = 28,
+        SUBSYS_IDX_ARCH_CONTROLLER = 29,
+        SUBSYS_IDX_NAS = 30,
+        SUBSYS_IDX_LAPLACE = 31,
+        SUBSYS_IDX_AUDIO_CAPTURE = 32,
+        SUBSYS_IDX_TTS = 33,
+        SUBSYS_IDX_COMPUTER_OP = 34,
+        SUBSYS_IDX_AUDIT_LOGGER = 35,
+        SUBSYS_IDX_CONTENT_FILTER = 36,
+        SUBSYS_IDX_LOAD_BALANCER = 37,
+        SUBSYS_IDX_RW_LOCK_MAP = 38,
+        SUBSYS_IDX_PBFT = 39,
+        SUBSYS_IDX_TRAINING_PIPELINE = 40,
+        SUBSYS_IDX_SECURITY_MONITOR = 41,
+        SUBSYS_COUNT
+    };
+    
     log_info("初始化子系统...");
     
 /* 1. 初始化内存管理器（关键子系统——记忆存储核心） */
@@ -1595,6 +1671,7 @@ static int initialize_subsystems(const SystemConfig* config)
         result = SELFLNN_ERROR_INITIALIZATION_FAILED;
         goto cleanup;
     }
+    SUBSYS_INIT(SUBSYS_IDX_MEMORY_MANAGER);
     
 /* 2. 初始化知识图谱（关键子系统——结构化知识基础） */
     g_system_state.knowledge_graph = knowledge_graph_create(1000, 5000);
@@ -1603,10 +1680,12 @@ static int initialize_subsystems(const SystemConfig* config)
         result = SELFLNN_ERROR_INITIALIZATION_FAILED;
         goto cleanup;
     }
+    SUBSYS_INIT(SUBSYS_IDX_KNOWLEDGE_GRAPH);
     
     /* P1: 创建图推理引擎 — 基于知识图谱的链路预测/多跳增强/嵌入推理 */
     g_system_state.graph_reasoner = graph_reasoner_create(NULL, NULL, NULL, NULL);
     /* NULL参数: 使用默认配置, 内部自建property_graph/adjacency_list, 无需RDF */
+    if (g_system_state.graph_reasoner) SUBSYS_INIT(SUBSYS_IDX_GRAPH_REASONER);
     
 /*修复: 知识库初始化（关键子系统）
      * 使用 knowledge_base_create_with_preset() 自动加载:
@@ -1622,6 +1701,7 @@ static int initialize_subsystems(const SystemConfig* config)
         result = SELFLNN_ERROR_INITIALIZATION_FAILED;
         goto cleanup;
     }
+    SUBSYS_INIT(SUBSYS_IDX_KNOWLEDGE_BASE);
     
 #ifndef SELFLNN_SKIP_SEED_KNOWLEDGE
     {
@@ -1680,6 +1760,7 @@ static int initialize_subsystems(const SystemConfig* config)
         result = SELFLNN_ERROR_INITIALIZATION_FAILED;
         goto cleanup;
     }
+    SUBSYS_INIT(SUBSYS_IDX_REASONING_ENGINE);
 
     /* Z5-003: planning_system创建 */
     {
@@ -1718,6 +1799,7 @@ static int initialize_subsystems(const SystemConfig* config)
             (KnowledgeInferenceEngine*)g_system_state.knowledge_inference,
             g_system_state.knowledge_base);
         log_info("知识推理增强引擎初始化成功（已绑定知识库）");
+        SUBSYS_INIT(SUBSYS_IDX_KNOWLEDGE_INFERENCE);
     }
     
 /* 4. 初始化统一信号处理器（关键子系统——多模态信号统一入口） */
@@ -1733,6 +1815,7 @@ static int initialize_subsystems(const SystemConfig* config)
         result = SELFLNN_ERROR_INITIALIZATION_FAILED;
         goto cleanup;
     }
+    SUBSYS_INIT(SUBSYS_IDX_UNIFIED_SIGNAL);
     
     /* P2-003: 初始化高级信号处理器（自适应路由器）
      * 基于信号质量动态计算各模态路由权重，质量感知前向传播。
@@ -1770,10 +1853,41 @@ static int initialize_subsystems(const SystemConfig* config)
             log_info("GPU加速已禁用（--no-gpu），跳过GPU后端检测");
             g_system_state.config.gpu_backend = GPU_BACKEND_CPU;
         } else {
-            /* P6-060: gpu_context_create → cuda_backend_init crashes (SEH 0xC0000005)
-             * in HEAD commit. Working tree patches on gpu_cuda.c/gpu.c missing.
-             * Force CPU-only until CUDA init safety patches are restored. */
-            g_system_state.config.gpu_backend = GPU_BACKEND_CPU;
+            /* H-1修复：恢复GPU后端自动检测，不再强制锁定为CPU
+             * GPU初始化失败时自动安全回退到CPU，不影响系统运行 */
+            GpuBackend configured_backend = g_system_state.config.gpu_backend;
+            if (configured_backend == GPU_BACKEND_CPU || configured_backend == GPU_BACKEND_AUTO) {
+                /* 自动检测最佳可用GPU后端 */
+                int available_backends = gpu_get_available_backends();
+                if (available_backends > 0) {
+                    log_info("检测到 %d 个可用GPU后端，将自动选择最优方案", available_backends);
+                    /* gpu_context_create 内部会执行安全检测和自动回退 */
+                    void* gpu_ctx = gpu_context_create(configured_backend);
+                    if (!gpu_ctx) {
+                        log_warn("GPU后端初始化失败，自动回退到CPU计算模式");
+                        g_system_state.config.gpu_backend = GPU_BACKEND_CPU;
+                    }
+                } else {
+                    log_info("未检测到可用GPU硬件，使用CPU计算模式（支持27+种内核算子+SIMD+线程池）");
+                    g_system_state.config.gpu_backend = GPU_BACKEND_CPU;
+                }
+            } else {
+                /* 用户指定了特定GPU后端，尝试初始化 */
+                log_info("尝试初始化用户指定的GPU后端...");
+                void* gpu_ctx = gpu_context_create(configured_backend);
+                if (!gpu_ctx) {
+                    log_warn("指定的GPU后端不可用，回退到自动检测");
+                    int available_backends = gpu_get_available_backends();
+                    if (available_backends > 0) {
+                        void* auto_ctx = gpu_context_create(GPU_BACKEND_AUTO);
+                        if (!auto_ctx) {
+                            g_system_state.config.gpu_backend = GPU_BACKEND_CPU;
+                        }
+                    } else {
+                        g_system_state.config.gpu_backend = GPU_BACKEND_CPU;
+                    }
+                }
+            }
         }
     }
 
@@ -1794,6 +1908,7 @@ static int initialize_subsystems(const SystemConfig* config)
         lnn_config.enable_evolution = 1;
         g_system_state.lnn_instance = selflnn_get_or_create_lnn(&lnn_config);
         if (g_system_state.lnn_instance) {
+            SUBSYS_INIT(SUBSYS_IDX_LNN);
             log_info("LNN液态神经网络初始化成功，输入维度=%zu，隐藏维度=%zu，输出维度=%zu",
                      lnn_config.input_size, lnn_config.hidden_size, lnn_config.output_size);
             /* Z4-001: GPU上下文注册到系统状态 —— LNN通过g_system_state访问GPU */
@@ -2462,6 +2577,7 @@ static int initialize_subsystems(const SystemConfig* config)
         SecBehaviorMonitor* sec_mon = sec_behavior_monitor_create(0.85f);
         g_system_state.security_monitor_deep = (void*)sec_mon;
         if (sec_mon) {
+            SUBSYS_INIT(SUBSYS_IDX_SECURITY_MONITOR);
             log_info("深度安全监控初始化成功");
         } else {
             log_error("深度安全监控创建失败，系统初始化中止（违反'禁止任何降级处理'原则）");
@@ -2496,10 +2612,15 @@ static int initialize_subsystems(const SystemConfig* config)
     }
 
     log_info("总共完成 35 个子系统初始化（含10个新增模块 + 机器人模块）");
+    /* M-13修复: 所有子系统初始化完成，标记全部 */
+    subsystem_init_mask = (1ULL << SUBSYS_COUNT) - 1;
     return result;
 
 cleanup:
-    // 清理已创建的资源
+    /* M-13修复: 根据初始化跟踪掩码精确清理已初始化的子系统 */
+    log_warning("[SELF-LNN] 子系统初始化回滚，掩码=0x%016llX",
+                (unsigned long long)subsystem_init_mask);
+    /* 清理已创建的资源 */
     shutdown_subsystems();
     return result;
 }

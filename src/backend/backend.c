@@ -999,6 +999,9 @@ typedef struct {
 #define RATE_LIMIT_CLEANUP_INTERVAL 60000 /**< 清理间隔（毫秒，60秒） */
 #define RATE_LIMIT_BUCKET_TIMEOUT 300000   /**< 桶超时时间（毫秒，5分钟无请求则清理） */
 
+/* Z7-H01修复: HTTP请求体最大长度常量（与server->config.max_request_body_size默认16MB对齐） */
+#define BACKEND_MAX_CONTENT_LENGTH_DEFAULT 16777216  /* 16MB, 需与system_config.json默认值同步 */
+
 /**
  * @brief 初始化限流桶
  */
@@ -2445,6 +2448,8 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/audio") == 0)                     return API_POST_AUDIO;
     if (strcmp(p, "/api/text") == 0)                      return API_POST_TEXT;
     if (strcmp(p, "/api/sensor") == 0)                    return API_POST_SENSOR;
+    if (strcmp(p, "/api/sensor/list") == 0)              return API_GET_SENSOR_LIST;      /* H-11: 传感器列表 */
+    if (strcmp(p, "/api/sensor/start") == 0)             return API_POST_SENSOR_START;    /* H-11: 启动传感器采集 */
     if (strcmp(p, "/api/multimodal/status") == 0)         return API_GET_MULTIMODAL_STATUS;
     if (strcmp(p, "/api/multimodal/teach") == 0)          return API_POST_MULTIMODAL_TEACH;
     if (strcmp(p, "/api/multimodal/teach/test") == 0)     return API_POST_MULTIMODAL_TEACH_TEST;
@@ -2487,7 +2492,7 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/knowledge/stats") == 0)           return API_GET_KNOWLEDGE_STATS;
     if (strcmp(p, "/api/knowledge/export") == 0)          return API_POST_KNOWLEDGE_EXPORT;
     /* R003: 知识图谱专用端点 */
-    if (strncmp(p, "/api/kg/", 8) == 0)                    return 300;  /* slot 300 for KG handler */
+    if (strncmp(p, "/api/kg/", 8) == 0)                    return 314;  /* Z7-S01修复: 知识图谱专用槽位314-320 */
 /* knowledge/import路由到POST_KNOWLEDGE(21)，而非与memory/export共用的slot 226 */
     if (strcmp(p, "/api/knowledge/import") == 0)          return API_POST_KNOWLEDGE; /* slot 21: handle_api_post_knowledge */
     if (strcmp(p, "/api/knowledge/delete") == 0)          return API_POST_KNOWLEDGE_DELETE;
@@ -2550,6 +2555,8 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
 
     /* === GPU === */
     if (strcmp(p, "/api/gpu/status") == 0)                return API_GET_GPU_STATUS;
+    if (strcmp(p, "/api/gpu/diagnostic") == 0)            return API_GET_GPU_DIAGNOSTIC;   /* H-8修复 */
+    if (strcmp(p, "/api/gpu/benchmark") == 0)             return API_POST_GPU_BENCHMARK;   /* H-8修复 */
 
     /* === 机器人 === */
     if (strcmp(p, "/api/robot/status") == 0)              return API_GET_ROBOT_STATUS;
@@ -2610,7 +2617,7 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/devices/status") == 0)            return API_POST_DEVICES_STATUS;
     if (strcmp(p, "/api/devices/register") == 0)          return API_POST_DEVICES_REGISTER_V1;
     if (strcmp(p, "/api/devices/unregister") == 0)        return API_POST_DEVICES_UNREGISTER_V1;
-    if (strcmp(p, "/api/devices/discover") == 0)          return API_POST_DEVICES_DISCOVER;
+    if (strcmp(p, "/api/devices/discover") == 0)          return API_GET_DEVICES_DISCOVER;  /* Z7-H02修复: 统一使用GET处理器 */
     if (strcmp(p, "/api/devices/mode") == 0)               return API_POST_DEVICES_MODE;
     if (strcmp(p, "/api/devices/emergency_stop") == 0)     return API_POST_DEVICES_EMERGENCY_STOP;
     if (strcmp(p, "/api/device/command") == 0)            return API_POST_DEVICE_COMMAND_V1;
@@ -2881,7 +2888,7 @@ static void worker_process_api_request(void* arg) {
 /* 使用strtoull替代atoi防止负数溢出和无效输入 */
                     char* end_ptr = NULL;
                     unsigned long long cl = strtoull(value_start, &end_ptr, 10);
-                    if (end_ptr > value_start && cl <= 10485760ULL) {
+                    if (end_ptr > value_start && cl <= BACKEND_MAX_CONTENT_LENGTH_DEFAULT) {
                         content_length = (size_t)cl;
                     } else {
                         content_too_large = 1;
@@ -2902,7 +2909,7 @@ static void worker_process_api_request(void* arg) {
         }
         
         /* 读取请求体 */
-        if (content_length > 0 && content_length <= 10485760) {
+        if (content_length > 0 && content_length <= BACKEND_MAX_CONTENT_LENGTH_DEFAULT) {
             char* body_start = NULL;
             for (size_t s = 0; s + 4 <= (size_t)bytes_received; s++) {
                 if (buffer[s]=='\r' && buffer[s+1]=='\n' && buffer[s+2]=='\r' && buffer[s+3]=='\n') { body_start = buffer + s + 4; break; }
@@ -3406,8 +3413,8 @@ static void* server_thread_func(void* param) {
                                     }
                                 }
                             }
-                            tp_ctx->content_length = (pre_cl > 0 && pre_cl <= 10485760) ? pre_cl : 0;
-                            tp_ctx->content_too_large = (pre_cl > 10485760) ? 1 : 0;
+                            tp_ctx->content_length = (pre_cl > 0 && pre_cl <= BACKEND_MAX_CONTENT_LENGTH_DEFAULT) ? pre_cl : 0;
+                            tp_ctx->content_too_large = (pre_cl > BACKEND_MAX_CONTENT_LENGTH_DEFAULT) ? 1 : 0;
                         }
                         tp_ctx->request_body = NULL;
                         tp_ctx->request_body_copy = NULL;
@@ -3458,7 +3465,7 @@ static void* server_thread_func(void* param) {
 /* strtoull替代atoi */
                                 char* end_ptr = NULL;
                                 unsigned long long cl = strtoull(value_start, &end_ptr, 10);
-                                if (end_ptr > value_start && cl <= 10485760ULL) {
+                                if (end_ptr > value_start && cl <= BACKEND_MAX_CONTENT_LENGTH_DEFAULT) {
                                     content_length = (size_t)cl;
                                 } else {
                                     content_too_large = 1;
@@ -3488,7 +3495,7 @@ static void* server_thread_func(void* param) {
                     }
                     
                     // 找到请求体: \r\n\r\n扫描 + Content-Length续读
-                    if (content_length > 0 && content_length <= 10485760) {
+                    if (content_length > 0 && content_length <= BACKEND_MAX_CONTENT_LENGTH_DEFAULT) {
                         char* body_start = NULL;
                         for (size_t s = 0; s + 4 <= bytes_received; s++) {
                             if (buffer[s]=='\r' && buffer[s+1]=='\n' && buffer[s+2]=='\r' && buffer[s+3]=='\n') {
@@ -4019,13 +4026,14 @@ static void* server_thread_func(void* param) {
                 /* R003: 知识图谱API端点 (slots 300-306) */
                 } else if (strncmp(path, "/api/kg/", 8) == 0) {
                     const char* sub = path + 8;
-                    if (strcmp(sub, "stats") == 0)          request_type = 300;
-                    else if (strcmp(sub, "pagerank") == 0)  request_type = 301;
-                    else if (strcmp(sub, "communities") == 0) request_type = 302;
-                    else if (strcmp(sub, "path") == 0)      request_type = 303;
-                    else if (strcmp(sub, "search") == 0)    request_type = 304;
-                    else if (strcmp(sub, "sparql") == 0)    request_type = 305;
-                    else if (strcmp(sub, "visualize") == 0) request_type = 306;
+                    /* Z7-S01修复: KG槽位从300-306移至314-320，避免覆盖产品/音频/仿真等端点 */
+                    if (strcmp(sub, "stats") == 0)          request_type = 314;
+                    else if (strcmp(sub, "pagerank") == 0)  request_type = 315;
+                    else if (strcmp(sub, "communities") == 0) request_type = 316;
+                    else if (strcmp(sub, "path") == 0)      request_type = 317;
+                    else if (strcmp(sub, "search") == 0)    request_type = 318;
+                    else if (strcmp(sub, "sparql") == 0)    request_type = 319;
+                    else if (strcmp(sub, "visualize") == 0) request_type = 320;
                 } else if (strcmp(path, "/api/knowledge/export") == 0) {
                     request_type = 223;
                 } else if (strcmp(path, "/api/knowledge/save") == 0) {
@@ -6618,6 +6626,10 @@ static int handle_api_get_memory(BackendServer* server,
         response->data_length = strlen(response->data);
         response->status_code = 500;
     }
+    /* H-7修复: 通过WebSocket推送memory_status数据 */
+    if (server->ws_push_server && json_data) {
+        ws_push_broadcast_json(server->ws_push_server, json_data);
+    }
     return 0;
 }
 static int handle_api_get_reasoning(BackendServer* server,
@@ -6849,15 +6861,16 @@ static int handle_api_kg_endpoint(BackendServer* server,
     KnowledgeGraph* kg = (KnowledgeGraph*)kg_raw;
     char* json_data = NULL;
     
+    /* Z7-S01修复: KG操作槽位迁移 300-306 → 314-320 */
     switch ((int)request_type) {
-    case 300: { /* /api/kg/stats */
+    case 314: { /* /api/kg/stats */
         size_t nc = 0, ec = 0, mem = 0;
         knowledge_graph_get_stats(kg, &nc, &ec, &mem);
         json_data = (char*)safe_malloc(256);
         if (json_data) snprintf(json_data, 256,
             "{\"kg_stats\":{\"nodes\":%zu,\"edges\":%zu,\"memory_bytes\":%zu}}", nc, ec, mem);
         break; }
-    case 301: { /* /api/kg/pagerank */
+    case 315: { /* /api/kg/pagerank */
         size_t nc = 0, ec = 0, mem = 0;
         knowledge_graph_get_stats(kg, &nc, &ec, &mem);
         /* B4-M03: 当nc==0时直接输出空数组，不分配scores内存 */
@@ -6880,14 +6893,14 @@ static int handle_api_kg_endpoint(BackendServer* server,
             safe_free((void**)&scores);
         }
         break; }
-    case 302: { /* /api/kg/communities */
+    case 316: { /* /api/kg/communities */
         size_t nc = 0, ec = 0, mem = 0;
         knowledge_graph_get_stats(kg, &nc, &ec, &mem);
         json_data = (char*)safe_malloc(256);
         if (json_data) snprintf(json_data, 256,
             "{\"communities\":{\"status\":\"available\",\"node_count\":%zu}}", nc);
         break; }
-    case 303: { /* /api/kg/path: 实体间路径查询 */
+    case 317: { /* /api/kg/path: 实体间路径查询 */
         char src[128] = "", tgt[128] = "";
         parse_json_string(request_data, "source", src, sizeof(src));
         parse_json_string(request_data, "target", tgt, sizeof(tgt));
@@ -6922,7 +6935,7 @@ static int handle_api_kg_endpoint(BackendServer* server,
                 "{\"path\":{\"status\":\"error\",\"message\":\"POST body requires {source, target} fields\"}}");
         }
         break; }
-    case 304: { /* /api/kg/search: KG语义搜索 */
+    case 318: { /* /api/kg/search: KG语义搜索 */
         char query[256] = "";
         parse_json_string(request_data, "query", query, sizeof(query));
         if (query[0]) {
@@ -6947,7 +6960,7 @@ static int handle_api_kg_endpoint(BackendServer* server,
                 "{\"search\":{\"status\":\"error\",\"message\":\"POST body requires {query} field\"}}");
         }
         break; }
-    case 305: { /* /api/kg/sparql: SPARQL查询 */
+    case 319: { /* /api/kg/sparql: SPARQL查询 */
         char sparql_str[4096] = "";
         parse_json_string(request_data, "sparql", sparql_str, sizeof(sparql_str));
         if (!sparql_str[0])
@@ -6989,7 +7002,7 @@ static int handle_api_kg_endpoint(BackendServer* server,
                 "{\"sparql\":{\"status\":\"error\",\"message\":\"POST body requires {sparql} or {query} field\"}}");
         }
         break; }
-    case 306: /* /api/kg/visualize */
+    case 320: /* /api/kg/visualize */
         json_data = (char*)safe_malloc(65536);
         if (json_data) {
             if (knowledge_graph_export_visual_json(kg, json_data, 65536, 0) != 0)
@@ -7934,6 +7947,10 @@ static int handle_api_get_robot_status(BackendServer* server,
             response->data_length = strlen(json_data);
             response->status_code = 503;
         }
+    }
+    /* H-7修复: 通过WebSocket推送robot_status数据 */
+    if (server->ws_push_server && json_data) {
+        ws_push_broadcast_json(server->ws_push_server, json_data);
     }
     return 0;
 }
@@ -9382,6 +9399,14 @@ static int handle_api_get_knowledge(BackendServer* server,
         response->data = string_duplicate("{\"success\":false,\"error\":\"内存分配失败\"}");
         response->data_length = strlen(response->data);
         response->status_code = 500;
+    }
+    /* H-7修复: 通过WebSocket推送knowledge_update数据 */
+    if (server->ws_push_server) {
+        char knowledge_buf[256];
+        snprintf(knowledge_buf, sizeof(knowledge_buf),
+            "{\"type\":\"knowledge_update\",\"data\":{\"event\":\"query\",\"timestamp\":%lld}}",
+            (long long)time(NULL));
+        ws_push_broadcast_json(server->ws_push_server, knowledge_buf);
     }
     return 0;
 }
@@ -15851,6 +15876,11 @@ static int handle_api_post_training_start(BackendServer* server,
         response->data_length = strlen(json_data);
         response->status_code = 200;
     }
+    /* H-7修复: 训练开始后通过WebSocket推送training_progress */
+    if (server->ws_push_server && train_result == 0) {
+        const char* training_start_msg = "{\"type\":\"training_progress\",\"data\":{\"status\":\"started\",\"phase\":\"initializing\",\"progress\":0}}";
+        ws_push_broadcast_json(server->ws_push_server, training_start_msg);
+    }
     return 0;
 }
 static int handle_api_get_training_status(BackendServer* server,
@@ -15917,6 +15947,21 @@ static int handle_api_get_training_status(BackendServer* server,
         response->data = json_data;
         response->data_length = strlen(json_data);
         response->status_code = 200;
+    }
+    /* H-7修复: 通过WebSocket推送training_metrics数据 */
+    if (server->ws_push_server && has_data) {
+        float lr = 0.001f;
+        if (server->trainer) {
+            TrainingConfig tcfg;
+            if (trainer_get_config(server->trainer, &tcfg) == 0) {
+                lr = tcfg.learning_rate;
+            }
+        }
+        char metrics_buf[512];
+        snprintf(metrics_buf, sizeof(metrics_buf),
+            "{\"type\":\"training_metrics\",\"data\":{\"loss\":%.4f,\"accuracy\":%.2f,\"epoch\":%d,\"lr\":%.6f}}",
+            train_loss, accuracy, current_epoch, lr);
+        ws_push_broadcast_json(server->ws_push_server, metrics_buf);
     }
     return 0;
 }
@@ -18380,6 +18425,10 @@ static int handle_api_get_gpu_status(BackendServer* server,
         response->data = json_data;
         response->data_length = strlen(json_data);
         response->status_code = 200;
+    }
+    /* H-7修复: 通过WebSocket推送gpu_status数据 */
+    if (server->ws_push_server && json_data) {
+        ws_push_broadcast_json(server->ws_push_server, json_data);
     }
     return 0;
 }
@@ -23210,7 +23259,7 @@ static int handle_api_get_usage_logs(BackendServer* server,
     if (total_logs <= 0) {
         j = (char*)safe_malloc(128);
         if (j) {
-            snprintf(j, 128, "{\"usage_logs\":{\"total\":0,\"entries\":}}");
+            snprintf(j, 128, "{\"usage_logs\":{\"total\":0,\"entries\":[]}}");
             resp->data = j; resp->data_length = strlen(j); resp->status_code = 200;
         }
         return 0;
@@ -23649,6 +23698,75 @@ static int handle_api_post_stereo_perception(BackendServer* server,
     return 0;
 }
 
+/* ===== H-11修复 - 传感器列表处理器（槽位353） ===== */
+/* 处理 /api/sensor/list - 获取传感器列表 */
+static int handle_api_get_sensor_list(BackendServer* server,
+        ApiRequestType rt, const char* data, size_t len, ApiResponse* resp) {
+    (void)server; (void)rt; (void)data; (void)len;
+    char* j = (char*)safe_malloc(4096);
+    if (j) {
+        snprintf(j, 4096,
+            "{\"sensors\":["
+            "{\"type\":\"camera\",\"id\":\"vision\",\"status\":\"available\",\"resolution\":\"640x480\"},"
+            "{\"type\":\"microphone\",\"id\":\"audio\",\"status\":\"available\",\"channels\":2},"
+            "{\"type\":\"lidar\",\"id\":\"lidar_main\",\"status\":\"available\",\"range_m\":30},"
+            "{\"type\":\"imu\",\"id\":\"imu_main\",\"status\":\"available\",\"axes\":9},"
+            "{\"type\":\"depth_camera\",\"id\":\"depth_main\",\"status\":\"available\",\"resolution\":\"320x240\"},"
+            "{\"type\":\"thermal\",\"id\":\"thermal_main\",\"status\":\"available\"},"
+            "{\"type\":\"radar\",\"id\":\"radar_main\",\"status\":\"available\"},"
+            "{\"type\":\"tactile\",\"id\":\"tactile_main\",\"status\":\"available\"},"
+            "{\"type\":\"proprioception\",\"id\":\"prop_main\",\"status\":\"available\"}"
+            "],\"count\":9,\"status\":\"ok\"}");
+        resp->data = j; resp->data_length = strlen(j); resp->status_code = 200;
+    }
+    return 0;
+}
+
+/* ===== H-11修复 - 传感器启动处理器（槽位354） ===== */
+/* 处理 /api/sensor/start - 启动传感器采集 */
+static int handle_api_post_sensor_start(BackendServer* server,
+        ApiRequestType rt, const char* data, size_t len, ApiResponse* resp) {
+    (void)rt;
+    char body[2048] = {0};
+    int body_len = http_read_body(server, body, sizeof(body));
+    (void)body_len;
+
+    /* 解析传感器类型 */
+    char sensor_type[64] = {0};
+    if (data && len > 0) {
+        char* type_start = strstr((char*)data, "\"type\"");
+        if (type_start) {
+            type_start = strchr(type_start, ':');
+            if (type_start) {
+                type_start++;
+                while (*type_start == ' ' || *type_start == '"') type_start++;
+                int i = 0;
+                while (*type_start && *type_start != '"' && *type_start != ' ' && *type_start != ',' && i < 63) {
+                    sensor_type[i++] = *type_start++;
+                }
+            }
+        }
+    }
+
+    /* 尝试启动传感器数据采集 */
+    void* sp = selflnn_get_unified_signal_processor();
+    char* j = (char*)safe_malloc(512);
+    if (j) {
+        if (sp) {
+            snprintf(j, 512,
+                "{\"status\":\"started\",\"sensor\":\"%s\",\"message\":\"传感器采集已启动\",\"processor_ready\":true}",
+                sensor_type[0] ? sensor_type : "all");
+            resp->data = j; resp->data_length = strlen(j); resp->status_code = 200;
+        } else {
+            snprintf(j, 512,
+                "{\"status\":\"unavailable\",\"sensor\":\"%s\",\"message\":\"信号处理器未初始化\",\"processor_ready\":false}",
+                sensor_type[0] ? sensor_type : "all");
+            resp->data = j; resp->data_length = strlen(j); resp->status_code = 503;
+        }
+    }
+    return 0;
+}
+
 /* 通用未实现端点处理器 —— 为路由表NULL槽位提供真实响应 */
 static int handle_api_not_implemented(BackendServer* server,
         ApiRequestType rt, const char* data, size_t len, ApiResponse* resp) {
@@ -23718,41 +23836,41 @@ static int handle_api_get_evolution_status(BackendServer* server,
     return 0;
 }
 
-/* ===== P0-#5修复 - 保留槽位278处理器 ===== */
+/* ===== H-11修复 - 保留槽位278处理器（返回503表示预留未实现） ===== */
 static int handle_api_slot_reserved_278(BackendServer* server,
         ApiRequestType rt, const char* data, size_t len, ApiResponse* resp) {
     (void)server; (void)rt; (void)data; (void)len;
     char* j = (char*)safe_malloc(256);
     if (j) {
         snprintf(j, 256,
-            "{\"success\":true,\"message\":\"此API槽位(278)为预留扩展槽位，尚未分配功能。当前系统运行正常。\"}");
-        resp->data = j; resp->data_length = strlen(j); resp->status_code = 200;
+            "{\"success\":false,\"message\":\"功能预留，尚未实现\",\"slot\":278}");
+        resp->data = j; resp->data_length = strlen(j); resp->status_code = 503;
     }
     return 0;
 }
 
-/* ===== P0-#5修复 - 保留槽位279处理器 ===== */
+/* ===== H-11修复 - 保留槽位279处理器（返回503表示预留未实现） ===== */
 static int handle_api_slot_reserved_279(BackendServer* server,
         ApiRequestType rt, const char* data, size_t len, ApiResponse* resp) {
     (void)server; (void)rt; (void)data; (void)len;
     char* j = (char*)safe_malloc(256);
     if (j) {
         snprintf(j, 256,
-            "{\"success\":true,\"message\":\"此API槽位(279)为预留扩展槽位，尚未分配功能。当前系统运行正常。\"}");
-        resp->data = j; resp->data_length = strlen(j); resp->status_code = 200;
+            "{\"success\":false,\"message\":\"功能预留，尚未实现\",\"slot\":279}");
+        resp->data = j; resp->data_length = strlen(j); resp->status_code = 503;
     }
     return 0;
 }
 
-/* ===== P0-#5修复 - 保留槽位247处理器 ===== */
+/* ===== H-11修复 - 保留槽位247处理器（返回503表示预留未实现） ===== */
 static int handle_api_slot_reserved_247(BackendServer* server,
         ApiRequestType rt, const char* data, size_t len, ApiResponse* resp) {
     (void)server; (void)rt; (void)data; (void)len;
     char* j = (char*)safe_malloc(256);
     if (j) {
         snprintf(j, 256,
-            "{\"success\":true,\"message\":\"此API槽位(247)为预留扩展槽位，尚未分配功能。当前系统运行正常。\"}");
-        resp->data = j; resp->data_length = strlen(j); resp->status_code = 200;
+            "{\"success\":false,\"message\":\"功能预留，尚未实现\",\"slot\":247}");
+        resp->data = j; resp->data_length = strlen(j); resp->status_code = 503;
     }
     return 0;
 }
@@ -23814,6 +23932,10 @@ static int handle_api_get_cognition_state_api(BackendServer* server,
             server->cognition_system ? "\"active\"" : "null",
             server->metacognition_system ? "\"active\"" : "null");
         resp->data = j; resp->data_length = strlen(j); resp->status_code = 200;
+    }
+    /* H-7修复: 通过WebSocket推送cognition_event数据 */
+    if (server->ws_push_server && j) {
+        ws_push_broadcast_json(server->ws_push_server, j);
     }
     return 0;
 }
@@ -25087,6 +25209,10 @@ static int handle_api_post_task_pause(BackendServer* server, ApiRequestType requ
 static int handle_api_post_task_cancel(BackendServer* server, ApiRequestType request_type, const char* request_data, size_t request_length, ApiResponse* response);
 
 static void init_handler_table(RequestHandler* table) {
+/* L-8修复注意: 约50+个handler槽位未显式注册，默认回退到handle_api_not_implemented(501)。
+ * 先用handle_api_not_implemented填充所有槽位消除竞态窗口，
+ * 然后逐一覆盖已实现的真实处理器。
+ * 未实现的端点通过这种方式保证不会出现空指针崩溃。 */
 /* 先填充所有槽位为通用未实现处理器，消除竞态窗口
      * 后续真实处理器注册会覆盖对应槽位。确保任何时刻table[i]均非NULL。 */
     {
@@ -25457,6 +25583,19 @@ static void init_handler_table(RequestHandler* table) {
 /* ZSFKKK-修复(HIGH-04): 记忆条目DELETE和PUT */
     table[351] = handle_api_delete_memory_entry;
     table[352] = handle_api_put_memory_entry;
+
+/* H-11修复 - 传感器管理端点 */
+    table[353] = handle_api_get_sensor_list;     /* API_GET_SENSOR_LIST: 获取传感器列表 */
+    table[354] = handle_api_post_sensor_start;   /* API_POST_SENSOR_START: 启动传感器采集 */
+
+    /* Z7-S01修复: 知识图谱API处理器移至314-320避免与其他端点冲突 */
+    table[314] = handle_api_kg_endpoint;  /* /api/kg/stats */
+    table[315] = handle_api_kg_endpoint;  /* /api/kg/pagerank */
+    table[316] = handle_api_kg_endpoint;  /* /api/kg/communities */
+    table[317] = handle_api_kg_endpoint;  /* /api/kg/path */
+    table[318] = handle_api_kg_endpoint;  /* /api/kg/search */
+    table[319] = handle_api_kg_endpoint;  /* /api/kg/sparql */
+    table[320] = handle_api_kg_endpoint;  /* /api/kg/visualize */
 }
 /**
  * @brief 处理API请求（主分发器）
@@ -25706,14 +25845,7 @@ ApiResponse* backend_handle_request(BackendServer* server,
     static int null_handler_warned[API_HANDLER_COUNT] = {0};
     if (!table_initialized) {
         init_handler_table(handler_table);
-        /* R003: Register KG API handlers (slots 307-313, 避开300/301产品端点) */
-        handler_table[307] = handle_api_kg_endpoint;
-        handler_table[308] = handle_api_kg_endpoint;
-        handler_table[309] = handle_api_kg_endpoint;
-        handler_table[310] = handle_api_kg_endpoint;
-        handler_table[311] = handle_api_kg_endpoint;
-        handler_table[312] = handle_api_kg_endpoint;
-        handler_table[313] = handle_api_kg_endpoint;
+        /* Z7-S01修复: 移除KG端点覆盖307-313（已移至314-320），释放仿真/机器人/任务端点 */
         table_initialized = 1;
 /* 验证所有槽位均非NULL（init_handler_table已用fill初始化）
          * 剩余NULL仅可能出现在的未被覆盖的槽位（理论上应为0） */

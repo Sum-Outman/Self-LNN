@@ -222,6 +222,162 @@ int ode_dp54_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void* ctx,
     return (total_steps >= max_iter && t_current < t_target - 1e-14f) ? -3 : 0;
 }
 
+/* ============================================================================
+ * M-4: Euler/RK2/RK4 显式ODE求解器公共API
+ *
+ * 补齐README声明的8种求解器：Euler（显式欧拉法，1阶）、
+ * RK2（中点法，2阶）、RK4（经典四阶Runge-Kutta，4阶）。
+ * 每个求解器遵循统一的参数签名和错误处理约定。
+ *
+ * 工作空间需求：
+ *   Euler: 1*n（临时缓冲区 tmp）
+ *   RK2:   3*n（k1, k2, tmp）
+ *   RK4:   5*n（k1, k2, k3, k4, tmp）
+ * ============================================================================ */
+
+/* ---- Euler 显式欧拉法（1阶精度） ---- */
+
+size_t ode_euler_workspace_size(size_t n)
+{
+    return n;  /* 仅需1个临时缓冲区 */
+}
+
+int ode_euler_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void* ctx,
+                    size_t n, float* workspace, float* h_actual, int* steps_used)
+{
+    if (!y || !rhs || !workspace || n == 0) return -1;
+    if (delta_t <= 0.0f) return -1;
+    if (ode_check_input_finite(y, n) != 0) return -1;
+
+    float* tmp = workspace;
+    float t_current = t;
+    float t_target = t + delta_t;
+    float h = delta_t;
+    int steps = 1;
+
+    /* 显式欧拉法: y_{n+1} = y_n + h * f(t_n, y_n) */
+    if (rhs(t_current, y, tmp, ctx) != 0) return -2;
+    if (ode_check_output_finite(tmp, n) != 0) return ODE_ERR_NAN_INF;
+
+    for (size_t i = 0; i < n; i++) {
+        y[i] = y[i] + h * tmp[i];
+    }
+
+    if (h_actual) *h_actual = h;
+    if (steps_used) *steps_used = steps;
+    return 0;
+}
+
+/* ---- RK2 中点法（2阶精度） ---- */
+
+size_t ode_rk2_workspace_size(size_t n)
+{
+    return 3 * n;  /* k1[n] + k2[n] + tmp[n] */
+}
+
+int ode_rk2_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void* ctx,
+                  size_t n, float* workspace, float* h_actual, int* steps_used)
+{
+    if (!y || !rhs || !workspace || n == 0) return -1;
+    if (delta_t <= 0.0f) return -1;
+    if (ode_check_input_finite(y, n) != 0) return -1;
+
+    float* k1  = workspace;         /* k1 = f(t_n, y_n) */
+    float* k2  = workspace + n;     /* k2 = f(t_n + h/2, y_n + h*k1/2) */
+    float* tmp = workspace + 2 * n; /* 临时缓冲区 */
+
+    float h = delta_t;
+    int steps = 1;
+
+    /* 中点法（RK2）：
+     *   k1 = f(t_n, y_n)
+     *   k2 = f(t_n + h/2, y_n + h*k1/2)
+     *   y_{n+1} = y_n + h * k2
+     */
+    if (rhs(t, y, k1, ctx) != 0) return -2;
+    if (ode_check_output_finite(k1, n) != 0) return ODE_ERR_NAN_INF;
+
+    for (size_t i = 0; i < n; i++) {
+        tmp[i] = y[i] + 0.5f * h * k1[i];
+    }
+    if (rhs(t + 0.5f * h, tmp, k2, ctx) != 0) return -2;
+    if (ode_check_output_finite(k2, n) != 0) return ODE_ERR_NAN_INF;
+
+    for (size_t i = 0; i < n; i++) {
+        y[i] = y[i] + h * k2[i];
+    }
+
+    if (h_actual) *h_actual = h;
+    if (steps_used) *steps_used = steps;
+    return 0;
+}
+
+/* ---- RK4 经典四阶Runge-Kutta（4阶精度） ---- */
+
+size_t ode_rk4_workspace_size(size_t n)
+{
+    return 5 * n;  /* k1[n] + k2[n] + k3[n] + k4[n] + tmp[n] */
+}
+
+int ode_rk4_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void* ctx,
+                  size_t n, float* workspace, float* h_actual, int* steps_used)
+{
+    if (!y || !rhs || !workspace || n == 0) return -1;
+    if (delta_t <= 0.0f) return -1;
+    if (ode_check_input_finite(y, n) != 0) return -1;
+
+    float* k1  = workspace;         /* k1 = f(t_n, y_n) */
+    float* k2  = workspace + n;     /* k2 = f(t_n + h/2, y_n + h*k1/2) */
+    float* k3  = workspace + 2 * n; /* k3 = f(t_n + h/2, y_n + h*k2/2) */
+    float* k4  = workspace + 3 * n; /* k4 = f(t_n + h,   y_n + h*k3) */
+    float* tmp = workspace + 4 * n; /* 临时缓冲区 */
+
+    float h = delta_t;
+    int steps = 1;
+
+    /* 经典四阶Runge-Kutta：
+     *   k1 = f(t_n, y_n)
+     *   k2 = f(t_n + h/2, y_n + h*k1/2)
+     *   k3 = f(t_n + h/2, y_n + h*k2/2)
+     *   k4 = f(t_n + h,   y_n + h*k3)
+     *   y_{n+1} = y_n + h*(k1 + 2*k2 + 2*k3 + k4)/6
+     */
+
+    /* 阶段1: k1 */
+    if (rhs(t, y, k1, ctx) != 0) return -2;
+    if (ode_check_output_finite(k1, n) != 0) return ODE_ERR_NAN_INF;
+
+    /* 阶段2: k2（中点评估） */
+    for (size_t i = 0; i < n; i++) {
+        tmp[i] = y[i] + 0.5f * h * k1[i];
+    }
+    if (rhs(t + 0.5f * h, tmp, k2, ctx) != 0) return -2;
+    if (ode_check_output_finite(k2, n) != 0) return ODE_ERR_NAN_INF;
+
+    /* 阶段3: k3（中点评估，用k2修正） */
+    for (size_t i = 0; i < n; i++) {
+        tmp[i] = y[i] + 0.5f * h * k2[i];
+    }
+    if (rhs(t + 0.5f * h, tmp, k3, ctx) != 0) return -2;
+    if (ode_check_output_finite(k3, n) != 0) return ODE_ERR_NAN_INF;
+
+    /* 阶段4: k4（终点评估，用k3修正） */
+    for (size_t i = 0; i < n; i++) {
+        tmp[i] = y[i] + h * k3[i];
+    }
+    if (rhs(t + h, tmp, k4, ctx) != 0) return -2;
+    if (ode_check_output_finite(k4, n) != 0) return ODE_ERR_NAN_INF;
+
+    /* 最终更新: y_{n+1} = y_n + h*(k1 + 2*k2 + 2*k3 + k4)/6 */
+    for (size_t i = 0; i < n; i++) {
+        y[i] = y[i] + h * (k1[i] + 2.0f * k2[i] + 2.0f * k3[i] + k4[i]) / 6.0f;
+    }
+
+    if (h_actual) *h_actual = h;
+    if (steps_used) *steps_used = steps;
+    return 0;
+}
+
 /* ======================================================================
  * 第4部分：事件检测和密集输出实现
  *

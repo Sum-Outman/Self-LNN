@@ -3,6 +3,7 @@
 # 添加自我认知源文件
 set(SELF_COGNITION_SOURCES
     self_cognition.c
+    bdi_model.c
     abstraction.c
     metacognition.c
     deep_reflection.c

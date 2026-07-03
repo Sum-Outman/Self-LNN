@@ -1042,7 +1042,7 @@
             return;
         }
         try {
-            var resp = await window.SelfLnnApi.request('/api/kg/sparql', {
+            var resp = await window.SelfLnnApi.request('/kg/sparql', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ query: queryEl.value.trim() })
@@ -1063,7 +1063,7 @@
         var topkEl = document.getElementById('kg-pagerank-topk');
         var topk = topkEl ? parseInt(topkEl.value) || 10 : 10;
         try {
-            var resp = await window.SelfLnnApi.request('/api/kg/pagerank', {
+            var resp = await window.SelfLnnApi.request('/kg/pagerank', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ top_k: topk })
@@ -1082,7 +1082,7 @@
      */
     async function kgCommunityDetect() {
         try {
-            var resp = await window.SelfLnnApi.request('/api/kg/communities', {
+            var resp = await window.SelfLnnApi.request('/kg/communities', {
                 method: 'GET'
             });
             if (!resp.ok) throw new Error('HTTP ' + resp.status);
@@ -1104,7 +1104,7 @@
             return;
         }
         try {
-            var resp = await window.SelfLnnApi.request('/api/kg/search', {
+            var resp = await window.SelfLnnApi.request('/kg/search', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ query: queryEl.value.trim(), top_k: 20 })
@@ -1131,7 +1131,7 @@
             return;
         }
         try {
-            var resp = await window.SelfLnnApi.request('/api/kg/path', {
+            var resp = await window.SelfLnnApi.request('/kg/path', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ from: fromVal, to: toVal, max_depth: 5 })

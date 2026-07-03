@@ -360,17 +360,43 @@ typedef struct {
 static StateSnapshot g_snapshots[MAX_SNAPSHOTS];
 static int g_snapshot_count = 0;
 static MutexHandle g_snapshot_mutex = NULL;
-static volatile int g_snapshot_mutex_init_done = 0;
+static volatile long g_snapshot_mutex_init_done = 0;  /* H-5修复：改为原子标志 */
+static MutexHandle g_snapshot_init_guard = NULL;      /* H-5修复：初始化保护锁 */
+
+/* H-5修复：使用双重检查锁定确保互斥锁初始化线程安全 */
+static int ensure_snapshot_mutex(void) {
+    if (g_snapshot_mutex_init_done) return 0;
+    if (!g_snapshot_init_guard) {
+        g_snapshot_init_guard = mutex_create();
+        if (!g_snapshot_init_guard) return -1;
+    }
+    mutex_lock(g_snapshot_init_guard);
+    if (!g_snapshot_mutex_init_done) {
+        g_snapshot_mutex = mutex_create();
+        if (!g_snapshot_mutex) {
+            mutex_unlock(g_snapshot_init_guard);
+            return -1;
+        }
+#ifdef _WIN32
+        InterlockedExchange(&g_snapshot_mutex_init_done, 1);
+#else
+        __atomic_store_n(&g_snapshot_mutex_init_done, 1, __ATOMIC_SEQ_CST);
+#endif
+    }
+    mutex_unlock(g_snapshot_init_guard);
+    return 0;
+}
 
 int network_state_snapshot_save(NetworkState* state, const char* label, int instance_id) {
     if (!state || !state->current_state) return -1;
-    if (!g_snapshot_mutex_init_done) {
-        g_snapshot_mutex = mutex_create();
-        g_snapshot_mutex_init_done = 1;
-    }
+    /* H-5修复：使用线程安全的双重检查锁定初始化 */
+    if (ensure_snapshot_mutex() != 0) return -2;
     mutex_lock(g_snapshot_mutex);
 
-/* ZSF-010修复：使用instance_id偏移隔离不同LNN实例的快照 */
+/* L-4修复注意: instance_id 有符号/无符号混合比较。
+ * instance_id > 0 时使用 instance_id * MAX_SNAPSHOTS_PER_INSTANCE 作为偏移。
+ * 负数 instance_id 将不使用偏移（行为视为 instance_id <= 0）。
+ * 如需更严格的负数处理，调用方应确保 instance_id 为非负值。 */
     int idx = g_snapshot_count;
     int instance_base = (instance_id > 0) ? instance_id * MAX_SNAPSHOTS_PER_INSTANCE : 0;
     int slot = idx + instance_base;

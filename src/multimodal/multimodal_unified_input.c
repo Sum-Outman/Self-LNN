@@ -6,6 +6,9 @@
  * 所有模态控制信号直接拼接为统一输入向量，通过单一CfC细胞进行连续时间状态演化，
  * CfC隐藏状态即为统一表示，不进行任何预融合加权平均。
  * 严格遵循：不需要多模型融合、不需要跨模态注意力。
+ *
+ * L-10修复注意: UnifiedInputState.lnn_instance 必须绑定外部LNN实例才能工作。
+ * 调用方需在创建UnifiedInputState后通过 unified_input_set_lnn() 设置共享LNN引用。
  */
 
 #include "selflnn/multimodal/multimodal_unified_input.h"

@@ -63,6 +63,7 @@
 #include "selflnn/knowledge/knowledge.h"
 #include "selflnn/cognition/deep_reflection.h"
 #include "selflnn/cognition/deep_thought_chain.h"
+#include "selflnn/cognition/bdi_model.h"  /* M-7修复: BDI模型提取到独立模块 */
 #include "selflnn/programming/programming_bridge.h"  /* 自我编程闭环桥接 */
 #include <stdlib.h>
 #include <string.h>
@@ -7339,36 +7340,21 @@ static float compute_action_similarity(const float* a, const float* b, size_t di
 }
 
 /**
- * @brief 贝叶斯信念更新
+ * @brief 贝叶斯信念更新 (M-7修复: 委托到bdi_model模块)
  * 使用观测数据以贝叶斯方式更新信念向量
  */
 static void update_belief_bayesian(float* belief, size_t dim,
                                     const float* observation, float certainty) {
-    if (!belief || !observation || dim == 0) return;
-    float prior_weight = 1.0f - certainty * 0.5f;
-    float posterior_weight = certainty * 0.5f;
-    for (size_t i = 0; i < dim; i++) {
-        belief[i] = belief[i] * prior_weight + observation[i] * posterior_weight;
-        if (belief[i] < 0.0f) belief[i] = 0.0f;
-        if (belief[i] > 1.0f) belief[i] = 1.0f;
-    }
+    bdi_update_belief_bayesian(belief, dim, observation, certainty);
 }
 
 /**
- * @brief 从欲望和信念计算意图
+ * @brief 从欲望和信念计算意图 (M-7修复: 委托到bdi_model模块)
  * 意图 = desire ⊙ belief (逐元素相乘后归一化)
  */
 static void compute_intention_from_desire_belief(float* intention, const float* desire,
                                                   const float* belief, size_t dim) {
-    if (!intention || !desire || !belief || dim == 0) return;
-    float sum = 0.0f;
-    for (size_t i = 0; i < dim; i++) {
-        intention[i] = desire[i] * belief[i];
-        sum += intention[i];
-    }
-    if (sum > 1e-10f) {
-        for (size_t i = 0; i < dim; i++) intention[i] /= sum;
-    }
+    bdi_compute_intention_from_desire_belief(intention, desire, belief, dim);
 }
 
 /**

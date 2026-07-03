@@ -84,6 +84,32 @@ typedef struct {
 
 static DialogueCfCWeights g_dialogue_cfc_weights = {0};
 
+/* M-9修复: 全局CfC权重互斥锁 —— 保护多实例并发访问 g_dialogue_cfc_weights
+ * 采用与 selflnn.c 相同的双重检查锁定初始化模式 */
+#ifdef _WIN32
+#include <windows.h>
+static CRITICAL_SECTION g_dialogue_weights_cs;
+static volatile LONG g_dialogue_weights_lock_init = 0;
+#define DIALOGUE_WEIGHTS_LOCK_INIT() do {                                    \
+    if (!g_dialogue_weights_lock_init) {                                     \
+        if (InterlockedCompareExchange(&g_dialogue_weights_lock_init, 2, 0) == 0) { \
+            InitializeCriticalSection(&g_dialogue_weights_cs);                \
+            g_dialogue_weights_lock_init = 1;                                \
+        } else {                                                             \
+            while (g_dialogue_weights_lock_init != 1) { Sleep(0); }          \
+        }                                                                    \
+    }                                                                        \
+} while(0)
+#define DIALOGUE_WEIGHTS_LOCK()   EnterCriticalSection(&g_dialogue_weights_cs)
+#define DIALOGUE_WEIGHTS_UNLOCK() LeaveCriticalSection(&g_dialogue_weights_cs)
+#else
+#include <pthread.h>
+static pthread_mutex_t g_dialogue_weights_mutex = PTHREAD_MUTEX_INITIALIZER;
+#define DIALOGUE_WEIGHTS_LOCK_INIT() do { } while(0)
+#define DIALOGUE_WEIGHTS_LOCK()   pthread_mutex_lock(&g_dialogue_weights_mutex)
+#define DIALOGUE_WEIGHTS_UNLOCK() pthread_mutex_unlock(&g_dialogue_weights_mutex)
+#endif
+
 /* 全局对话处理器引用，用于LNN驱动的意图分析 */
 static DialogueProcessor* g_dialogue_processor_global = NULL;
 
@@ -298,6 +324,10 @@ int dialogue_evolve_state(DialogueProcessor* processor,
         float* h = processor->dialogue_state_buffer;
         size_t in_dim = feature_count;
 
+        /* M-9修复: 加锁保护全局权重单例 —— 初始化、同步、读写均在临界区内 */
+        DIALOGUE_WEIGHTS_LOCK_INIT();
+        DIALOGUE_WEIGHTS_LOCK();
+
 /* 使用存储的确定性Xavier初始化权重替代随机生成
  *修复: 当共享LNN可用时，优先从LNN同步权重；
          * 对话系统的独立CfC权重备份仅在LNN未训练时作为冷启动后备 */
@@ -348,6 +378,8 @@ int dialogue_evolve_state(DialogueProcessor* processor,
 
             h[i] = h[i] * decay + (1.0f - decay) * gate * act;
         }
+
+        DIALOGUE_WEIGHTS_UNLOCK();
     } else {
         float alpha = 1.0f - expf(-dt / processor->config.dialogue_time_constant);
         size_t copy_count = (feature_count < processor->dialogue_buffer_size)
@@ -1189,7 +1221,14 @@ DialogueResponse* dialogue_process_input_ext(DialogueProcessor* processor,
         intent.max_iterations = 2;
 
         static SelfProgrammingEngine* cached_prog = NULL;
-        if (!cached_prog) cached_prog = self_programming_engine_create(LANG_C);
+        if (!cached_prog) {
+            cached_prog = self_programming_engine_create(LANG_C);
+            if (!cached_prog) {
+                /* L-11修复: 创建失败时记录错误日志，避免永久静默跳过 */
+                log_error("[对话→编程桥接] self_programming_engine_create 失败，将在下次调用时重试");
+                cached_prog = NULL; /* 保持NULL以触发下次重建 */
+            }
+        }
         if (cached_prog) {
             int bridge_ret = programming_bridge_intent_to_code(cached_prog, &intent, &closure);
             if (bridge_ret == 0 && closure.learning_signal > 0.3f) {

@@ -154,7 +154,11 @@ static void cfc_simd_vector_add(const float* a, const float* b, float* c, size_t
 /* P2-006修复: SSE高精度exp —— 增强多项式系数提升精度至~5e-7
  * 使用6项最小极大多项式拟合，相对误差从~1e-6降至~5e-7。
  * float32尾数有7位有效数字，5e-7误差已在float32精度极限附近。
- * 当需要bit-exact expf时，调用方应使用标准库expf()。 */
+ *
+ * L-3修复: 精度免责声明 —— 此SSE实现为性能优化版本，相对误差~5e-7。
+ * 当需要bit-exact精度（如梯度反向传播中的关键路径）时，
+ * 调用方应使用标准库expf()进行bit-exact计算。
+ * 该快速exp适用于前向传播和推理阶段，不推荐用于高精度反向传播。 */
 static __m128 cfc_sse_exp_ps(__m128 x) {
     __m128i emm0;
     __m128 one = _mm_set1_ps(1.0f);

@@ -808,7 +808,12 @@ int decision_engine_analyze(DecisionEngine* engine, DecisionResult* result) {
         
 /* 迭代最佳响应中对手策略索引修正
          * 对于多智能体博弈, 智能体i的对手策略是所有其他智能体策略的聚合
-         * 简化处理: 对于2人博弈, 对手是另一个智能体; 对于n>2, 取其他智能体的多数策略 */
+         * 简化处理: 对于2人博弈, 对手是另一个智能体; 对于n>2, 取其他智能体的多数策略
+         *
+         * L-6修复注意: strategy_profile索引映射 ——
+         * strategy_profile[i] 存储智能体i的策略索引。
+         * 对于n>2的多智能体场景，使用频率分布的众数来聚合对手策略。
+         * 如需更精确的策略聚合，可考虑加权平均或其他博弈论方法。 */
         int converged = 0;
         for (int iter = 0; iter < 100 && !converged; iter++) {
             converged = 1;
@@ -1443,10 +1448,11 @@ int decision_audit_log_record(DecisionAuditLog* log,
 
     time_t now = time(NULL);
     struct tm* tm_info;
-#ifdef _WIN32
-    tm_info = localtime(&now);
-#else
     struct tm tm_buf;
+#ifdef _WIN32
+    localtime_s(&tm_buf, &now);
+    tm_info = &tm_buf;
+#else
     tm_info = localtime_r(&now, &tm_buf);
 #endif
     if (tm_info) {

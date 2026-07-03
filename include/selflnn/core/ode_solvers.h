@@ -85,6 +85,20 @@ int ode_bdf2_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void* ctx,
                    size_t n, const BDF2Config* cfg, float* workspace,
                    float* h_actual, int* steps_used);
 
+/* M-4: Euler/RK2/RK4 显式求解器（补齐README声明的8种求解器） */
+int ode_euler_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void* ctx,
+                    size_t n, float* workspace, float* h_actual, int* steps_used);
+
+int ode_rk2_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void* ctx,
+                  size_t n, float* workspace, float* h_actual, int* steps_used);
+
+int ode_rk4_solve(float* y, float t, float delta_t, ODERHSFunc rhs, void* ctx,
+                  size_t n, float* workspace, float* h_actual, int* steps_used);
+
+size_t ode_euler_workspace_size(size_t n);
+size_t ode_rk2_workspace_size(size_t n);
+size_t ode_rk4_workspace_size(size_t n);
+
 size_t ode_dp54_workspace_size(size_t n);
 size_t ode_rosenbrock_workspace_size(size_t n);
 size_t ode_forest_ruth_workspace_size(size_t n);

@@ -35,6 +35,7 @@ typedef struct {
     int use_layer_norm;          /**< P0-001修复: 层归一化开关，默认启用，消除内部协变量偏移 */
     int ode_solver_type;
     int use_enhanced;            /**< P0-001修复: 启用CfC增强层(SIMD加速/自动求解器/刚度检测)，默认0 */
+    float delta_t;              /**< L-12修复: 时间步长（秒），从网络配置传播，默认1.0f */
 } CfCNetworkConfig;
 
 typedef struct CfCNetwork CfCNetwork;

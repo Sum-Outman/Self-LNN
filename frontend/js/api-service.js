@@ -6722,27 +6722,6 @@ class WebSocketManager {
     }
 
     /**
-     * 注册消息处理器
-     */
-    on(type, handler) {
-        if (!this.messageHandlers[type]) {
-            this.messageHandlers[type] = [];
-        }
-        this.messageHandlers[type].push(handler);
-    }
-
-    /**
-     * 移除消息处理器
-     */
-    off(type, handler) {
-        if (!this.messageHandlers[type]) return;
-        const idx = this.messageHandlers[type].indexOf(handler);
-        if (idx !== -1) {
-            this.messageHandlers[type].splice(idx, 1);
-        }
-    }
-
-    /**
      * 设置连接状态回调
      */
     onStatusChange(callback) {
@@ -7129,6 +7108,6 @@ window.SelfLnnWebSocket = new WebSocketManager;
 
 /* 延迟启动WebSocket连接（确保服务器先完成初始化） */
     setTimeout(function() {
-        ws.connect;
+        ws.connect();
     }, 3000);
 });

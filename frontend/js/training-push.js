@@ -1,6 +1,11 @@
 ﻿/**
  * SELF-LNN AGI 训练可视化面板 - WebSocket实时推送集成
  * 将后端推送的训练数据实时映射到前端可视化图表和监控面板
+ *
+ * L-2修复注意: WebSocket消息类型在main.js和training-push.js双注册。
+ * system_status/memory_status/robot_status等在两个文件中都有注册。
+ * 确保回调不冲突: 两个文件共享同一个window.SelfLnnWebSocket实例，
+ * 使用.on()逐一注册回调，WebSocket事件为广播模式，所有回调都会执行。
  */
 
 class TrainingPushManager {
@@ -702,6 +707,9 @@ class TrainingPushManager {
         this.initialized = false;
     }
 }
+
+/* L-1修复: 显式挂载到window，确保跨模块可访问 */
+window.TrainingPushManager = TrainingPushManager;
 
 let trainingPushManager = null;
 
