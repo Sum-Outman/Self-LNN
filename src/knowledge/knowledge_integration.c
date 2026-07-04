@@ -325,10 +325,18 @@ static int entries_directly_contradict(const KnowledgeEntry* a, const KnowledgeE
 
 static int find_entry_id_by_content(KnowledgeBase* kb, const KnowledgeEntry* target) {
     if (!kb || !target) return -1;
+    /* M-022修复: 使用连续失败计数提前退出，避免不必要的O(100K)扫描 */
     KnowledgeEntry cur;
+    int consecutive_miss = 0;
     for (int id = 1; id < KI_MAX_ENTREACH_SCAN; id++) {
         memset(&cur, 0, sizeof(KnowledgeEntry));
-        if (knowledge_base_get_by_id(kb, id, &cur) != 0) continue;
+        if (knowledge_base_get_by_id(kb, id, &cur) != 0) {
+            consecutive_miss++;
+            /* M-022: 连续100次miss说明已超出实际条目范围，提前退出 */
+            if (consecutive_miss >= 100) break;
+            continue;
+        }
+        consecutive_miss = 0; /* 命中则重置计数器 */
         int match = 1;
         if (target->subject && cur.subject) {
             if (strcmp(target->subject, cur.subject) != 0) match = 0;
@@ -853,12 +861,11 @@ int knowledge_integration_sync_all(KnowledgeIntegrationSystem* system) {
                 selflnn_set_last_error(SELFLNN_ERROR_GENERIC, __func__, __FILE__, __LINE__,
                                       "同步知识库到推理引擎：规则加载失败 (kb=%zu, engine=%zu)", 
                                       i, j);
-                // 记录失败计数，但继续尝试其他组合以确保最大同步覆盖
                 system->total_failures++;
-                system->last_sync_time = time(NULL);
             } else {
                 total_synced++;
             }
+            system->last_sync_time = time(NULL);  /* M-023修复: 无论成败都更新时间戳 */
         }
     }
     
@@ -947,9 +954,10 @@ size_t knowledge_integration_unified_query(KnowledgeIntegrationSystem* system,
                 if (!is_dup) {
                     KnowledgeEntry* dst = &results[total_found];
                     memset(dst, 0, sizeof(KnowledgeEntry));
-                    dst->subject    = cfc_results[s].subject ? strdup(cfc_results[s].subject) : NULL;
-                    dst->predicate  = cfc_results[s].predicate ? strdup(cfc_results[s].predicate) : NULL;
-                    dst->object     = cfc_results[s].object ? strdup(cfc_results[s].object) : NULL;
+                    /* C-002修复: 用string_duplicate替代strdup，统一内存管理 */
+                    dst->subject    = cfc_results[s].subject ? string_duplicate_nullable(cfc_results[s].subject) : NULL;
+                    dst->predicate  = cfc_results[s].predicate ? string_duplicate_nullable(cfc_results[s].predicate) : NULL;
+                    dst->object     = cfc_results[s].object ? string_duplicate_nullable(cfc_results[s].object) : NULL;
                     dst->type       = cfc_results[s].type;
                     dst->confidence = cfc_results[s].confidence;
                     dst->source     = cfc_results[s].source;
@@ -975,6 +983,18 @@ size_t knowledge_integration_unified_query(KnowledgeIntegrationSystem* system,
                         }
                     } else {
                         dst->metadata = NULL;
+                    }
+                    /* C-002修复: 验证所有分配成功后才递增计数 */
+                    if ((cfc_results[s].subject && !dst->subject) ||
+                        (cfc_results[s].predicate && !dst->predicate) ||
+                        (cfc_results[s].object && !dst->object)) {
+                        /* 字符串分配失败，清理已分配资源 */
+                        if (dst->subject) safe_free((void**)&dst->subject);
+                        if (dst->predicate) safe_free((void**)&dst->predicate);
+                        if (dst->object) safe_free((void**)&dst->object);
+                        if (dst->embedding) safe_free((void**)&dst->embedding);
+                        if (dst->metadata) safe_free((void**)&dst->metadata);
+                        continue;  /* 跳过此条目，不递增total_found */
                     }
                     total_found++;
                 }

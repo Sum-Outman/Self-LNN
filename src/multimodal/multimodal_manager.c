@@ -329,6 +329,7 @@ int multimodal_manager_process(MultimodalManager* manager,
         static int s_has_prev_frame = 0;
         static MutexHandle s_frame_mutex = NULL;
         if (!s_frame_mutex) s_frame_mutex = mutex_create();
+        if (!s_frame_mutex) goto skip_temporal;  /* 锁创建失败，跳过时间特征 */
         mutex_lock(s_frame_mutex);
         
         size_t tdim = (max_features < 256) ? max_features : 256;
@@ -348,6 +349,7 @@ int multimodal_manager_process(MultimodalManager* manager,
         s_has_prev_frame = 1;
         mutex_unlock(s_frame_mutex);
     }
+    skip_temporal:;
 
     if (result != 0) {
         safe_free((void**)&unified_output->temporal_features);
@@ -366,7 +368,8 @@ int multimodal_manager_process(MultimodalManager* manager,
             size_t press_copy = si->sensor_count < 16 ? si->sensor_count : 16;
             for (size_t i = 0; i < press_copy; i++)
                 hr.pressure[i] = si->sensor_values[i];
-            hr.sensor_count = (int)si->sensor_count;
+            /* L-003修复：带溢出检查的安全类型转换，防止size_t到int截断 */
+            hr.sensor_count = (si->sensor_count > (size_t)INT_MAX) ? INT_MAX : (int)si->sensor_count;
         }
         float cfc_features[64];
         int contact = 0, slip = 0;
@@ -433,8 +436,18 @@ int multimodal_manager_process(MultimodalManager* manager,
         size_t extra_sizes[5] = {64, 32, 16, 128, 64};
         int extra_indices[5] = {4, 5, 6, 7, 8};
 
-        /* 惰性初始化Xavier投影矩阵（仅首次调用时分配） */
-        if (!manager->extra_proj_initialized) {
+        /* 惰性初始化Xavier投影矩阵（仅首次调用时分配）。
+         * M-018修复: 使用静态文件级锁保护初始化，替代不存在的结构体字段。
+         * M-007修复: 当safe_malloc失败时回滚已分配的投影矩阵，避免部分初始化状态。 */
+        {
+            static MutexHandle extra_proj_lock = NULL;
+            static volatile int extra_proj_lock_init = 0;
+            if (!extra_proj_lock) {
+                extra_proj_lock = mutex_create();
+                if (!extra_proj_lock) goto skip_extra_proj; /* 锁创建失败，跳过投影初始化 */
+            }
+            mutex_lock(extra_proj_lock);
+            if (!manager->extra_proj_initialized) {
             size_t input_dim = lnn_cfg.input_size;
             for (int m = 0; m < 5; m++) {
                 size_t src_dim = extra_sizes[m];
@@ -447,11 +460,21 @@ int multimodal_manager_process(MultimodalManager* manager,
                     for (size_t i = 0; i < total_elems; i++) {
                         manager->extra_proj_w[m][i] = (secure_random_float() * 2.0f - 1.0f) * scale;
                     }
+                } else {
+                    /* M-007: 分配失败，回滚已分配的前m个投影矩阵 */
+                    for (int rollback = 0; rollback < m; rollback++) {
+                        safe_free((void**)&manager->extra_proj_w[rollback]);
+                    }
+                    mutex_unlock(extra_proj_lock);
+                    goto skip_extra_proj;
                 }
             }
             manager->extra_proj_input_dim = input_dim;
             manager->extra_proj_initialized = 1;
+            } /* 双重检查内层结束 */
+            mutex_unlock(extra_proj_lock); /* 释放初始化锁 */
         }
+    skip_extra_proj:;
 
         /* 使用投影矩阵进行矩阵-向量乘法: lnn_input += weight * W^T * src_signal */
         if (manager->extra_proj_input_dim == lnn_cfg.input_size) {
@@ -609,7 +632,7 @@ float* multimodal_load_image_file(const char* filepath, int* width_out,
     float* result = image_rgb_to_float(rgb, loaded_w, loaded_h, ch);
 
     /* 释放原始RGB数据 */
-    free(rgb);
+    safe_free((void**)&rgb);  /* H-015修复: 统一使用safe_free替代free */
 
     if (channels_out) *channels_out = ch;
     return result;
@@ -698,6 +721,9 @@ void multimodal_manager_reset(MultimodalManager* manager) {
     }
 
     /* ZSF-074修复：重置后需要重新进行投影矩阵惰性初始化 */
+    for (int m = 0; m < 5; m++) {
+        safe_free((void**)&manager->extra_proj_w[m]);
+    }
     manager->extra_proj_initialized = 0;
 }
 

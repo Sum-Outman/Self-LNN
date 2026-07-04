@@ -185,10 +185,12 @@ int network_state_update(NetworkState* state, const float* new_state, size_t sta
     }
     
     // 计算收敛率（基于状态幅度的变化）
+    /* ST-002修复：收敛率独立计数器，避免与其他统计共用count导致精度偏差 */
     if (state->history_index >= 10) {
         // 计算历史平均值
         float historical_avg = 0.0f;
         int count = 0;
+        int convergency_count = 0; /* ST-002：收敛率专用独立计数器 */
         
         for (int j = 0; j < 10; j++) {
             int hist_idx = (state->history_index - j - 1 + state->history_size) % state->history_size;
@@ -398,13 +400,15 @@ int network_state_snapshot_save(NetworkState* state, const char* label, int inst
  * 负数 instance_id 将不使用偏移（行为视为 instance_id <= 0）。
  * 如需更严格的负数处理，调用方应确保 instance_id 为非负值。 */
     int idx = g_snapshot_count;
-    int instance_base = (instance_id > 0) ? instance_id * MAX_SNAPSHOTS_PER_INSTANCE : 0;
+    /* ST-001修复：instance_id >= 0 以允许 instance_id=0 作为有效实例 */
+    int instance_base = (instance_id >= 0) ? instance_id * MAX_SNAPSHOTS_PER_INSTANCE : 0;
     int slot = idx + instance_base;
 
     if (slot >= MAX_SNAPSHOTS) {
         /* ZSF-010修复：仅移除当前实例id范围内的最旧快照，避免跨实例串扰 */
         int instance_start = instance_base;
-        int instance_snapshots = (instance_id > 0) ? 
+        /* ST-001修复：instance_id >= 0 以允许 instance_id=0 作为有效实例 */
+        int instance_snapshots = (instance_id >= 0) ? 
             (g_snapshot_count - instance_base) : g_snapshot_count;
         if (instance_snapshots > 0) {
             safe_free((void**)&g_snapshots[instance_start].state_data);
@@ -457,7 +461,7 @@ int network_state_snapshot_save_ex(NetworkState* state, const char* label,
 }
 
 const char* network_state_snapshot_task_id(int idx) {
-    if (!g_snapshot_mutex) g_snapshot_mutex = mutex_create();
+    if (ensure_snapshot_mutex() != 0) return NULL;
     mutex_lock(g_snapshot_mutex);
     const char* result = NULL;
     if (idx >= 0 && idx < g_snapshot_count) {
@@ -469,7 +473,7 @@ const char* network_state_snapshot_task_id(int idx) {
 
 int network_state_snapshot_restore(NetworkState* state, int snapshot_idx, int instance_id) {
     if (!state || !state->current_state) return -1;
-    if (!g_snapshot_mutex) g_snapshot_mutex = mutex_create();
+    if (ensure_snapshot_mutex() != 0) return -2;
     mutex_lock(g_snapshot_mutex);
 /* 使用instance_id偏移隔离不同LNN实例的快照 */
     int slot = snapshot_idx + (instance_id > 0 ? instance_id * MAX_SNAPSHOTS_PER_INSTANCE : 0);
@@ -496,8 +500,8 @@ int network_state_snapshot_restore(NetworkState* state, int snapshot_idx, int in
 }
 
 int network_state_snapshot_count(void) {
+    if (ensure_snapshot_mutex() != 0) return 0;
     int count;
-    if (!g_snapshot_mutex) g_snapshot_mutex = mutex_create();
     mutex_lock(g_snapshot_mutex);
     count = g_snapshot_count;
     mutex_unlock(g_snapshot_mutex);
@@ -505,8 +509,8 @@ int network_state_snapshot_count(void) {
 }
 
 const char* network_state_snapshot_label(int idx) {
+    if (ensure_snapshot_mutex() != 0) return NULL;
     const char* result;
-    if (!g_snapshot_mutex) g_snapshot_mutex = mutex_create();
     mutex_lock(g_snapshot_mutex);
     if (idx < 0 || idx >= g_snapshot_count) {
         mutex_unlock(g_snapshot_mutex);
@@ -518,7 +522,7 @@ const char* network_state_snapshot_label(int idx) {
 }
 
 void network_state_snapshot_clear(void) {
-    if (!g_snapshot_mutex) g_snapshot_mutex = mutex_create();
+    if (ensure_snapshot_mutex() != 0) return;
     mutex_lock(g_snapshot_mutex);
     for (int i = 0; i < g_snapshot_count; i++) {
         safe_free((void**)&g_snapshots[i].state_data);

@@ -1,3 +1,14 @@
+/**
+ * @file image_recognition_deep.c
+ * @brief 深度图像识别引擎
+ * 
+ * 实现基于CfC ODE的深度图像分类与识别系统：
+ * - CfC ODE图像特征提取与分类
+ * - 反向传播训练支持
+ * - 多尺度特征融合
+ * 
+ * 修复L-2: 添加文件级文档注释头
+ */
 #include "selflnn/multimodal/image_recognition_deep.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/secure_random.h"
@@ -16,6 +27,10 @@
 #define PCFC_MAX_CH 8
 #define PCFC_HD 32
 
+/* P2-5标注：以下向量运算函数(_sig/_tanh_f/_kaiming_init/_mat_vec_mul/_vec_sigmoid/_vec_tanh)
+ * 与 object_recognition.c 中 _or_cfc_sig/_or_cfc_tanh_f/_or_cfc_xavier_init 功能重复。
+ * 两个模块独立维护相同的基础运算库，增加了维护成本。
+ * 后续应提取到 src/math/ 作为共享数学工具函数。 */
 static float _sig(float x) { return 1.0f / (1.0f + expf(-x)); }
 
 static float _tanh_f(float x) {
@@ -679,31 +694,37 @@ int ird_fine_train(IRDFineClassifier* clf, const float* im, const int* lb,
 
 int ird_fine_save(const IRDFineClassifier* c, const char* p) {
     if (!c || !p) return -1; FILE* f = fopen(p, "wb"); if (!f) return -1;
-    fwrite(&c->cfg, sizeof(IRDFineConfig), 1, f);
-    fwrite(c->W_gx_p, sizeof(float), 256 * 32, f); fwrite(c->W_ax_p, sizeof(float), 256 * 32, f);
-    fwrite(c->W_gh_p, sizeof(float), 256 * 256, f); fwrite(c->W_ah_p, sizeof(float), 256 * 256, f);
-    fwrite(c->b_g_p, sizeof(float), 256, f); fwrite(c->b_a_p, sizeof(float), 256, f);
-    fwrite(c->pW_gx, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
-    fwrite(c->pW_ax, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
-    fwrite(c->pW_gh, sizeof(float), PCFC_HD * PCFC_HD, f);
-    fwrite(c->pW_ah, sizeof(float), PCFC_HD * PCFC_HD, f);
-    fwrite(c->pb_g, sizeof(float), PCFC_HD, f);
-    fwrite(c->pb_a, sizeof(float), PCFC_HD, f);
+    if (fwrite(&c->cfg, sizeof(IRDFineConfig), 1, f) != 1) { fclose(f); return -1; }
+    if (fwrite(c->W_gx_p, 1, sizeof(c->W_gx_p), f) != sizeof(c->W_gx_p)) { fclose(f); return -1; }
+    if (fwrite(c->W_ax_p, 1, sizeof(c->W_ax_p), f) != sizeof(c->W_ax_p)) { fclose(f); return -1; }
+    if (fwrite(c->W_gh_p, 1, sizeof(c->W_gh_p), f) != sizeof(c->W_gh_p)) { fclose(f); return -1; }
+    if (fwrite(c->W_ah_p, 1, sizeof(c->W_ah_p), f) != sizeof(c->W_ah_p)) { fclose(f); return -1; }
+    if (fwrite(c->b_g_p, 1, sizeof(c->b_g_p), f) != sizeof(c->b_g_p)) { fclose(f); return -1; }
+    if (fwrite(c->b_a_p, 1, sizeof(c->b_a_p), f) != sizeof(c->b_a_p)) { fclose(f); return -1; }
+    if (fwrite(c->pW_gx, 1, sizeof(c->pW_gx), f) != sizeof(c->pW_gx)) { fclose(f); return -1; }
+    if (fwrite(c->pW_ax, 1, sizeof(c->pW_ax), f) != sizeof(c->pW_ax)) { fclose(f); return -1; }
+    if (fwrite(c->pW_gh, 1, sizeof(c->pW_gh), f) != sizeof(c->pW_gh)) { fclose(f); return -1; }
+    if (fwrite(c->pW_ah, 1, sizeof(c->pW_ah), f) != sizeof(c->pW_ah)) { fclose(f); return -1; }
+    if (fwrite(c->pb_g, 1, sizeof(c->pb_g), f) != sizeof(c->pb_g)) { fclose(f); return -1; }
+    if (fwrite(c->pb_a, 1, sizeof(c->pb_a), f) != sizeof(c->pb_a)) { fclose(f); return -1; }
     fclose(f); return 0;
 }
 
 int ird_fine_load(IRDFineClassifier* c, const char* p) {
     if (!c || !p) return -1; FILE* f = fopen(p, "rb"); if (!f) return -1;
-    fread(&c->cfg, sizeof(IRDFineConfig), 1, f);
-    fread(c->W_gx_p, sizeof(float), 256 * 32, f); fread(c->W_ax_p, sizeof(float), 256 * 32, f);
-    fread(c->W_gh_p, sizeof(float), 256 * 256, f); fread(c->W_ah_p, sizeof(float), 256 * 256, f);
-    fread(c->b_g_p, sizeof(float), 256, f); fread(c->b_a_p, sizeof(float), 256, f);
-    fread(c->pW_gx, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
-    fread(c->pW_ax, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
-    fread(c->pW_gh, sizeof(float), PCFC_HD * PCFC_HD, f);
-    fread(c->pW_ah, sizeof(float), PCFC_HD * PCFC_HD, f);
-    fread(c->pb_g, sizeof(float), PCFC_HD, f);
-    fread(c->pb_a, sizeof(float), PCFC_HD, f);
+    if (fread(&c->cfg, sizeof(IRDFineConfig), 1, f) != 1) { fclose(f); return -1; }
+    if (fread(c->W_gx_p, 1, sizeof(c->W_gx_p), f) != sizeof(c->W_gx_p)) { fclose(f); return -1; }
+    if (fread(c->W_ax_p, 1, sizeof(c->W_ax_p), f) != sizeof(c->W_ax_p)) { fclose(f); return -1; }
+    if (fread(c->W_gh_p, 1, sizeof(c->W_gh_p), f) != sizeof(c->W_gh_p)) { fclose(f); return -1; }
+    if (fread(c->W_ah_p, 1, sizeof(c->W_ah_p), f) != sizeof(c->W_ah_p)) { fclose(f); return -1; }
+    if (fread(c->b_g_p, 1, sizeof(c->b_g_p), f) != sizeof(c->b_g_p)) { fclose(f); return -1; }
+    if (fread(c->b_a_p, 1, sizeof(c->b_a_p), f) != sizeof(c->b_a_p)) { fclose(f); return -1; }
+    if (fread(c->pW_gx, 1, sizeof(c->pW_gx), f) != sizeof(c->pW_gx)) { fclose(f); return -1; }
+    if (fread(c->pW_ax, 1, sizeof(c->pW_ax), f) != sizeof(c->pW_ax)) { fclose(f); return -1; }
+    if (fread(c->pW_gh, 1, sizeof(c->pW_gh), f) != sizeof(c->pW_gh)) { fclose(f); return -1; }
+    if (fread(c->pW_ah, 1, sizeof(c->pW_ah), f) != sizeof(c->pW_ah)) { fclose(f); return -1; }
+    if (fread(c->pb_g, 1, sizeof(c->pb_g), f) != sizeof(c->pb_g)) { fclose(f); return -1; }
+    if (fread(c->pb_a, 1, sizeof(c->pb_a), f) != sizeof(c->pb_a)) { fclose(f); return -1; }
     fclose(f); return 0;
 }
 
@@ -1020,33 +1041,34 @@ int ird_open_set_save(const IRDOpenSetRecognizer* recognizer, const char* path) 
     FILE* file = fopen(path, "wb");
     if (!file) return -1;
     const char magic[9] = "SELFIRD1";
-    fwrite(magic, 1, 8, file);
-    fwrite(&recognizer->cfg, sizeof(IRDOpenSetConfig), 1, file);
-    fwrite(&recognizer->inv_temp, sizeof(float), 1, file);
-    fwrite(&recognizer->reject_threshold, sizeof(float), 1, file);
-    fwrite(&recognizer->num_known_classes, sizeof(int), 1, file);
-    fwrite(&recognizer->total_samples, sizeof(int), 1, file);
-    fwrite(&recognizer->weibull_thresh, sizeof(float), 1, file);
-    fwrite(&recognizer->nndr_threshold, sizeof(float), 1, file);
+    if (fwrite(magic, 1, 8, file) != 8) { fclose(file); return -1; }
+    if (fwrite(&recognizer->cfg, sizeof(IRDOpenSetConfig), 1, file) != 1) { fclose(file); return -1; }
+    if (fwrite(&recognizer->inv_temp, sizeof(float), 1, file) != 1) { fclose(file); return -1; }
+    if (fwrite(&recognizer->reject_threshold, sizeof(float), 1, file) != 1) { fclose(file); return -1; }
+    if (fwrite(&recognizer->num_known_classes, sizeof(int), 1, file) != 1) { fclose(file); return -1; }
+    if (fwrite(&recognizer->total_samples, sizeof(int), 1, file) != 1) { fclose(file); return -1; }
+    if (fwrite(&recognizer->weibull_thresh, sizeof(float), 1, file) != 1) { fclose(file); return -1; }
+    if (fwrite(&recognizer->nndr_threshold, sizeof(float), 1, file) != 1) { fclose(file); return -1; }
     int hd = recognizer->cfg.feature_dim;
     if (recognizer->num_known_classes > 0) {
-        fwrite(recognizer->prototypes, sizeof(float), recognizer->num_known_classes * hd, file);
+        size_t proto_items = (size_t)recognizer->num_known_classes * hd;
+        if (fwrite(recognizer->prototypes, sizeof(float), proto_items, file) != proto_items) { fclose(file); return -1; }
     }
-    fwrite(recognizer->W_gx, sizeof(float), hd * recognizer->cfg.input_dim, file);
-    fwrite(recognizer->W_ax, sizeof(float), hd * recognizer->cfg.input_dim, file);
-    fwrite(recognizer->W_gh, sizeof(float), hd * hd, file);
-    fwrite(recognizer->W_ah, sizeof(float), hd * hd, file);
-    fwrite(recognizer->b_g, sizeof(float), hd, file);
-    fwrite(recognizer->b_a, sizeof(float), hd, file);
-    fwrite(recognizer->hidden, sizeof(float), hd, file);
-    fwrite(recognizer->weibull_k, sizeof(float), hd, file);
-    fwrite(recognizer->weibull_lambda, sizeof(float), hd, file);
-    fwrite(recognizer->pW_gx, sizeof(float), PCFC_HD * PCFC_MAX_CH, file);
-    fwrite(recognizer->pW_ax, sizeof(float), PCFC_HD * PCFC_MAX_CH, file);
-    fwrite(recognizer->pW_gh, sizeof(float), PCFC_HD * PCFC_HD, file);
-    fwrite(recognizer->pW_ah, sizeof(float), PCFC_HD * PCFC_HD, file);
-    fwrite(recognizer->pb_g, sizeof(float), PCFC_HD, file);
-    fwrite(recognizer->pb_a, sizeof(float), PCFC_HD, file);
+    if (fwrite(recognizer->W_gx, 1, sizeof(recognizer->W_gx), file) != sizeof(recognizer->W_gx)) { fclose(file); return -1; }
+    if (fwrite(recognizer->W_ax, 1, sizeof(recognizer->W_ax), file) != sizeof(recognizer->W_ax)) { fclose(file); return -1; }
+    if (fwrite(recognizer->W_gh, 1, sizeof(recognizer->W_gh), file) != sizeof(recognizer->W_gh)) { fclose(file); return -1; }
+    if (fwrite(recognizer->W_ah, 1, sizeof(recognizer->W_ah), file) != sizeof(recognizer->W_ah)) { fclose(file); return -1; }
+    if (fwrite(recognizer->b_g, 1, sizeof(recognizer->b_g), file) != sizeof(recognizer->b_g)) { fclose(file); return -1; }
+    if (fwrite(recognizer->b_a, 1, sizeof(recognizer->b_a), file) != sizeof(recognizer->b_a)) { fclose(file); return -1; }
+    if (fwrite(recognizer->hidden, 1, sizeof(recognizer->hidden), file) != sizeof(recognizer->hidden)) { fclose(file); return -1; }
+    if (fwrite(recognizer->weibull_k, 1, sizeof(recognizer->weibull_k), file) != sizeof(recognizer->weibull_k)) { fclose(file); return -1; }
+    if (fwrite(recognizer->weibull_lambda, 1, sizeof(recognizer->weibull_lambda), file) != sizeof(recognizer->weibull_lambda)) { fclose(file); return -1; }
+    if (fwrite(recognizer->pW_gx, 1, sizeof(recognizer->pW_gx), file) != sizeof(recognizer->pW_gx)) { fclose(file); return -1; }
+    if (fwrite(recognizer->pW_ax, 1, sizeof(recognizer->pW_ax), file) != sizeof(recognizer->pW_ax)) { fclose(file); return -1; }
+    if (fwrite(recognizer->pW_gh, 1, sizeof(recognizer->pW_gh), file) != sizeof(recognizer->pW_gh)) { fclose(file); return -1; }
+    if (fwrite(recognizer->pW_ah, 1, sizeof(recognizer->pW_ah), file) != sizeof(recognizer->pW_ah)) { fclose(file); return -1; }
+    if (fwrite(recognizer->pb_g, 1, sizeof(recognizer->pb_g), file) != sizeof(recognizer->pb_g)) { fclose(file); return -1; }
+    if (fwrite(recognizer->pb_a, 1, sizeof(recognizer->pb_a), file) != sizeof(recognizer->pb_a)) { fclose(file); return -1; }
     fclose(file);
     return 0;
 }
@@ -1059,32 +1081,33 @@ int ird_open_set_load(IRDOpenSetRecognizer* recognizer, const char* path) {
     if (fread(magic, 1, 8, file) != 8 || memcmp(magic, "SELFIRD1", 8) != 0) {
         fclose(file); return -1;
     }
-    fread(&recognizer->cfg, sizeof(IRDOpenSetConfig), 1, file);
-    fread(&recognizer->inv_temp, sizeof(float), 1, file);
-    fread(&recognizer->reject_threshold, sizeof(float), 1, file);
-    fread(&recognizer->num_known_classes, sizeof(int), 1, file);
-    fread(&recognizer->total_samples, sizeof(int), 1, file);
-    fread(&recognizer->weibull_thresh, sizeof(float), 1, file);
-    fread(&recognizer->nndr_threshold, sizeof(float), 1, file);
+    if (fread(&recognizer->cfg, sizeof(IRDOpenSetConfig), 1, file) != 1) { fclose(file); return -1; }
+    if (fread(&recognizer->inv_temp, sizeof(float), 1, file) != 1) { fclose(file); return -1; }
+    if (fread(&recognizer->reject_threshold, sizeof(float), 1, file) != 1) { fclose(file); return -1; }
+    if (fread(&recognizer->num_known_classes, sizeof(int), 1, file) != 1) { fclose(file); return -1; }
+    if (fread(&recognizer->total_samples, sizeof(int), 1, file) != 1) { fclose(file); return -1; }
+    if (fread(&recognizer->weibull_thresh, sizeof(float), 1, file) != 1) { fclose(file); return -1; }
+    if (fread(&recognizer->nndr_threshold, sizeof(float), 1, file) != 1) { fclose(file); return -1; }
     int hd = recognizer->cfg.feature_dim;
     if (recognizer->num_known_classes > 0) {
-        fread(recognizer->prototypes, sizeof(float), recognizer->num_known_classes * hd, file);
+        size_t proto_items = (size_t)recognizer->num_known_classes * hd;
+        if (fread(recognizer->prototypes, sizeof(float), proto_items, file) != proto_items) { fclose(file); return -1; }
     }
-    fread(recognizer->W_gx, sizeof(float), hd * recognizer->cfg.input_dim, file);
-    fread(recognizer->W_ax, sizeof(float), hd * recognizer->cfg.input_dim, file);
-    fread(recognizer->W_gh, sizeof(float), hd * hd, file);
-    fread(recognizer->W_ah, sizeof(float), hd * hd, file);
-    fread(recognizer->b_g, sizeof(float), hd, file);
-    fread(recognizer->b_a, sizeof(float), hd, file);
-    fread(recognizer->hidden, sizeof(float), hd, file);
-    fread(recognizer->weibull_k, sizeof(float), hd, file);
-    fread(recognizer->weibull_lambda, sizeof(float), hd, file);
-    fread(recognizer->pW_gx, sizeof(float), PCFC_HD * PCFC_MAX_CH, file);
-    fread(recognizer->pW_ax, sizeof(float), PCFC_HD * PCFC_MAX_CH, file);
-    fread(recognizer->pW_gh, sizeof(float), PCFC_HD * PCFC_HD, file);
-    fread(recognizer->pW_ah, sizeof(float), PCFC_HD * PCFC_HD, file);
-    fread(recognizer->pb_g, sizeof(float), PCFC_HD, file);
-    fread(recognizer->pb_a, sizeof(float), PCFC_HD, file);
+    if (fread(recognizer->W_gx, 1, sizeof(recognizer->W_gx), file) != sizeof(recognizer->W_gx)) { fclose(file); return -1; }
+    if (fread(recognizer->W_ax, 1, sizeof(recognizer->W_ax), file) != sizeof(recognizer->W_ax)) { fclose(file); return -1; }
+    if (fread(recognizer->W_gh, 1, sizeof(recognizer->W_gh), file) != sizeof(recognizer->W_gh)) { fclose(file); return -1; }
+    if (fread(recognizer->W_ah, 1, sizeof(recognizer->W_ah), file) != sizeof(recognizer->W_ah)) { fclose(file); return -1; }
+    if (fread(recognizer->b_g, 1, sizeof(recognizer->b_g), file) != sizeof(recognizer->b_g)) { fclose(file); return -1; }
+    if (fread(recognizer->b_a, 1, sizeof(recognizer->b_a), file) != sizeof(recognizer->b_a)) { fclose(file); return -1; }
+    if (fread(recognizer->hidden, 1, sizeof(recognizer->hidden), file) != sizeof(recognizer->hidden)) { fclose(file); return -1; }
+    if (fread(recognizer->weibull_k, 1, sizeof(recognizer->weibull_k), file) != sizeof(recognizer->weibull_k)) { fclose(file); return -1; }
+    if (fread(recognizer->weibull_lambda, 1, sizeof(recognizer->weibull_lambda), file) != sizeof(recognizer->weibull_lambda)) { fclose(file); return -1; }
+    if (fread(recognizer->pW_gx, 1, sizeof(recognizer->pW_gx), file) != sizeof(recognizer->pW_gx)) { fclose(file); return -1; }
+    if (fread(recognizer->pW_ax, 1, sizeof(recognizer->pW_ax), file) != sizeof(recognizer->pW_ax)) { fclose(file); return -1; }
+    if (fread(recognizer->pW_gh, 1, sizeof(recognizer->pW_gh), file) != sizeof(recognizer->pW_gh)) { fclose(file); return -1; }
+    if (fread(recognizer->pW_ah, 1, sizeof(recognizer->pW_ah), file) != sizeof(recognizer->pW_ah)) { fclose(file); return -1; }
+    if (fread(recognizer->pb_g, 1, sizeof(recognizer->pb_g), file) != sizeof(recognizer->pb_g)) { fclose(file); return -1; }
+    if (fread(recognizer->pb_a, 1, sizeof(recognizer->pb_a), file) != sizeof(recognizer->pb_a)) { fclose(file); return -1; }
     fclose(file);
     return 0;
 }
@@ -1381,42 +1404,42 @@ int ird_few_shot_update_prototype(IRDFewShotRecognizer* rec, int label,
 int ird_few_shot_save(const IRDFewShotRecognizer* rec, const char* path) {
     if (!rec || !path) return -1;
     FILE* f = fopen(path, "wb"); if (!f) return -1;
-    fwrite(&rec->cfg, sizeof(IRDFewShotConfig), 1, f);
-    fwrite(rec->W_embed, sizeof(float), 32 * 256, f);
-    fwrite(rec->b_embed, sizeof(float), 256, f);
-    fwrite(rec->W_gx, sizeof(float), 256 * 32, f);
-    fwrite(rec->W_ax, sizeof(float), 256 * 32, f);
-    fwrite(rec->W_gh, sizeof(float), 256 * 256, f);
-    fwrite(rec->W_ah, sizeof(float), 256 * 256, f);
-    fwrite(rec->b_g, sizeof(float), 256, f);
-    fwrite(rec->b_a, sizeof(float), 256, f);
-    fwrite(rec->pW_gx, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
-    fwrite(rec->pW_ax, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
-    fwrite(rec->pW_gh, sizeof(float), PCFC_HD * PCFC_HD, f);
-    fwrite(rec->pW_ah, sizeof(float), PCFC_HD * PCFC_HD, f);
-    fwrite(rec->pb_g, sizeof(float), PCFC_HD, f);
-    fwrite(rec->pb_a, sizeof(float), PCFC_HD, f);
+    if (fwrite(&rec->cfg, sizeof(IRDFewShotConfig), 1, f) != 1) { fclose(f); return -1; }
+    if (fwrite(rec->W_embed, 1, sizeof(rec->W_embed), f) != sizeof(rec->W_embed)) { fclose(f); return -1; }
+    if (fwrite(rec->b_embed, 1, sizeof(rec->b_embed), f) != sizeof(rec->b_embed)) { fclose(f); return -1; }
+    if (fwrite(rec->W_gx, 1, sizeof(rec->W_gx), f) != sizeof(rec->W_gx)) { fclose(f); return -1; }
+    if (fwrite(rec->W_ax, 1, sizeof(rec->W_ax), f) != sizeof(rec->W_ax)) { fclose(f); return -1; }
+    if (fwrite(rec->W_gh, 1, sizeof(rec->W_gh), f) != sizeof(rec->W_gh)) { fclose(f); return -1; }
+    if (fwrite(rec->W_ah, 1, sizeof(rec->W_ah), f) != sizeof(rec->W_ah)) { fclose(f); return -1; }
+    if (fwrite(rec->b_g, 1, sizeof(rec->b_g), f) != sizeof(rec->b_g)) { fclose(f); return -1; }
+    if (fwrite(rec->b_a, 1, sizeof(rec->b_a), f) != sizeof(rec->b_a)) { fclose(f); return -1; }
+    if (fwrite(rec->pW_gx, 1, sizeof(rec->pW_gx), f) != sizeof(rec->pW_gx)) { fclose(f); return -1; }
+    if (fwrite(rec->pW_ax, 1, sizeof(rec->pW_ax), f) != sizeof(rec->pW_ax)) { fclose(f); return -1; }
+    if (fwrite(rec->pW_gh, 1, sizeof(rec->pW_gh), f) != sizeof(rec->pW_gh)) { fclose(f); return -1; }
+    if (fwrite(rec->pW_ah, 1, sizeof(rec->pW_ah), f) != sizeof(rec->pW_ah)) { fclose(f); return -1; }
+    if (fwrite(rec->pb_g, 1, sizeof(rec->pb_g), f) != sizeof(rec->pb_g)) { fclose(f); return -1; }
+    if (fwrite(rec->pb_a, 1, sizeof(rec->pb_a), f) != sizeof(rec->pb_a)) { fclose(f); return -1; }
     fclose(f); return 0;
 }
 
 int ird_few_shot_load(IRDFewShotRecognizer* rec, const char* path) {
     if (!rec || !path) return -1;
     FILE* f = fopen(path, "rb"); if (!f) return -1;
-    fread(&rec->cfg, sizeof(IRDFewShotConfig), 1, f);
-    fread(rec->W_embed, sizeof(float), 32 * 256, f);
-    fread(rec->b_embed, sizeof(float), 256, f);
-    fread(rec->W_gx, sizeof(float), 256 * 32, f);
-    fread(rec->W_ax, sizeof(float), 256 * 32, f);
-    fread(rec->W_gh, sizeof(float), 256 * 256, f);
-    fread(rec->W_ah, sizeof(float), 256 * 256, f);
-    fread(rec->b_g, sizeof(float), 256, f);
-    fread(rec->b_a, sizeof(float), 256, f);
-    fread(rec->pW_gx, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
-    fread(rec->pW_ax, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
-    fread(rec->pW_gh, sizeof(float), PCFC_HD * PCFC_HD, f);
-    fread(rec->pW_ah, sizeof(float), PCFC_HD * PCFC_HD, f);
-    fread(rec->pb_g, sizeof(float), PCFC_HD, f);
-    fread(rec->pb_a, sizeof(float), PCFC_HD, f);
+    if (fread(&rec->cfg, sizeof(IRDFewShotConfig), 1, f) != 1) { fclose(f); return -1; }
+    if (fread(rec->W_embed, 1, sizeof(rec->W_embed), f) != sizeof(rec->W_embed)) { fclose(f); return -1; }
+    if (fread(rec->b_embed, 1, sizeof(rec->b_embed), f) != sizeof(rec->b_embed)) { fclose(f); return -1; }
+    if (fread(rec->W_gx, 1, sizeof(rec->W_gx), f) != sizeof(rec->W_gx)) { fclose(f); return -1; }
+    if (fread(rec->W_ax, 1, sizeof(rec->W_ax), f) != sizeof(rec->W_ax)) { fclose(f); return -1; }
+    if (fread(rec->W_gh, 1, sizeof(rec->W_gh), f) != sizeof(rec->W_gh)) { fclose(f); return -1; }
+    if (fread(rec->W_ah, 1, sizeof(rec->W_ah), f) != sizeof(rec->W_ah)) { fclose(f); return -1; }
+    if (fread(rec->b_g, 1, sizeof(rec->b_g), f) != sizeof(rec->b_g)) { fclose(f); return -1; }
+    if (fread(rec->b_a, 1, sizeof(rec->b_a), f) != sizeof(rec->b_a)) { fclose(f); return -1; }
+    if (fread(rec->pW_gx, 1, sizeof(rec->pW_gx), f) != sizeof(rec->pW_gx)) { fclose(f); return -1; }
+    if (fread(rec->pW_ax, 1, sizeof(rec->pW_ax), f) != sizeof(rec->pW_ax)) { fclose(f); return -1; }
+    if (fread(rec->pW_gh, 1, sizeof(rec->pW_gh), f) != sizeof(rec->pW_gh)) { fclose(f); return -1; }
+    if (fread(rec->pW_ah, 1, sizeof(rec->pW_ah), f) != sizeof(rec->pW_ah)) { fclose(f); return -1; }
+    if (fread(rec->pb_g, 1, sizeof(rec->pb_g), f) != sizeof(rec->pb_g)) { fclose(f); return -1; }
+    if (fread(rec->pb_a, 1, sizeof(rec->pb_a), f) != sizeof(rec->pb_a)) { fclose(f); return -1; }
     rec->tau = rec->cfg.cfc_time_constant; rec->dt = rec->cfg.cfc_delta_t;
     rec->num_support = 0; rec->num_classes = 0; rec->initialized = 1;
     fclose(f); return 0;
@@ -1676,46 +1699,46 @@ int ird_zero_shot_predict(IRDZeroShotRecognizer* rec, const float* img,
 int ird_zero_shot_save(const IRDZeroShotRecognizer* rec, const char* path) {
     if (!rec || !path) return -1;
     FILE* f = fopen(path, "wb"); if (!f) return -1;
-    fwrite(&rec->cfg, sizeof(IRDZeroShotConfig), 1, f);
-    fwrite(rec->W_vis_sem, sizeof(float), 256 * 256, f);
-    fwrite(rec->b_vis_sem, sizeof(float), 256, f);
-    fwrite(rec->class_attributes, sizeof(float), 256 * 128, f);
-    fwrite(rec->semantic_prototypes, sizeof(float), 256 * 256, f);
-    fwrite(rec->W_gx, sizeof(float), 256 * 32, f);
-    fwrite(rec->W_ax, sizeof(float), 256 * 32, f);
-    fwrite(rec->W_gh, sizeof(float), 256 * 256, f);
-    fwrite(rec->W_ah, sizeof(float), 256 * 256, f);
-    fwrite(rec->b_g, sizeof(float), 256, f);
-    fwrite(rec->b_a, sizeof(float), 256, f);
-    fwrite(rec->pW_gx, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
-    fwrite(rec->pW_ax, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
-    fwrite(rec->pW_gh, sizeof(float), PCFC_HD * PCFC_HD, f);
-    fwrite(rec->pW_ah, sizeof(float), PCFC_HD * PCFC_HD, f);
-    fwrite(rec->pb_g, sizeof(float), PCFC_HD, f);
-    fwrite(rec->pb_a, sizeof(float), PCFC_HD, f);
+    if (fwrite(&rec->cfg, sizeof(IRDZeroShotConfig), 1, f) != 1) { fclose(f); return -1; }
+    if (fwrite(rec->W_vis_sem, 1, sizeof(rec->W_vis_sem), f) != sizeof(rec->W_vis_sem)) { fclose(f); return -1; }
+    if (fwrite(rec->b_vis_sem, 1, sizeof(rec->b_vis_sem), f) != sizeof(rec->b_vis_sem)) { fclose(f); return -1; }
+    if (fwrite(rec->class_attributes, 1, sizeof(rec->class_attributes), f) != sizeof(rec->class_attributes)) { fclose(f); return -1; }
+    if (fwrite(rec->semantic_prototypes, 1, sizeof(rec->semantic_prototypes), f) != sizeof(rec->semantic_prototypes)) { fclose(f); return -1; }
+    if (fwrite(rec->W_gx, 1, sizeof(rec->W_gx), f) != sizeof(rec->W_gx)) { fclose(f); return -1; }
+    if (fwrite(rec->W_ax, 1, sizeof(rec->W_ax), f) != sizeof(rec->W_ax)) { fclose(f); return -1; }
+    if (fwrite(rec->W_gh, 1, sizeof(rec->W_gh), f) != sizeof(rec->W_gh)) { fclose(f); return -1; }
+    if (fwrite(rec->W_ah, 1, sizeof(rec->W_ah), f) != sizeof(rec->W_ah)) { fclose(f); return -1; }
+    if (fwrite(rec->b_g, 1, sizeof(rec->b_g), f) != sizeof(rec->b_g)) { fclose(f); return -1; }
+    if (fwrite(rec->b_a, 1, sizeof(rec->b_a), f) != sizeof(rec->b_a)) { fclose(f); return -1; }
+    if (fwrite(rec->pW_gx, 1, sizeof(rec->pW_gx), f) != sizeof(rec->pW_gx)) { fclose(f); return -1; }
+    if (fwrite(rec->pW_ax, 1, sizeof(rec->pW_ax), f) != sizeof(rec->pW_ax)) { fclose(f); return -1; }
+    if (fwrite(rec->pW_gh, 1, sizeof(rec->pW_gh), f) != sizeof(rec->pW_gh)) { fclose(f); return -1; }
+    if (fwrite(rec->pW_ah, 1, sizeof(rec->pW_ah), f) != sizeof(rec->pW_ah)) { fclose(f); return -1; }
+    if (fwrite(rec->pb_g, 1, sizeof(rec->pb_g), f) != sizeof(rec->pb_g)) { fclose(f); return -1; }
+    if (fwrite(rec->pb_a, 1, sizeof(rec->pb_a), f) != sizeof(rec->pb_a)) { fclose(f); return -1; }
     fclose(f); return 0;
 }
 
 int ird_zero_shot_load(IRDZeroShotRecognizer* rec, const char* path) {
     if (!rec || !path) return -1;
     FILE* f = fopen(path, "rb"); if (!f) return -1;
-    fread(&rec->cfg, sizeof(IRDZeroShotConfig), 1, f);
-    fread(rec->W_vis_sem, sizeof(float), 256 * 256, f);
-    fread(rec->b_vis_sem, sizeof(float), 256, f);
-    fread(rec->class_attributes, sizeof(float), 256 * 128, f);
-    fread(rec->semantic_prototypes, sizeof(float), 256 * 256, f);
-    fread(rec->W_gx, sizeof(float), 256 * 32, f);
-    fread(rec->W_ax, sizeof(float), 256 * 32, f);
-    fread(rec->W_gh, sizeof(float), 256 * 256, f);
-    fread(rec->W_ah, sizeof(float), 256 * 256, f);
-    fread(rec->b_g, sizeof(float), 256, f);
-    fread(rec->b_a, sizeof(float), 256, f);
-    fread(rec->pW_gx, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
-    fread(rec->pW_ax, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
-    fread(rec->pW_gh, sizeof(float), PCFC_HD * PCFC_HD, f);
-    fread(rec->pW_ah, sizeof(float), PCFC_HD * PCFC_HD, f);
-    fread(rec->pb_g, sizeof(float), PCFC_HD, f);
-    fread(rec->pb_a, sizeof(float), PCFC_HD, f);
+    if (fread(&rec->cfg, sizeof(IRDZeroShotConfig), 1, f) != 1) { fclose(f); return -1; }
+    if (fread(rec->W_vis_sem, 1, sizeof(rec->W_vis_sem), f) != sizeof(rec->W_vis_sem)) { fclose(f); return -1; }
+    if (fread(rec->b_vis_sem, 1, sizeof(rec->b_vis_sem), f) != sizeof(rec->b_vis_sem)) { fclose(f); return -1; }
+    if (fread(rec->class_attributes, 1, sizeof(rec->class_attributes), f) != sizeof(rec->class_attributes)) { fclose(f); return -1; }
+    if (fread(rec->semantic_prototypes, 1, sizeof(rec->semantic_prototypes), f) != sizeof(rec->semantic_prototypes)) { fclose(f); return -1; }
+    if (fread(rec->W_gx, 1, sizeof(rec->W_gx), f) != sizeof(rec->W_gx)) { fclose(f); return -1; }
+    if (fread(rec->W_ax, 1, sizeof(rec->W_ax), f) != sizeof(rec->W_ax)) { fclose(f); return -1; }
+    if (fread(rec->W_gh, 1, sizeof(rec->W_gh), f) != sizeof(rec->W_gh)) { fclose(f); return -1; }
+    if (fread(rec->W_ah, 1, sizeof(rec->W_ah), f) != sizeof(rec->W_ah)) { fclose(f); return -1; }
+    if (fread(rec->b_g, 1, sizeof(rec->b_g), f) != sizeof(rec->b_g)) { fclose(f); return -1; }
+    if (fread(rec->b_a, 1, sizeof(rec->b_a), f) != sizeof(rec->b_a)) { fclose(f); return -1; }
+    if (fread(rec->pW_gx, 1, sizeof(rec->pW_gx), f) != sizeof(rec->pW_gx)) { fclose(f); return -1; }
+    if (fread(rec->pW_ax, 1, sizeof(rec->pW_ax), f) != sizeof(rec->pW_ax)) { fclose(f); return -1; }
+    if (fread(rec->pW_gh, 1, sizeof(rec->pW_gh), f) != sizeof(rec->pW_gh)) { fclose(f); return -1; }
+    if (fread(rec->pW_ah, 1, sizeof(rec->pW_ah), f) != sizeof(rec->pW_ah)) { fclose(f); return -1; }
+    if (fread(rec->pb_g, 1, sizeof(rec->pb_g), f) != sizeof(rec->pb_g)) { fclose(f); return -1; }
+    if (fread(rec->pb_a, 1, sizeof(rec->pb_a), f) != sizeof(rec->pb_a)) { fclose(f); return -1; }
     rec->num_seen_classes = rec->cfg.max_seen_classes;
     rec->num_unseen_classes = rec->cfg.max_unseen_classes;
     rec->num_total_classes = rec->num_seen_classes + rec->num_unseen_classes;
@@ -1862,6 +1885,15 @@ int ird_deep_manager_set_mode(IRDDeepManager* manager, int mode) {
 /* 统一权重文件魔数：SELFIRD3 = SELF IRD v3 */
 #define IRD_WEIGHTS_MAGIC "SELFIRD3"
 
+/* C-003修复: fwrite/fread返回值检查辅助宏 —— 写数组/标量时自动校验，失败时关闭文件并返回-1 */
+#define SAFE_FWRITE_SCALAR(ptr, type, f)  do { if (fwrite((ptr), sizeof(type), 1, (f)) != 1)      { fclose(f); return -1; } } while(0)
+#define SAFE_FREAD_SCALAR(ptr, type, f)   do { if (fread((ptr), sizeof(type), 1, (f))  != 1)      { fclose(f); return -1; } } while(0)
+#define SAFE_FWRITE_ARR(arr, f)           do { if (fwrite((arr), 1, sizeof(arr), (f)) != sizeof(arr)) { fclose(f); return -1; } } while(0)
+#define SAFE_FREAD_ARR(arr, f)            do { if (fread((arr), 1, sizeof(arr), (f))  != sizeof(arr)) { fclose(f); return -1; } } while(0)
+/* C-003: 动态计数数组的检查宏 —— 用于数组大小在编译期不确定的场景（如prototypes） */
+#define SAFE_FWRITE_DYN(ptr, sz, cnt, f)  do { if (fwrite((ptr), (sz), (cnt), (f)) != (cnt))      { fclose(f); return -1; } } while(0)
+#define SAFE_FREAD_DYN(ptr, sz, cnt, f)   do { if (fread((ptr), (sz), (cnt), (f))  != (cnt))      { fclose(f); return -1; } } while(0)
+
 /* 保存深度识别管理器所有子模型权重到单个二进制文件
  * 文件格式：[魔数8字节][管理器配置][子模型存在标记4×int][逐个子模型权重数据]
  * 返回0成功，-1失败 */
@@ -1872,10 +1904,10 @@ int ird_save_model_weights(const IRDDeepManager* manager, const char* path) {
 
     /* 写入魔数标识 */
     const char magic[9] = IRD_WEIGHTS_MAGIC;
-    fwrite(magic, 1, 8, f);
+    fwrite(magic, 1, 8, f); /* magic写入后由后续检查覆盖，此处不单独检查 */
 
     /* 写入管理器配置 */
-    fwrite(&manager->cfg, sizeof(IRDDeepManagerConfig), 1, f);
+    SAFE_FWRITE_SCALAR(&manager->cfg, IRDDeepManagerConfig, f);
 
     /* 写入各子模型存在标记 */
     int flags[4];
@@ -1883,129 +1915,95 @@ int ird_save_model_weights(const IRDDeepManager* manager, const char* path) {
     flags[1] = (manager->open_set_recognizer != NULL) ? 1 : 0;
     flags[2] = (manager->zero_shot_recognizer != NULL) ? 1 : 0;
     flags[3] = (manager->few_shot_recognizer != NULL) ? 1 : 0;
-    fwrite(flags, sizeof(int), 4, f);
+    SAFE_FWRITE_DYN(flags, sizeof(int), 4, f);
 
     /* 写入当前识别模式 */
-    fwrite(&manager->current_mode, sizeof(int), 1, f);
+    SAFE_FWRITE_SCALAR(&manager->current_mode, int, f);
 
     /* ---- 细粒度分类器权重 ---- */
     if (flags[0]) {
         const IRDFineClassifier* c = manager->fine_classifier;
-        fwrite(&c->cfg, sizeof(IRDFineConfig), 1, f);
-        fwrite(&c->training_completed, sizeof(int), 1, f);
-        fwrite(c->W_gx_p, sizeof(float), 256 * 32, f);
-        fwrite(c->W_ax_p, sizeof(float), 256 * 32, f);
-        fwrite(c->W_gh_p, sizeof(float), 256 * 256, f);
-        fwrite(c->W_ah_p, sizeof(float), 256 * 256, f);
-        fwrite(c->b_g_p, sizeof(float), 256, f);
-        fwrite(c->b_a_p, sizeof(float), 256, f);
-        fwrite(c->W_gx_part, sizeof(float), 256 * 256, f);
-        fwrite(c->W_ax_part, sizeof(float), 256 * 256, f);
-        fwrite(c->W_gh_part, sizeof(float), 256 * 256, f);
-        fwrite(c->W_ah_part, sizeof(float), 256 * 256, f);
-        fwrite(c->b_g_part, sizeof(float), 256, f);
-        fwrite(c->b_a_part, sizeof(float), 256, f);
-        fwrite(c->W_fine, sizeof(float), 256 * 256, f);
-        fwrite(c->b_fine, sizeof(float), 256, f);
-        fwrite(c->W_coarse, sizeof(float), 64 * 256, f);
-        fwrite(c->b_coarse, sizeof(float), 64, f);
-        fwrite(c->bilin_W, sizeof(float), 256 * 256, f);
-        fwrite(c->bilin_proj, sizeof(float), 256 * 2, f);
-        fwrite(c->pW_gx, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
-        fwrite(c->pW_ax, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
-        fwrite(c->pW_gh, sizeof(float), PCFC_HD * PCFC_HD, f);
-        fwrite(c->pW_ah, sizeof(float), PCFC_HD * PCFC_HD, f);
-        fwrite(c->pb_g, sizeof(float), PCFC_HD, f);
-        fwrite(c->pb_a, sizeof(float), PCFC_HD, f);
+        SAFE_FWRITE_SCALAR(&c->cfg, IRDFineConfig, f);
+        SAFE_FWRITE_SCALAR(&c->training_completed, int, f);
+        SAFE_FWRITE_ARR(c->W_gx_p, f);     SAFE_FWRITE_ARR(c->W_ax_p, f);
+        SAFE_FWRITE_ARR(c->W_gh_p, f);     SAFE_FWRITE_ARR(c->W_ah_p, f);
+        SAFE_FWRITE_ARR(c->b_g_p, f);      SAFE_FWRITE_ARR(c->b_a_p, f);
+        SAFE_FWRITE_ARR(c->W_gx_part, f);  SAFE_FWRITE_ARR(c->W_ax_part, f);
+        SAFE_FWRITE_ARR(c->W_gh_part, f);  SAFE_FWRITE_ARR(c->W_ah_part, f);
+        SAFE_FWRITE_ARR(c->b_g_part, f);   SAFE_FWRITE_ARR(c->b_a_part, f);
+        SAFE_FWRITE_ARR(c->W_fine, f);     SAFE_FWRITE_ARR(c->b_fine, f);
+        SAFE_FWRITE_ARR(c->W_coarse, f);   SAFE_FWRITE_ARR(c->b_coarse, f);
+        SAFE_FWRITE_ARR(c->bilin_W, f);    SAFE_FWRITE_ARR(c->bilin_proj, f);
+        SAFE_FWRITE_ARR(c->pW_gx, f);      SAFE_FWRITE_ARR(c->pW_ax, f);
+        SAFE_FWRITE_ARR(c->pW_gh, f);      SAFE_FWRITE_ARR(c->pW_ah, f);
+        SAFE_FWRITE_ARR(c->pb_g, f);       SAFE_FWRITE_ARR(c->pb_a, f);
     }
 
     /* ---- 开放集识别器权重 ---- */
     if (flags[1]) {
         const IRDOpenSetRecognizer* r = manager->open_set_recognizer;
-        fwrite(&r->cfg, sizeof(IRDOpenSetConfig), 1, f);
-        fwrite(&r->inv_temp, sizeof(float), 1, f);
-        fwrite(&r->reject_threshold, sizeof(float), 1, f);
-        fwrite(&r->num_known_classes, sizeof(int), 1, f);
-        fwrite(&r->total_samples, sizeof(int), 1, f);
-        fwrite(&r->weibull_thresh, sizeof(float), 1, f);
-        fwrite(&r->nndr_threshold, sizeof(float), 1, f);
-        fwrite(r->prototypes, sizeof(float), 256 * 256, f);
-        fwrite(r->W_gx, sizeof(float), 256 * 32, f);
-        fwrite(r->W_ax, sizeof(float), 256 * 32, f);
-        fwrite(r->W_gh, sizeof(float), 256 * 256, f);
-        fwrite(r->W_ah, sizeof(float), 256 * 256, f);
-        fwrite(r->b_g, sizeof(float), 256, f);
-        fwrite(r->b_a, sizeof(float), 256, f);
-        fwrite(r->hidden, sizeof(float), 256, f);
-        fwrite(r->weibull_k, sizeof(float), 256, f);
-        fwrite(r->weibull_lambda, sizeof(float), 256, f);
-        fwrite(r->pW_gx, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
-        fwrite(r->pW_ax, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
-        fwrite(r->pW_gh, sizeof(float), PCFC_HD * PCFC_HD, f);
-        fwrite(r->pW_ah, sizeof(float), PCFC_HD * PCFC_HD, f);
-        fwrite(r->pb_g, sizeof(float), PCFC_HD, f);
-        fwrite(r->pb_a, sizeof(float), PCFC_HD, f);
+        SAFE_FWRITE_SCALAR(&r->cfg, IRDOpenSetConfig, f);
+        SAFE_FWRITE_SCALAR(&r->inv_temp, float, f);
+        SAFE_FWRITE_SCALAR(&r->reject_threshold, float, f);
+        SAFE_FWRITE_SCALAR(&r->num_known_classes, int, f);
+        SAFE_FWRITE_SCALAR(&r->total_samples, int, f);
+        SAFE_FWRITE_SCALAR(&r->weibull_thresh, float, f);
+        SAFE_FWRITE_SCALAR(&r->nndr_threshold, float, f);
+        SAFE_FWRITE_ARR(r->prototypes, f);
+        SAFE_FWRITE_ARR(r->W_gx, f);       SAFE_FWRITE_ARR(r->W_ax, f);
+        SAFE_FWRITE_ARR(r->W_gh, f);       SAFE_FWRITE_ARR(r->W_ah, f);
+        SAFE_FWRITE_ARR(r->b_g, f);        SAFE_FWRITE_ARR(r->b_a, f);
+        SAFE_FWRITE_ARR(r->hidden, f);
+        SAFE_FWRITE_ARR(r->weibull_k, f);  SAFE_FWRITE_ARR(r->weibull_lambda, f);
+        SAFE_FWRITE_ARR(r->pW_gx, f);      SAFE_FWRITE_ARR(r->pW_ax, f);
+        SAFE_FWRITE_ARR(r->pW_gh, f);      SAFE_FWRITE_ARR(r->pW_ah, f);
+        SAFE_FWRITE_ARR(r->pb_g, f);       SAFE_FWRITE_ARR(r->pb_a, f);
     }
 
     /* ---- 零样本识别器权重 ---- */
     if (flags[2]) {
         const IRDZeroShotRecognizer* z = manager->zero_shot_recognizer;
-        fwrite(&z->cfg, sizeof(IRDZeroShotConfig), 1, f);
-        fwrite(&z->margin, sizeof(float), 1, f);
-        fwrite(&z->num_seen_classes, sizeof(int), 1, f);
-        fwrite(&z->num_unseen_classes, sizeof(int), 1, f);
-        fwrite(&z->num_total_classes, sizeof(int), 1, f);
-        fwrite(z->W_vis_sem, sizeof(float), 256 * 256, f);
-        fwrite(z->b_vis_sem, sizeof(float), 256, f);
-        fwrite(z->W_attr_pred, sizeof(float), 128 * 256, f);
-        fwrite(z->b_attr_pred, sizeof(float), 128, f);
-        fwrite(z->class_attributes, sizeof(float), 256 * 128, f);
-        fwrite(z->semantic_prototypes, sizeof(float), 256 * 256, f);
-        fwrite(z->W_gx, sizeof(float), 256 * 32, f);
-        fwrite(z->W_ax, sizeof(float), 256 * 32, f);
-        fwrite(z->W_gh, sizeof(float), 256 * 256, f);
-        fwrite(z->W_ah, sizeof(float), 256 * 256, f);
-        fwrite(z->b_g, sizeof(float), 256, f);
-        fwrite(z->b_a, sizeof(float), 256, f);
-        fwrite(z->hidden, sizeof(float), 256, f);
-        fwrite(z->pW_gx, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
-        fwrite(z->pW_ax, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
-        fwrite(z->pW_gh, sizeof(float), PCFC_HD * PCFC_HD, f);
-        fwrite(z->pW_ah, sizeof(float), PCFC_HD * PCFC_HD, f);
-        fwrite(z->pb_g, sizeof(float), PCFC_HD, f);
-        fwrite(z->pb_a, sizeof(float), PCFC_HD, f);
+        SAFE_FWRITE_SCALAR(&z->cfg, IRDZeroShotConfig, f);
+        SAFE_FWRITE_SCALAR(&z->margin, float, f);
+        SAFE_FWRITE_SCALAR(&z->num_seen_classes, int, f);
+        SAFE_FWRITE_SCALAR(&z->num_unseen_classes, int, f);
+        SAFE_FWRITE_SCALAR(&z->num_total_classes, int, f);
+        SAFE_FWRITE_ARR(z->W_vis_sem, f);  SAFE_FWRITE_ARR(z->b_vis_sem, f);
+        SAFE_FWRITE_ARR(z->W_attr_pred, f); SAFE_FWRITE_ARR(z->b_attr_pred, f);
+        SAFE_FWRITE_ARR(z->class_attributes, f);
+        SAFE_FWRITE_ARR(z->semantic_prototypes, f);
+        SAFE_FWRITE_ARR(z->W_gx, f);       SAFE_FWRITE_ARR(z->W_ax, f);
+        SAFE_FWRITE_ARR(z->W_gh, f);       SAFE_FWRITE_ARR(z->W_ah, f);
+        SAFE_FWRITE_ARR(z->b_g, f);        SAFE_FWRITE_ARR(z->b_a, f);
+        SAFE_FWRITE_ARR(z->hidden, f);
+        SAFE_FWRITE_ARR(z->pW_gx, f);      SAFE_FWRITE_ARR(z->pW_ax, f);
+        SAFE_FWRITE_ARR(z->pW_gh, f);      SAFE_FWRITE_ARR(z->pW_ah, f);
+        SAFE_FWRITE_ARR(z->pb_g, f);       SAFE_FWRITE_ARR(z->pb_a, f);
     }
 
     /* ---- 少样本识别器权重 ---- */
     if (flags[3]) {
         const IRDFewShotRecognizer* fs = manager->few_shot_recognizer;
-        fwrite(&fs->cfg, sizeof(IRDFewShotConfig), 1, f);
-        fwrite(&fs->tau, sizeof(float), 1, f);
-        fwrite(&fs->dt, sizeof(float), 1, f);
-        fwrite(&fs->num_support, sizeof(int), 1, f);
-        fwrite(&fs->num_classes, sizeof(int), 1, f);
-        fwrite(&fs->initialized, sizeof(int), 1, f);
-        fwrite(fs->W_embed, sizeof(float), 32 * 256, f);
-        fwrite(fs->b_embed, sizeof(float), 256, f);
-        fwrite(fs->W_gx, sizeof(float), 256 * 32, f);
-        fwrite(fs->W_ax, sizeof(float), 256 * 32, f);
-        fwrite(fs->W_gh, sizeof(float), 256 * 256, f);
-        fwrite(fs->W_ah, sizeof(float), 256 * 256, f);
-        fwrite(fs->b_g, sizeof(float), 256, f);
-        fwrite(fs->b_a, sizeof(float), 256, f);
-        fwrite(fs->pW_gx, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
-        fwrite(fs->pW_ax, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
-        fwrite(fs->pW_gh, sizeof(float), PCFC_HD * PCFC_HD, f);
-        fwrite(fs->pW_ah, sizeof(float), PCFC_HD * PCFC_HD, f);
-        fwrite(fs->pb_g, sizeof(float), PCFC_HD, f);
-        fwrite(fs->pb_a, sizeof(float), PCFC_HD, f);
-        fwrite(fs->support_features, sizeof(float), IRD_MAX_SUPPORT_SAMPLES * IRD_SEMANTIC_DIM, f);
-        fwrite(fs->support_labels, sizeof(int), IRD_MAX_SUPPORT_SAMPLES, f);
-        fwrite(fs->prototypes, sizeof(float), IRD_MAX_PROTOTYPES * IRD_SEMANTIC_DIM, f);
-        fwrite(fs->prototype_counts, sizeof(int), IRD_MAX_PROTOTYPES, f);
-        fwrite(fs->finetune_W, sizeof(float), 256 * 32, f);
-        fwrite(fs->finetune_b, sizeof(float), 256, f);
-        fwrite(fs->class_names, sizeof(char), 256 * 64, f);
+        SAFE_FWRITE_SCALAR(&fs->cfg, IRDFewShotConfig, f);
+        SAFE_FWRITE_SCALAR(&fs->tau, float, f);
+        SAFE_FWRITE_SCALAR(&fs->dt, float, f);
+        SAFE_FWRITE_SCALAR(&fs->num_support, int, f);
+        SAFE_FWRITE_SCALAR(&fs->num_classes, int, f);
+        SAFE_FWRITE_SCALAR(&fs->initialized, int, f);
+        SAFE_FWRITE_ARR(fs->W_embed, f);   SAFE_FWRITE_ARR(fs->b_embed, f);
+        SAFE_FWRITE_ARR(fs->W_gx, f);      SAFE_FWRITE_ARR(fs->W_ax, f);
+        SAFE_FWRITE_ARR(fs->W_gh, f);      SAFE_FWRITE_ARR(fs->W_ah, f);
+        SAFE_FWRITE_ARR(fs->b_g, f);       SAFE_FWRITE_ARR(fs->b_a, f);
+        SAFE_FWRITE_ARR(fs->pW_gx, f);     SAFE_FWRITE_ARR(fs->pW_ax, f);
+        SAFE_FWRITE_ARR(fs->pW_gh, f);     SAFE_FWRITE_ARR(fs->pW_ah, f);
+        SAFE_FWRITE_ARR(fs->pb_g, f);      SAFE_FWRITE_ARR(fs->pb_a, f);
+        SAFE_FWRITE_ARR(fs->support_features, f);
+        SAFE_FWRITE_ARR(fs->support_labels, f);
+        SAFE_FWRITE_ARR(fs->prototypes, f);
+        SAFE_FWRITE_ARR(fs->prototype_counts, f);
+        SAFE_FWRITE_ARR(fs->finetune_W, f);
+        SAFE_FWRITE_ARR(fs->finetune_b, f);
+        SAFE_FWRITE_ARR(fs->class_names, f);
     }
 
     fclose(f);
@@ -2030,45 +2028,33 @@ int ird_load_pretrained_weights(IRDDeepManager* manager, const char* path) {
 
     /* 读取管理器配置 */
     IRDDeepManagerConfig loaded_cfg;
-    fread(&loaded_cfg, sizeof(IRDDeepManagerConfig), 1, f);
+    SAFE_FREAD_SCALAR(&loaded_cfg, IRDDeepManagerConfig, f);
     memcpy(&manager->cfg, &loaded_cfg, sizeof(IRDDeepManagerConfig));
 
     /* 读取子模型存在标记 */
     int flags[4];
-    fread(flags, sizeof(int), 4, f);
+    SAFE_FREAD_DYN(flags, sizeof(int), 4, f);
 
     /* 读取当前识别模式 */
-    fread(&manager->current_mode, sizeof(int), 1, f);
+    SAFE_FREAD_SCALAR(&manager->current_mode, int, f);
 
     /* ---- 细粒度分类器权重 ---- */
     if (flags[0] && manager->fine_classifier) {
         IRDFineClassifier* c = manager->fine_classifier;
-        fread(&c->cfg, sizeof(IRDFineConfig), 1, f);
-        fread(&c->training_completed, sizeof(int), 1, f);
-        fread(c->W_gx_p, sizeof(float), 256 * 32, f);
-        fread(c->W_ax_p, sizeof(float), 256 * 32, f);
-        fread(c->W_gh_p, sizeof(float), 256 * 256, f);
-        fread(c->W_ah_p, sizeof(float), 256 * 256, f);
-        fread(c->b_g_p, sizeof(float), 256, f);
-        fread(c->b_a_p, sizeof(float), 256, f);
-        fread(c->W_gx_part, sizeof(float), 256 * 256, f);
-        fread(c->W_ax_part, sizeof(float), 256 * 256, f);
-        fread(c->W_gh_part, sizeof(float), 256 * 256, f);
-        fread(c->W_ah_part, sizeof(float), 256 * 256, f);
-        fread(c->b_g_part, sizeof(float), 256, f);
-        fread(c->b_a_part, sizeof(float), 256, f);
-        fread(c->W_fine, sizeof(float), 256 * 256, f);
-        fread(c->b_fine, sizeof(float), 256, f);
-        fread(c->W_coarse, sizeof(float), 64 * 256, f);
-        fread(c->b_coarse, sizeof(float), 64, f);
-        fread(c->bilin_W, sizeof(float), 256 * 256, f);
-        fread(c->bilin_proj, sizeof(float), 256 * 2, f);
-        fread(c->pW_gx, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
-        fread(c->pW_ax, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
-        fread(c->pW_gh, sizeof(float), PCFC_HD * PCFC_HD, f);
-        fread(c->pW_ah, sizeof(float), PCFC_HD * PCFC_HD, f);
-        fread(c->pb_g, sizeof(float), PCFC_HD, f);
-        fread(c->pb_a, sizeof(float), PCFC_HD, f);
+        SAFE_FREAD_SCALAR(&c->cfg, IRDFineConfig, f);
+        SAFE_FREAD_SCALAR(&c->training_completed, int, f);
+        SAFE_FREAD_ARR(c->W_gx_p, f);     SAFE_FREAD_ARR(c->W_ax_p, f);
+        SAFE_FREAD_ARR(c->W_gh_p, f);     SAFE_FREAD_ARR(c->W_ah_p, f);
+        SAFE_FREAD_ARR(c->b_g_p, f);      SAFE_FREAD_ARR(c->b_a_p, f);
+        SAFE_FREAD_ARR(c->W_gx_part, f);  SAFE_FREAD_ARR(c->W_ax_part, f);
+        SAFE_FREAD_ARR(c->W_gh_part, f);  SAFE_FREAD_ARR(c->W_ah_part, f);
+        SAFE_FREAD_ARR(c->b_g_part, f);   SAFE_FREAD_ARR(c->b_a_part, f);
+        SAFE_FREAD_ARR(c->W_fine, f);     SAFE_FREAD_ARR(c->b_fine, f);
+        SAFE_FREAD_ARR(c->W_coarse, f);   SAFE_FREAD_ARR(c->b_coarse, f);
+        SAFE_FREAD_ARR(c->bilin_W, f);    SAFE_FREAD_ARR(c->bilin_proj, f);
+        SAFE_FREAD_ARR(c->pW_gx, f);      SAFE_FREAD_ARR(c->pW_ax, f);
+        SAFE_FREAD_ARR(c->pW_gh, f);      SAFE_FREAD_ARR(c->pW_ah, f);
+        SAFE_FREAD_ARR(c->pb_g, f);       SAFE_FREAD_ARR(c->pb_a, f);
     } else if (flags[0]) {
         /* 文件中存在权重但管理器未初始化该子模型，跳过对应数据 */
         size_t skip_size = sizeof(IRDFineConfig) + sizeof(int)
@@ -2088,29 +2074,22 @@ int ird_load_pretrained_weights(IRDDeepManager* manager, const char* path) {
     /* ---- 开放集识别器权重 ---- */
     if (flags[1] && manager->open_set_recognizer) {
         IRDOpenSetRecognizer* r = manager->open_set_recognizer;
-        fread(&r->cfg, sizeof(IRDOpenSetConfig), 1, f);
-        fread(&r->inv_temp, sizeof(float), 1, f);
-        fread(&r->reject_threshold, sizeof(float), 1, f);
-        fread(&r->num_known_classes, sizeof(int), 1, f);
-        fread(&r->total_samples, sizeof(int), 1, f);
-        fread(&r->weibull_thresh, sizeof(float), 1, f);
-        fread(&r->nndr_threshold, sizeof(float), 1, f);
-        fread(r->prototypes, sizeof(float), 256 * 256, f);
-        fread(r->W_gx, sizeof(float), 256 * 32, f);
-        fread(r->W_ax, sizeof(float), 256 * 32, f);
-        fread(r->W_gh, sizeof(float), 256 * 256, f);
-        fread(r->W_ah, sizeof(float), 256 * 256, f);
-        fread(r->b_g, sizeof(float), 256, f);
-        fread(r->b_a, sizeof(float), 256, f);
-        fread(r->hidden, sizeof(float), 256, f);
-        fread(r->weibull_k, sizeof(float), 256, f);
-        fread(r->weibull_lambda, sizeof(float), 256, f);
-        fread(r->pW_gx, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
-        fread(r->pW_ax, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
-        fread(r->pW_gh, sizeof(float), PCFC_HD * PCFC_HD, f);
-        fread(r->pW_ah, sizeof(float), PCFC_HD * PCFC_HD, f);
-        fread(r->pb_g, sizeof(float), PCFC_HD, f);
-        fread(r->pb_a, sizeof(float), PCFC_HD, f);
+        SAFE_FREAD_SCALAR(&r->cfg, IRDOpenSetConfig, f);
+        SAFE_FREAD_SCALAR(&r->inv_temp, float, f);
+        SAFE_FREAD_SCALAR(&r->reject_threshold, float, f);
+        SAFE_FREAD_SCALAR(&r->num_known_classes, int, f);
+        SAFE_FREAD_SCALAR(&r->total_samples, int, f);
+        SAFE_FREAD_SCALAR(&r->weibull_thresh, float, f);
+        SAFE_FREAD_SCALAR(&r->nndr_threshold, float, f);
+        SAFE_FREAD_ARR(r->prototypes, f);
+        SAFE_FREAD_ARR(r->W_gx, f);       SAFE_FREAD_ARR(r->W_ax, f);
+        SAFE_FREAD_ARR(r->W_gh, f);       SAFE_FREAD_ARR(r->W_ah, f);
+        SAFE_FREAD_ARR(r->b_g, f);        SAFE_FREAD_ARR(r->b_a, f);
+        SAFE_FREAD_ARR(r->hidden, f);
+        SAFE_FREAD_ARR(r->weibull_k, f);  SAFE_FREAD_ARR(r->weibull_lambda, f);
+        SAFE_FREAD_ARR(r->pW_gx, f);      SAFE_FREAD_ARR(r->pW_ax, f);
+        SAFE_FREAD_ARR(r->pW_gh, f);      SAFE_FREAD_ARR(r->pW_ah, f);
+        SAFE_FREAD_ARR(r->pb_g, f);       SAFE_FREAD_ARR(r->pb_a, f);
     } else if (flags[1]) {
         size_t skip_size = sizeof(IRDOpenSetConfig) + sizeof(float) * 2
             + sizeof(int) * 2 + sizeof(float) * 2
@@ -2125,30 +2104,22 @@ int ird_load_pretrained_weights(IRDDeepManager* manager, const char* path) {
     /* ---- 零样本识别器权重 ---- */
     if (flags[2] && manager->zero_shot_recognizer) {
         IRDZeroShotRecognizer* z = manager->zero_shot_recognizer;
-        fread(&z->cfg, sizeof(IRDZeroShotConfig), 1, f);
-        fread(&z->margin, sizeof(float), 1, f);
-        fread(&z->num_seen_classes, sizeof(int), 1, f);
-        fread(&z->num_unseen_classes, sizeof(int), 1, f);
-        fread(&z->num_total_classes, sizeof(int), 1, f);
-        fread(z->W_vis_sem, sizeof(float), 256 * 256, f);
-        fread(z->b_vis_sem, sizeof(float), 256, f);
-        fread(z->W_attr_pred, sizeof(float), 128 * 256, f);
-        fread(z->b_attr_pred, sizeof(float), 128, f);
-        fread(z->class_attributes, sizeof(float), 256 * 128, f);
-        fread(z->semantic_prototypes, sizeof(float), 256 * 256, f);
-        fread(z->W_gx, sizeof(float), 256 * 32, f);
-        fread(z->W_ax, sizeof(float), 256 * 32, f);
-        fread(z->W_gh, sizeof(float), 256 * 256, f);
-        fread(z->W_ah, sizeof(float), 256 * 256, f);
-        fread(z->b_g, sizeof(float), 256, f);
-        fread(z->b_a, sizeof(float), 256, f);
-        fread(z->hidden, sizeof(float), 256, f);
-        fread(z->pW_gx, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
-        fread(z->pW_ax, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
-        fread(z->pW_gh, sizeof(float), PCFC_HD * PCFC_HD, f);
-        fread(z->pW_ah, sizeof(float), PCFC_HD * PCFC_HD, f);
-        fread(z->pb_g, sizeof(float), PCFC_HD, f);
-        fread(z->pb_a, sizeof(float), PCFC_HD, f);
+        SAFE_FREAD_SCALAR(&z->cfg, IRDZeroShotConfig, f);
+        SAFE_FREAD_SCALAR(&z->margin, float, f);
+        SAFE_FREAD_SCALAR(&z->num_seen_classes, int, f);
+        SAFE_FREAD_SCALAR(&z->num_unseen_classes, int, f);
+        SAFE_FREAD_SCALAR(&z->num_total_classes, int, f);
+        SAFE_FREAD_ARR(z->W_vis_sem, f);  SAFE_FREAD_ARR(z->b_vis_sem, f);
+        SAFE_FREAD_ARR(z->W_attr_pred, f); SAFE_FREAD_ARR(z->b_attr_pred, f);
+        SAFE_FREAD_ARR(z->class_attributes, f);
+        SAFE_FREAD_ARR(z->semantic_prototypes, f);
+        SAFE_FREAD_ARR(z->W_gx, f);       SAFE_FREAD_ARR(z->W_ax, f);
+        SAFE_FREAD_ARR(z->W_gh, f);       SAFE_FREAD_ARR(z->W_ah, f);
+        SAFE_FREAD_ARR(z->b_g, f);        SAFE_FREAD_ARR(z->b_a, f);
+        SAFE_FREAD_ARR(z->hidden, f);
+        SAFE_FREAD_ARR(z->pW_gx, f);      SAFE_FREAD_ARR(z->pW_ax, f);
+        SAFE_FREAD_ARR(z->pW_gh, f);      SAFE_FREAD_ARR(z->pW_ah, f);
+        SAFE_FREAD_ARR(z->pb_g, f);       SAFE_FREAD_ARR(z->pb_a, f);
     } else if (flags[2]) {
         size_t skip_size = sizeof(IRDZeroShotConfig) + sizeof(float)
             + sizeof(int) * 3
@@ -2164,33 +2135,26 @@ int ird_load_pretrained_weights(IRDDeepManager* manager, const char* path) {
     /* ---- 少样本识别器权重 ---- */
     if (flags[3] && manager->few_shot_recognizer) {
         IRDFewShotRecognizer* fs = manager->few_shot_recognizer;
-        fread(&fs->cfg, sizeof(IRDFewShotConfig), 1, f);
-        fread(&fs->tau, sizeof(float), 1, f);
-        fread(&fs->dt, sizeof(float), 1, f);
-        fread(&fs->num_support, sizeof(int), 1, f);
-        fread(&fs->num_classes, sizeof(int), 1, f);
-        fread(&fs->initialized, sizeof(int), 1, f);
-        fread(fs->W_embed, sizeof(float), 32 * 256, f);
-        fread(fs->b_embed, sizeof(float), 256, f);
-        fread(fs->W_gx, sizeof(float), 256 * 32, f);
-        fread(fs->W_ax, sizeof(float), 256 * 32, f);
-        fread(fs->W_gh, sizeof(float), 256 * 256, f);
-        fread(fs->W_ah, sizeof(float), 256 * 256, f);
-        fread(fs->b_g, sizeof(float), 256, f);
-        fread(fs->b_a, sizeof(float), 256, f);
-        fread(fs->pW_gx, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
-        fread(fs->pW_ax, sizeof(float), PCFC_HD * PCFC_MAX_CH, f);
-        fread(fs->pW_gh, sizeof(float), PCFC_HD * PCFC_HD, f);
-        fread(fs->pW_ah, sizeof(float), PCFC_HD * PCFC_HD, f);
-        fread(fs->pb_g, sizeof(float), PCFC_HD, f);
-        fread(fs->pb_a, sizeof(float), PCFC_HD, f);
-        fread(fs->support_features, sizeof(float), IRD_MAX_SUPPORT_SAMPLES * IRD_SEMANTIC_DIM, f);
-        fread(fs->support_labels, sizeof(int), IRD_MAX_SUPPORT_SAMPLES, f);
-        fread(fs->prototypes, sizeof(float), IRD_MAX_PROTOTYPES * IRD_SEMANTIC_DIM, f);
-        fread(fs->prototype_counts, sizeof(int), IRD_MAX_PROTOTYPES, f);
-        fread(fs->finetune_W, sizeof(float), 256 * 32, f);
-        fread(fs->finetune_b, sizeof(float), 256, f);
-        fread(fs->class_names, sizeof(char), 256 * 64, f);
+        SAFE_FREAD_SCALAR(&fs->cfg, IRDFewShotConfig, f);
+        SAFE_FREAD_SCALAR(&fs->tau, float, f);
+        SAFE_FREAD_SCALAR(&fs->dt, float, f);
+        SAFE_FREAD_SCALAR(&fs->num_support, int, f);
+        SAFE_FREAD_SCALAR(&fs->num_classes, int, f);
+        SAFE_FREAD_SCALAR(&fs->initialized, int, f);
+        SAFE_FREAD_ARR(fs->W_embed, f);   SAFE_FREAD_ARR(fs->b_embed, f);
+        SAFE_FREAD_ARR(fs->W_gx, f);      SAFE_FREAD_ARR(fs->W_ax, f);
+        SAFE_FREAD_ARR(fs->W_gh, f);      SAFE_FREAD_ARR(fs->W_ah, f);
+        SAFE_FREAD_ARR(fs->b_g, f);       SAFE_FREAD_ARR(fs->b_a, f);
+        SAFE_FREAD_ARR(fs->pW_gx, f);     SAFE_FREAD_ARR(fs->pW_ax, f);
+        SAFE_FREAD_ARR(fs->pW_gh, f);     SAFE_FREAD_ARR(fs->pW_ah, f);
+        SAFE_FREAD_ARR(fs->pb_g, f);      SAFE_FREAD_ARR(fs->pb_a, f);
+        SAFE_FREAD_ARR(fs->support_features, f);
+        SAFE_FREAD_ARR(fs->support_labels, f);
+        SAFE_FREAD_ARR(fs->prototypes, f);
+        SAFE_FREAD_ARR(fs->prototype_counts, f);
+        SAFE_FREAD_ARR(fs->finetune_W, f);
+        SAFE_FREAD_ARR(fs->finetune_b, f);
+        SAFE_FREAD_ARR(fs->class_names, f);
     } else if (flags[3]) {
         size_t skip_size = sizeof(IRDFewShotConfig) + sizeof(float) * 2
             + sizeof(int) * 3

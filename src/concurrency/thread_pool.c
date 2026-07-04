@@ -880,15 +880,16 @@ ThreadPool* thread_pool_create(const ThreadPoolConfig* config) {
         );
         
         if (!pool->threads[i].handle) {
-            // 创建失败，清理已创建的线程
             for (size_t j = 0; j < i; j++) {
                 CloseHandle(pool->threads[j].handle);
             }
             safe_free((void**)&pool->threads);
 #ifdef _WIN32
             DeleteCriticalSection(&pool->lock);
+            DeleteCriticalSection(&pool->node_lock);  /* DEEP-FIX: 创建失败时清理node_lock */
 #else
             pthread_mutex_destroy(&pool->lock);
+            pthread_mutex_destroy(&pool->node_lock);  /* DEEP-FIX */
             pthread_cond_destroy(&pool->task_cond);
             pthread_cond_destroy(&pool->empty_cond);
 #endif
@@ -898,12 +899,12 @@ ThreadPool* thread_pool_create(const ThreadPoolConfig* config) {
 #else
         if (pthread_create(&pool->threads[i].handle, NULL, 
                           worker_thread_func, pool) != 0) {
-            // 创建失败，清理已创建的线程
             for (size_t j = 0; j < i; j++) {
                 pthread_cancel(pool->threads[j].handle);
             }
             safe_free((void**)&pool->threads);
             pthread_mutex_destroy(&pool->lock);
+            pthread_mutex_destroy(&pool->node_lock);  /* DEEP-FIX */
             pthread_cond_destroy(&pool->task_cond);
             pthread_cond_destroy(&pool->empty_cond);
             safe_free((void**)&pool);

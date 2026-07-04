@@ -675,14 +675,27 @@ AGISystem* agi_system_create(const AGIConfig* config)
         return NULL;
     }
     create_default_reasoning_engine(system);
+    if (!system->reasoning) {
+        /* P-FIX-019: 关键子系统失败应为ERROR级别（项目规范：禁止降级处理） */
+        selflnn_log(LOG_LEVEL_ERROR, "AGI", "默认推理引擎创建失败，推理功能不可用");
+    }
     if (system->reasoning && system->knowledge) {
         reasoning_engine_set_knowledge_base(system->reasoning, system->knowledge);
         reasoning_sync_knowledge(system->reasoning);
     }
-    create_default_decision_engine(system);
-    create_default_planning_system(system);
-    create_default_learning_engine(system);
-    create_default_memory_manager(system);
+    /* P1-11修复：检查各关键子系统的创建结果并记录错误 */
+    if (create_default_decision_engine(system) != 0) {
+        selflnn_log(LOG_LEVEL_ERROR, "AGI", "默认决策引擎创建失败，决策功能不可用");
+    }
+    if (create_default_planning_system(system) != 0) {
+        selflnn_log(LOG_LEVEL_ERROR, "AGI", "默认规划系统创建失败，规划功能不可用");
+    }
+    if (create_default_learning_engine(system) != 0) {
+        selflnn_log(LOG_LEVEL_ERROR, "AGI", "默认学习引擎创建失败，学习功能不可用");
+    }
+    if (create_default_memory_manager(system) != 0) {
+        selflnn_log(LOG_LEVEL_ERROR, "AGI", "默认记忆管理器创建失败，记忆功能不可用");
+    }
     create_default_metacognition(system);
     create_default_self_cognition(system);
     create_default_reflection(system);
@@ -691,13 +704,13 @@ AGISystem* agi_system_create(const AGIConfig* config)
     create_default_dialogue(system);
     create_default_thread_pool(system);
     if (create_default_vision(system) != 0) {
-        selflnn_log(LOG_LEVEL_WARNING, "AGI", "默认视觉处理器创建失败，视觉功能不可用");
+        selflnn_log(LOG_LEVEL_ERROR, "AGI", "默认视觉处理器创建失败，视觉功能不可用");
     }
     if (create_default_depth_estimator(system) != 0) {
-        selflnn_log(LOG_LEVEL_WARNING, "AGI", "默认深度估计器创建失败，深度估计功能不可用");
+        selflnn_log(LOG_LEVEL_ERROR, "AGI", "默认深度估计器创建失败，深度估计功能不可用");
     }
     if (create_default_multisystem_control(system) != 0) {
-        selflnn_log(LOG_LEVEL_WARNING, "AGI", "默认多系统控制引擎创建失败，多机器人控制功能不可用");
+        selflnn_log(LOG_LEVEL_ERROR, "AGI", "默认多系统控制引擎创建失败，多机器人控制功能不可用");
     }
 
     {
@@ -779,6 +792,11 @@ void agi_system_free(AGISystem* system)
         depth_estimator_free(system->depth_estimator);
     if (system->owns_multisystem_control && system->multisystem_control)
         multisystem_control_engine_destroy(system->multisystem_control);
+    /* P-FIX-021: 释放AGI拥有的LNN实例（之前遗漏导致内存泄漏） */
+    if (system->owns_lnn && system->lnn) {
+        lnn_free(system->lnn);
+        system->lnn = NULL;
+    }
 
     if (system->vision_input_buffer)
         safe_free((void**)&system->vision_input_buffer);

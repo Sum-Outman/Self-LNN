@@ -265,9 +265,9 @@ int cfc_ocr_net_create(int ih, int iw, int nc, int hs, int fd, void** out_net) {
         return -1;
     }
 
-    /* Xavier初始化所有权重矩阵（不再有零初始化！） */
-    float scale_gx = sqrtf(2.0f/(float)(d+d));
-    float scale_gate = sqrtf(2.0f/(float)(2*d));
+    /* Xavier初始化所有权重矩阵（不再有零初始化！）
+     * 修复L-1: 移除未使用的 scale_gx/scale_gate 局部变量，
+     * 实际 Xavier 初始化由 xavier_uniform() 内联完成 */
     for(int i=0;i<d*d;i++){
         n->W_gx[i] = xavier_uniform(d, d);       /* 输入→门控 */
         n->W_gh[i] = xavier_uniform(d, d);       /* 隐藏→门控 */

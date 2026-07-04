@@ -5,6 +5,8 @@
  * 严格遵循项目要求：纯前端自实现
  */
 
+'use strict';
+
 class SelfLnnChart {
     constructor(canvas, options) {
         /* FIX-F2-7: null canvas保护,避免TypeError中断后续图表初始化 */

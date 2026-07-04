@@ -298,12 +298,23 @@ Robot* robot_create(const RobotConfig* config) {
     // 初始化传感器管理
     robot->sensor_capacity = 8; // 默认容量
     robot->sensors = (SensorInstance*)safe_calloc(robot->sensor_capacity, sizeof(SensorInstance));
+    /* M-025修复: 检查safe_calloc返回值 */
+    if (!robot->sensors) {
+        safe_free((void**)&robot);
+        return NULL;
+    }
     robot->sensor_count = 0;
     robot->next_sensor_id = 0;
     
     // 初始化运动控制
     robot->trajectory_size = 1024; // 默认轨迹缓冲区大小
     robot->joint_trajectory = (float*)safe_malloc(robot->trajectory_size * sizeof(float));
+    /* M-025修复: 检查safe_malloc返回值 */
+    if (!robot->joint_trajectory) {
+        safe_free((void**)&robot->sensors);
+        safe_free((void**)&robot);
+        return NULL;
+    }
     robot->trajectory_time = 0.0f;
     robot->trajectory_progress = 0.0f;
     
@@ -481,8 +492,11 @@ int robot_remove_sensor(Robot* robot, int sensor_id) {
     safe_free((void**)&sensor->data_buffer);
     
     // 移动后续传感器填补空位
-    for (size_t i = sensor_index + 1; i < robot->sensor_count; i++) {
-        robot->sensors[i - 1] = robot->sensors[i];
+    /* L-012修复：使用memmove替代直接赋值，避免SensorInstance结构体浅拷贝 */
+    if (sensor_index + 1 < (int)robot->sensor_count) {
+        size_t move_count = robot->sensor_count - (size_t)(sensor_index + 1);
+        memmove(&robot->sensors[sensor_index], &robot->sensors[sensor_index + 1],
+                move_count * sizeof(SensorInstance));
     }
     
     robot->sensor_count--;

@@ -8,6 +8,7 @@
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/string_utils.h"
+#include "selflnn/utils/logging.h"  /* P0-001修复: log_warn依赖此头文件 */
 #ifndef _WIN32
 #include <unistd.h>
 #endif
@@ -51,7 +52,11 @@ static void errors_auto_cleanup(void) {
 static int errors_auto_cleanup_init(void) {
     static int registered = 0;
     if (!registered) {
-        atexit(errors_auto_cleanup);
+        if (atexit(errors_auto_cleanup) != 0) {
+            /* atexit失败极少发生（ENOMEM），记录日志后继续 */
+            log_warn("[errors] atexit注册失败，错误消息内存不会在退出时自动释放");
+            return -1;
+        }
         registered = 1;
     }
     return 0;
@@ -132,8 +137,8 @@ static const struct {
     {SELFLNN_ERROR_GPU_MEMORY, "GPU内存错误"},
     {SELFLNN_ERROR_GPU_KERNEL, "GPU内核错误"},
     
-    // 自我认知错误
     // 设备相关错误
+    // 自我认知错误
     {SELFLNN_ERROR_DEVICE_OFFLINE, "设备离线"},
     {SELFLNN_ERROR_DEVICE_NOT_FOUND, "设备未找到"},
     {SELFLNN_ERROR_DEVICE_BUSY, "设备忙"},

@@ -100,7 +100,17 @@
 
                 if (data.running === false) stopPolling();
             }
-        } catch(e) { console.warn('训练轮询失败:', e.message); }
+        } catch(e) {
+            console.warn('训练轮询失败:', e.message);
+            /* F-S02修复: 连接失败时更新UI状态，显示"连接断开"提示 */
+            var progressEl = document.getElementById('train-progress-fill');
+            if (progressEl) progressEl.style.width = '0%';
+            var progressText = document.getElementById('train-progress-text');
+            if (progressText) progressText.textContent = '连接断开';
+            var taskEl = document.getElementById('train-current-task');
+            if (taskEl) taskEl.textContent = '连接断开';
+            stopPolling();
+        }
     }
 
 /* 训练历史图表渲染 

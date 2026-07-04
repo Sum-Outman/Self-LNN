@@ -4901,6 +4901,10 @@ int cuda_batch_norm_backward(GpuContext* ctx, const float* input, const float* g
     } else {
         /* 默认gamma=1 */
         float* ones = (float*)malloc(feature_bytes);
+        if (!ones) { /* C-012修复: NULL检查 */
+            cuda_backend_kernel_free(kernel);
+            return -1;
+        }
         for (size_t i = 0; i < features; i++) ones[i] = 1.0f;
         cudaMemcpy(d_gamma, ones, feature_bytes, cudaMemcpyHostToDevice);
         free(ones);
@@ -4911,6 +4915,13 @@ int cuda_batch_norm_backward(GpuContext* ctx, const float* input, const float* g
     float* h_input = (float*)malloc(total_bytes);
     float* host_mean = (float*)calloc(features, sizeof(float));
     float* host_var = (float*)calloc(features, sizeof(float));
+    if (!h_input || !host_mean || !host_var) { /* C-012修复: NULL检查 */
+        if (h_input) free(h_input);
+        if (host_mean) free(host_mean);
+        if (host_var) free(host_var);
+        cuda_backend_kernel_free(kernel);
+        return -1;
+    }
     memcpy(h_input, input, total_bytes);
 
     for (size_t f = 0; f < features; f++) {
@@ -4965,6 +4976,13 @@ int cuda_batch_norm_backward(GpuContext* ctx, const float* input, const float* g
     if (grad_gamma || grad_beta) {
         float* h_grad_output = (float*)malloc(total_bytes);
         float* h_input_local = (float*)malloc(total_bytes);
+        if (!h_grad_output || !h_input_local) { /* C-012修复: NULL检查 */
+            if (h_grad_output) free(h_grad_output);
+            if (h_input_local) free(h_input_local);
+            cuda_backend_kernel_free(kernel);
+            free(h_input); free(host_mean); free(host_var);
+            return -1;
+        }
         cudaMemcpy(h_grad_output, d_grad_output, total_bytes, cudaMemcpyDeviceToHost);
         cudaMemcpy(h_input_local, d_input, total_bytes, cudaMemcpyDeviceToHost);
 
@@ -5277,6 +5295,12 @@ int cuda_cross_entropy_loss_gradient(GpuContext* ctx, const float* logits,
         /* One-hot标签：使用归约计算（简化：在GPU上逐元素计算） */
         float* h_logits = (float*)malloc(logits_bytes);
         float* h_targets_local = (float*)malloc(targets_bytes);
+        if (!h_logits || !h_targets_local) { /* C-012修复: NULL检查 */
+            if (h_logits) free(h_logits);
+            if (h_targets_local) free(h_targets_local);
+            cuda_backend_kernel_free(kernel);
+            return -1;
+        }
         cudaMemcpy(h_logits, d_logits, logits_bytes, cudaMemcpyDeviceToHost);
         cudaMemcpy(h_targets_local, d_targets, targets_bytes, cudaMemcpyDeviceToHost);
 
@@ -5693,6 +5717,8 @@ int gpu_benchmark_throughput(float* bandwidth_gbps, float* compute_tflops, int* 
     cudaFree(d_src);
     cudaFree(d_dst);
     free(h_buf);
+    cudaEventDestroy(start_ev);  /* H-012修复: 释放CUDA事件资源 */
+    cudaEventDestroy(stop_ev);   /* H-012修复: 释放CUDA事件资源 */
 
     /* 计算能力: 基于GPU规格的实际TFLOPS估算 */
     float gpu_clock_ghz = prop.clockRate / 1e6f;

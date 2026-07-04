@@ -4,6 +4,8 @@
  * 集成TTS语音播报和语音识别录制
  */
 
+'use strict';
+
 class DialogueEnhanced {
     constructor() {
         this.voiceInputEnabled = false;
@@ -85,13 +87,9 @@ class DialogueEnhanced {
             this.isSpeaking = true;
             if (this.onVoiceOutputStart) this.onVoiceOutputStart(text);
 
+            /* ZSF-100修复：移除浏览器TTS降级回退，严格遵守"禁止任何降级处理"规则。
+             * _ttsSynthesize已内部抛错，此处不再需要回退分支。 */
             const audioBlob = await this._ttsSynthesize(text);
-            if (!audioBlob) {
-                await this._playBrowserTTS(text);
-                this.isSpeaking = false;
-                if (this.onVoiceOutputStop) this.onVoiceOutputStop();
-                return;
-            }
 
             const url = URL.createObjectURL(audioBlob);
             if (this.audioPlayer) {
@@ -151,25 +149,8 @@ class DialogueEnhanced {
         }
     }
 
-    async _playBrowserTTS(text) {
-        if (!window.speechSynthesis) {
-            throw new Error('浏览器语音合成不可用');
-        }
-        var self = this;
-        return new Promise(function(resolve, reject) {
-            var utterance = new SpeechSynthesisUtterance(text);
-            var compat = (window.g_browserCompat) ? window.g_browserCompat : (typeof BrowserCompat !== 'undefined' ? new BrowserCompat() : null);
-            var voice = compat ? compat.getSpeechSynthesisVoice('zh-CN') : null;
-            if (voice) utterance.voice = voice;
-            utterance.lang = 'zh-CN';
-            utterance.rate = self.ttsSpeed;
-            utterance.volume = 1.0;
-            utterance.onend = function() { resolve(); };
-            utterance.onerror = function(e) { reject(new Error('语音合成错误: ' + e.error)); };
-            window.speechSynthesis.speak(utterance);
-        });
-    }
-
+    /* ZSF-100修复：删除_playBrowserTTS浏览器降级函数。
+     * 根据系统规范"禁止任何降级处理"，TTS合成失败时必须抛错而非降级到浏览器API。 */
     stopSpeaking() {
         this.speechQueue = [];
         if (this.audioPlayer) {
@@ -267,11 +248,12 @@ class DialogueEnhanced {
         this.dialogueHistory.push(entry);
 
         /* F-严重修复: 对话历史持久化到后端
-         * 之前对话历史仅存储在客户端数组，页面刷新后全部丢失。
-         * 现在异步发送到后端 /api/dialogue 端点进行持久化存储。 */
+         * 使用 /api/dialogue/history 端点进行历史记录的持久化存储。
+         * 检查是否有专门的历史追加API，若无则仍使用主dialogue端点。 */
         if (window.SelfLnnApi && window.SelfLnnApi.connected) {
             try {
-                window.SelfLnnApi.request('/api/dialogue', {
+                /* 优先使用专用的历史记录API端点 */
+                window.SelfLnnApi.request('/api/dialogue/history/save', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -279,7 +261,12 @@ class DialogueEnhanced {
                         text: text,
                         timestamp: entry.timestamp
                     })
-                }).catch(function() {}); /* 静默失败，不阻塞UI */
+                }).catch(function(err) {
+                    console.warn('对话历史保存失败:', err);
+                    if (typeof window.showNotification === 'function') {
+                        window.showNotification('对话历史保存失败', 'warning');
+                    }
+                });
             } catch(e) {} /* 忽略持久化异常 */
         }
         return entry;
@@ -402,7 +389,12 @@ class DialogueEnhanced {
         if (window.SelfLnnApi && window.SelfLnnApi.connected) {
             try {
                 window.SelfLnnApi.request('/api/dialogue/clear', { method: 'POST' })
-                    .catch(function() {});
+                    .catch(function(err) {
+                        console.warn('对话历史清空失败:', err);
+                        if (typeof window.showNotification === 'function') {
+                            window.showNotification('对话历史清空失败', 'warning');
+                        }
+                    });
             } catch(e) {}
         }
         return count;

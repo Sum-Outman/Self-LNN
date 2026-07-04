@@ -4,6 +4,8 @@
  * 提供系统命令执行、文件操作、进程管理、机器设备控制接口
  */
 
+'use strict';
+
 class AGIController {
     constructor() {
         this.initialized = false;
@@ -199,7 +201,8 @@ class AGIController {
                     encoding: task.params.encoding || 'utf-8'
                 });
             case 'serial_receive':
-                return await this._apiPost('/api/serial/receive', {
+                /* P0-4修复：后端注册为GET方法，前端原使用POST导致405错误，统一为GET */
+                return await this._apiGet('/api/serial/receive', {
                     port: task.params.port,
                     timeout_ms: task.params.timeoutMs || 1000
                 });
@@ -266,6 +269,11 @@ class AGIController {
                 }
                 throw new Error('训练API不可用');
             case 'stop_training':
+                /* ZSF-100修复：统一stop_training API调用，优先使用stopTraining，
+                 * 与voice-command.js保持一致，回退使用stopTrainingJob */
+                if (window.SelfLnnApi && typeof window.SelfLnnApi.stopTraining === 'function') {
+                    return await window.SelfLnnApi.stopTraining();
+                }
                 if (window.SelfLnnApi && typeof window.SelfLnnApi.stopTrainingJob === 'function') {
                     return await window.SelfLnnApi.stopTrainingJob();
                 }
@@ -284,24 +292,24 @@ class AGIController {
             case 'get_feature_list':
                 return await this._apiGet('/api/agi/features');
             case 'start_evolution':
-                return await this._apiPost('/api/agi/features/toggle', { feature: 'self_evolution', enabled: true });
+                return await this._apiPost('/api/agi/feature/toggle', { feature: 'self_evolution', enabled: true });
             case 'stop_evolution':
-                return await this._apiPost('/api/agi/features/toggle', { feature: 'self_evolution', enabled: false });
+                return await this._apiPost('/api/agi/feature/toggle', { feature: 'self_evolution', enabled: false });
             case 'toggle_self_learning':
-                return await this._apiPost('/api/agi/features/toggle', { feature: 'self_learning', enabled: task.params.enabled });
+                return await this._apiPost('/api/agi/feature/toggle', { feature: 'self_learning', enabled: task.params.enabled });
             case 'toggle_self_decision':
-                return await this._apiPost('/api/agi/features/toggle', { feature: 'self_decision', enabled: task.params.enabled });
+                return await this._apiPost('/api/agi/feature/toggle', { feature: 'self_decision', enabled: task.params.enabled });
             case 'toggle_self_execution':
-                return await this._apiPost('/api/agi/features/toggle', { feature: 'self_execution', enabled: task.params.enabled });
+                return await this._apiPost('/api/agi/feature/toggle', { feature: 'self_execution', enabled: task.params.enabled });
             case 'toggle_imitation_learning':
-                return await this._apiPost('/api/agi/features/toggle', { feature: 'imitation_learning', enabled: task.params.enabled });
+                return await this._apiPost('/api/agi/feature/toggle', { feature: 'imitation_learning', enabled: task.params.enabled });
             case 'toggle_self_correction':
-                return await this._apiPost('/api/agi/features/toggle', { feature: 'self_correction', enabled: task.params.enabled });
+                return await this._apiPost('/api/agi/feature/toggle', { feature: 'self_correction', enabled: task.params.enabled });
             /* Z7-004: 补充缺失的能力开关前端接口 */  
             case 'toggle_self_reflection':
-                return await this._apiPost('/api/agi/features/toggle', { feature: 'reflection', enabled: task.params.enabled });
+                return await this._apiPost('/api/agi/feature/toggle', { feature: 'reflection', enabled: task.params.enabled });
             case 'toggle_planning':
-                return await this._apiPost('/api/agi/features/toggle', { feature: 'planning', enabled: task.params.enabled });
+                return await this._apiPost('/api/agi/feature/toggle', { feature: 'planning', enabled: task.params.enabled });
             case 'trigger_self_correction':
                 return await this._apiPost('/api/agi/self_correction', { trigger: task.params.trigger || 'manual', context: task.params.context || {} });
             default:
@@ -336,18 +344,31 @@ class AGIController {
             if (!window.SelfLnnApi) {
                 throw new Error('API服务不可用');
             }
-            const response = await window.SelfLnnApi.request(endpoint, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(data || {})
-            });
-            if (response && typeof response.json === 'function') {
-                if (!response.ok) {
-                    throw new Error('请求失败: HTTP ' + response.status);
+            /* P2-001修复: 添加30秒超时，避免请求无限挂起阻塞AGI任务队列 */
+            var controller = new AbortController();
+            var timeoutId = setTimeout(function() { controller.abort(); }, 30000);
+            try {
+                const response = await window.SelfLnnApi.request(endpoint, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data || {}),
+                    signal: controller.signal
+                });
+                clearTimeout(timeoutId);
+                if (response && typeof response.json === 'function') {
+                    if (!response.ok) {
+                        throw new Error('请求失败: HTTP ' + response.status);
+                    }
+                    return await response.json();
                 }
-                return await response.json();
+                return response;
+            } catch (innerErr) {
+                clearTimeout(timeoutId);
+                if (innerErr.name === 'AbortError') {
+                    throw new Error('请求超时(30s): ' + endpoint);
+                }
+                throw innerErr;
             }
-            return response;
         } catch (err) {
             console.warn('API请求失败:', endpoint, err.message);
             document.dispatchEvent(new CustomEvent('agi-control-error', {
@@ -362,14 +383,29 @@ class AGIController {
             if (!window.SelfLnnApi) {
                 throw new Error('API服务不可用');
             }
-            const response = await window.SelfLnnApi.request(endpoint, { method: 'GET' });
-            if (response && typeof response.json === 'function') {
-                if (!response.ok) {
-                    throw new Error('请求失败: HTTP ' + response.status);
+            /* P2-001修复: 添加30秒超时 */
+            var controller = new AbortController();
+            var timeoutId = setTimeout(function() { controller.abort(); }, 30000);
+            try {
+                const response = await window.SelfLnnApi.request(endpoint, {
+                    method: 'GET',
+                    signal: controller.signal
+                });
+                clearTimeout(timeoutId);
+                if (response && typeof response.json === 'function') {
+                    if (!response.ok) {
+                        throw new Error('请求失败: HTTP ' + response.status);
+                    }
+                    return await response.json();
                 }
-                return await response.json();
+                return response;
+            } catch (innerErr) {
+                clearTimeout(timeoutId);
+                if (innerErr.name === 'AbortError') {
+                    throw new Error('请求超时(30s): ' + endpoint);
+                }
+                throw innerErr;
             }
-            return response;
         } catch (err) {
             console.warn('API请求失败:', endpoint, err.message);
             throw err;
@@ -377,7 +413,9 @@ class AGIController {
     }
 
     _isHighRiskTask(task) {
-        const highRisk = ['shutdown', 'restart', 'reboot', 'delete', 'emergency_stop'];
+        /* P2-001修复: 补充缺失的高风险操作 */
+        const highRisk = ['shutdown', 'restart', 'reboot', 'delete', 'emergency_stop',
+                         'execute_command', 'ros_publish', 'multi_robot_sync'];
         return highRisk.includes(task.action);
     }
 

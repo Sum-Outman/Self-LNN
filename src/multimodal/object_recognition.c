@@ -174,6 +174,8 @@ static float normalized_cross_correlation(const float* a, const float* b, int le
 /* CfC深度学习基础数学函数 —— 从image_recognition_deep.c移植  */
 /* ======================================================================== */
 
+/* P2-5标注：以下向量运算函数与 image_recognition_deep.c 中对应函数功能重复，
+ * 详见 image_recognition_deep.c 开头的 P2-5 标注。 */
 static float _or_cfc_sig(float x) { return 1.0f / (1.0f + expf(-x)); }
 
 static float _or_cfc_tanh_f(float x) {

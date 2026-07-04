@@ -120,7 +120,11 @@ DialogueProcessor* dialogue_get_global_processor(void) {
     return g_dialogue_processor_global;
 }
 
-/* 初始化对话CfC权重（Xavier均匀分布，仅执行一次） */
+/* 初始化对话CfC权重（Xavier均匀分布，仅执行一次）
+ * L-005修复说明：当hs或in_dim增大时，旧权重被直接释放，然后重新分配。
+ * 这意味着之前的训练成果会丢失。如果需要在维度扩展时保留旧权重，
+ * 应在此处增加"先分配新空间、复制旧权重、再释放旧空间"的逻辑。
+ * 当前实现适用于原型快速迭代，生产环境应考虑权重迁移方案。 */
 static void dialogue_cfc_weights_init(DialogueCfCWeights* w, size_t hs, size_t in_dim)
 {
     if (w->initialized && w->max_hs >= hs && w->max_in >= in_dim) return;

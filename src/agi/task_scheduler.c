@@ -147,6 +147,10 @@ static void task_wrapper_execute(void* arg) {
         int ret = t->func(t->context);
         t->status = (ret == 0) ? TASK_COMPLETED : TASK_FAILED;
     }
+    /* DEEP-FIX: 释放TSWrapperArg，修复每次认知循环的内存泄漏 */
+    if (t && t->context) {
+        safe_free(&t->context);
+    }
 }
 
 /**
@@ -218,12 +222,28 @@ static int ts_dependencies_met(TaskScheduler* s, ScheduledTask* t) {
  * @brief K-038: 选择下一个任务(最高优先级、依赖满足)
  */
 static int ts_select_next(TaskScheduler* s) {
+    /* DEEP-FIX: 添加老化计数器防止优先级饥饿。
+     * PENDING任务每轮未被选中时老化+1，老化超过5轮则提升优先级。 */
     for (int p = TS_PRIORITY_LEVELS - 1; p >= 0; p--) {
         int tid = s->queue_heads[p];
         while (tid != -1) {
             ScheduledTask* t = &s->tasks[tid];
-            if (t->status == TASK_PENDING && ts_dependencies_met(s, t)) {
-                return tid;
+            if (t->status == TASK_PENDING) {
+                /* 老化机制：长期等待的低优先级任务逐轮提升优先级 */
+                if (!ts_dependencies_met(s, t)) {
+                    t->aging_counter++;
+                    if (t->aging_counter > 5 && t->priority < TS_PRIORITY_LEVELS - 1) {
+                        t->priority++;  /* 提升一级 */
+                        t->aging_counter = 0;
+                        /* 从旧队列移除并插入到新优先级队列首部 */
+                        ts_queue_remove(s, tid);
+                        ts_queue_insert(s, tid);
+                        /* 当前扫描中断，下次tick处理 */
+                        return -1;
+                    }
+                } else {
+                    return tid;
+                }
             }
             tid = s->queue_next[tid];
         }
@@ -308,12 +328,14 @@ int task_scheduler_tick(TaskScheduler* s) {
                     /* 线程池异步模式：提交到线程池执行 */
                     if (s->use_thread_pool && s->thread_pool_submit) {
                         s->thread_pool_submit(s->thread_pool, task_wrapper_execute, t);
+                        /* P1-9修复：异步模式下不立即检查t->status，
+                         * task_wrapper_execute会在任务完成时更新状态和计数器 */
                     } else {
                         int ret = t->func(t->context);
                         t->status = (ret == 0) ? TASK_COMPLETED : TASK_FAILED;
+                        if (t->status == TASK_COMPLETED) s->total_completed++;
+                        else if (t->status == TASK_FAILED) s->total_failed++;
                     }
-                    if (t->status == TASK_COMPLETED) s->total_completed++;
-                    else if (t->status == TASK_FAILED) s->total_failed++;
                 }
                 s->running_task_id = -1;
                 executed++;
@@ -327,23 +349,19 @@ int task_scheduler_tick(TaskScheduler* s) {
                 /* 线程池异步模式：提交到线程池执行 */
                 if (s->use_thread_pool && s->thread_pool_submit) {
                     s->thread_pool_submit(s->thread_pool, task_wrapper_execute, t);
+                    /* P1-9修复：异步模式下计数器由task_wrapper_execute更新 */
                 } else {
                     int ret = t->func(t->context);
-                    /* P2修复: 显式初始化elapsed避免编译器警告 */
-                    time_t elapsed = 0;
-                    elapsed = time(NULL) - t->start_time;
+                    time_t elapsed = time(NULL) - t->start_time;
 
                     if (t->timeout_seconds > 0 && elapsed > t->timeout_seconds) {
                         t->status = TASK_PREEMPTED;
-                        log_warning("[调度器] 超时: %s(ID=%d) 运行%lds>%ds",
-                                   t->name, t->task_id, (long)elapsed, t->timeout_seconds);
                     } else {
                         t->status = (ret == 0) ? TASK_COMPLETED : TASK_FAILED;
                     }
+                    if (t->status == TASK_COMPLETED) s->total_completed++;
+                    else if (t->status == TASK_FAILED) s->total_failed++;
                 }
-
-                if (t->status == TASK_COMPLETED) s->total_completed++;
-                else if (t->status == TASK_FAILED) s->total_failed++;
             }
             s->running_task_id = -1;
             executed++;
@@ -362,6 +380,8 @@ void task_scheduler_get_stats(const TaskScheduler* s,
                                int* running, int* completed,
                                int* preempted, int* failed) {
     if (!s) return;
+    /* P-FIX-026: 添加锁保护，防止与task_scheduler_tick并发导致数据竞争 */
+    TS_MUTEX_LOCK(&((TaskScheduler*)s)->lock);
     if (total) *total = s->task_count;
     if (completed) *completed = s->total_completed;
     if (preempted) *preempted = s->total_preempted;
@@ -369,12 +389,14 @@ void task_scheduler_get_stats(const TaskScheduler* s,
 
     int p = 0, r = 0;
     for (int i = 0; i < s->task_count; i++) {
-        if (s->tasks[i].status == TASK_PENDING || s->tasks[i].status == TASK_PREEMPTED)
+        /* P-FIX-026: TASK_PREEMPTED不应计入pending，它需要重新调度 */
+        if (s->tasks[i].status == TASK_PENDING)
             p++;
         if (s->tasks[i].status == TASK_RUNNING) r++;
     }
     if (pending) *pending = p;
     if (running) *running = r;
+    TS_MUTEX_UNLOCK(&((TaskScheduler*)s)->lock);
 }
 
 void task_scheduler_pause(TaskScheduler* s) {

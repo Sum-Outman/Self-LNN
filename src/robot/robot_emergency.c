@@ -373,6 +373,11 @@ int robot_emergency_watchdog_reset(EmergencySystem* system, uint64_t timestamp_m
 
 int robot_emergency_watchdog_check(EmergencySystem* system, uint64_t timestamp_ms) {
     if (!system) return -1;
+    /* L-016修复：检测时间戳回拨，防止uptime_ms > timestamp_ms导致elapsed下溢 */
+    if (timestamp_ms < system->uptime_ms) {
+        system->uptime_ms = timestamp_ms; /* 回拨时重置基准时间 */
+        return 0;
+    }
     uint64_t elapsed = timestamp_ms - system->uptime_ms;
     if (elapsed > ROBOT_EMERGENCY_WATCHDOG_TIMEOUT_MS) {
         system->history.watchdog_timeout_count++;

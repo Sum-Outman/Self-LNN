@@ -613,7 +613,6 @@ static void agi_bg_knowledge_consolidate(void) {
         if (kie) {
             GLOBAL_LNN_LOCK();
             void* shared_lnn = g_global_lnn;
-            GLOBAL_LNN_UNLOCK();
             if (shared_lnn) {
                 int consumed = selflnn_consume_knowledge_inference(
                     shared_lnn, kie, "AGI", 3, 0.1f);
@@ -621,6 +620,7 @@ static void agi_bg_knowledge_consolidate(void) {
                     log_debug("[AGI后台] 知识推理消费：%d条事实注入LNN状态", consumed);
                 }
             }
+            GLOBAL_LNN_UNLOCK();  /* DEEP-FIX: 无论shared_lnn是否为NULL都解锁 */
         }
 
         /* KG→LNN AGI后台注入 (图推理引擎全局就绪) */
@@ -934,13 +934,35 @@ static void agi_bg_goal_reevaluate(void) {
     }
 }
 
+/* P2-10修复：FeatureType→CapabilityType安全映射函数。
+ * 两套枚举的值定义完全不同，直接(CapabilityType)feature强转导致功能映射错乱。
+ * 例如 FEATURE_SELF_DECISION=0 但 CAP_SELF_DECISION=1，
+ * 强转后实际查询的是 CAP_SELF_COGNITION 而非 CAP_SELF_DECISION。 */
+static CapabilityType feature_to_capability(FeatureType feature) {
+    switch (feature) {
+        case FEATURE_SELF_DECISION:         return CAP_SELF_DECISION;
+        case FEATURE_AUTONOMOUS_EXECUTION:  return CAP_AUTONOMOUS_EXECUTION;
+        case FEATURE_SELF_LEARNING:         return CAP_SELF_LEARNING;
+        case FEATURE_SELF_EVOLUTION:        return CAP_SELF_EVOLUTION;
+        case FEATURE_SELF_CORRECTION:       return CAP_SELF_CORRECTION;
+        case FEATURE_IMITATION_LEARNING:    return CAP_IMITATION_LEARNING;
+        case FEATURE_MULTI_ROBOT:           return CAP_MULTI_AGENT;
+        case FEATURE_CONCURRENCY:           return CAP_CONCURRENCY;
+        case FEATURE_DIALOGUE:              return CAP_DIALOGUE;
+        case FEATURE_KNOWLEDGE_BASE:        return CAP_SELF_COGNITION;  /* 知识库归入认知 */
+        case FEATURE_METACOGNITION:         return CAP_REFLECTION;      /* 元认知归入反思 */
+        default:                            return CAP_SELF_COGNITION;  /* 未知功能默认查认知 */
+    }
+}
+
 /* 检查功能开关是否启用（统一双开关系统）
  * 优先检查capability_switch（主开关系统），其次检查self_cognition（认知反射系统）。
  * 两个系统任一返回启用即视为启用，消除两套开关返回值不一致导致的
  * 功能在capability_is_enabled已打开但is_feature_enabled_internal仍关闭的问题。 */
 static int is_feature_enabled_internal(FeatureType feature) {
-    /* 优先使用capability_switch（主开关系统） */
-    int cap_result = capability_is_enabled((CapabilityType)feature);
+    /* 优先使用capability_switch（主开关系统），通过安全映射函数转换枚举类型 */
+    CapabilityType cap = feature_to_capability(feature);
+    int cap_result = capability_is_enabled(cap);
     if (cap_result) return 1;
 
     /* 回退到self_cognition检查 */
@@ -2254,9 +2276,29 @@ static void generate_random_key(char* key, size_t key_size)
 static void signal_handler(int sig)
 {
     (void)sig;
-/* 信号处理时立即刷新所有日志缓冲区
-     * 防止SIGINT/SIGTERM/SIGSEGV时内存中的日志丢失 */
-    fflush(NULL);  /* 刷新所有打开的stdio流 */
+    if (sig == SIGSEGV) {
+        /* H-MED-003修复: 信号处理器中使用volatile sig_atomic_t确保原子读写，避免数据竞争 */
+        static volatile sig_atomic_t segv_count = 0;
+        if (++segv_count > 2) {
+            /* 多次SIGSEGV，直接中止 */
+            _exit(128 + sig);
+        }
+    }
+    /* H-002修复: 信号处理中避免使用任何可能持锁的函数。
+     * Windows使用WriteFile(GetStdHandle)绕过CRT锁；
+     * POSIX使用write(STDERR_FILENO) - 信号安全。 */
+#ifdef _WIN32
+    {
+        const char* msg = "SELF-LNN: 收到终止信号，正在安全关闭...\n";
+        DWORD written;
+        WriteFile(GetStdHandle(STD_ERROR_HANDLE), msg, (DWORD)strlen(msg), &written, NULL);
+    }
+#else
+    {
+        const char* msg = "SELF-LNN: 收到终止信号，正在安全关闭...\n";
+        write(STDERR_FILENO, msg, strlen(msg));
+    }
+#endif
     g_agi_running = 0;
 }
 
@@ -2384,7 +2426,7 @@ int main(int argc, char** argv)
     sigaction(SIGTERM, &sa, NULL);
     sigaction(SIGHUP, &sa, NULL);
     /* SIGSEGV紧急状态保存 */
-    sa.sa_flags = SA_RESETHAND;
+    /* H-001修复: 移除SA_RESETHAND，改用信号处理器内计数器控制 */
     sigaction(SIGSEGV, &sa, NULL);
 #endif
 
@@ -2497,7 +2539,7 @@ int main(int argc, char** argv)
             SystemConfig sys_config;
             memset(&sys_config, 0, sizeof(SystemConfig));
             /* 优先使用JSON中的值，JSON中未提供则使用硬编码默认值 */
-            sys_config.state_dimension = (sysjson_state_dim > 0) ? sysjson_state_dim : 128;
+            sys_config.state_dimension = (sysjson_state_dim > 0) ? sysjson_state_dim : 256;
             sys_config.multimodal_channels = (sysjson_mm_channels > 0) ? sysjson_mm_channels : 64;
             sys_config.memory_capacity = (sysjson_mem_cap > 0) ? sysjson_mem_cap : 10000;
             sys_config.max_concurrent_tasks = (sysjson_max_tasks > 0) ? sysjson_max_tasks : 100;
@@ -3025,8 +3067,10 @@ skip_agi_injection:
     g_last_cognition = g_start_time;
     g_last_safety = g_start_time;
 
+#if 0 /* L-010修复：main_loop_restart 为死代码标签，永远无法被goto跳转到，已移除 */
 #ifndef _MSC_VER
 main_loop_restart:
+#endif
 #endif
     /* E002修复: 移除Mini HTTP服务器（原代码在此启动独立原始socket HTTP服务器
      * 绑定8080端口，与BackendServer端口冲突导致bind失败。
@@ -3039,6 +3083,45 @@ main_loop_restart:
         }
     }
     
+    /* P1-7修复：启动WebSocket独立轮询线程，与AGI 10秒主循环解耦。
+     * 原架构ws_push_server_poll仅在主循环中每10秒调用一次，
+     * 导致客户端消息处理延迟高达10秒，WebSocket实时推送名存实亡。
+     * 独立线程以100ms高频轮询，确保消息实时处理、心跳及时发送。 */
+#ifdef _WIN32
+    {
+        static DWORD WINAPI ws_poll_thread_func(LPVOID arg) {
+            (void)arg;
+            while (g_agi_running) {
+                if (g_ws_push_server) {
+                    ws_push_server_poll(g_ws_push_server, 100);
+                }
+                Sleep(100);
+            }
+            return 0;
+        }
+        HANDLE ws_thread = CreateThread(NULL, 0, ws_poll_thread_func, NULL, 0, NULL);
+        if (ws_thread) CloseHandle(ws_thread);
+    }
+#else
+    {
+        static void* ws_poll_thread_func(void* arg) {
+            (void)arg;
+            while (g_agi_running) {
+                if (g_ws_push_server) {
+                    ws_push_server_poll(g_ws_push_server, 100);
+                }
+                struct timespec ts = {0, 100000000L}; /* 100ms */
+                nanosleep(&ts, NULL);
+            }
+            return NULL;
+        }
+        pthread_t ws_thread;
+        if (pthread_create(&ws_thread, NULL, ws_poll_thread_func, NULL) == 0) {
+            pthread_detach(ws_thread);
+        }
+    }
+#endif
+
     /* AGI主事件循环 */
     while (g_agi_running) {
 #ifdef _MSC_VER
@@ -3089,19 +3172,35 @@ main_loop_restart:
             task_scheduler_tick(g_task_scheduler);
         }
 
-        /* WebSocket推送服务器poll：处理客户端帧、心跳、超时检测 */
-        if (g_ws_push_server) {
-            ws_push_server_poll(g_ws_push_server, 100);
-        }
+        /* P-FIX-001: 主循环中不再调用ws_push_server_poll
+         * WebSocket推送服务由独立轮询线程(ws_poll_thread_func)每100ms驱动,
+         * 主循环中重复调用会导致双路并发操作同一socket的竞态条件.
+         * 此处仅保留WS广播(ws_push_broadcast等)调用. */
+        /* ws_push_server_poll 已迁移至独立线程,此处不再重复调用 */
 
-        /* 主睡眠间隔 */
+        /* P2-007修复: 将长睡眠(10s)分解为100ms短睡眠循环，
+         * 每次检查g_agi_running，使信号处理可在100ms内退出而非10s */
 #ifdef _WIN32
-        Sleep(AGI_BG_INTERVAL_MS);
+        {
+            int remain = AGI_BG_INTERVAL_MS;
+            while (remain > 0 && g_agi_running) {
+                int chunk = (remain > 100) ? 100 : remain;
+                Sleep(chunk);
+                remain -= chunk;
+            }
+        }
 #else
-        struct timespec ts;
-        ts.tv_sec = AGI_BG_INTERVAL_MS / 1000;
-        ts.tv_nsec = (AGI_BG_INTERVAL_MS % 1000) * 1000000L;
-        nanosleep(&ts, NULL);
+        {
+            int remain = AGI_BG_INTERVAL_MS;
+            struct timespec ts;
+            while (remain > 0 && g_agi_running) {
+                int chunk = (remain > 100) ? 100 : remain;
+                ts.tv_sec = 0;
+                ts.tv_nsec = chunk * 1000000L;
+                nanosleep(&ts, NULL);
+                remain -= chunk;
+            }
+        }
 #endif
 #ifdef _MSC_VER
         } __except(GetExceptionCode()) {
@@ -3187,6 +3286,11 @@ main_loop_restart:
      * 与selflnn内部的g_system_state.distributed_training指向同一块内存。
      * selflnn_shutdown内部会统一释放，此处重复释放将导致double-free崩溃。 */
     g_distributed = NULL;
+    /* L-002修复: 清理全局互斥锁，避免valgrind报告"still reachable" */
+    if (g_lnn_mutex) {
+        system_mutex_destroy(g_lnn_mutex);
+        g_lnn_mutex = NULL;
+    }
     selflnn_shutdown();
 
     printf("SELF-LNN AGI 系统已停止。\n");

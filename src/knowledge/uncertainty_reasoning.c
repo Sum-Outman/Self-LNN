@@ -49,6 +49,8 @@ float fuzzy_membership(const MembershipFunction* mf, float x) {
 
     switch (mf->type) {
     case MF_TRIANGULAR: {
+        /* 参数校验：避免除零错误（a==b或b==c时隶属度无定义） */
+        if (a == b || b == c) return 0.0f;
         if (x <= a || x >= c) return 0.0f;
         if (x == b) return 1.0f;
         if (x < b) return (x - a) / (b - a);

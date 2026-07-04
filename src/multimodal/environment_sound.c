@@ -336,8 +336,11 @@ void env_sound_classifier_mark_trained(void* classifier) {
 
 void environment_sound_classifier_free(void* classifier) {
     if (!classifier) return;
-    safe_free(&classifier);
+    /* 修复H-1: 先清除全局指针引用，再释放内存
+     * 原来的顺序: safe_free(&classifier) 将 classifier 置为 NULL
+     * 然后 g_esc == NULL 永远为假，全局指针无法清空，造成悬空指针 */
     if (g_esc == classifier) g_esc = NULL;
+    safe_free(&classifier);
 }
 
 /**

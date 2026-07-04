@@ -420,6 +420,11 @@ static int intel_ze_init(void) {
         return 0;
     }
     g_ze_lib.drivers = (ze_driver_handle_t*)calloc(driver_count, sizeof(ze_driver_handle_t));
+    /* H-MED-004a: calloc后NULL检查，防止内存分配失败导致空指针解引用 */
+    if (!g_ze_lib.drivers) {
+        LOG_ERROR("Intel Level Zero驱动句柄内存分配失败");
+        return 0;
+    }
     g_ze_lib.zeDriverGet(&driver_count, g_ze_lib.drivers);
     g_ze_lib.driver_count = (int)driver_count;
 
@@ -431,11 +436,25 @@ static int intel_ze_init(void) {
     }
     if (total_devices == 0) {
         LOG_WARN("Level Zero驱动无设备");
+        /* H-MED-004b: 释放已分配的驱动句柄内存，防止内存泄漏 */
+        free(g_ze_lib.drivers);
+        g_ze_lib.drivers = NULL;
         return 0;
     }
 
     g_ze_lib.devices = (ze_device_handle_t*)calloc(total_devices, sizeof(ze_device_handle_t));
     g_ze_lib.device_props = (ze_device_properties_t*)calloc(total_devices, sizeof(ze_device_properties_t));
+    /* H-MED-004c: calloc后NULL检查，防止内存分配失败导致空指针解引用 */
+    if (!g_ze_lib.devices || !g_ze_lib.device_props) {
+        LOG_ERROR("Intel Level Zero设备信息内存分配失败");
+        free(g_ze_lib.drivers);
+        free(g_ze_lib.devices);
+        free(g_ze_lib.device_props);
+        g_ze_lib.drivers = NULL;
+        g_ze_lib.devices = NULL;
+        g_ze_lib.device_props = NULL;
+        return 0;
+    }
     int idx = 0;
     for (int d = 0; d < (int)driver_count; d++) {
         uint32_t dev_count = 0;
@@ -862,6 +881,19 @@ static GpuKernel* intel_backend_kernel_create(GpuContext* context, const char* k
     kernel->arg_capacity = 16;
     kernel->arg_values = (void**)calloc(kernel->arg_capacity, sizeof(void*));
     kernel->arg_sizes = (size_t*)calloc(kernel->arg_capacity, sizeof(size_t));
+    /* H-MED-004d: calloc后NULL检查，防止内存分配失败导致空指针解引用 */
+    if (!kernel->arg_values || !kernel->arg_sizes) {
+        LOG_ERROR("GPU内核参数内存分配失败");
+        free(kernel->arg_values);
+        free(kernel->arg_sizes);
+        kernel->arg_values = NULL;
+        kernel->arg_sizes = NULL;
+        /* 清理已分配的内核结构 */
+        safe_free((void**)&kernel->kernel_name);
+        safe_free((void**)&kernel->kernel_source);
+        safe_free((void**)&kernel);
+        return NULL;
+    }
     kernel->arg_count = 0;
 
     /* 尝试通过Level Zero创建原生GPU内核（需要SPIR-V二进制格式）

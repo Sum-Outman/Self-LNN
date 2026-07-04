@@ -146,6 +146,7 @@ static MutexHandle g_elastic_mutex = NULL;
 /* 获取弹性上下文并加锁 */
 static DistributedContext* elastic_ctx_lock(void) {
     if (!g_elastic_mutex) g_elastic_mutex = mutex_create();
+    if (!g_elastic_mutex) return NULL;  /* C-011修复: mutex_create失败时拒绝lock */
     mutex_lock(g_elastic_mutex);
     return g_elastic_ctx;
 }

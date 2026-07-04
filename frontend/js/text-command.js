@@ -4,6 +4,8 @@
  * 支持自然语言解析和结构化命令
  */
 
+'use strict';
+
 class TextCommandSystem {
     constructor() {
         this.commandEngine = null;

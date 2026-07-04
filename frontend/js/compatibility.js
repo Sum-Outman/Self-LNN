@@ -4,6 +4,8 @@
  * 移动端兼容性 + 后端平台差异适配
  */
 
+'use strict';
+
 class BrowserCompat {
     constructor() {
         this.ua = navigator.userAgent;
@@ -42,7 +44,7 @@ class BrowserCompat {
             mediaRecorder: !!window.MediaRecorder,
             webAudio: !!(window.AudioContext || window.webkitAudioContext),
             speechSynthesis: !!window.speechSynthesis,
-            webRTC: !!window.RTCPeerConnection,
+            webRTC: !!(window.RTCPeerConnection || window.webkitRTCPeerConnection || window.mozRTCPeerConnection),
             webSocket: !!window.WebSocket,
             canvas: !!document.createElement('canvas').getContext,
             webGL: this._checkWebGL(),
@@ -67,6 +69,8 @@ class BrowserCompat {
     }
 
     getSupportedMediaRecorderMimeType() {
+        /* P2-003修复: 检查MediaRecorder是否存在，避免在不支持的浏览器崩溃 */
+        if (typeof MediaRecorder === 'undefined' || !MediaRecorder.isTypeSupported) return '';
         var types = [
             'audio/webm;codecs=opus',
             'audio/webm',

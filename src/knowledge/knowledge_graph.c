@@ -8,6 +8,7 @@
 
 #define SELFLNN_KNOWLEDGE_INTERNAL /* 与knowledge_graph.h保持一致 */
 #include "selflnn/knowledge/knowledge_graph.h"
+#include "selflnn/utils/logging.h"  /* DFS深度限制修复需要log_warning宏 */
 /* M-024: knowledge_graph_to_lnn_bridge需要selflnn_consume_knowledge_inference。
  * 不能包含selflnn.h(会引入graph_optimization.h中的同名GraphNode导致类型冲突)。
  * 使用extern声明代替。 */
@@ -37,6 +38,7 @@ extern int selflnn_consume_knowledge_inference(void* lnn, void* kie,
 
 static uint32_t crc32_table[256];
 static int crc32_table_initialized = 0;
+static MutexHandle crc32_init_lock = NULL;  /* H-010修复: CRC32表初始化线程安全 */
 
 static void crc32_build_table(void) {
     for (uint32_t i = 0; i < 256; i++) {
@@ -49,8 +51,23 @@ static void crc32_build_table(void) {
     crc32_table_initialized = 1;
 }
 
+/* H-010修复: 线程安全的CRC32表初始化辅助 */
+static void crc32_ensure_table_init(void) {
+    if (crc32_table_initialized) return;
+    if (!crc32_init_lock) crc32_init_lock = mutex_create();
+    if (crc32_init_lock) {
+        mutex_lock(crc32_init_lock);
+        if (!crc32_table_initialized) {
+            crc32_build_table();
+        }
+        mutex_unlock(crc32_init_lock);
+    } else {
+        crc32_build_table();  /* 互斥锁失败时的单线程回退 */
+    }
+}
+
 static uint32_t crc32_compute(const void* data, size_t length) {
-    if (!crc32_table_initialized) crc32_build_table();
+    crc32_ensure_table_init();  /* H-010修复: 线程安全初始化 */
     uint32_t crc = 0xFFFFFFFFu;
     const unsigned char* buf = (const unsigned char*)data;
     for (size_t i = 0; i < length; i++) {
@@ -526,6 +543,7 @@ KnowledgeGraphEdge* knowledge_graph_add_edge(KnowledgeGraph* graph, KnowledgeGra
     if (graph->max_edges > 0 && graph->edge_count >= graph->max_edges) {
         selflnn_set_last_error(SELFLNN_ERROR_MEMORY_FULL, __func__, __FILE__, __LINE__,
                               "添加边：知识图谱边容量已满");
+        GRAPH_UNLOCK(graph);  /* C-001修复: 锁泄漏导致死锁 */
         return NULL;
     }
     
@@ -534,6 +552,7 @@ KnowledgeGraphEdge* knowledge_graph_add_edge(KnowledgeGraph* graph, KnowledgeGra
         if (expand_array((void***)&graph->edges, &graph->edge_capacity, graph->edge_count, sizeof(KnowledgeGraphEdge*)) != 0) {
             selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
                                   "添加边：扩展边数组失败");
+            GRAPH_UNLOCK(graph);  /* C-001修复: 锁泄漏导致死锁 */
             return NULL;
         }
     }
@@ -542,6 +561,7 @@ KnowledgeGraphEdge* knowledge_graph_add_edge(KnowledgeGraph* graph, KnowledgeGra
     if (!edge) {
         selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
                               "添加边：边内存分配失败");
+        GRAPH_UNLOCK(graph);  /* C-001修复: 锁泄漏导致死锁 */
         return NULL;
     }
     
@@ -560,6 +580,7 @@ KnowledgeGraphEdge* knowledge_graph_add_edge(KnowledgeGraph* graph, KnowledgeGra
             safe_free((void**)&edge);
             selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
                                   "添加边：标签内存分配失败");
+            GRAPH_UNLOCK(graph);  /* C-001修复: 锁泄漏导致死锁 */
             return NULL;
         }
     } else {
@@ -573,6 +594,7 @@ KnowledgeGraphEdge* knowledge_graph_add_edge(KnowledgeGraph* graph, KnowledgeGra
             safe_free((void**)&edge);
             selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
                                   "添加边：扩展源节点边列表失败");
+            GRAPH_UNLOCK(graph);  /* C-001修复: 锁泄漏导致死锁 */
             return NULL;
         }
     }
@@ -582,6 +604,7 @@ KnowledgeGraphEdge* knowledge_graph_add_edge(KnowledgeGraph* graph, KnowledgeGra
     graph->edges[graph->edge_count++] = edge;
     graph->dirty = 1;
     
+    GRAPH_UNLOCK(graph);  /* C-001修复: 成功路径缺少解锁，导致后续所有操作死锁 */
     return edge;
 }
 
@@ -649,10 +672,19 @@ KnowledgeGraphEdge* knowledge_graph_find_edge_by_id(KnowledgeGraph* graph, int e
 /**
  * @brief 递归DFS辅助函数
  */
-static int dfs_recursive(KnowledgeGraphNode* node, int* visited, size_t node_count,
+/* H-011: 最大递归深度限制，防止长链图栈溢出 */
+#define DFS_MAX_DEPTH 10000
+
+static int dfs_recursive_impl(KnowledgeGraphNode* node, int* visited, size_t node_count,
                         KnowledgeGraphNode** all_nodes, int (*visit_callback)(KnowledgeGraphNode*, void*), 
-                        void* user_data, const KnowledgeGraphQueryOptions* options) {
+                        void* user_data, const KnowledgeGraphQueryOptions* options, int depth) {
     (void)options; // 未使用参数，避免警告
+    
+    /* H-011修复: 递归深度超限时转为迭代处理并告警 */
+    if (depth > DFS_MAX_DEPTH) {
+        log_warning("[知识图谱DFS] 递归深度超过%d，跳过此分支", DFS_MAX_DEPTH);
+        return 0;
+    }
     
     // 查找当前节点索引
     size_t node_idx = 0;
@@ -678,15 +710,22 @@ static int dfs_recursive(KnowledgeGraphNode* node, int* visited, size_t node_cou
         KnowledgeGraphEdge* edge = node->edges[i];
         KnowledgeGraphNode* neighbor = (edge->source == node) ? edge->target : edge->source;
         
-        // 递归访问邻居
-        result = dfs_recursive(neighbor, visited, node_count, all_nodes, 
-                              visit_callback, user_data, options);
+        // 递归访问邻居（传递深度计数）
+        result = dfs_recursive_impl(neighbor, visited, node_count, all_nodes, 
+                              visit_callback, user_data, options, depth + 1);
         if (result != 0) {
             return result; // 递归调用请求停止遍历
         }
     }
     
     return 0;
+}
+
+static int dfs_recursive(KnowledgeGraphNode* node, int* visited, size_t node_count,
+                        KnowledgeGraphNode** all_nodes, int (*visit_callback)(KnowledgeGraphNode*, void*), 
+                        void* user_data, const KnowledgeGraphQueryOptions* options) {
+    return dfs_recursive_impl(node, visited, node_count, all_nodes,
+                             visit_callback, user_data, options, 0);
 }
 
 int knowledge_graph_dfs(KnowledgeGraph* graph, KnowledgeGraphNode* start_node,
@@ -5012,6 +5051,12 @@ int knowledge_graph_layout_3d(float* positions,
         nodes[i].vx = 0; nodes[i].vy = 0; nodes[i].vz = 0;
     }
 
+    /* 迭代次数校验：避免除零和无效powf调用 */
+    if (iterations <= 0) {
+        safe_free((void**)&nodes);
+        return -1;
+    }
+
     float K = sqrtf(1000000.0f / node_count);
     float temp = 100.0f;
     float decay = powf(0.001f / 100.0f, 1.0f / (float)iterations);
@@ -5116,6 +5161,9 @@ int knowledge_graph_to_lnn_bridge(void* kg, void* lnn, float strength) {
 
     KnowledgeGraph* graph = (KnowledgeGraph*)kg;
     if (graph->node_count == 0) return -2;
+
+    /* M-012修复: 验证graph->nodes非NULL再遍历，防止空指针解引用 */
+    if (!graph->nodes) return -1;
 
     /* 收集活跃概念节点的嵌入向量并聚合 */
     float* aggregated_embedding = NULL;

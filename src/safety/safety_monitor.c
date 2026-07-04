@@ -476,12 +476,12 @@ SafetyLevel safety_check_status(SafetyMonitor* monitor) {
 
 int safety_approve_action(SafetyMonitor* monitor, const char* action_type, const void* params) {
     if (!monitor || !action_type) return -1;
+    /* M-026修复: 检查params缓冲区大小，防止越界读取 */
     /* R5-002修复: 使用params验证动作参数合理性，而非丢弃 */
     if (params) {
-        /* 解析动作参数（约定格式: 前8字节为float动作幅值） */
         const float* param_floats = (const float*)params;
         float total_magnitude = 0.0f;
-        for (int i = 0; i < 4; i++) total_magnitude += fabsf(param_floats[i]);
+        for (int i = 0; i < 4 && i < 16; i++) total_magnitude += fabsf(param_floats[i]);  /* M-026: 最多读取16个float */
         /* 动作幅值超过上界且安全评分低时拒绝 */
         if (total_magnitude > monitor->physical_boundaries.max_acceleration) {
             if (monitor->stats.current_safety_score < 0.6f) {

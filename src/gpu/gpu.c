@@ -314,11 +314,11 @@ static pthread_mutex_t g_gpu_error_lock = PTHREAD_MUTEX_INITIALIZER;
 /** GPU状态锁 - 保护g_active_backend和g_gpu_global_initialized */
 #ifdef _WIN32
 static CRITICAL_SECTION g_gpu_state_lock;
-static int g_gpu_state_lock_init = 0;
+static volatile LONG g_gpu_state_lock_init = 0;  /* H-014修复: 使用原子变量 */
 static void gpu_state_lock_init_func(void) {
-    if (!g_gpu_state_lock_init) {
+    /* H-014修复: 使用InterlockedCompareExchange确保一次性初始化 */
+    if (InterlockedCompareExchange(&g_gpu_state_lock_init, 1, 0) == 0) {
         InitializeCriticalSection(&g_gpu_state_lock);
-        g_gpu_state_lock_init = 1;
     }
 }
 #define GPU_STATE_LOCK() do { gpu_state_lock_init_func(); EnterCriticalSection(&g_gpu_state_lock); } while(0)
@@ -1853,6 +1853,7 @@ int gpu_init(GpuBackend backend) {
             iface->cleanup();
         }
         gpu_set_error_string("所有GPU后端均不可用，无可用计算后端");
+        GPU_STATE_UNLOCK();
         return -1;
     }
 
@@ -1873,6 +1874,7 @@ int gpu_init(GpuBackend backend) {
         iface->cleanup();
     }
     gpu_set_error_string("指定的后端初始化失败: %d", (int)backend);
+    GPU_STATE_UNLOCK();
     return -1;
 }
 

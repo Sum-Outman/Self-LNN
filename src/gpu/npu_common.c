@@ -943,7 +943,8 @@ int npu_common_kernel_create(void** handle, const char* name) {
         strncpy(kernel->name, name, 127);
         kernel->name[127] = '\0';
     } else {
-        strcpy(kernel->name, "unnamed");
+        strncpy(kernel->name, "unnamed", sizeof(kernel->name) - 1);
+        kernel->name[sizeof(kernel->name) - 1] = '\0';
     }
     kernel->arg_count = 0;
     kernel->is_compiled = 0;

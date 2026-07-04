@@ -26,6 +26,9 @@ static void hmac_sha256(const uint8_t* key, size_t key_len,
     uint8_t inner_hash[AUTH_HASH_LEN];
     memset(k_ipad, 0, 64); memset(k_opad, 0, 64);
     size_t klen = key_len < 64 ? key_len : 64;
+    /* L-011修复说明：当前HMAC实现采用简化密钥处理方式 ——
+     * 当key_len < 64时直接复制短密钥（而非标准RFC2104的零填充+哈希扩展）。
+     * 已知限制：短密钥(<64字节)安全性弱于标准HMAC，生产环境建议使用≥64字节密钥。 */
     memcpy(k_ipad, key, klen);
     memcpy(k_opad, key, klen);
     for (size_t i = 0; i < 64; i++) {
@@ -88,7 +91,12 @@ static void key_to_string(const uint8_t* hash, char* str, size_t str_len) {
         if ((i % 4) == 3 && pos < str_len - 1 && i < AUTH_HASH_LEN - 1)
             str[pos++] = '-';
     }
-    if (pos < str_len) str[pos] = '\0';
+    /* P2-001修复: 确保即使在边界情况下也写入空终止符 */
+    if (pos < str_len) {
+        str[pos] = '\0';
+    } else if (str_len > 0) {
+        str[str_len - 1] = '\0';  /* 安全兜底：最后一个字节强制设为\0 */
+    }
 }
 
 static int string_to_key(const char* str, uint8_t* hash) {
@@ -152,7 +160,7 @@ static int token_bucket_consume(TokenBucket* bucket, uint64_t tokens) {
     token_bucket_refill(bucket);
     if (bucket->tokens >= tokens) {
         bucket->tokens -= tokens;
-        bucket->tokens_consumed_total++;
+        bucket->tokens_consumed_total += tokens;  /* P0-002修复: 累加实际消耗令牌数，而非只+1 */
         return 1;
     }
     return 0;
@@ -194,6 +202,10 @@ int auth_generate_key(AuthSystem* auth, const char* name, AuthPermission permiss
     for (size_t i = 0; i < 8; i++)
         time_bytes[i] = (uint8_t)((uint64_t)now >> (i*8));
 
+    /* P1-3修复：HMAC密钥独立于消息内容，不再将random_bytes同时用作密钥和消息前缀 */
+    uint8_t hmac_key[32];
+    generate_random_bytes(hmac_key, 32);
+
     uint8_t hmac_input[64];
     memcpy(hmac_input, random_bytes, 32);
     memcpy(hmac_input+32, time_bytes, 8);
@@ -203,7 +215,7 @@ int auth_generate_key(AuthSystem* auth, const char* name, AuthPermission permiss
     if (name_len > 0) memcpy(hmac_input+56, name, name_len);
 
     uint8_t key_hash[AUTH_HASH_LEN];
-    hmac_sha256(random_bytes, 32, hmac_input, 56+name_len, key_hash);
+    hmac_sha256(hmac_key, 32, hmac_input, 56+name_len, key_hash);
 
     key_to_string(key_hash, key_out, key_out_size);
 
@@ -299,7 +311,16 @@ int auth_get_stats(AuthSystem* auth, AuthStats* stats) {
     }
     stats->requests_today = 0;
     time_t now = time(NULL);
-    struct tm* tm_now = localtime(&now);
+    /* H-006修复: 使用localtime_s(Windows)替代非线程安全的localtime */
+#ifdef _WIN32
+    struct tm tm_buf;
+    localtime_s(&tm_buf, &now);
+    struct tm* tm_now = &tm_buf;
+#else
+    struct tm tm_buf;
+    localtime_r(&now, &tm_buf);
+    struct tm* tm_now = &tm_buf;
+#endif
     time_t today_start = (time_t)mktime(tm_now) - (tm_now->tm_hour * 3600 + tm_now->tm_min * 60 + tm_now->tm_sec);
     for (int i = 0; i < auth->key_count; i++) {
         if (auth->keys[i].last_used_at >= today_start)
@@ -479,7 +500,8 @@ int auth_load_keys(AuthSystem* auth, const char* filepath) {
     if (is_encrypted) {
         uint8_t* keys_encrypted = (uint8_t*)safe_malloc(keys_size);
         if (!keys_encrypted || fread(keys_encrypted, 1, keys_size, fp) != keys_size) {
-            free(keys_encrypted);
+            /* P-FIX-012: 统一使用safe_free替代free，保持分配释放配对一致 */
+            safe_free((void**)&keys_encrypted);
             fclose(fp);
             return -1;
         }

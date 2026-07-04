@@ -1,4 +1,5 @@
 ﻿// SELF-LNN AGI 管理系统 - 主JavaScript文件
+'use strict';
 var g_dataEngine = null;
 var g_usingDataEngine = false;
 
@@ -3786,39 +3787,35 @@ function saveRobotConfig() {
  * 连接机器人
  */
 async function connectRobot() {
-    showNotification('正在检查机器人状态...', 'info');
+    showNotification('正在连接机器人...', 'info');
     
     try {
-        // 根据项目要求"禁止任何虚假数据"，不模拟连接进度
-        // 首先尝试获取机器人状态，检查机器人是否可用
-        const statusResult = await window.SelfLnnApi.getRobotStatus();
-        
-        if (statusResult.success && statusResult.data && statusResult.data.robot) {
-            const robot = statusResult.data.robot;
+        /* P0-5修复：调用后端 connectRobot API 建立真实连接，原代码只改UI不调API */
+        if (window.SelfLnnApi && typeof window.SelfLnnApi.connectRobot === 'function') {
+            const connectResult = await window.SelfLnnApi.connectRobot();
             
-            if (robot.status === 'available' || robot.status === 'enabled') {
-                // 机器人可用，更新UI状态为已连接
-                document.getElementById('robot-connection-status').innerHTML = '<i class="fas fa-plug"></i> 已连接';
-                document.getElementById('robot-connection-status').className = 'status-value connected';
-                showNotification('✅ 机器人已连接并可用', 'success');
-            } else if (robot.status === 'disabled') {
-                // 机器人控制未启用
-                showNotification('⚠️ 机器人控制功能未启用', 'warning');
-                console.warn('机器人控制未启用:', robot);
-            } else if (robot.status === 'error') {
-                // 机器人状态错误
-                showNotification(`❌ 机器人状态错误: ${robot.error || '未知错误'}`, 'danger');
-                console.error('机器人状态错误:', robot);
+            if (connectResult && connectResult.success) {
+                // 后端连接成功后，获取机器人状态更新UI
+                const statusResult = await window.SelfLnnApi.getRobotStatus();
+                
+                if (statusResult.success && statusResult.data && statusResult.data.robot) {
+                    const robot = statusResult.data.robot;
+                    document.getElementById('robot-connection-status').innerHTML = '<i class="fas fa-plug"></i> 已连接';
+                    document.getElementById('robot-connection-status').className = 'status-value connected';
+                    showNotification('✅ 机器人已连接并可用', 'success');
+                } else {
+                    document.getElementById('robot-connection-status').innerHTML = '<i class="fas fa-plug"></i> 已连接（状态未知）';
+                    document.getElementById('robot-connection-status').className = 'status-value connected';
+                    showNotification('⚠️ 机器人已连接但无法获取状态信息', 'warning');
+                }
             } else {
-                // 其他状态
-                showNotification(`⚠️ 机器人状态: ${robot.status}`, 'warning');
-                console.warn('机器人状态:', robot);
+                const errorMsg = (connectResult && connectResult.error) || '连接请求失败';
+                showNotification(`❌ ${errorMsg}`, 'danger');
+                console.error('机器人连接失败:', connectResult);
             }
         } else {
-            // 获取机器人状态失败
-            const errorMsg = statusResult.error || '获取机器人状态失败';
-            showNotification(`❌ ${errorMsg}`, 'danger');
-            console.error('获取机器人状态失败:', statusResult);
+            showNotification('❌ 机器人连接API不可用，请检查后端服务', 'danger');
+            console.error('connectRobot API未定义');
         }
     } catch (error) {
         console.error('连接机器人失败:', error);
@@ -3831,11 +3828,22 @@ async function connectRobot() {
  */
 async function disconnectRobot() {
     
-    if (confirm('确定要断开机器人连接吗？这将更新前端UI状态为未连接。')) {
+    if (confirm('确定要断开机器人连接吗？')) {
         try {
-            // 根据项目要求"禁止任何虚假数据"，不模拟断开连接进度
-            // 更新前端UI状态为未连接
-            showNotification('正在更新机器人连接状态...', 'warning');
+            showNotification('正在断开机器人连接...', 'warning');
+            
+            /* P0-5修复：调用后端 disconnectRobot API 真实断开连接 */
+            if (window.SelfLnnApi && typeof window.SelfLnnApi.disconnectRobot === 'function') {
+                const result = await window.SelfLnnApi.disconnectRobot();
+                
+                if (result && result.success) {
+                    showNotification('✅ 机器人已断开连接', 'success');
+                } else {
+                    showNotification(`⚠️ 后端返回异常: ${(result && result.error) || '未知错误'}，已更新本地UI状态`, 'warning');
+                }
+            } else {
+                showNotification('⚠️ disconnectRobot API不可用，仅更新本地UI状态', 'warning');
+            }
             
             // 更新UI状态
             document.getElementById('robot-connection-status').innerHTML = '<i class="fas fa-unplug"></i> 未连接';
@@ -3847,8 +3855,6 @@ async function disconnectRobot() {
             document.getElementById('robot-position').textContent = 'X: -- m, Y: -- m, Z: -- m';
             document.getElementById('robot-orientation').textContent = 'Roll: --°, Pitch: --°, Yaw: --°';
             document.getElementById('robot-temperature').textContent = '--°C';
-            
-            showNotification('机器人连接状态已更新为未连接', 'danger');
             
         } catch (error) {
             console.error('断开机器人连接失败:', error);
@@ -5118,160 +5124,11 @@ function connectVisualizationWebSocket() {
         }
     });
 
-    window.SelfLnnWebSocket.on('memory_status', function(data) {
-        if (!window.visualizationManager) return;
-        if (data.used_memory !== undefined) {
-            window.visualizationManager.updateMemoryData(data.used_memory, data.allocated_memory);
-        }
-    });
-
-    window.SelfLnnWebSocket.on('robot_status', function(data) {
-        if (!window.visualizationManager) return;
-        if (data.metrics) {
-            window.visualizationManager.updateRobotStatus(data.robot_id || 1, data.metrics);
-        }
-    });
-
-    window.SelfLnnWebSocket.on('knowledge_status', function(data) {
-        if (!window.visualizationManager) return;
-        if (data.total_entries !== undefined) {
-            window.visualizationManager.updateKnowledgeGrowthData(
-                data.total_entries,
-                data.concepts || 0,
-                data.relations || 0
-            );
-        }
-    });
-
-    window.SelfLnnWebSocket.on('prediction_result', function(data) {
-        if (!window.visualizationManager) return;
-        if (data.actual && data.predicted) {
-            window.visualizationManager.updatePredictionData(data.actual, data.predicted);
-        }
-    });
-
-    window.SelfLnnWebSocket.on('concept_evolution', function(data) {
-        if (!window.visualizationManager) return;
-        if (data.level !== undefined) {
-            window.visualizationManager.updateConceptEvolutionData(data.level);
-        }
-    });
-
-    window.SelfLnnWebSocket.on('state_activation_data', function(data) {
-        if (!window.visualizationManager) return;
-        if (data.matrix) {
-            window.visualizationManager.updateStateActivationData(data.matrix);
-        }
-    });
-
-    window.SelfLnnWebSocket.on('weight_distribution', function(data) {
-        if (!window.visualizationManager) return;
-        if (data.weights) {
-            window.visualizationManager.updateWeightDistributionData(data.weights);
-        }
-    });
-
-    window.SelfLnnWebSocket.on('activation_stats', function(data) {
-        if (!window.visualizationManager) return;
-        if (data.layers) {
-            window.visualizationManager.updateActivationData(data.layers, data.mean, data.max, data.min, data.std);
-        }
-    });
-
-    // LNN核心实时状态（高频率推送CfC ODE演化数据）
-    window.SelfLnnWebSocket.on('lnn_state', function(data) {
-        if (!window.lnnCoreStatus) { window.lnnCoreStatus = {}; }
-        if (data.h_dim !== undefined) {
-            window.lnnCoreStatus.h_dim = data.h_dim;
-            var hDimEl = document.getElementById('lnn-real-h-dim');
-            if (hDimEl) hDimEl.textContent = data.h_dim;
-        }
-        if (data.ode_solver !== undefined) {
-            window.lnnCoreStatus.ode_solver = data.ode_solver;
-            var solverEl = document.getElementById('lnn-real-ode-solver');
-            if (solverEl) solverEl.textContent = data.ode_solver;
-        }
-        if (data.tau !== undefined) {
-            window.lnnCoreStatus.tau = data.tau;
-            var tauEl = document.getElementById('lnn-real-tau');
-            if (tauEl) tauEl.textContent = data.tau.toFixed(4);
-        }
-        if (data.input_channels !== undefined) {
-            window.lnnCoreStatus.input_channels = data.input_channels;
-            var chEl = document.getElementById('lnn-real-input-channels');
-            if (chEl) chEl.textContent = data.input_channels;
-        }
-        if (data.state_entropy !== undefined) {
-            window.lnnCoreStatus.state_entropy = data.state_entropy;
-            var entEl = document.getElementById('lnn-real-state-entropy');
-            if (entEl) entEl.textContent = data.state_entropy.toFixed(4);
-        }
-        if (data.solver_step !== undefined) {
-            var stepEl = document.getElementById('lnn-real-solver-step');
-            if (stepEl) stepEl.textContent = data.solver_step.toFixed(6);
-        }
-        if (data.solver_steps !== undefined) {
-            var stepsEl = document.getElementById('lnn-real-solver-steps');
-            if (stepsEl) stepsEl.textContent = data.solver_steps;
-        }
-        if (data.grad_norm !== undefined) {
-            var gradEl = document.getElementById('lnn-real-grad-norm');
-            if (gradEl) gradEl.textContent = data.grad_norm.toFixed(6);
-        }
-        if (data.state_vector && Array.isArray(data.state_vector)) {
-            window.lnnCoreStatus.lastStateVector = data.state_vector;
-            var stateStr = '[' + data.state_vector.slice(0, 8).map(function(v) {return v.toFixed(3);}).join(', ') + '...]';
-            var vecEl = document.getElementById('lnn-real-state-vector');
-            if (vecEl) vecEl.textContent = stateStr + ' (共' + data.state_vector.length + '维)';
-            // 更新状态轨迹缓存
-            if (!window.lnnStateTrajectory) window.lnnStateTrajectory = [];
-            window.lnnStateTrajectory.push({t: Date.now(), vec: data.state_vector.slice(0, 10)});
-            if (window.lnnStateTrajectory.length > 200) window.lnnStateTrajectory.shift();
-        }
-        // 更新活跃模态通道状态
-        if (data.active_modalities && Array.isArray(data.active_modalities)) {
-            var modContainer = document.getElementById('lnn-active-modalities');
-            if (modContainer) {
-                modContainer.innerHTML = data.active_modalities.map(function(m) {
-                    var colorMap = {vision:'#00c8ff', audio:'#ff6b6b', text:'#48c774', sensor:'#ffd93d', control:'#b388ff'};
-                    return '<span style="display:inline-block;padding:2px 10px;margin:2px;border-radius:10px;background:' + (colorMap[m] || '#666') + '22;color:' + (colorMap[m] || '#aaa') + ';font-size:0.75rem;border:1px solid ' + (colorMap[m] || '#666') + '44;">' + m + '</span>';
-                }).join('');
-            }
-        }
-        // 渲染状态轨迹（每次收到状态数据时重绘）
-        renderLnnStateTrajectory();
-    });
-
-/* 安全告警推送消费 — 此前后端每20周期推送但前端无消费 */
-    window.SelfLnnWebSocket.on('safety_alert', function(data) {
-        var scoreEl = document.getElementById('safety-score');
-        var eventsEl = document.getElementById('safety-events-count');
-        if (!scoreEl && !eventsEl) return;
-        if (data.safety_score !== undefined && scoreEl) {
-            scoreEl.textContent = (data.safety_score * 100).toFixed(1) + '%';
-            var fillEl = document.getElementById('safety-score-fill');
-            if (fillEl) fillEl.style.width = (data.safety_score * 100).toFixed(1) + '%';
-        }
-        if (data.events !== undefined && eventsEl) {
-            eventsEl.textContent = data.events + ' 次';
-        }
-    });
-
-/* 元认知状态推送消费 — 此前后端每25周期推送但前端无消费 */
-    window.SelfLnnWebSocket.on('metacognition_status', function(data) {
-        var reflectionEl = document.getElementById('meta-reflection-score');
-        var loadEl = document.getElementById('meta-cognitive-load');
-        var successEl = document.getElementById('meta-learning-success');
-        if (data.reflection_score !== undefined && reflectionEl) {
-            reflectionEl.textContent = data.reflection_score.toFixed(2);
-        }
-        if (data.cognitive_load !== undefined && loadEl) {
-            loadEl.textContent = (data.cognitive_load * 100).toFixed(1) + '%';
-        }
-        if (data.learning_success_rate !== undefined && successEl) {
-            successEl.textContent = (data.learning_success_rate * 100).toFixed(1) + '%';
-        }
-    });
+    /* 以下事件（memory_status / robot_status / knowledge_status / prediction_result
+       / concept_evolution / state_activation_data / weight_distribution / activation_stats
+       / lnn_state / safety_alert / metacognition_status）已由 training-push.js 的
+       TrainingPushManager 统一注册并管理，同时通过 trainingPushManager 分发 CustomEvent
+       和更新 visualizationManager / g_dataEngine，此处移除重复注册以避免事件冲突。 */
 
     window.SelfLnnWebSocket.connect();
 }
@@ -5772,16 +5629,31 @@ function emergencyStopRobot(robotId) {
     
     if (!confirm(`确定要紧急停止 ${robot.name} 吗？`)) return;
     
-    robot.status = 'error';
-    renderFleetDashboard();
-    showNotification(`${robot.name} 已紧急停止`, 'danger');
+    showNotification(`${robot.name} 正在紧急停止...`, 'warning');
     
+    /* P1-8修复：调用后端API并await结果，确保紧急停止真正执行 */
     if (window.SelfLnnApi && typeof window.SelfLnnApi.sendRobotCommand === 'function') {
         window.SelfLnnApi.sendRobotCommand({
             robot_id: robotId,
             mode: 2,
             emergency_stop: true
+        }).then(function(result) {
+            if (result && result.success) {
+                robot.status = 'error';
+                renderFleetDashboard();
+                showNotification(`${robot.name} 已紧急停止`, 'danger');
+            } else {
+                showNotification(`${robot.name} 紧急停止失败: ${(result && result.error) || '未知错误'}`, 'danger');
+            }
+        }).catch(function(err) {
+            console.error('紧急停止失败:', err);
+            showNotification(`${robot.name} 紧急停止命令发送失败`, 'danger');
         });
+    } else {
+        /* 后端API不可用，更新前端状态为错误 */
+        robot.status = 'error';
+        renderFleetDashboard();
+        showNotification(`${robot.name} 已标记为停止状态（后端API不可用）`, 'danger');
     }
 }
 
@@ -8305,8 +8177,8 @@ async function refreshLearningMetrics() {
     })();
 })();
 
-/* ===== 知识库搜索功能 ===== */
-async function searchKnowledge() {
+/* ===== 知识库搜索功能 (L-007修复: 重命名为searchKnowledgeBase避免与knowledge-graph.js冲突) ===== */
+async function searchKnowledgeBase() {
     var query = document.getElementById('knowledge-search');
     var filter = document.getElementById('knowledge-filter');
     var q = query ? query.value.trim() : '';

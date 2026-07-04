@@ -8,6 +8,8 @@
  * 使用.on()逐一注册回调，WebSocket事件为广播模式，所有回调都会执行。
  */
 
+'use strict';
+
 class TrainingPushManager {
     constructor() {
         this.bufferSize = 1000;
@@ -167,8 +169,9 @@ class TrainingPushManager {
 
         this._wsRobotStatusHandler = (function(data) {
             console.log('[TrainingPush] 机器人状态:', data);
-            if (data && window.DataEngine) {
-                window.DataEngine.updateRobotStatus(data);
+            /* P-FIX-002: DataEngine是类构造函数, 实际实例为g_dataEngine */
+            if (data && window.g_dataEngine && typeof window.g_dataEngine.updateRobotStatus === 'function') {
+                window.g_dataEngine.updateRobotStatus(data);
             }
             document.dispatchEvent(new CustomEvent('ws-robot-status', { detail: data }));
         }).bind(this);
@@ -176,8 +179,8 @@ class TrainingPushManager {
 
         this._wsMemoryStatusHandler = (function(data) {
             console.log('[TrainingPush] 记忆状态:', data);
-            if (data && window.DataEngine) {
-                window.DataEngine.updateMemoryStatus(data);
+            if (data && window.g_dataEngine && typeof window.g_dataEngine.updateMemoryStatus === 'function') {
+                window.g_dataEngine.updateMemoryStatus(data);
             }
             document.dispatchEvent(new CustomEvent('ws-memory-status', { detail: data }));
         }).bind(this);
@@ -185,8 +188,8 @@ class TrainingPushManager {
 
         this._wsKnowledgeStatusHandler = (function(data) {
             console.log('[TrainingPush] 知识状态:', data);
-            if (data && window.DataEngine) {
-                window.DataEngine.updateKnowledgeStatus(data);
+            if (data && window.g_dataEngine && typeof window.g_dataEngine.updateKnowledgeStatus === 'function') {
+                window.g_dataEngine.updateKnowledgeStatus(data);
             }
             document.dispatchEvent(new CustomEvent('ws-knowledge-status', { detail: data }));
         }).bind(this);
@@ -209,8 +212,8 @@ class TrainingPushManager {
             if (data && window.visualizationManager) {
                 window.visualizationManager.updateStateActivationData(data);
             }
-            if (data && window.DataEngine) {
-                window.DataEngine.updateStateActivation(data);
+            if (data && window.g_dataEngine && typeof window.g_dataEngine.updateStateActivation === 'function') {
+                window.g_dataEngine.updateStateActivation(data);
             }
             document.dispatchEvent(new CustomEvent('ws-state-activation-data', { detail: data }));
         }).bind(this);
@@ -245,8 +248,8 @@ class TrainingPushManager {
             if (data && window.visualizationManager) {
                 window.visualizationManager.updateLnnState(data);
             }
-            if (data && window.DataEngine) {
-                window.DataEngine.updateLnnState(data);
+            if (data && window.g_dataEngine && typeof window.g_dataEngine.updateLnnState === 'function') {
+                window.g_dataEngine.updateLnnState(data);
             }
             document.dispatchEvent(new CustomEvent('ws-lnn-state', { detail: data }));
         }).bind(this);
@@ -257,8 +260,8 @@ class TrainingPushManager {
             if (data && window.visualizationManager) {
                 window.visualizationManager.updateMetacognitionStatus(data);
             }
-            if (data && window.DataEngine) {
-                window.DataEngine.updateMetacognitionStatus(data);
+            if (data && window.g_dataEngine && typeof window.g_dataEngine.updateMetacognitionStatus === 'function') {
+                window.g_dataEngine.updateMetacognitionStatus(data);
             }
             document.dispatchEvent(new CustomEvent('ws-metacognition-status', { detail: data }));
         }).bind(this);

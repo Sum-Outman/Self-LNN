@@ -186,6 +186,8 @@ static void policy_update(PolicyNetwork* net,
 
 static void replay_buffer_push(ReplayBuffer* buf,
                                 const AgentExperience* exp) {
+    /* L-015修复：capacity==0时除零保护，防止取模操作崩溃 */
+    if (buf->capacity == 0) return;
     buf->buffer[buf->head] = *exp;
     buf->head = (buf->head + 1) % buf->capacity;
     if (buf->count < buf->capacity) buf->count++;
@@ -775,6 +777,7 @@ int robot_agent_add_skill(RobotAgent* agent, const char* name,
 
     AgentSkill* skill = &agent->skills[agent->skill_count];
     strncpy(skill->skill_name, name, 63);
+    skill->skill_name[63] = '\0'; /* L-014修复：确保strncpy后字符串以'\0'终止，防止溢出读取 */
     memcpy(skill->skill_parameters, parameters, AGENT_ACTION_DIM * sizeof(float));
     skill->execution_count = 0;
     skill->success_rate = 0.5f;
@@ -1079,6 +1082,8 @@ int robot_agent_load(RobotAgent* agent, const char* filepath) {
 
 int robot_agent_reset(RobotAgent* agent) {
     if (!agent) return -1;
+    /* C-010修复: 先释放原有权重，再重新初始化，防止reset时memset清零导致内存泄漏 */
+    robot_agent_free(agent);
     AgentConfig cfg = AGENT_CONFIG_DEFAULT;
     cfg.learning_mode = agent->learning_mode;
     return robot_agent_init(agent, &cfg);

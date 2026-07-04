@@ -1,3 +1,14 @@
+/**
+ * @file stereo_3d_reconstruction.c
+ * @brief 双目立体三维重建系统
+ * 
+ * 实现完整的双目立体视觉三维重建管线：
+ * - Census变换 + Census-SGM 半全局双目匹配
+ * - 唯一性约束 + LRC 左右一致性检查 + 亚像素精炼
+ * - 三角测量3D反投影 + 点云生成
+ * 
+ * 修复L-3: 添加文件级文档注释头
+ */
 #include "selflnn/multimodal/stereo_3d_reconstruction.h"
 #include "selflnn/multimodal/stereo_depth_enhance.h"
 #include "selflnn/utils/memory_utils.h"

@@ -2657,20 +2657,16 @@ int self_cognition_execute_decision(SelfCognitionSystem* system,
     /* ZSF-004: 决策类型分发桥接 —— 将认知决策连接到真实执行管道 */
     switch (decision->type) {
     case DECISION_LEARN: {
-        /* 学习决策 → 触发在线学习器执行一步 */
-        extern void* selflnn_get_online_learner(void);
-        extern void* selflnn_get_shared_lnn(void);
+        /* 学习决策 → 触发在线学习器执行一步
+         * ZSF-101修复：移除函数体内冗余extern声明，selflnn.h/online_learning.h已包含 */
         void* learner = selflnn_get_online_learner();
         void* lnn = selflnn_get_shared_lnn();
         if (learner && lnn) {
             float state_vec[128] = {0};
             float target_vec[128] = {0};
-            extern int selflnn_get_recent_state(void*, float*, int);
-            extern int selflnn_get_recent_output(void*, float*, int);
             if (selflnn_get_recent_state(lnn, state_vec, 128) == 0 &&
                 selflnn_get_recent_output(lnn, target_vec, 128) == 0) {
                 float loss = 0.0f;
-                extern int online_learner_update(void*, const float*, size_t, const float*, size_t, float*);
                 online_learner_update(learner, state_vec, 128, target_vec, 128, &loss);
                 snprintf(system->current_execution.feedback, 
                         sizeof(system->current_execution.feedback),
@@ -2681,11 +2677,9 @@ int self_cognition_execute_decision(SelfCognitionSystem* system,
     }
     case DECISION_PLAN: {
         /* 规划决策 → 触发规划系统生成新计划 */
-        extern void* selflnn_get_planning_system(void);
         void* planning = selflnn_get_planning_system();
         if (planning) {
             float goal[64] = {0}, state_buf[64] = {0}, plan_buf[512] = {0};
-            extern int planning_generate(void*, const float*, size_t, const float*, size_t, float*, size_t);
             int plan_len = planning_generate(planning, goal, 64, state_buf, 64, plan_buf, 512);
             snprintf(system->current_execution.feedback,
                     sizeof(system->current_execution.feedback),
@@ -2694,13 +2688,11 @@ int self_cognition_execute_decision(SelfCognitionSystem* system,
         break;
     }
     case DECISION_EXPLORE: {
-        /* 探索决策 → 触发知识库推理探索新概念 */
-        extern void* selflnn_get_knowledge_inference(void);
-        extern void* selflnn_get_shared_lnn(void);
+        /* 探索决策 → 触发知识库推理探索新概念
+         * ZSF-101修复：移除函数体内冗余extern声明 */
         void* kie = selflnn_get_knowledge_inference();
         void* lnn_exp = selflnn_get_shared_lnn();
         if (kie && lnn_exp) {
-            extern int selflnn_consume_knowledge_inference(void*, void*, const char*, int, float);
             selflnn_consume_knowledge_inference(lnn_exp, kie, "探索", 5, 0.15f);
             snprintf(system->current_execution.feedback,
                     sizeof(system->current_execution.feedback),
@@ -2709,11 +2701,10 @@ int self_cognition_execute_decision(SelfCognitionSystem* system,
         break;
     }
     case DECISION_ADAPT: {
-        /* 适应决策 → 触发演化引擎执行结构变异 */
-        extern void* selflnn_get_evolution_engine(void);
+        /* 适应决策 → 触发演化引擎执行结构变异
+         * ZSF-101修复：移除函数体内冗余extern声明 */
         void* evo = selflnn_get_evolution_engine();
         if (evo) {
-            extern int evolution_step(void*);
             int evo_ret = evolution_step(evo);
             snprintf(system->current_execution.feedback,
                     sizeof(system->current_execution.feedback),
@@ -2722,12 +2713,11 @@ int self_cognition_execute_decision(SelfCognitionSystem* system,
         break;
     }
     case DECISION_EXPLOIT: {
-        /* 利用决策 → 执行当前最佳已知动作（通过LNN前向传播获取最优输出） */
-        extern void* selflnn_get_shared_lnn(void);
+        /* 利用决策 → 执行当前最佳已知动作（通过LNN前向传播获取最优输出）
+         * ZSF-101修复：移除函数体内冗余extern声明 */
         void* lnn_act = selflnn_get_shared_lnn();
         if (lnn_act) {
             float input_vec[128] = {0}, output_vec[128] = {0};
-            extern int selflnn_safe_forward(void*, const float*, float*);
             selflnn_safe_forward(lnn_act, input_vec, output_vec);
             snprintf(system->current_execution.feedback,
                     sizeof(system->current_execution.feedback),
@@ -2736,11 +2726,10 @@ int self_cognition_execute_decision(SelfCognitionSystem* system,
         break;
     }
     case DECISION_REST: {
-        /* 休息决策 → 降低系统活动水平，执行记忆巩固 */
-        extern void* selflnn_get_memory_manager(void);
+        /* 休息决策 → 降低系统活动水平，执行记忆巩固
+         * ZSF-101修复：移除函数体内冗余extern声明 */
         void* mm = selflnn_get_memory_manager();
         if (mm) {
-            extern int memory_sleep_consolidation(void*, float, int*);
             int stats[4] = {0};
             memory_sleep_consolidation(mm, 0.5f, stats);
             snprintf(system->current_execution.feedback,
@@ -6796,9 +6785,7 @@ int self_cognition_assess_accuracy(SelfCognitionSystem* system, float* accuracy)
     return 0;
 }
 
-/* self_model_state_free在self_cognition.h中声明但从未实现。
- * SelfModelState结构体包含动态分配的encoded_state数组，需正确释放。
- * 添加完整实现以释放SelfModelState中所有动态分配的内存。 */
+/* ZSF-101修复：self_model_state_free已实现（见下方函数体），该注释已过时。 */
 void self_model_state_free(SelfModelState* state) {
     if (!state) return;
     
@@ -9478,7 +9465,7 @@ int cognition_get_system_health(SystemHealth* health) {
             char line[256];
             while (fgets(line, sizeof(line), fp)) {
                 if (sscanf(line, "MemTotal: %llu kB", &total_kb) == 1) continue;
-                if (sscanf(line, "MemAvailable: %llu kB", &avail_kb) == 1) {}
+                if (sscanf(line, "MemAvailable: %llu kB", &avail_kb) == 1) { /* 捕获可用内存值，供下方健康度计算使用 */ }
             }
             fclose(fp);
             if (total_kb > 0 && avail_kb <= total_kb) {

@@ -9,6 +9,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
+#include <pthread.h>
 
 #define TASK_ID_NONE ((uint64_t)-1)
 
@@ -40,6 +41,9 @@ struct LbBalancer {
     /* 拉普拉斯分析器（频域负载均衡稳定性分析与预测） */
     LaplaceAnalyzer* laplace_analyzer;
     float* laplace_spectrum_buffer;
+
+    /* H-MED-005: 互斥锁，保护负载均衡器内部状态的并发访问 */
+    pthread_mutex_t lock;
 };
 
 void lb_default_config(LbConfig* config) {
@@ -70,6 +74,9 @@ LbBalancer* lb_create(const LbConfig* config) {
     balancer->initialized = 1;
     balancer->last_rebalance_time_ms = get_time_ms();
     balancer->last_health_check_ms = get_time_ms();
+    
+    /* H-MED-005: 初始化互斥锁 */
+    pthread_mutex_init(&balancer->lock, NULL);
     
     /* P1-019修复：拉普拉斯分析器参数从实际负载特性动态推导
        替代硬编码值，根据配置的节点数量、心跳间隔和期望的频域分辨率推导 */
@@ -117,6 +124,8 @@ void lb_destroy(LbBalancer* balancer) {
         balancer->laplace_analyzer = NULL;
     }
     safe_free((void**)&balancer->laplace_spectrum_buffer);
+    /* H-MED-005: 销毁互斥锁 */
+    pthread_mutex_destroy(&balancer->lock);
     safe_free((void**)&balancer);
 }
 
@@ -233,9 +242,17 @@ uint64_t lb_submit_task(LbBalancer* balancer, LbTaskPriority priority,
                         uint32_t estimated_duration_ms, int affinity_node_id,
                         void* user_data) {
     if (!balancer) return TASK_ID_NONE;
-    if (balancer->task_count >= (int)balancer->config.max_tasks) return TASK_ID_NONE;
+    /* H-MED-005: 加锁保护内部状态 */
+    pthread_mutex_lock(&balancer->lock);
+    if (balancer->task_count >= (int)balancer->config.max_tasks) {
+        pthread_mutex_unlock(&balancer->lock);
+        return TASK_ID_NONE;
+    }
     LbTask* task = (LbTask*)safe_calloc(1, sizeof(LbTask));
-    if (!task) return TASK_ID_NONE;
+    if (!task) {
+        pthread_mutex_unlock(&balancer->lock);
+        return TASK_ID_NONE;
+    }
     task->task_id = balancer->next_task_id++;
     task->priority = priority;
     task->estimated_compute_cost = compute_cost;
@@ -255,23 +272,31 @@ uint64_t lb_submit_task(LbBalancer* balancer, LbTaskPriority priority,
             task->assigned_node_id = node;
         }
     }
-    return task->task_id;
+    uint64_t result = task->task_id;
+    pthread_mutex_unlock(&balancer->lock);
+    return result;
 }
 
 int lb_cancel_task(LbBalancer* balancer, uint64_t task_id) {
     if (!balancer) return LB_ERROR_INVALID_PARAM;
+    /* H-MED-005: 加锁保护任务数组的并发访问 */
+    pthread_mutex_lock(&balancer->lock);
     for (int i = 0; i < balancer->task_count; i++) {
         if (balancer->tasks[i] && balancer->tasks[i]->task_id == task_id) {
             safe_free((void**)&balancer->tasks[i]);
             balancer->tasks[i] = balancer->tasks[--balancer->task_count];
+            pthread_mutex_unlock(&balancer->lock);
             return LB_ERROR_NONE;
         }
     }
+    pthread_mutex_unlock(&balancer->lock);
     return LB_ERROR_TASK_NOT_FOUND;
 }
 
 int lb_complete_task(LbBalancer* balancer, uint64_t task_id, int failed) {
     if (!balancer) return LB_ERROR_INVALID_PARAM;
+    /* H-MED-005: 加锁保护任务完成时的并发统计更新 */
+    pthread_mutex_lock(&balancer->lock);
     for (int i = 0; i < balancer->task_count; i++) {
         LbTask* t = balancer->tasks[i];
         if (t && t->task_id == task_id) {
@@ -298,9 +323,11 @@ int lb_complete_task(LbBalancer* balancer, uint64_t task_id, int failed) {
             }
             safe_free((void**)&t);
             balancer->tasks[i] = balancer->tasks[--balancer->task_count];
+            pthread_mutex_unlock(&balancer->lock);
             return LB_ERROR_NONE;
         }
     }
+    pthread_mutex_unlock(&balancer->lock);
     return LB_ERROR_TASK_NOT_FOUND;
 }
 
@@ -435,17 +462,25 @@ int lb_set_schedule_policy(LbBalancer* balancer, LbSchedulePolicy policy) {
 
 int lb_heartbeat(LbBalancer* balancer, uint32_t node_id) {
     if (!balancer) return LB_ERROR_INVALID_PARAM;
+    /* H-MED-005: 加锁保护节点心跳状态的并发更新 */
+    pthread_mutex_lock(&balancer->lock);
     int idx = find_node_index(balancer, node_id);
-    if (idx < 0) return LB_ERROR_NODE_NOT_FOUND;
+    if (idx < 0) {
+        pthread_mutex_unlock(&balancer->lock);
+        return LB_ERROR_NODE_NOT_FOUND;
+    }
     balancer->nodes[idx].last_heartbeat_ms = get_time_ms();
     if (balancer->nodes[idx].consecutive_failures > 0) {
         balancer->nodes[idx].consecutive_failures--;
     }
+    pthread_mutex_unlock(&balancer->lock);
     return LB_ERROR_NONE;
 }
 
 int lb_check_health(LbBalancer* balancer) {
     if (!balancer) return LB_ERROR_INVALID_PARAM;
+    /* H-MED-005: 加锁保护健康检查的并发访问 */
+    pthread_mutex_lock(&balancer->lock);
     uint64_t now = get_time_ms();
     balancer->last_health_check_ms = now;
     int failures = 0;
@@ -466,11 +501,14 @@ int lb_check_health(LbBalancer* balancer) {
             n->consecutive_failures--;
         }
     }
+    pthread_mutex_unlock(&balancer->lock);
     return failures > 0 ? 1 : 0;
 }
 
 int lb_rebalance(LbBalancer* balancer) {
     if (!balancer) return LB_ERROR_INVALID_PARAM;
+    /* H-MED-005: 加锁保护重均衡的并发操作 */
+    pthread_mutex_lock(&balancer->lock);
     balancer->last_rebalance_time_ms = get_time_ms();
     int moved = 0;
     int overloaded = 0;
@@ -500,6 +538,7 @@ int lb_rebalance(LbBalancer* balancer) {
         }
     }
     balancer->stats.total_rebalances++;
+    pthread_mutex_unlock(&balancer->lock);
     return moved;
 }
 

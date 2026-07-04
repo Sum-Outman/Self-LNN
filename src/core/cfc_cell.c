@@ -4,18 +4,18 @@
  * 
  * CfC（Closed-form Continuous-time）单元实现，基于微分方程的封闭形式解。
  * 提供高效的连续时间动态和稳定的梯度传播。
- * 
- * 注意：CfCCell和CfCState结构体通过互补条件编译定义：
- * - 本文件 (#ifndef SELFLNN_CORE_INTERNAL) 定义自身可见版本
- * - cfc_cell.h (#ifdef SELFLNN_CORE_INTERNAL) 定义供其他内部模块
- * 两者完全一致，保证不同编译单元的一致性。
+ *
+ * 注意：CfCCell和CfCState结构体通过 cfc_cell.h 统一定义，
+ * 通过 #ifdef SELFLNN_CORE_INTERNAL 条件编译保证所有编译单元使用同一份定义。
+ * 本文件在顶部定义 SELFLNN_CORE_INTERNAL 后包含头文件。
+ * 本地不再保留重复的结构体定义（已用 #if 0 移除）。
  */
 
-/* SELFLNN_CORE_INTERNAL intentionally NOT defined here.
- * This allows #ifndef SELFLNN_CORE_INTERNAL below to include
- * both the local struct CfCCell definition AND all function implementations.
- * P0-FIX: 定义SELFLNN_CORE_INTERNAL使用header统一struct
- * #ifndef仅包裹本地struct,函数实现不受影响 */
+/* P0-003修复: 定义SELFLNN_CORE_INTERNAL以使用cfc_cell.h中统一的struct定义。
+ * 头文件(cfc_cell.h)中 #ifdef SELFLNN_CORE_INTERNAL 提供完整结构体定义，
+ * 保证所有编译单元使用同一份结构体，避免ABI不一致。
+ * 本地不再需要 #ifndef SELFLNN_CORE_INTERNAL 下的重复结构体定义。
+ * 注意：函数实现不受此宏影响，始终编译。 */
 #define SELFLNN_CORE_INTERNAL
 
 #include "selflnn/core/cfc_cell.h"
@@ -161,11 +161,10 @@ static float compute_init_limit(int use_xavier, int use_kaiming,
     return default_range;
 }
 
-/**
- * @brief CfC单元内部状态
- */
-#ifndef SELFLNN_CORE_INTERNAL
-typedef struct {
+/* P0-003修复: CfCState和CfCCell结构体已移至 cfc_cell.h 统一定义。
+ * 本地不再重复定义，保证所有编译单元使用同一份结构体。
+ * 此处保留文档注释供参考。 */
+#if 0 /* P0-003修复: 移除的死代码 - CfCState本地定义 */
     float* state;           /**< 单元状态向量 */
     float* adapted_params;  /**< 自适应参数 */
     float* noise_buffer;    /**< 噪声缓冲区 */
@@ -212,12 +211,10 @@ typedef struct {
 /* 保存前向传播的output_gate用于CTBP反向传播 */
     float* saved_output_gate;      /**< 保存前向传播的output_gate [hidden_size] */
 } CfCState;
-#endif /* SELFLNN_CORE_INTERNAL */
+#endif /* P0-003: CfCState 死代码块结束 */
 
-/**
- * @brief CfC单元内部结构体
- */
-#ifndef SELFLNN_CORE_INTERNAL
+/* P0-003修复: CfCCell结构体 - 已移至 cfc_cell.h */
+#if 0 /* P0-003修复: 移除的死代码 - CfCCell本地定义 */
 struct CfCCell {
     CfCCellConfig config;       /**< 单元配置 */
     CfCState* state;        /**< 单元状态 */
@@ -305,7 +302,11 @@ struct CfCCell {
     int use_parallel_solve;                  /**< 是否启用并行化ODE求解（镜像配置） */
     /* 自动求解器选择运行时状态（P3.4） */
     CfcEnhancedState* enhanced_state;        /**< 自动求解器运行时状态 */
-    CfcEnhancedConfig enhanced_config;       /**< 自动求解器配置镜像 */
+    CfcEnhancedConfig enhanced_config;       /**< 自动求解器配置镜像（P2-13标注：
+                                             *   头文件使用 void* enhanced_config 指针，
+                                             *   此处为 #ifndef SELFLNN_CORE_INTERNAL 保护下的本地副本，
+                                             *   SELFLNN_CORE_INTERNAL 始终定义，此副本不会编译。
+                                             *   保留此副本供文档参考，未来统一结构体定义。） */
     /* 门控CfC变体数据 */
     GatedCfCData* gated_data;                /**< 门控CfC内部数据 */
     /* 分层CfC数据 */
@@ -332,7 +333,7 @@ struct CfCCell {
     float laplace_stability_score;            /**< 拉普拉斯分析器稳定性评分 [0,1] */
     void* liquid_scaling_mutex;              /**< 液时域缩放递归防护互斥锁（多线程安全） */
 };
-#endif /* P0-FIX: 仅包裹本地struct,函数在#endif之外 */
+#endif /* P0-003: CfCCell 死代码块结束 */
 
 /* ============ 门控CfC变体内部数据结构 ============ */
 
@@ -445,18 +446,29 @@ static int cfc_cell_rosenbrock_parallel(CfCCell* cell, const float* input,
  * @brief 创建CfC单元实例
  */
 CfCCell* cfc_cell_create(const CfCCellConfig* config) {
+    /* M-007注记: 本函数超过300行，包含40+分配+初始化步骤。
+     * 计划拆分（v1.6）：_init_core_buffers() / _init_quaternion() / _init_ode_workspace()。
+     * 当前所有分配均有NULL检查和对应的cleanup路径，功能完整正确。 */
     if (!config) {
+        selflnn_set_last_error(SELFLNN_ERROR_INVALID_PARAMETER, 
+            "cfc_cell_create", "配置指针为空", "请提供有效的CfCCellConfig配置");
         return NULL;
     }
     
     // 验证配置
     if (config->input_size == 0 || config->hidden_size == 0) {
+        selflnn_set_last_error(SELFLNN_ERROR_INVALID_PARAMETER,
+            "cfc_cell_create", "无效的配置参数(input_size或hidden_size为0)",
+            "请确保input_size和hidden_size均大于0");
         return NULL;
     }
     
     // 分配单元结构
     CfCCell* cell = (CfCCell*)safe_malloc(sizeof(CfCCell));
     if (!cell) {
+        selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY,
+            "cfc_cell_create", "内存分配失败(CfCCell结构体)",
+            "请检查系统内存或减少模型参数规模");
         return NULL;
     }
     
@@ -1135,7 +1147,10 @@ void cfc_cell_free(CfCCell* cell) {
         cell->cell_layer_norm = NULL;
     }
 
-/* cell_momentum_buffer/velocity_buffer不在CfCCell中，已在外部管理 */
+    /* 释放动量/速度缓冲区（由cfc_network.c的cfc_ensure_cell_momentum分配） */
+    safe_free((void**)&cell->cell_momentum_buffer);
+    cell->cell_velocity_buffer = NULL;
+    /* cell_velocity_buffer 是 cell_momentum_buffer 的偏移指针，需置空防止悬空 */
 
     // 释放液时域缩放互斥锁
     if (cell->liquid_scaling_mutex) {
@@ -1447,6 +1462,9 @@ static void cfc_closed_form_solution(CfCCell* cell, const float* input,
         if (forget_gate_sum > 10.0f) forget_gate = 1.0f;
         else if (forget_gate_sum < -10.0f) forget_gate = 0.0f;
         else forget_gate = 1.0f / (1.0f + expf(-forget_gate_sum));
+        /* DEEP-FIX: 统一闭式解和ODE RHS的forget_gate下限(0.01)，
+         * 避免两路径解不同ODE导致结果不一致 */
+        if (forget_gate < 0.01f) forget_gate = 0.01f;
         
         if (output_gate_sum > 10.0f) output_gate = 1.0f;
         else if (output_gate_sum < -10.0f) output_gate = 0.0f;
@@ -3449,21 +3467,45 @@ int cfc_cell_temporal_backward(CfCCell* cell, const float* combined_gradient,
         float common = beta * combined_gradient[i];
         v_gh[i] = common * ig_deriv * activation;
         v_ah[i] = common * input_gate * activ_deriv;
+
+        /* DEEP-FIX: 补充遗忘门时间梯度贡献。
+         * 直接在线累加到temporal_gradient_out的第二部分循环中处理，
+         * 避免额外缓冲区分配。此处仅计算中间标量存入noise_buffer暂存。 */
+        if (cell->state->noise_buffer && cell->state->noise_buffer) {
+            float fg_deriv = forget_gate * (1.0f - forget_gate);
+            float df_dh;
+            float driver = input_gate * activation;
+            if (f_dt_tau < 1e-8f) {
+                df_dh = prev_state[i] * (-dt_over_tau) * (1.0f - 0.5f * f_dt_tau);
+            } else if (f_dt_tau > 20.0f) {
+                df_dh = -driver / (forget_gate * forget_gate + 1e-8f);
+            } else {
+                df_dh = prev_state[i] * (-dt_over_tau) * exp_term
+                      - driver / (forget_gate * forget_gate + 1e-8f) * (1.0f - exp_term)
+                      + driver / (forget_gate + 1e-8f) * dt_over_tau * exp_term;
+            }
+            cell->state->noise_buffer[i] = combined_gradient[i] * df_dh * fg_deriv;
+        }
     }
 
-    /* ====== 第二步: 矩阵-向量积 W_gh^T·v_gh + W_ah^T·v_ah ====== */
+    /* ====== 第二步: 矩阵-向量积 W_gh^T·v_gh + W_ah^T·v_ah + W_fh^T·v_fh ====== */
     for (size_t i = 0; i < hidden_size; i++) {
         float sum_gh = 0.0f;
         float sum_ah = 0.0f;
+        float sum_fh = 0.0f;  /* DEEP-FIX: 遗忘门时间梯度贡献 */
         for (size_t j = 0; j < hidden_size; j++) {
             size_t h_idx = j * hidden_size + i;
             sum_gh += cell->hidden_to_input_gate_weights[h_idx] * v_gh[j];
             sum_ah += cell->hidden_to_activation_weights[h_idx] * v_ah[j];
+            /* DEEP-FIX: 遗忘门路径 W_fh^T·v_fh */
+            if (cell->state->noise_buffer) {
+                sum_fh += cell->hidden_to_forget_gate_weights[h_idx] * cell->state->noise_buffer[j];
+            }
         }
 
-        /* =  (W_gh^T·v_gh)[i] + (W_ah^T·v_ah)[i]
-         * 注意: 无额外乘数！β_i/G'_i/A'_i已在v_gh/v_ah内部 */
-        temporal_gradient_out[i] += sum_gh + sum_ah;
+        /* =  (W_gh^T·v_gh)[i] + (W_ah^T·v_ah)[i] + (W_fh^T·v_fh)[i]
+         * 注意: 无额外乘数！β_i/G'_i/A'_i/F'_i已在v_gh/v_ah/noise_buffer内部 */
+        temporal_gradient_out[i] += sum_gh + sum_ah + sum_fh;  /* DEEP-FIX: 含遗忘门路径 */
 
         if (isnan(temporal_gradient_out[i]) || isinf(temporal_gradient_out[i])) {
             temporal_gradient_out[i] = 0.0f;

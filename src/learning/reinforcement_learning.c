@@ -192,7 +192,8 @@ typedef struct {
     int action_dim;             /* 动作维度 (joint_targets) */
     float dt;                   /* 仿真步长 */
     int use_pybullet;           /* 使用PyBullet还是内部sim */
-    Simulator* sim;             /* 内部simulator实例 */
+    /* L-019修复：Simulator* sim 字段已废除，使用 internal_env 替代
+    Simulator* sim; */         /* 内部simulator实例（已废弃） */
     InternalPhysicsEnv* internal_env; /* 内部ODE物理模拟器（无PyBullet时使用） */
     unsigned int seed;          /* 随机种子 */
     int is_valid;               /**< M-009修复: 环境是否有效（有真实物理后端或内部模拟器） */

@@ -437,8 +437,9 @@ float cfc_estimate_stiffness_ratio(CfCCell* cell, const float* input,
 
     if (input && state && hidden_size < 4096) {
         for (size_t i = 0; i < hidden_size; i++) {
-            input_hash = input_hash * 31 + (uint32_t)(int)(input[i] * 10000.0f);
-            state_hash = state_hash * 31 + (uint32_t)(int)(state[i] * 10000.0f);
+            /* M-006修复: 使用int64_t防止浮点转换溢出INT_MAX */
+            input_hash = input_hash * 31 + (uint32_t)(int64_t)(input[i] * 10000.0);
+            state_hash = state_hash * 31 + (uint32_t)(int64_t)(state[i] * 10000.0);
         }
         if (estate->stiffness_cache_age < 200 &&
             input_hash == estate->stiffness_cache_input_hash &&

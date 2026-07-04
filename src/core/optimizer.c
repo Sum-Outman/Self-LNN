@@ -284,10 +284,7 @@ int optimizer_step(Optimizer* optimizer, float* parameters, float* gradients,
                 optimizer->velocity_buffer[i] = b2 * optimizer->velocity_buffer[i] +
                                                 (1.0f - b2) * gradients[i] * gradients[i];
 
-                float m_hat = optimizer->momentum_buffer[i] / (1.0f - *optimizer->beta1_power);
-                float v_hat = optimizer->velocity_buffer[i] / (1.0f - *optimizer->beta2_power);
-
-                /* ZSFJJJ-H003修复: 防止Adam偏差校正分母趋零。
+                /* ZSFJJJ-H003修复: 防止Adam偏差校正分母趋零，已有完整保护 */
                  * 长期训练(t>10000)后beta1_power下溢为0(float精度~1e-7),
                  * 导致1.0-0=1.0, 偏差校正失去意义。
                  * 使用min epsilon确保分母始终>=1e-8, 避免除零和校正失效。 */
@@ -320,6 +317,9 @@ int optimizer_step(Optimizer* optimizer, float* parameters, float* gradients,
 
                 float m_hat = optimizer->momentum_buffer[i] / (1.0f - *optimizer->beta1_power);
                 float v_hat = optimizer->velocity_buffer[i] / (1.0f - *optimizer->beta2_power);
+                /* DEEP-FIX: AdamW添加下溢保护 */
+                { float bc=1.0f-*optimizer->beta1_power; if(bc<1e-7f)bc=1e-7f; m_hat=optimizer->momentum_buffer[i]/bc; }
+                { float bc=1.0f-*optimizer->beta2_power; if(bc<1e-7f)bc=1e-7f; v_hat=optimizer->velocity_buffer[i]/bc; }
 
                 parameters[i] -= lr * (m_hat / (sqrtf(v_hat) + eps) + wd * parameters[i]);
             }
@@ -630,7 +630,10 @@ int optimizer_update_multi_group(Optimizer* optimizer, OptimizerParamGroup* grou
                 float* params = groups[g].parameters;
                 const float* grads = groups[g].gradients;
                 size_t n = groups[g].num_params;
+                float grp_wd = groups[g].weight_decay > 0.0f ? groups[g].weight_decay : wd;
                 for (size_t i = 0; i < n; i++, idx++) {
+                    /* P-FIX-013: 添加RMSProp multi_group分支的权重衰减（与单参数组版本对齐） */
+                    params[i] *= (1.0f - lr * grp_wd);
                     optimizer->cache_buffer[idx] = decay_rate * optimizer->cache_buffer[idx] +
                                                    (1.0f - decay_rate) * grads[i] * grads[i];
                     float adjusted_lr = lr / (sqrtf(optimizer->cache_buffer[idx]) + eps);
@@ -644,6 +647,7 @@ int optimizer_update_multi_group(Optimizer* optimizer, OptimizerParamGroup* grou
         {
             float b1 = optimizer->config.beta1 > 0.0f ? optimizer->config.beta1 : 0.9f;
             float b2 = optimizer->config.beta2 > 0.0f ? optimizer->config.beta2 : 0.999f;
+            float wd = optimizer->config.weight_decay;  /* DEEP-FIX: 多组Adam添加权重衰减 */
             *optimizer->beta1_power *= b1;
             *optimizer->beta2_power *= b2;
             idx = 0;
@@ -656,9 +660,13 @@ int optimizer_update_multi_group(Optimizer* optimizer, OptimizerParamGroup* grou
                                                       (1.0f - b1) * grads[i];
                     optimizer->velocity_buffer[idx] = b2 * optimizer->velocity_buffer[idx] +
                                                       (1.0f - b2) * grads[i] * grads[i];
-                    float m_hat = optimizer->momentum_buffer[idx] / (1.0f - *optimizer->beta1_power);
-                    float v_hat = optimizer->velocity_buffer[idx] / (1.0f - *optimizer->beta2_power);
-                    params[i] -= lr * m_hat / (sqrtf(v_hat) + eps);
+                    /* DEEP-FIX: 多组Adam添加下溢保护 */
+                    float b1c = 1.0f - *optimizer->beta1_power; if (b1c < 1e-7f) b1c = 1e-7f;
+                    float b2c = 1.0f - *optimizer->beta2_power; if (b2c < 1e-7f) b2c = 1e-7f;
+                    float m_hat = optimizer->momentum_buffer[idx] / b1c;
+                    float v_hat = optimizer->velocity_buffer[idx] / b2c;
+                    /* DEEP-FIX: 多组Adam权重衰减 */
+                    params[i] = params[i] * (1.0f - lr * wd) - lr * m_hat / (sqrtf(v_hat) + eps);
                 }
             }
             break;
@@ -938,7 +946,7 @@ void optimizer_reset(Optimizer* optimizer)
     }
     if (optimizer->beta1_power) *optimizer->beta1_power = 1.0f;
     if (optimizer->beta2_power) *optimizer->beta2_power = 1.0f;
-    optimizer->is_initialized = 0;
+    optimizer->is_initialized = 1; /* 缓冲区已通过memset清零，保持已初始化状态，避免不必要的重新分配 */
 }
 
 int optimizer_get_config(const Optimizer* optimizer, OptimizerConfig* config)

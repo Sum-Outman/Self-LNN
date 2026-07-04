@@ -92,6 +92,9 @@ typedef struct {
     BuddyBlock descriptor_pool[BUDDY_MAX_DESCRIPTORS];
     int next_descriptor;
     int descriptor_capacity;
+    /* P1-10修复：描述符空闲链表，回收释放的描述符实现复用 */
+    int descriptor_free_list[BUDDY_MAX_DESCRIPTORS];
+    int descriptor_free_count;
 
     size_t current_used;
     size_t peak_used;
@@ -155,9 +158,17 @@ static size_t buddy_level_size(int level)
     return BUDDY_MIN_SIZE << level;
 }
 
-/* 从描述符池分配一个描述符 */
+/* 从描述符池分配一个描述符（P1-10修复：优先从回收链复用） */
 static BuddyBlock* buddy_alloc_descriptor(CpuBuddyAllocator* allocator)
 {
+    /* 优先从空闲链表回收 */
+    if (allocator->descriptor_free_count > 0) {
+        allocator->descriptor_free_count--;
+        int idx = allocator->descriptor_free_list[allocator->descriptor_free_count];
+        BuddyBlock* block = &allocator->descriptor_pool[idx];
+        memset(block, 0, sizeof(BuddyBlock));
+        return block;
+    }
     int idx = allocator->next_descriptor;
     if (idx >= allocator->descriptor_capacity) {
         return NULL;
@@ -168,12 +179,18 @@ static BuddyBlock* buddy_alloc_descriptor(CpuBuddyAllocator* allocator)
     return block;
 }
 
-/* 释放描述符回池（实际上只是重置，因为预分配） */
+/* 释放描述符回池（P1-10修复：加入空闲链表供后续复用） */
 static void buddy_free_descriptor(CpuBuddyAllocator* allocator, BuddyBlock* block)
 {
     if (!block) return;
     if (block >= allocator->descriptor_pool &&
         block < allocator->descriptor_pool + allocator->descriptor_capacity) {
+        /* 计算描述符索引并加入空闲链表 */
+        int idx = (int)(block - allocator->descriptor_pool);
+        if (allocator->descriptor_free_count < BUDDY_MAX_DESCRIPTORS) {
+            allocator->descriptor_free_list[allocator->descriptor_free_count] = idx;
+            allocator->descriptor_free_count++;
+        }
         memset(block, 0, sizeof(BuddyBlock));
     }
 }

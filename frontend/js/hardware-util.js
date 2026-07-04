@@ -4,6 +4,8 @@
  * 消除 device-control.html / hardware-setup.html / index.html 中的重复硬件扫描逻辑
  */
 
+'use strict';
+
 var HardwareScanUtil = {
     _lastScanResult: null,
     _lastScanTime: 0,
@@ -275,3 +277,6 @@ var HardwareScanUtil = {
         this._lastScanTime = 0;
     }
 };
+
+/* L-009修复: 显式导出到window，与其他模块保持一致的导出风格 */
+window.HardwareScanUtil = HardwareScanUtil;

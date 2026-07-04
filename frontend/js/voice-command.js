@@ -4,6 +4,10 @@
  * 支持运动控制、设备控制、系统控制、计算机控制
  */
 
+/* P2-005修复: IIFE封装，防止VOICE_FEATURE_MAP/VOICE_COMMAND_ROUTES等全局变量污染 */
+(function() {
+'use strict';
+
 /* 语音指令中文功能名→后端英文字段名映射
  * 修复语音命令"启用自我学习能力"将中文"自我学习能力"直接发送给后端的Bug */
 var VOICE_FEATURE_MAP = {
@@ -93,7 +97,14 @@ function voiceCommandTranslateFeature(chineseInput) {
 
 class VoiceCommandSystem {
     constructor() {
-        this._capturer = new window.VoiceCaptureUtil({ maxDuration: 15000 });
+        /* P2-005修复: 检查VoiceCaptureUtil依赖 */
+        if (typeof window.VoiceCaptureUtil === 'undefined') {
+            console.error('[VoiceCommandSystem] VoiceCaptureUtil模块未加载，语音指令系统不可用');
+            this._capturer = null;
+        } else {
+            this._capturer = new window.VoiceCaptureUtil({ maxDuration: 15000 });
+        }
+        if (this._capturer) {
         this._capturer.onStart = function() {
             this.isProcessing = false;
             if (this.onRecordingStart) this.onRecordingStart();
@@ -124,6 +135,7 @@ class VoiceCommandSystem {
         this.commandEngine = null;
         this.continuousMode = false;
         this.continuousInterval = null;
+        } /* P2-005: 关闭 if (this._capturer) 块 */
     }
 
     /* P2-006修复：添加setCommandEngine方法支持外部注入共享引擎 */
@@ -131,7 +143,8 @@ class VoiceCommandSystem {
         this.commandEngine = engine;
     }
 
-    get isRecording() { return this._capturer.isRecording; }
+    /* P2-005修复: 检查VoiceCaptureUtil依赖时也要处理安全回退 */
+    get isRecording() { return this._capturer ? this._capturer.isRecording : false; }
 
     async startRecording(micStream) {
         if (this.isRecording) return { success: false, error: '录音已在进行中' };
@@ -316,7 +329,16 @@ var VOICE_COMMAND_ROUTES = {
     'speakerTurnOff':        { type: 'device', device: 'speaker', action: 'off' },
     'speakerVolumeUp':       { type: 'device', device: 'speaker', action: 'volume_up', paramMap: { value: 'arg1' }, defaults: { value: 10 } },
     'speakerVolumeDown':     { type: 'device', device: 'speaker', action: 'volume_down', paramMap: { value: 'arg1' }, defaults: { value: 10 } },
-    'speakerMuteToggle':     { type: 'device', device: 'speaker', action: 'mute_toggle' }
+    'speakerMuteToggle':     { type: 'device', device: 'speaker', action: 'mute_toggle' },
+    /* ZSF-100修复：补全7个设备控制指令路由（灯光/空调/风扇），
+     * 确保语音正则匹配器(_initCommands device类别)产生的handler名称有对应路由条目 */
+    'deviceTurnOnLight':     { type: 'device', device: 'light', action: 'on' },
+    'deviceTurnOffLight':    { type: 'device', device: 'light', action: 'off' },
+    'deviceTurnOnAC':        { type: 'device', device: 'ac', action: 'on' },
+    'deviceTurnOffAC':       { type: 'device', device: 'ac', action: 'off' },
+    'deviceSetTemperature':  { type: 'device', device: 'ac', action: 'set_temperature', paramMap: { temperature: 'arg1' }, defaults: { temperature: 26 } },
+    'deviceTurnOnFan':       { type: 'device', device: 'fan', action: 'on' },
+    'deviceTurnOffFan':      { type: 'device', device: 'fan', action: 'off' }
 };
 
 /* 数据驱动路由分发函数
@@ -833,6 +855,23 @@ class CommandEngine {
                             return { success: false, error: '没有可用的扬声器' };
                     }
                     break;
+                /* ZSF-100修复：新增灯光、空调、风扇设备控制case，
+                 * 通过后端 sendDeviceCommand API 统一处理物联网设备指令 */
+                case 'light':
+                    if (window.SelfLnnApi && typeof window.SelfLnnApi.sendDeviceCommand === 'function') {
+                        return await window.SelfLnnApi.sendDeviceCommand('light', action, params || {});
+                    }
+                    return { success: false, error: '设备API不可用，无法控制灯光' };
+                case 'ac':
+                    if (window.SelfLnnApi && typeof window.SelfLnnApi.sendDeviceCommand === 'function') {
+                        return await window.SelfLnnApi.sendDeviceCommand('ac', action, params || {});
+                    }
+                    return { success: false, error: '设备API不可用，无法控制空调' };
+                case 'fan':
+                    if (window.SelfLnnApi && typeof window.SelfLnnApi.sendDeviceCommand === 'function') {
+                        return await window.SelfLnnApi.sendDeviceCommand('fan', action, params || {});
+                    }
+                    return { success: false, error: '设备API不可用，无法控制风扇' };
             }
             return { success: true, message: '设备指令已发送: ' + deviceType + '/' + action };
         } catch (err) {
@@ -866,3 +905,8 @@ class CommandEngine {
 
 window.VoiceCommandSystem = VoiceCommandSystem;
 window.CommandEngine = CommandEngine;
+
+/* P2-006修复: 激活映射表自检，死代码复活 */
+voiceCommandCheckFeatureMap();
+
+})(); /* P2-005修复: IIFE封装结束 */

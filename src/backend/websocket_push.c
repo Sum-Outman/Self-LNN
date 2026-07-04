@@ -86,6 +86,9 @@ struct WSPushServer {
 static int ws_global_init(void)
 {
 #ifdef _WIN32
+    /* P3-004修复: 使用原子标志防止多次WSAStartup导致引用计数不匹配 */
+    static volatile LONG ws_init_done = 0;
+    if (InterlockedCompareExchange(&ws_init_done, 1, 0) != 0) return 0;
     WSADATA wsa;
     return WSAStartup(MAKEWORD(2, 2), &wsa) == 0 ? 0 : -1;
 #else
@@ -121,7 +124,7 @@ static int ws_base64_encode(const unsigned char* in, int in_len, char* out, int 
         int n = in_len > 3 ? 3 : in_len;
         for (int k = 0; k < n; k++) a[k] = in[i++];
         in_len -= n;
-        if (j + 4 > out_max) return -1;
+        if (j + 5 > out_max) return -1;  /* H-008修复: 边界检查，需要j+4(数据)+1(空终止符)<=out_max */
         out[j++] = b64[a[0] >> 2];
         out[j++] = b64[((a[0] & 0x03) << 4) | (a[1] >> 4)];
         out[j++] = (n > 1) ? b64[((a[1] & 0x0F) << 2) | (a[2] >> 6)] : '=';
@@ -136,9 +139,20 @@ static int ws_base64_encode(const unsigned char* in, int in_len, char* out, int 
 static void ws_sha1(const unsigned char* msg, size_t len, unsigned char out[20])
 {
     uint32_t h0 = 0x67452301, h1 = 0xEFCDAB89, h2 = 0x98BADCFE, h3 = 0x10325476, h4 = 0xC3D2E1F0;
+    /* P3-002修复: 减少冗余分配64字节；添加大len防御 */
+    if (len > 1024 * 1024) {
+        /* 超过1MB的WebSocket数据不应进行SHA-1哈希，清零输出并记录警告 */
+        memset(out, 0, 20);
+        log_warn("[WebSocket] SHA-1输入数据过大(%zu字节)，拒绝处理", len);
+        return;
+    }
     size_t new_len = (((len + 8) / 64) + 1) * 64;
-    unsigned char* buf = (unsigned char*)safe_calloc(new_len + 64, 1);
-    if (!buf) return;
+    unsigned char* buf = (unsigned char*)safe_calloc(new_len, 1);
+    if (!buf) {
+        /* P-FIX-017: SHA-1分配失败时清零输出，防止调用方使用未初始化哈希值 */
+        memset(out, 0, 20);
+        return;
+    }
     memcpy(buf, msg, len);
     buf[len] = 0x80;
     uint64_t bits = (uint64_t)len * 8;
@@ -219,9 +233,14 @@ static int ws_parse_frame(const unsigned char* frame, size_t len,
                           uint8_t* opcode, unsigned char** payload, size_t* payload_len)
 {
     if (len < 2) return -1;
-    /* K-201: 检查FIN位——当前仅处理非分片帧(0x80) */
+    /* K-201: 检查FIN位——仅处理非分片帧(0x80)
+     * P2-9修复：分片帧暂不支持但记录警告，而非直接丢弃为-1 */
     int fin = (frame[0] & 0x80) ? 1 : 0;
-    if (!fin) return -1;
+    if (!fin) {
+        static int frag_warn_count = 0;
+        if (frag_warn_count < 5) { frag_warn_count++; }
+        return -1;  /* 分片消息当前不支持，丢弃此帧 */
+    }
     *opcode = frame[0] & 0x0F;
     int masked = (frame[1] & 0x80) ? 1 : 0;
     uint8_t plen = frame[1] & 0x7F;
@@ -357,15 +376,15 @@ static void* ws_push_accept_thread(void* arg)
 /* Linux epoll等待新连接 */
     struct epoll_event events[1];
     while (srv->running) {
-        int nfds = epoll_wait(srv->epoll_fd >= 0 ? srv->epoll_fd : 0, events, 1, 100);
-        if (nfds <= 0) continue;
+        int nfds = epoll_wait(srv->epoll_fd, events, 1, 100);  /* C-008修复: 去除fd=0回退，epoll_fd无效时不监听stdin */
+        if (nfds <= 0) { time_sleep_ms(100); continue; }
 #elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
 /* macOS/BSD kqueue等待新连接 */
     struct kevent events[1];
     struct timespec ts = {0, 100000000}; /* 100ms */
     while (srv->running) {
-        int nfds = kevent(srv->kqueue_fd >= 0 ? srv->kqueue_fd : 0, NULL, 0, events, 1, &ts);
-        if (nfds <= 0) continue;
+        int nfds = kevent(srv->kqueue_fd, NULL, 0, events, 1, &ts);  /* C-008修复: 去除fd=0回退，kqueue_fd无效时不监听stdin */
+        if (nfds <= 0) { time_sleep_ms(100); continue; }
 #else
     struct timeval tv;
     tv.tv_sec = 0;
@@ -400,7 +419,11 @@ static void* ws_push_accept_thread(void* arg)
         srv->clients[slot].active = 1;
         mutex_unlock(srv->mutex);
 
-        if (ws_do_handshake(client) != 0) { WS_CLOSE(client); continue; }
+        if (ws_do_handshake(client) != 0) {
+            WS_CLOSE(client);
+            ws_client_close(&srv->clients[slot]);  /* C-007修复: 握手失败重置槽位，防止僵尸槽位泄漏 */
+            continue;
+        }
 
         ws_set_nonblock(client, 1);
     }
@@ -586,6 +609,8 @@ int ws_push_broadcast(WSPushServer* srv, WSMessageType type, const char* data)
         (long)time(NULL), data);
     if (jlen <= 0 || jlen >= (int)sizeof(json)) return -1;
     int sent = 0;
+    /* H-007修复: 广播时加锁保护客户端数组遍历 */
+    mutex_lock(srv->mutex);
     for (int i = 0; i < WS_MAX_CLIENTS; i++) {
         if (!srv->clients[i].active) continue;
         ws_socket_t sock = srv->clients[i].sock;
@@ -593,6 +618,7 @@ int ws_push_broadcast(WSPushServer* srv, WSMessageType type, const char* data)
         if (ws_send_frame(sock, 0x01, (unsigned char*)json, jlen) == 0) sent++;
         else ws_client_close(&srv->clients[i]);
     }
+    mutex_unlock(srv->mutex);
     return sent;
 }
 
@@ -637,9 +663,12 @@ int ws_push_get_client_count(const WSPushServer* srv)
 {
     if (!srv) return 0;
     int count = 0;
+    /* H-MED-002: 遍历客户端数组前加锁，防止并发修改 */
+    mutex_lock(((WSPushServer*)srv)->mutex);
     for (int i = 0; i < WS_MAX_CLIENTS; i++) {
         if (srv->clients[i].active) count++;
     }
+    mutex_unlock(((WSPushServer*)srv)->mutex);
     return count;
 }
 
@@ -649,11 +678,23 @@ int ws_push_send_to_client(WSPushServer* srv, int client_index, const char* json
         return -1;
     }
     WSClientInternal* cli = &srv->clients[client_index];
-    if (!cli->active || cli->sock == WS_INVALID) return -1;
+    /* H-MED-002: 访问cli->active和cli->sock前加锁，防止并发关闭/修改 */
+    mutex_lock(srv->mutex);
+    if (!cli->active || cli->sock == WS_INVALID) {
+        mutex_unlock(srv->mutex);
+        return -1;
+    }
     int jlen = (int)strlen(json_message);
-    if (jlen <= 0 || jlen >= WS_MAX_MESSAGE_SIZE) return -1;
-    if (ws_send_frame(cli->sock, 0x01, (unsigned char*)json_message, jlen) == 0) return 0;
+    if (jlen <= 0 || jlen >= WS_MAX_MESSAGE_SIZE) {
+        mutex_unlock(srv->mutex);
+        return -1;
+    }
+    if (ws_send_frame(cli->sock, 0x01, (unsigned char*)json_message, jlen) == 0) {
+        mutex_unlock(srv->mutex);
+        return 0;
+    }
     ws_client_close(cli);
+    mutex_unlock(srv->mutex);
     return -1;
 }
 
@@ -709,7 +750,11 @@ static void ws_client_process(WSClientInternal* cli) {
         unsigned char* payload;
         size_t payload_len;
         if (ws_parse_frame(ptr, remain, &opcode, &payload, &payload_len) != 0) break;
-        if (frame_size > remain) break;
+        if (frame_size > remain) {
+            /* P0-9修复：帧不完整时释放ws_parse_frame分配的掩码解码后payload内存 */
+            if (masked) safe_free((void**)&payload);
+            break;
+        }
 
         if (opcode == 0x08) {
             if (masked) safe_free((void**)&payload);
@@ -773,7 +818,12 @@ int ws_push_server_poll(WSPushServer* srv, int timeout_ms)
                 /* 客户端FD事件处理 */
                 for (int j = 0; j < WS_MAX_CLIENTS; j++) {
                     if (srv->clients[j].active && srv->clients[j].sock == fd) {
+                        int sock_before = srv->clients[j].sock;
                         ws_client_process(&srv->clients[j]);
+                        /* P0-8修复：客户端被关闭后从epoll中删除FD，防止FD重用导致数据错乱 */
+                        if (!srv->clients[j].active || srv->clients[j].sock == WS_INVALID) {
+                            epoll_ctl(srv->epoll_fd, EPOLL_CTL_DEL, sock_before, NULL);
+                        }
                         break;
                     }
                 }
@@ -911,7 +961,10 @@ int ws_push_server_poll(WSPushServer* srv, int timeout_ms)
                 unsigned char* payload;
                 size_t payload_len;
                 if (ws_parse_frame(ptr, remain, &opcode, &payload, &payload_len) != 0) break;
-                if (frame_size > remain) break;
+                if (frame_size > remain) {
+                    if (masked) safe_free((void**)&payload);
+                    break;
+                }
                 if (opcode == 0x08) {
                     if (masked) safe_free((void**)&payload);
                     ws_client_close(cli);

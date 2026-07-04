@@ -74,6 +74,7 @@ typedef struct {
     float diversity;                 /* 种群多样性 */
     int stagnated_generations;       /* 停滞代数 */
     int total_evaluations;           /* 总评估次数 */
+    int fitness_converged;           /* DEEP-FIX: 适应度收敛标志（多样性检测触发） */
 } EvolutionPopulation;
 
 /* 演化配置 */

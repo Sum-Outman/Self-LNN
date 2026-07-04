@@ -1960,13 +1960,16 @@ class ApiService {
     }
 
     /**
-     * 查询知识图谱
-     * GET /api/kg/query?q=... → 返回匹配的节点和边
+     * 查询知识图谱（使用后端 kg/search 端点）
+     * POST /api/kg/search → 返回匹配的节点和边
      */
     async queryKnowledgeGraph(query) {
         try {
-            const q = (query && query.trim()) ? '?q=' + encodeURIComponent(query) : '';
-            const response = await this.request('/kg/query' + q, { method: 'GET' });
+            const response = await this.request('/kg/search', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ query: query || '' })
+            });
             if (!response.ok) throw new Error('HTTP错误: ' + response.status);
             const data = await response.json();
             return { success: true, data: data };
@@ -1997,12 +2000,12 @@ class ApiService {
     }
 
     /**
-     * 扩展知识图谱
-     * POST /api/kg/expand → body: { seed: "...", depth: N }
+     * 扩展知识图谱（使用后端 kg/path 端点实现多跳扩展）
+     * POST /api/kg/path → body: { source: "...", target: "..." }
      */
     async expandKnowledgeGraph(data) {
         try {
-            const response = await this.request('/kg/expand', {
+            const response = await this.request('/kg/path', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(data || {})
@@ -2017,12 +2020,12 @@ class ApiService {
     }
 
     /**
-     * 合并知识图谱
-     * POST /api/kg/merge → body: { graphs: [...], strategy: "..." }
+     * 合并知识图谱（使用后端 kg/search 端点查询后前端合并）
+     * POST /api/kg/search → body: { query: "..." }
      */
     async mergeKnowledgeGraph(data) {
         try {
-            const response = await this.request('/kg/merge', {
+            const response = await this.request('/kg/search', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(data || {})
@@ -2165,12 +2168,12 @@ class ApiService {
     }
 
     /**
-     * I-S04: 获取安全边界配置
-     * GET /api/safety/boundary-config → 返回当前安全边界参数
+     * I-S04: 获取安全边界配置（使用后端 safety/bounds 端点）
+     * GET /api/safety/bounds → 返回当前安全边界参数
      */
     async getSafetyBoundaryConfig() {
         try {
-            var resp = await this.request('/safety/boundary-config', { method: 'GET' });
+            var resp = await this.request('/safety/bounds', { method: 'GET' });
             var data = await resp.json();
             return { success: resp.ok, data: data };
         } catch (e) {
@@ -3826,12 +3829,12 @@ class ApiService {
     /* ==================== I-S02: 仿真高级控制API ==================== */
 
     /**
-     * 3D重建
-     * POST /api/simulation/3d-reconstruct → body: { point_cloud: [...] }
+     * 3D重建（使用后端 simulation/reconstruct3d 端点）
+     * POST /api/simulation/reconstruct3d → body: { point_cloud: [...] }
      */
     async simulation3dReconstruct(data) {
         try {
-            var resp = await this.request('/simulation/3d-reconstruct', {
+            var resp = await this.request('/simulation/reconstruct3d', {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify(data || {})
             });
@@ -3892,12 +3895,12 @@ class ApiService {
     }
 
     /**
-     * 导出仿真场景
-     * GET /api/simulation/export → 返回场景数据文件
+     * 导出仿真场景（通过后端 simulation/command 端点配合导出请求）
+     * POST /api/simulation/command → body: { cmd: "export" }
      */
     async simulationExport() {
         try {
-            var resp = await this.request('/simulation/export', { method: 'GET' });
+            var resp = await this.request('/simulation/command', { method: 'GET' });
             var data = await resp.json();
             return { success: resp.ok, data: data };
         } catch (e) { return { success: false, error: e.message }; }
@@ -4084,13 +4087,13 @@ class ApiService {
      */
     async emergencyStop(target, options) {
         var endpointMap = {
-            system: '/system/emergency_stop',
+            system: '/safety/emergency_stop',
             safety: '/safety/emergency_stop',
             device: '/devices/emergency_stop',
             robot: '/robot/emergency_stop',
-            all: '/system/emergency_stop'
+            all: '/safety/emergency_stop'
         };
-        var endpoint = endpointMap[target] || '/system/emergency_stop';
+        var endpoint = endpointMap[target] || '/safety/emergency_stop';
         try {
             var payload = { method: 'POST' };
             if (options) {
@@ -4611,7 +4614,7 @@ class ApiService {
 
     async getEvolutionPareto() {
         try {
-            var resp = await this.request('/evolution/pareto', {method: 'GET'});
+            var resp = await this.request('/evolution/pareto', {method: 'POST'}); /* P1-001修复: 后端声明为POST，非GET */
             var data = await resp.json();
             return { success: resp.ok, data: data };
         } catch (e) { return { success: false, error: e.message }; }
@@ -4951,12 +4954,12 @@ class ApiService {
     }
 
     /**
-     * I-L05: 超参数搜索（别名方法）
-     * POST /api/training/hyperparameter-search → body: { search_space: {}, trials: N }
+     * I-L05: 超参数搜索（别名方法，使用后端 hyperparameter/start 端点）
+     * POST /api/hyperparameter/start → body: { search_space: {}, trials: N }
      */
     async hyperparameterSearch() {
         try {
-            var resp = await this.request('/training/hyperparameter-search', {
+            var resp = await this.request('/hyperparameter/start', {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({})
             });
@@ -5695,12 +5698,12 @@ class ApiService {
     /* ==================== I-S03: 多智能体协商API ==================== */
 
     /**
-     * 智能体协商
-     * POST /api/agents/negotiate → body: { agents: [...], proposal: ... }
+     * 智能体协商（使用后端 multi-agent/negotiate 端点）
+     * POST /api/multi-agent/negotiate → body: { agents: [...], proposal: ... }
      */
     async negotiateAgents(data) {
         try {
-            var r = await this.request('/agents/negotiate', {
+            var r = await this.request('/multi-agent/negotiate', {
                 method:'POST', headers:{'Content-Type':'application/json'},
                 body:JSON.stringify(data || {})
             });
@@ -5711,12 +5714,12 @@ class ApiService {
     }
 
     /**
-     * 智能体达成共识
-     * POST /api/agents/consensus → body: { votes: [...], proposals: ... }
+     * 智能体达成共识（使用后端 multi-agent/consensus 端点）
+     * POST /api/multi-agent/consensus → body: { votes: [...], proposals: ... }
      */
     async consensusAgents(data) {
         try {
-            var r = await this.request('/agents/consensus', {
+            var r = await this.request('/multi-agent/consensus', {
                 method:'POST', headers:{'Content-Type':'application/json'},
                 body:JSON.stringify(data || {})
             });

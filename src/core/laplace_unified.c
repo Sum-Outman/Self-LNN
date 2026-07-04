@@ -294,7 +294,7 @@ int laplace_unified_get_spectrum(void* analyzer, float* spectrum, size_t size) {
         return -1;
     }
 
-    FrequencyResponse* responses = (FrequencyResponse*)calloc(size, sizeof(FrequencyResponse));
+    FrequencyResponse* responses = (FrequencyResponse*)safe_calloc(size, sizeof(FrequencyResponse));
     if (!responses) return -1;
     int ret = laplace_compute_frequency_response(la,
         cached_num, cached_den,
@@ -305,6 +305,6 @@ int laplace_unified_get_spectrum(void* analyzer, float* spectrum, size_t size) {
             spectrum[i] = responses[i].magnitude;
         }
     }
-    free(responses);
+    safe_free((void**)&responses);
     return ret == 0 ? (int)size : -1;
 }

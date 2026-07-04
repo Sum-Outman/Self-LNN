@@ -62,8 +62,8 @@ struct ReasoningEngine {
     int is_initialized;
     float* rule_base;
     size_t rule_base_size;
-    float* knowledge_buffer;
-    size_t knowledge_buffer_size;
+    float* knowledge_base;          /**< 知识库（P1-6修复：字段名统一为knowledge_base） */
+    size_t knowledge_base_size;     /**< 知识库大小 */
     float* working_memory;
     size_t working_memory_size;
     float* inference_buffer;
@@ -115,8 +115,8 @@ ReasoningEngine* reasoning_engine_create(const ReasoningConfig* config) {
     engine->rule_base_size = 1024;
     engine->rule_base = (float*)safe_malloc(engine->rule_base_size * sizeof(float));
     
-    engine->knowledge_buffer_size = 2048;
-    engine->knowledge_buffer = (float*)safe_malloc(engine->knowledge_buffer_size * sizeof(float));
+    engine->knowledge_base_size = 2048;
+    engine->knowledge_base = (float*)safe_malloc(engine->knowledge_base_size * sizeof(float));
     
     engine->working_memory_size = 512;
     engine->working_memory = (float*)safe_malloc(engine->working_memory_size * sizeof(float));
@@ -124,14 +124,14 @@ ReasoningEngine* reasoning_engine_create(const ReasoningConfig* config) {
     engine->inference_buffer_size = 256;
     engine->inference_buffer = (float*)safe_malloc(engine->inference_buffer_size * sizeof(float));
     
-    if (!engine->rule_base || !engine->knowledge_buffer ||
+    if (!engine->rule_base || !engine->knowledge_base ||
         !engine->working_memory || !engine->inference_buffer) {
         reasoning_engine_free(engine);
         return NULL;
     }
     
     memset(engine->rule_base, 0, engine->rule_base_size * sizeof(float));
-    memset(engine->knowledge_buffer, 0, engine->knowledge_buffer_size * sizeof(float));
+    memset(engine->knowledge_base, 0, engine->knowledge_base_size * sizeof(float));
     memset(engine->working_memory, 0, engine->working_memory_size * sizeof(float));
     memset(engine->inference_buffer, 0, engine->inference_buffer_size * sizeof(float));
     
@@ -165,7 +165,7 @@ ReasoningEngine* reasoning_engine_create(const ReasoningConfig* config) {
 void reasoning_engine_free(ReasoningEngine* engine) {
     if (!engine) return;
     safe_free((void**)&engine->rule_base);
-    safe_free((void**)&engine->knowledge_buffer);
+    safe_free((void**)&engine->knowledge_base);
     safe_free((void**)&engine->working_memory);
     safe_free((void**)&engine->inference_buffer);
     safe_free((void**)&engine->rule_index);
@@ -186,7 +186,7 @@ void reasoning_engine_free(ReasoningEngine* engine) {
 void reasoning_engine_reset(ReasoningEngine* engine) {
     if (!engine) return;
     if (engine->rule_base) memset(engine->rule_base, 0, engine->rule_base_size * sizeof(float));
-    if (engine->knowledge_buffer) memset(engine->knowledge_buffer, 0, engine->knowledge_buffer_size * sizeof(float));
+    if (engine->knowledge_base) memset(engine->knowledge_base, 0, engine->knowledge_base_size * sizeof(float));
     if (engine->working_memory) memset(engine->working_memory, 0, engine->working_memory_size * sizeof(float));
     if (engine->inference_buffer) memset(engine->inference_buffer, 0, engine->inference_buffer_size * sizeof(float));
     if (engine->inference_cache) memset(engine->inference_cache, 0, engine->cache_size * sizeof(CacheItem));

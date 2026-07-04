@@ -268,17 +268,17 @@ void tensor_free(Tensor* tensor) {
     
     // 如果拥有数据内存，则释放
     if (tensor->owner && tensor->data) {
-        safe_free(&tensor->data);
+        safe_free((void**)&tensor->data);
     }
     
     // 释放形状和步幅数组
     if (tensor->shape) {
-        safe_free(&tensor->shape);
+        safe_free((void**)&tensor->shape);  /* P2-12修复：显式转void**消除严格别名违规 */
     }
     
     if (tensor->strides) {
-        safe_free(&tensor->strides);
-    }
+        safe_free((void**)&tensor->strides); /* P2-12修复：同上 */
+    }  /* 修复C-003: 添加缺失的闭合大括号，确保strides==NULL时张量结构体也能被释放 */
     
     // 释放张量结构体
     safe_free((void**)&tensor);
@@ -370,8 +370,8 @@ int tensor_reshape(Tensor* tensor, const int* new_shape, int new_ndim) {
     compute_strides(tensor->strides, new_shape, new_ndim, tensor->format);
     
     // 现在可以安全释放旧内存
-    safe_free(&old_shape);
-    safe_free(&old_strides);
+    safe_free((void**)&old_shape);    /* M-001修复: 类型安全转换 */
+    safe_free((void**)&old_strides);  /* M-001修复: 类型安全转换 */
     
     // 更新维度
     tensor->ndim = new_ndim;

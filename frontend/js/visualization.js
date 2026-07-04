@@ -3,6 +3,8 @@
  * 提供性能指标、网络拓扑、训练过程等可视化功能
  */
 
+'use strict';
+
 class VisualizationManager {
     constructor() {
         this.charts = {};

@@ -26,16 +26,10 @@ static pthread_mutex_t g_cap_lock = PTHREAD_MUTEX_INITIALIZER;
 #define CAP_UNLOCK() pthread_mutex_unlock(&g_cap_lock)
 #endif
 
-/* 前向声明：子系统访问器（来自selflnn.h） */
-extern void* selflnn_get_self_cognition(void);
-extern void* selflnn_get_metacognition(void);
-extern void* selflnn_get_online_learner(void);
-extern void* selflnn_get_evolution_engine(void);
-extern void* selflnn_get_thread_pool(void);
-extern void* selflnn_get_dialogue_processor(void);
-extern void* selflnn_get_planning_system(void);
-extern void* selflnn_get_lnn(void);
-extern void* selflnn_get_multi_agent_system(void); /* H-015集成 */
+/* D-011修复: 引入selflnn.h替代手工维护的extern前向声明，
+ * 确保所有selflnn_get_*函数签名与头文件一致，避免静默ABI不匹配。
+ * 前向声明已移除，统一通过头文件获取正确原型。 */
+#include "selflnn/selflnn.h"
 
 static const char* g_capability_names[CAP_COUNT] = {
     "自我认知",
@@ -554,9 +548,12 @@ int capability_get_states(int* states, size_t max_count)
     if (!states) return -1;
     size_t i;
     size_t count = (max_count < (size_t)CAP_COUNT) ? max_count : (size_t)CAP_COUNT;
+    /* P-FIX-023: 添加锁保护，防止与capability_set_enabled并发读写 */
+    CAP_LOCK();
     for (i = 0; i < count; i++) {
         states[i] = g_capability_states[i];
     }
+    CAP_UNLOCK();
     return (int)count;
 }
 
@@ -565,12 +562,15 @@ int capability_set_states(const int* states, size_t count)
     if (!states) return -1;
     size_t i;
     size_t n = (count < (size_t)CAP_COUNT) ? count : (size_t)CAP_COUNT;
+    /* P-FIX-023: 添加锁保护，防止与capability_set_enabled并发读写 */
+    CAP_LOCK();
     for (i = 0; i < n; i++) {
         g_capability_states[i] = (states[i] != 0) ? 1 : 0;
         if (g_set_funcs[i]) {
             g_set_funcs[i](g_capability_states[i]);
         }
     }
+    CAP_UNLOCK();
     return (int)n;
 }
 
@@ -578,21 +578,27 @@ int capability_get_enabled_count(void)
 {
     int count = 0;
     int i;
+    /* H-MED-001: 遍历前加锁，防止与capability_set_enabled并发读写 */
+    CAP_LOCK();
     for (i = 0; i < CAP_COUNT; i++) {
         if (g_capability_states[i]) count++;
     }
+    CAP_UNLOCK();
     return count;
 }
 
 int capability_reset_to_defaults(void)
 {
     int i;
+    /* H-MED-001: 遍历前加锁，防止与其他操作并发读写状态数组 */
+    CAP_LOCK();
     for (i = 0; i < CAP_COUNT; i++) {
         g_capability_states[i] = g_default_states[i];
         if (g_set_funcs[i]) {
             g_set_funcs[i](g_default_states[i]);
         }
     }
+    CAP_UNLOCK();
     return 0;
 }
 

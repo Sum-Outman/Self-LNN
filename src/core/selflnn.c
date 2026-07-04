@@ -87,9 +87,6 @@
 #include <crtdbg.h>
 #endif
 #include <math.h>
-#ifndef _WIN32
-#include <sys/stat.h>
-#endif
 
 /* ================================================================
  *: SYSTEM_LOCK/SYSTEM_UNLOCK宏必须定义在首次使用(line 184)之前
@@ -105,7 +102,17 @@ static volatile LONG g_lock_initialized = 0;
         if (InterlockedCompareExchange(&g_lock_initialized, 2, 0) == 0) { \
             InitializeCriticalSection(&g_system_lock); \
             g_lock_initialized = 1; \
-        } else { while (g_lock_initialized != 1) { Sleep(0); } } \
+        } else { \
+            /* P3-001修复: 添加超时保护，防止异常导致永久自旋 */ \
+            int spin_count = 0; \
+            while (g_lock_initialized != 1 && spin_count < 10000) { \
+                Sleep(0); spin_count++; \
+            } \
+            if (g_lock_initialized != 1) { \
+                /* 超时后强制认为已初始化，避免死锁 */ \
+                g_lock_initialized = 1; \
+            } \
+        } \
     } \
 } while(0)
 #define SYSTEM_LOCK() EnterCriticalSection(&g_system_lock)
@@ -204,8 +211,12 @@ static const char* g_module_names[MODULE_COUNT] = {
     "推理引擎", "统一信号处理器", "对话系统", "自我认知", "元认知",
     "自我编程", "产品设计", "多系统控制", "GPU上下文", "演化引擎",
     "安全监控", "分布式训练", "线程池", "在线学习器", "规划系统", "机器人"
-    , "自动知识学习", "知识推理增强", "多智能体系统", "数据采集管线"
-};
+    , "自动知识学习", "知识推理增强", "知识推理引擎", "多智能体系统", "数据采集管线"
+    /* ZSF-100修复：补全第26个条目（MODULE_COUNT=26），
+     * 原数组仅25个初始化项导致g_module_names[25]为NULL。
+     * 新增"知识推理引擎"对应MODULE_ID_KNOWLEDGE_INFERENCE(23)，
+     * "多智能体系统"对应MODULE_ID_MULTI_AGENT(24)，
+     * "数据采集管线"对应MODULE_ID_DATA_PIPELINE(25)。 */
 
 /* 模块注册：每个子系统只能获取共享LNN引用，不能拥有独立LNN */
 typedef struct {
@@ -380,6 +391,7 @@ SELFLNN_API int selflnn_safe_forward(void* lnn, const float* input, float* outpu
 // g_system_state 已在前方声明并初始化
 
 // 错误消息映射（通过错误码绝对值索引）
+/* M-005修复: 扩展错误消息数组，覆盖更多错误码 */
 static const char* error_messages[] = {
     "成功",                         // abs(0)=0
     "通用错误",                     // abs(-1)=1
@@ -399,6 +411,13 @@ static const char* error_messages[] = {
     "未找到",                       // abs(-15)=15
     "越界",                         // abs(-16)=16
     "已存在",                       // abs(-17)=17
+    "容量已满",                     // abs(-18)=18
+    "不支持",                       // abs(-19)=19
+    "权限不足",                     // abs(-20)=20
+    "资源繁忙",                     // abs(-21)=21
+    "已取消",                       // abs(-22)=22
+    "数据损坏",                     // abs(-23)=23
+    "校验失败",                     // abs(-24)=24
 };
 
 static const char* lookup_error_message(int error_code) {

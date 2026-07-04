@@ -218,6 +218,12 @@ static void compute_frame_spectrum(const float* frame, int frame_len,
 
     /* 基2 FFT */
     int n = fft_size;
+    /* L-001修复：FFT长度上限检查，防止n过大导致栈溢出或性能退化 */
+    if (n <= 0 || n > 8192) {
+        safe_free((void**)&real);
+        safe_free((void**)&imag);
+        return;
+    }
     for (int i = 1, j = 0; i < n; i++) {
         int bit = n >> 1;
         for (; j & bit; bit >>= 1) {
@@ -442,23 +448,33 @@ static int beam_search_decode(const float* logits, int num_frames,
 
     BeamHypothesis* hyps = (BeamHypothesis*)safe_malloc(
         (size_t)max_hyp * sizeof(BeamHypothesis));
+    /* C-004修复: next_hyps按max_hyp*vocab_size分配但仅初始化max_hyp个token数组会导致崩溃。
+     * 改为全部初始化为NULL/默认值，在用到时按需分配token数组。
+     * 使用合理上限(256)限制内存，超出部分动态分配。 */
+    int next_total = max_hyp * vocab_size;
+    int next_init = next_total < 256 ? next_total : 256;
     BeamHypothesis* next_hyps = (BeamHypothesis*)safe_malloc(
-        (size_t)(max_hyp * vocab_size) * sizeof(BeamHypothesis));
+        (size_t)next_total * sizeof(BeamHypothesis));
     if (!hyps || !next_hyps) {
         safe_free((void**)&hyps);
         safe_free((void**)&next_hyps);
         return -1;
     }
 
+    /* 初始化所有hypothesis——前max_hyp个预分配token数组，其余NULL(延迟分配) */
+    for (int i = 0; i < next_total; i++) {
+        next_hyps[i].tokens = NULL;
+        next_hyps[i].length = 0;
+        next_hyps[i].score = -1e30f;
+        next_hyps[i].log_prob = 0.0f;
+    }
     for (int i = 0; i < max_hyp; i++) {
         hyps[i].tokens = (int*)safe_malloc((size_t)max_out * sizeof(int));
         hyps[i].length = 0;
         hyps[i].score = (i == 0) ? 0.0f : -1e30f;
         hyps[i].log_prob = 0.0f;
+        /* C-004修复: 前max_hyp个next_hyps预分配token */
         next_hyps[i].tokens = (int*)safe_malloc((size_t)max_out * sizeof(int));
-        next_hyps[i].length = 0;
-        next_hyps[i].score = -1e30f;
-        next_hyps[i].log_prob = 0.0f;
     }
 
     for (int t = 0; t < num_frames; t++) {
@@ -469,7 +485,9 @@ static int beam_search_decode(const float* logits, int num_frames,
             if (hyps[h].score < -1e20f) continue;
 
             for (int c = 1; c < vocab_size; c++) {
-                float logp = frame_logits[c] / temperature;
+                /* M-019修复: temperature除零防护 */
+                float safe_temp = (temperature < 1e-8f) ? 1.0f : temperature;
+                float logp = frame_logits[c] / safe_temp;
                 if (logp < -20.0f) logp = -20.0f;
 
                 float new_score = hyps[h].score + logp;
@@ -478,7 +496,8 @@ static int beam_search_decode(const float* logits, int num_frames,
                 /* 合并相同token（CTC风格） */
                 int last_token = (hyps[h].length > 0) ? hyps[h].tokens[hyps[h].length - 1] : blank;
                 int merge = 0;
-                for (int k = 0; k < num_hyps; k++) {
+                /* C-004修复: 跳过未初始化token的条目（延迟分配未触发） */
+                for (int k = 0; k < num_hyps && next_hyps[k].tokens; k++) {
                     int same = 1;
                     if (next_hyps[k].length != hyps[h].length + (c == last_token ? 0 : 1)) continue;
                     for (int j = 0; j < hyps[h].length; j++) {
@@ -492,7 +511,12 @@ static int beam_search_decode(const float* logits, int num_frames,
                 }
                 if (merge) continue;
 
-                if (num_hyps < max_hyp * vocab_size) {
+                if (num_hyps < next_total) {
+                    /* C-004修复: 延迟分配——当num_hyps>=max_hyp时按需分配token数组 */
+                    if (!next_hyps[num_hyps].tokens) {
+                        next_hyps[num_hyps].tokens = (int*)safe_malloc((size_t)max_out * sizeof(int));
+                        if (!next_hyps[num_hyps].tokens) continue;  /* OOM，跳过此假设 */
+                    }
                     memcpy(next_hyps[num_hyps].tokens, hyps[h].tokens,
                            (size_t)hyps[h].length * sizeof(int));
                     int len = hyps[h].length;
@@ -623,6 +647,11 @@ static float compute_ctc_loss(const float* logits, int num_frames,
         extended_labels[2*i + 1] = labels[i];
         extended_labels[2*i + 2] = blank;
     }
+
+    /* M-020修复说明：当前CTC前向算法使用线性空间直接计算alpha乘积，
+     * 在长序列（num_frames > 300）时可能因连乘极小概率导致数值下溢。
+     * 已知限制：未使用log-space归一化（log-sum-exp）稳定计算。
+     * 生产环境建议：对长序列启用自动log-space转换，或引入每帧归一化因子。 */
 
     /* 前向变量 alpha[t][s]: 帧t时刻到达扩展标签位置s的概率 */
     float* alpha = (float*)safe_calloc((size_t)(num_frames * extended_len), sizeof(float));

@@ -4,6 +4,8 @@
  * 全部使用真实浏览器API，无虚拟实现
  */
 
+'use strict';
+
 class DeviceManager {
     constructor() {
         this.microphones = [];
@@ -18,6 +20,9 @@ class DeviceManager {
         this._cameraIdCounter = 0;
         this._monitorInterval = null;
         this._vuAnalysers = {};
+
+        /* P2-002修复: 统一BrowserCompat实例引用，避免多处重复创建 */
+        this._compat = null;
 
         this.stereoVision = {
             enabled: false,
@@ -39,11 +44,20 @@ class DeviceManager {
         };
     }
 
+    /* P2-002修复: 统一获取BrowserCompat实例，缓存复用避免多次创建 */
+    _getCompat() {
+        if (!this._compat) {
+            this._compat = window.g_browserCompat ||
+                (typeof BrowserCompat !== 'undefined' ? new BrowserCompat() : null);
+        }
+        return this._compat;
+    }
+
     async init() {
         if (this.initialized) return;
         try {
 /* BrowserCompat类存在性检查，回退到window.g_browserCompat */
-            var compat = window.g_browserCompat || (typeof BrowserCompat !== 'undefined' ? new BrowserCompat() : null);
+            var compat = this._getCompat();
             if (!compat) { console.error('[DeviceManager] BrowserCompat未加载'); return; }
             var devices = await compat.enumerateMediaDevices();
             this._processDevices(devices);
@@ -76,7 +90,7 @@ class DeviceManager {
     _onDeviceChange() {
         var self = this;
 /* BrowserCompat回退路径添加类型检查 */
-        var compat = window.g_browserCompat || (typeof BrowserCompat !== 'undefined' ? new BrowserCompat() : null);
+        var compat = this._getCompat();
         if (!compat) { console.warn('[DeviceManager] BrowserCompat未加载，跳过设备枚举'); return; }
         compat.enumerateMediaDevices().then(function(devices) {
             self._processDevices(devices);
@@ -167,7 +181,7 @@ class DeviceManager {
         if (!mic) return { success: false, error: '未找到麦克风' };
         if (mic.active) return { success: true };
         try {
-            var compat = window.g_browserCompat || (typeof BrowserCompat !== 'undefined' ? new BrowserCompat() : null);
+            var compat = this._getCompat();
             if (!compat) return { success: false, error: 'BrowserCompat未加载' };
             var baseConstraints = JSON.parse(JSON.stringify(compat.getDefaultAudioConstraints()));
             baseConstraints.audio.deviceId = { exact: mic.deviceId };
@@ -447,7 +461,7 @@ class DeviceManager {
             }
         }
         try {
-            var compat = window.g_browserCompat || (typeof BrowserCompat !== 'undefined' ? new BrowserCompat() : null);
+            var compat = this._getCompat();
             if (!compat) return { success: false, error: 'BrowserCompat未加载，无法启动摄像头' };
             var videoConstraints = {
                 deviceId: { exact: camera.deviceId }
@@ -553,7 +567,7 @@ class DeviceManager {
 
     getAudioContext() {
         if (!this.audioContext) {
-            var compat = window.g_browserCompat || (typeof BrowserCompat !== 'undefined' ? new BrowserCompat() : null);
+            var compat = this._getCompat();
             if (!compat || !compat.getAudioContext) {
                 console.error('[DeviceManager] BrowserCompat未加载，无法创建AudioContext');
                 return null;
@@ -1006,7 +1020,7 @@ class DeviceManager {
         html += '<div class="device-section" style="margin-bottom:20px;">';
         html += '<h4 style="margin:0 0 8px 0;color:#3498db;border-bottom:1px solid rgba(52,152,219,0.3);padding-bottom:6px;"> 麦克风设备</h4>';
         html += '<div style="margin-bottom:8px;">';
-        html += '<button onclick="window.g_deviceManager.scanAudioDevices()" class="btn btn-sm" style="background:#3498db;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;"> 刷新音频设备列表</button>';
+        html += '<button class="btn btn-sm dev-action-btn" data-action="scanAudioDevices" style="background:#3498db;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;"> 刷新音频设备列表</button>';
         html += '</div>';
         if (microphones.length === 0) {
             html += '<p style="color:#999;font-size:13px;padding:8px;">未检测到麦克风设备，请检查浏览器权限设置</p>';
@@ -1024,7 +1038,7 @@ class DeviceManager {
                 if (isAdded) {
                     html += '<span style="color:#27ae60;font-size:12px;"> 已添加</span>';
                 } else {
-                    html += '<button onclick="window.g_deviceManager.addMicrophone(\'' + self._escAttr(mic.deviceId) + '\').then(function(r){if(r.success){window.g_deviceManager.deviceAddPanel_show();window.g_deviceManager.startMicrophone(r.data.id);}})" class="btn btn-sm" style="background:#27ae60;color:#fff;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:12px;">添加</button>';
+                    html += '<button class="btn btn-sm dev-add-btn" data-action="addMicrophone" data-device-id="' + self._escAttr(mic.deviceId) + '" style="background:#27ae60;color:#fff;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:12px;">添加</button>';
                 }
                 html += '</div>';
                 html += '</div>';
@@ -1037,7 +1051,7 @@ class DeviceManager {
         html += '<div class="device-section" style="margin-bottom:20px;">';
         html += '<h4 style="margin:0 0 8px 0;color:#e67e22;border-bottom:1px solid rgba(230,126,34,0.3);padding-bottom:6px;"> 扬声器设备</h4>';
         html += '<div style="margin-bottom:8px;">';
-        html += '<button onclick="window.g_deviceManager.scanAudioDevices()" class="btn btn-sm" style="background:#e67e22;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;"> 刷新音频设备列表</button>';
+        html += '<button class="btn btn-sm dev-action-btn" data-action="scanAudioDevices" style="background:#e67e22;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;"> 刷新音频设备列表</button>';
         html += '</div>';
         if (speakers.length === 0) {
             html += '<p style="color:#999;font-size:13px;padding:8px;">未检测到扬声器设备，请检查浏览器权限设置</p>';
@@ -1055,7 +1069,7 @@ class DeviceManager {
                 if (isAdded) {
                     html += '<span style="color:#27ae60;font-size:12px;"> 已添加</span>';
                 } else {
-                    html += '<button onclick="window.g_deviceManager.addSpeaker(\'' + self._escAttr(spk.deviceId) + '\').then(function(r){if(r.success){window.g_deviceManager.deviceAddPanel_show();window.g_deviceManager.startSpeaker(r.data.id);}})" class="btn btn-sm" style="background:#27ae60;color:#fff;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:12px;">添加</button>';
+                    html += '<button class="btn btn-sm dev-add-btn" data-action="addSpeaker" data-device-id="' + self._escAttr(spk.deviceId) + '" style="background:#27ae60;color:#fff;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:12px;">添加</button>';
                 }
                 html += '</div>';
                 html += '</div>';
@@ -1068,7 +1082,7 @@ class DeviceManager {
         html += '<div class="device-section" style="margin-bottom:20px;">';
         html += '<h4 style="margin:0 0 8px 0;color:#9b59b6;border-bottom:1px solid rgba(155,89,182,0.3);padding-bottom:6px;"> 摄像头设备</h4>';
         html += '<div style="margin-bottom:8px;">';
-        html += '<button onclick="window.g_deviceManager.scanVideoDevices()" class="btn btn-sm" style="background:#9b59b6;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;"> 刷新视频设备列表</button>';
+        html += '<button class="btn btn-sm dev-action-btn" data-action="scanVideoDevices" style="background:#9b59b6;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;"> 刷新视频设备列表</button>';
         html += '</div>';
         if (cameras.length === 0) {
             html += '<p style="color:#999;font-size:13px;padding:8px;">未检测到摄像头设备，请检查浏览器权限设置</p>';
@@ -1086,7 +1100,7 @@ class DeviceManager {
                 if (isAdded) {
                     html += '<span style="color:#27ae60;font-size:12px;"> 已添加</span>';
                 } else {
-                    html += '<button onclick="window.g_deviceManager.addCamera(\'' + self._escAttr(cam.deviceId) + '\').then(function(r){if(r.success){window.g_deviceManager.deviceAddPanel_show();window.g_deviceManager.startCamera(r.data.id);}})" class="btn btn-sm" style="background:#27ae60;color:#fff;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:12px;">添加</button>';
+                    html += '<button class="btn btn-sm dev-add-btn" data-action="addCamera" data-device-id="' + self._escAttr(cam.deviceId) + '" style="background:#27ae60;color:#fff;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:12px;">添加</button>';
                 }
                 html += '</div>';
                 html += '</div>';
@@ -1142,10 +1156,51 @@ class DeviceManager {
                 panel.insertBefore(closeBtn, panel.firstChild);
                 overlay.appendChild(panel);
                 document.body.appendChild(overlay);
+                /* P1-002修复: 事件委托 - 替代内联onclick */
+                this._bindDevicePanelEvents(panel);
                 return;
             }
         }
         container.innerHTML = this.deviceAddPanel();
+        /* P1-002修复: 事件委托 */
+        this._bindDevicePanelEvents(container);
+    }
+
+    /* P1-002修复: 设备面板事件委托处理器
+     * 替代原有的内联onclick字符串拼接，消除XSS风险并统一事件管理 */
+    _bindDevicePanelEvents(container) {
+        var self = this;
+        if (!container) return;
+        /* 移除旧监听器，防止重复绑定 */
+        var oldHandler = container._devPanelHandler;
+        if (oldHandler) container.removeEventListener('click', oldHandler);
+        
+        var handler = function(e) {
+            var btn = e.target.closest('.dev-add-btn, .dev-action-btn');
+            if (!btn) return;
+            var action = btn.getAttribute('data-action');
+            var deviceId = btn.getAttribute('data-device-id');
+            
+            if (action === 'scanAudioDevices') {
+                self.scanAudioDevices();
+            } else if (action === 'scanVideoDevices') {
+                self.scanVideoDevices();
+            } else if (action === 'addMicrophone' && deviceId) {
+                self.addMicrophone(deviceId).then(function(r) {
+                    if (r.success) { self.deviceAddPanel_show(); self.startMicrophone(r.data.id); }
+                });
+            } else if (action === 'addSpeaker' && deviceId) {
+                self.addSpeaker(deviceId).then(function(r) {
+                    if (r.success) { self.deviceAddPanel_show(); self.startSpeaker(r.data.id); }
+                });
+            } else if (action === 'addCamera' && deviceId) {
+                self.addCamera(deviceId).then(function(r) {
+                    if (r.success) { self.deviceAddPanel_show(); self.startCamera(r.data.id); }
+                });
+            }
+        };
+        container.addEventListener('click', handler);
+        container._devPanelHandler = handler;
     }
 
 /* 真实Web API扫描音频设备（麦克风 + 扬声器）

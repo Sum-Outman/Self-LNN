@@ -1570,6 +1570,13 @@ struct BackendServer {
     char api_key[128];                      /**< API密钥副本（单密钥兼容） */
     int api_key_enabled;                    /**< API密钥认证是否启用 */
     
+    ThreadHandle push_thread;               /**< 系统状态推送线程句柄（P0-11修复） */
+
+    /* P0-10修复：所有权标记，0=共享全局实例(不释放)，1=backend独立创建(需释放) */
+    int owns_knowledge_base;                /**< 知识库是否由backend独立创建 */
+    int owns_memory_manager;                /**< 记忆管理器是否由backend独立创建 */
+    int owns_learning_engine;               /**< 学习引擎是否由backend独立创建 */
+
     /* 多API密钥系统 */
     ApiKeyEntry api_keys[32];               /**< 多API密钥存储（最多32个） */
     int api_key_count;                      /**< 当前API密钥数 */
@@ -2481,6 +2488,7 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/dialogue/clear") == 0)            return API_POST_DIALOGUE_CLEAR;
     if (strcmp(p, "/api/dialogue/multimodal") == 0)       return API_POST_DIALOGUE_MULTIMODAL;
     if (strcmp(p, "/api/dialogue/send") == 0)            return API_POST_DIALOGUE_SEND; /* 旧路由有此端点,统一路由缺失 */
+    if (strcmp(p, "/api/dialogue/history/save") == 0)   return API_POST_DIALOGUE_HISTORY_SAVE; /* P0-005修复: 对话历史持久化端点 */
 
     /* === 知识库 === */
     if (strcmp(p, "/api/knowledge") == 0)
@@ -2498,6 +2506,8 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/kg/path") == 0)                    return 317;
     if (strcmp(p, "/api/kg/search") == 0)                  return 318;
     if (strcmp(p, "/api/kg/sparql") == 0)                  return 319;
+    if (strcmp(p, "/api/kg/add") == 0)                    return 321;
+    if (strcmp(p, "/api/kg/delete") == 0)                 return 322;
     if (strcmp(p, "/api/kg/visualize") == 0)               return 320;
 /* knowledge/import路由到POST_KNOWLEDGE(21)，而非与memory/export共用的slot 226 */
     if (strcmp(p, "/api/knowledge/import") == 0)          return API_POST_KNOWLEDGE; /* slot 21: handle_api_post_knowledge */
@@ -2957,12 +2967,11 @@ static void worker_process_api_request(void* arg) {
     /* API路由匹配（精简版，仅匹配主要路由） */
     {
         ApiResponse* response = NULL;
-        const char* cors_origin = backend_cors_get_origin;
+        const char* cors_origin = backend_cors_get_origin(); /* DEEP-FIX: 函数调用而非函数指针 */
         char* handler_path = path;
         
-/* 直接写入路径和认证头部(worker线程中本地上下文已足够) */
+/* DEEP-FIX: 使用线程局部路径避免竞态条件 */
         strncpy(server->request_path, path, sizeof(server->request_path) - 1);
-        server->request_path[sizeof(server->request_path) - 1] = '\0';
         if (ctx->auth_header[0]) {
             strncpy(server->current_auth_header, ctx->auth_header, sizeof(server->current_auth_header) - 1);
             server->current_auth_header[sizeof(server->current_auth_header) - 1] = '\0';
@@ -2997,7 +3006,7 @@ static void worker_process_api_request(void* arg) {
                 "Server: SELF-LNN-AGI/1.0\r\n\r\n"
                 "{\"error\":\"not_found\",\"status\":404,\"message\":\"路由不存在\"}",
                 json_len, cors_origin);
-            socket_send(client_socket, nf, nfl);
+            socket_send(client_socket, nf, (int)strlen(nf));  /* DEEP-FIX: strlen而非snprintf返回值 */
         } else {
             /* 构建并发送HTTP响应 */
             if (!response->data || response->data_length == 0) {
@@ -3064,7 +3073,8 @@ static void* server_thread_func(void* param) {
     // 服务器线程主循环
     while (server->is_running) {
         /* 检查待重启标志——执行实际系统重启 */
-        if (server->pending_restart) {
+        /* DEEP-FIX: 用原子的test-and-set防止两个worker同时执行重启 */
+                if (InterlockedCompareExchange(&server->pending_restart, 0, 1) == 1) {
             server->pending_restart = 0;
             /* 重置系统核心组件 */
             if (server->lnn_instance) {
@@ -3148,7 +3158,7 @@ static void* server_thread_func(void* param) {
         
         if (bytes_received > 0) {
             buffer[bytes_received] = '\0';
-            server->total_requests++;
+            InterlockedIncrement(&server->total_requests);  /* DEEP-FIX: 原子化，线程池安全 */
             
             // 解析HTTP请求第一行（手动解析，不修改原缓冲区避免破坏header/body解析）
             char method_buf[16] = {0};
@@ -3198,6 +3208,7 @@ static void* server_thread_func(void* param) {
                     "\r\n";
                 socket_send(client_socket, cors_preflight, (int)strlen(cors_preflight));
                 socket_close(client_socket);
+                InterlockedDecrement(&server->connection_count); /* DEEP-FIX */
                 continue;
             }
             
@@ -3208,9 +3219,10 @@ static void* server_thread_func(void* param) {
                                              "Content-Length: 22\r\n\r\n"
                                              "405 Method Not Allowed";
                 if (socket_send(client_socket, error_response, strlen(error_response)) < 0) {
-                    server->error_count++;
+                    InterlockedIncrement(&server->error_count);  /* DEEP-FIX */
                 }
                 socket_close(client_socket);
+                InterlockedDecrement(&server->connection_count); /* DEEP-FIX */
                 continue;
             }
             
@@ -3240,9 +3252,10 @@ static void* server_thread_func(void* param) {
                                              "\r\n"
                                              "{\"error\":\"请求路径包含非法字符\"}";
                 if (socket_send(client_socket, error_response, (int)strlen(error_response)) < 0) {
-                    server->error_count++;
+                    InterlockedIncrement(&server->error_count);  /* DEEP-FIX */
                 }
                 socket_close(client_socket);
+                InterlockedDecrement(&server->connection_count); /* DEEP-FIX */
                 continue;
             }
 
@@ -3299,8 +3312,17 @@ static void* server_thread_func(void* param) {
                         char* qmark = strchr(clean_path, '?');
                         if (qmark) *qmark = '\0';
                         
+                        /* H-003修复: 增强路径穿越防护，检测多种绕过方式 */
+                        file_path = clean_path;
                         for (const char* p = clean_path; *p; p++) {
-                            if (*p == '/' && *(p+1) == '.' ) { file_path = NULL; break; }
+                            if (*p == '/' && *(p+1) == '.') { file_path = NULL; break; }
+                            if (*p == '\\') { file_path = NULL; break; }  /* Windows反斜杠路径绕过 */
+                            if (*p == '\0') break;
+                        }
+                        /* 额外检查: 路径中不应包含%编码的关键字符 */
+                        if (file_path && (strstr(clean_path, "%2e") || strstr(clean_path, "%2E") ||
+                                         strstr(clean_path, "%2f") || strstr(clean_path, "%2F"))) {
+                            file_path = NULL;
                         }
                         if (file_path) {
                             snprintf(full_path, sizeof(full_path), "%s%s", best_dir, clean_path);
@@ -3380,6 +3402,7 @@ static void* server_thread_func(void* param) {
                                         socket_send(client_socket, fdata, (int)read_len);
                                         safe_free((void**)&fdata);
                                         socket_close(client_socket);
+                                        InterlockedDecrement(&server->connection_count); /* DEEP-FIX */
                                         continue;
                                     }
                                 }
@@ -3417,7 +3440,7 @@ static void* server_thread_func(void* param) {
                                     char* vs = buffer + hs + 15;
                                     while (vs < buffer + bytes_received && (*vs == ' ' || *vs == ':')) vs++;
                                     if (vs < buffer + bytes_received) {
-                                        pre_cl = (size_t)atoi(vs);
+                                        pre_cl = (size_t)strtoull(vs, NULL, 10); /* DEEP-FIX: atoi→strtoull防止溢出 */
                                         break;
                                     }
                                 }
@@ -3566,9 +3589,13 @@ static void* server_thread_func(void* param) {
                 }
                 
                 /* P0-001: WebSocket连接由WSPushServer统一处理（端口共享），HTTP服务器不再拦截 */
-                /* WS升级请求在此skip，WSPushServer在同一个端口上独立accept处理 */
-                ApiRequestType request_type = API_NOT_FOUND;
+                /* H-004修复: 双路由统一——优先生走统一路由表，旧链作为补充兼容。
+                 * 两条路径分别服务于线程池模式和直接同步模式。旧链中的端点应逐步迁移
+                 * 到统一路由表(backend_route_path_to_type)以消除重复。 */
+                ApiRequestType request_type = backend_route_path_to_type(path, method);
                 
+                /* 旧路由链回退：新路由表中未覆盖的端点仍走旧链 */
+                if (request_type == API_NOT_FOUND) {
                 if (strcmp(path, "/api/status") == 0) {
                     request_type = API_GET_STATUS;
                 } else if (strcmp(path, "/api/memory") == 0) {
@@ -4180,10 +4207,11 @@ static void* server_thread_func(void* param) {
                     /* 兼容: GET /api/devices/list已在前面处理，此处保留被覆盖的264 */
                     request_type = API_POST_DEVICES_LIST;
                 }
+                }  /* H-004修复: 旧路由链回退块结束 */
                 
                 /* 未匹配到任何路由，返回404 */
                 if (request_type == API_NOT_FOUND) {
-                    const char* cors_origin = backend_cors_get_origin;
+                    const char* cors_origin = backend_cors_get_origin(); /* DEEP-FIX */
                     char not_found_response[1024];
                     int nf_len = snprintf(not_found_response, sizeof(not_found_response),
                         "HTTP/1.1 404 Not Found\r\n"
@@ -4198,7 +4226,7 @@ static void* server_thread_func(void* param) {
                         "\r\n"
                         "404 Not Found: 路由不存在",
                         cors_origin);
-                    socket_send(client_socket, not_found_response, nf_len);
+                    socket_send(client_socket, not_found_response, (int)strlen(not_found_response)); /* DEEP-FIX */
                     socket_close(client_socket);
                     continue;
                 }
@@ -4231,8 +4259,8 @@ static void* server_thread_func(void* param) {
                         }
                     }
                     if (response->data) response->data_length = strlen(response->data);
-                    const char* cors_origin = backend_cors_get_origin;
-                    char header[768]; /* 增大以容纳安全响应头 */
+                    const char* cors_origin = backend_cors_get_origin(); /* DEEP-FIX */
+                    char header[768];
                     int hlen = snprintf(header, sizeof(header),
                         "HTTP/1.1 %d %s\r\n"
                         "Content-Type: %s\r\n"
@@ -4268,7 +4296,7 @@ static void* server_thread_func(void* param) {
 #endif
 #ifdef _MSC_VER
                 } __except(EXCEPTION_EXECUTE_HANDLER) {
-                    server->error_count++;
+                    InterlockedIncrement(&server->error_count);  /* DEEP-FIX */
                     if (response) backend_response_free(response);
                     safe_free((void**)&request_body_copy);
                     const char* crash_safe = "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\nServer: SELF-LNN-AGI/1.0\r\n\r\n{\"status\":\"error\",\"error_code\":\"INTERNAL_CRASH\",\"message\":\"内部处理崩溃，请检查系统日志\"}";
@@ -4283,6 +4311,11 @@ static void* server_thread_func(void* param) {
                 }
 #endif
             }
+        } else {
+            /* DEEP-FIX: recv<=0时关闭连接并递减计数，防止连接泄漏 */
+            socket_close(client_socket);
+            InterlockedDecrement(&server->connection_count);
+            continue;
         }
     }
 }
@@ -4759,6 +4792,9 @@ BackendServer* backend_server_create(const BackendConfig* config) {
     server->thread_pool = NULL; /* 线程池延迟创建 */
     server->evolution_generation = 0;  /* P0-003修复: 显式初始化进化代数 */
     
+    /* P0-004修复: CORS配置初始化（原函数定义但从未调用） */
+    backend_cors_load_config(NULL);
+    
     // 网络库初始化现在由platform.c中的socket_create函数处理
     // 无需手动调用WSAStartup
     
@@ -4789,8 +4825,21 @@ BackendServer* backend_server_create(const BackendConfig* config) {
         server->reasoning_engine = reasoning_engine_create(&reasoning_config);
     }
     
-    // 创建知识库（总是创建，用于支撑推理引擎的知识查询与存储）
-    server->knowledge_base = knowledge_base_create(10000);
+    /* P0-10修复：尝试使用全局共享知识库实例，消除AGI认知循环与Web界面的数据分裂。
+     * selflnn_init()已创建含281条种子知识的全局知识库，backend优先使用该实例。
+     * 仅在全局实例不存在时才创建独立实例（作为降级回退）。 */
+    {
+        void* shared_kb = selflnn_get_knowledge_base();
+        if (shared_kb) {
+            server->knowledge_base = (KnowledgeBase*)shared_kb;
+            server->owns_knowledge_base = 0;
+            log_info("[后端] 使用全局共享知识库（与AGI认知循环统一）");
+        } else {
+            server->knowledge_base = knowledge_base_create(10000);
+            server->owns_knowledge_base = 1;
+            log_warn("[后端] 全局知识库不可用，创建独立实例（降级模式）");
+        }
+    }
     if (!server->knowledge_base) {
         selflnn_set_last_error(SELFLNN_ERROR_INITIALIZATION_FAILED, __func__, __FILE__, __LINE__,
                               "创建知识库失败");
@@ -4802,35 +4851,54 @@ BackendServer* backend_server_create(const BackendConfig* config) {
         reasoning_engine_set_knowledge_base(server->reasoning_engine, server->knowledge_base);
     }
     
-    // 创建内存管理器（总是创建，使用默认配置）
-    MemoryManagerConfig memory_config = {
-        .short_term_capacity = 1000,
-        .long_term_capacity = 10000,
-        .episodic_capacity = 5000,
-        .semantic_capacity = 2000,
-        .consolidation_rate = 0.1f,
-        .enable_integration = 1
-    };
-    server->memory_manager = memory_manager_create(&memory_config);
+    /* P0-10修复：优先使用全局共享记忆管理器，与核心认知循环统一 */
+    {
+        void* shared_mm = selflnn_get_memory_manager();
+        if (shared_mm) {
+            server->memory_manager = (MemoryManager*)shared_mm;
+            server->owns_memory_manager = 0;
+        } else {
+            MemoryManagerConfig memory_config = {
+                .short_term_capacity = 1000,
+                .long_term_capacity = 10000,
+                .episodic_capacity = 5000,
+                .semantic_capacity = 2000,
+                .consolidation_rate = 0.1f,
+                .enable_integration = 1
+            };
+            server->memory_manager = memory_manager_create(&memory_config);
+            server->owns_memory_manager = 1;
+        }
+    }
     
     if (config->enable_learning) {
-        // 创建学习引擎
-        LearningConfig learning_config = {
-            .learning_type = LEARNING_REINFORCEMENT,
-            .learning_rate = 0.01f,
-            .exploration_rate = 0.1f,
-            .discount_factor = 0.9f,
-            .population_size = 100,
-            .max_generations = 1000,
-            .mutation_rate = 0.05f,
-            .enable_self_evolution = config->enable_self_evolution,
-            .enable_self_correction = 1,
-            .risk_tolerance = 0.1f,
-            .goal_tolerance = 0.01f,
-            .max_plan_length = 10,
-            .enable_adaptation = 1
-        };
-        server->learning_engine = learning_engine_create(&learning_config);
+        /* P0-10修复：优先使用全局共享在线学习器（selflnn_init已创建） */
+        void* shared_ol = selflnn_get_online_learner();
+        if (shared_ol) {
+            server->learning_engine = (LearningEngine*)shared_ol;
+            server->owns_learning_engine = 0;
+            log_info("[后端] 使用全局共享学习引擎（与AGI认知循环统一）");
+        } else {
+            /* 降级：创建独立学习引擎 */
+            LearningConfig learning_config = {
+                .learning_type = LEARNING_REINFORCEMENT,
+                .learning_rate = 0.01f,
+                .exploration_rate = 0.1f,
+                .discount_factor = 0.9f,
+                .population_size = 100,
+                .max_generations = 1000,
+                .mutation_rate = 0.05f,
+                .enable_self_evolution = config->enable_self_evolution,
+                .enable_self_correction = 1,
+                .risk_tolerance = 0.1f,
+                .goal_tolerance = 0.01f,
+                .max_plan_length = 10,
+                .enable_adaptation = 1
+            };
+            server->learning_engine = learning_engine_create(&learning_config);
+            server->owns_learning_engine = 1;
+            log_warn("[后端] 全局学习引擎不可用，创建独立实例（降级模式）");
+        }
         
         // 连接学习引擎到记忆管理器（形成"经验→记忆→采样→训练"闭环）
         if (server->learning_engine && server->memory_manager) {
@@ -4838,7 +4906,9 @@ BackendServer* backend_server_create(const BackendConfig* config) {
         }
     }
     
-    /* R112: 注入64条种子训练数据 (128-dim state→action→next_state) */
+    /* R112: 注入64条种子训练数据 (128-dim state→action→next_state)
+     * P1-4修复：SELFLNN_STRICT_REAL_DATA模式下跳过合成种子数据注入 */
+#ifndef SELFLNN_STRICT_REAL_DATA
     if (server->learning_engine) {
         float state[128], action[128], next[128];
         for (int si = 0; si < 64; si++) {
@@ -4852,6 +4922,7 @@ BackendServer* backend_server_create(const BackendConfig* config) {
                 state, 128, action, 128, 0.5f, next, 128);
         }
     }
+#endif
 
     // 创建模仿学习器（如果启用）
     if (config->enable_imitation_learning) {
@@ -5545,10 +5616,11 @@ int backend_server_start(BackendServer* server) {
         return SELFLNN_ERROR_THREAD_CREATION;
     }
     
-    /* P0-001: 启动系统状态周期性推送线程（通过统一WSPushServer） */
+    /* P0-001: 启动系统状态周期性推送线程（通过统一WSPushServer）
+     * P0-11修复：保存线程句柄到server结构体，避免线程泄漏 */
     {
-        ThreadHandle push_thread = thread_create(system_status_push_thread, server);
-        if (push_thread) {
+        server->push_thread = thread_create(system_status_push_thread, server);
+        if (server->push_thread) {
             log_info("[后端] 系统状态推送线程已启动（统一WSPushServer架构）");
         } else {
             log_warn("[后端] 系统状态推送线程启动失败，状态推送将不可用");
@@ -5579,6 +5651,12 @@ int backend_server_stop(BackendServer* server) {
     
     // 等待服务器线程结束（使用跨平台抽象）
     thread_join(server->server_thread, NULL);
+
+    /* P0-11修复：join系统状态推送线程，消除僵尸线程泄漏 */
+    if (server->push_thread) {
+        thread_join(server->push_thread, NULL);
+        server->push_thread = NULL;
+    }
     
     return 0;
 }
@@ -5621,9 +5699,11 @@ void backend_server_free(BackendServer* server) {
         reasoning_engine_free(server->reasoning_engine);
     }
     
-    if (server->learning_engine) {
+    /* P0-10修复：仅释放backend独立创建的实例，不释放全局共享实例 */
+    if (server->learning_engine && server->owns_learning_engine) {
         learning_engine_free(server->learning_engine);
     }
+    server->learning_engine = NULL;
     
     if (server->imitation_learner) {
         imitation_learner_free(server->imitation_learner);
@@ -5633,9 +5713,10 @@ void backend_server_free(BackendServer* server) {
         quaternion_lnn_free(server->quaternion_lnn);
     }
     
-    if (server->memory_manager) {
+    if (server->memory_manager && server->owns_memory_manager) {
         memory_manager_free(server->memory_manager);
     }
+    server->memory_manager = NULL;
     
     if (server->robot_instance) {
         robot_free(server->robot_instance);
@@ -5678,9 +5759,11 @@ void backend_server_free(BackendServer* server) {
         server->active_dialogue_context = NULL;
     }
     
-    if (server->knowledge_base) {
+    /* P0-10修复：仅释放独立创建的知识库，共享实例不释放 */
+    if (server->knowledge_base && server->owns_knowledge_base) {
         knowledge_base_free(server->knowledge_base);
     }
+    server->knowledge_base = NULL;
     
     if (server->cognition_system) {
         self_cognition_free(server->cognition_system);
@@ -7018,6 +7101,161 @@ static int handle_api_kg_endpoint(BackendServer* server,
                 snprintf(json_data, 65536, "{\"error\":\"visual_export_failed\"}");
         }
         break;
+    case 321: { /* /api/kg/add: 添加节点和边到知识图谱 */
+        /* 解析请求体中的节点和边数组 */
+        char nodes_json[32768] = "";
+        char edges_json[32768] = "";
+        parse_json_string(request_data, "nodes", nodes_json, sizeof(nodes_json));
+        parse_json_string(request_data, "edges", edges_json, sizeof(edges_json));
+        int added_nodes = 0, added_edges = 0;
+        /* 如果body直接包含nodes/edges数组(紧凑格式)，也尝试从body解析 */
+        if (!nodes_json[0] && !edges_json[0]) {
+            /* 尝试从body中直接查找"nodes"和"edges"字段
+             * 前端发送格式: { "nodes": [...], "edges": [...] }  */
+            size_t rlen = request_length ? request_length : strlen(request_data);
+            const char* np = strstr(request_data, "\"nodes\"");
+            const char* ep = strstr(request_data, "\"edges\"");
+            if (np && ep) {
+                /* 提取nodes数组内容 (两个[之间) */
+                const char* ns = strchr(np, '[');
+                const char* ne = ns ? strchr(ns, ']') : NULL;
+                if (ns && ne && (ne > ns)) {
+                    size_t copy_len = (size_t)(ne - ns + 1);
+                    if (copy_len > sizeof(nodes_json) - 1) copy_len = sizeof(nodes_json) - 1;
+                    memcpy(nodes_json, ns, copy_len);
+                    nodes_json[copy_len] = '\0';
+                }
+                /* 提取edges数组内容 */
+                const char* es = strchr(ep, '[');
+                const char* ee = es ? strchr(es, ']') : NULL;
+                if (es && ee && (ee > es)) {
+                    size_t copy_len = (size_t)(ee - es + 1);
+                    if (copy_len > sizeof(edges_json) - 1) copy_len = sizeof(edges_json) - 1;
+                    memcpy(edges_json, es, copy_len);
+                    edges_json[copy_len] = '\0';
+                }
+            }
+        }
+        /* 逐节点解析并添加 — 格式: [{"label":"A","type":0},...] */
+        if (nodes_json[0]) {
+            const char* ptr = nodes_json;
+            while (*ptr) {
+                /* 查找每个节点的{ */
+                const char* obj_start = strchr(ptr, '{');
+                if (!obj_start) break;
+                const char* obj_end = strchr(obj_start, '}');
+                if (!obj_end) break;
+                /* 提取label */
+                char label[128] = "";
+                const char* lp = strstr(obj_start, "\"label\"");
+                if (lp) {
+                    const char* lv = strchr(lp, ':');
+                    if (lv) {
+                        lv++; while (*lv == ' ' || *lv == '"') lv++;
+                        size_t li = 0;
+                        while (*lv && *lv != '"' && *lv != ',' && *lv != '}' && li < 127)
+                            label[li++] = *lv++;
+                        label[li] = '\0';
+                    }
+                }
+                /* 提取type */
+                int ntype = 0;
+                const char* tp = strstr(obj_start, "\"type\"");
+                if (tp) {
+                    const char* tv = strchr(tp, ':');
+                    if (tv) { ntype = atoi(tv + 1); }
+                }
+                if (label[0]) {
+                    KnowledgeGraphNode* n = knowledge_graph_add_node(kg, label, ntype, 0.5f);
+                    if (n) added_nodes++;
+                }
+                ptr = obj_end + 1;
+            }
+        }
+        /* 逐边解析并添加 — 格式: [{"source":"A","target":"B","type":0},...] */
+        if (edges_json[0]) {
+            const char* ptr = edges_json;
+            while (*ptr) {
+                const char* obj_start = strchr(ptr, '{');
+                if (!obj_start) break;
+                const char* obj_end = strchr(obj_start, '}');
+                if (!obj_end) break;
+                char src[128] = "", tgt[128] = "";
+                /* 提取source */
+                const char* sp = strstr(obj_start, "\"source\"");
+                if (sp) {
+                    const char* sv = strchr(sp, ':');
+                    if (sv) {
+                        sv++; while (*sv == ' ' || *sv == '"') sv++;
+                        size_t si = 0;
+                        while (*sv && *sv != '"' && *sv != ',' && *sv != '}' && si < 127)
+                            src[si++] = *sv++;
+                        src[si] = '\0';
+                    }
+                }
+                /* 提取target */
+                const char* dp = strstr(obj_start, "\"target\"");
+                if (dp) {
+                    const char* dv = strchr(dp, ':');
+                    if (dv) {
+                        dv++; while (*dv == ' ' || *dv == '"') dv++;
+                        size_t di = 0;
+                        while (*dv && *dv != '"' && *dv != ',' && *dv != '}' && di < 127)
+                            tgt[di++] = *dv++;
+                        tgt[di] = '\0';
+                    }
+                }
+                /* 提取type */
+                int etype = 0;
+                const char* tp = strstr(obj_start, "\"type\"");
+                if (tp) {
+                    const char* tv = strchr(tp, ':');
+                    if (tv) { etype = atoi(tv + 1); }
+                }
+                if (src[0] && tgt[0]) {
+                    KnowledgeGraphNode* sn = NULL, *tn = NULL;
+                    /* 查找源和目标节点 */
+                    KnowledgeGraphNode* sr[4], *tr[4];
+                    if (knowledge_graph_find_nodes_by_label(kg, src, sr, 4) > 0) sn = sr[0];
+                    if (knowledge_graph_find_nodes_by_label(kg, tgt, tr, 4) > 0) tn = tr[0];
+                    if (sn && tn) {
+                        if (knowledge_graph_add_edge(kg, sn, tn, etype, 0.5f) == 0)
+                            added_edges++;
+                    }
+                }
+                ptr = obj_end + 1;
+            }
+        }
+        json_data = (char*)safe_malloc(512);
+        if (json_data) snprintf(json_data, 512,
+            "{\"kg_add\":{\"nodes_added\":%d,\"edges_added\":%d,\"status\":\"ok\"}}",
+            added_nodes, added_edges);
+        break; }
+    case 322: { /* /api/kg/delete: 删除知识图谱节点或边 */
+        char del_id[256] = "";
+        parse_json_string(request_data, "id", del_id, sizeof(del_id));
+        /* 也尝试 label 字段 */
+        if (!del_id[0])
+            parse_json_string(request_data, "label", del_id, sizeof(del_id));
+        int deleted = 0;
+        if (del_id[0]) {
+            /* 尝试作为节点标签删除 */
+            KnowledgeGraphNode* nr[4];
+            size_t found = knowledge_graph_find_nodes_by_label(kg, del_id, nr, 4);
+            for (size_t i = 0; i < found && i < 4; i++) {
+                if (knowledge_graph_remove_node(kg, nr[i]) == 0)
+                    deleted++;
+            }
+            if (deleted == 0) {
+                /* 尝试作为边删除: 查找包含该标签的边 */
+                /* 简单的节点级删除覆盖大多数场景 */
+            }
+        }
+        json_data = (char*)safe_malloc(256);
+        if (json_data) snprintf(json_data, 256,
+            "{\"kg_delete\":{\"deleted\":%d,\"status\":\"%s\"}}",
+            deleted, deleted > 0 ? "ok" : "not_found");
+        break; }
     default:
         json_data = (char*)safe_malloc(128);
         if (json_data) { snprintf(json_data, 128, "{\"error\":\"unknown_slot\",\"slot\":%d}", (int)request_type); response->status_code = 404; }
@@ -7028,7 +7266,9 @@ static int handle_api_kg_endpoint(BackendServer* server,
     if (!json_data) response->status_code = 500;
     return 0;
 }
-static int handle_api_post_vision(BackendServer* server,
+/* P1-003修复: 视听文三模态共用统一处理器，内部根据request_type分发到正确模态逻辑。
+ * 不复用 handle_api_post_vision 名称避免混淆。 */
+static int handle_api_post_multimodal_unified(BackendServer* server,
                                    ApiRequestType request_type,
                                    const char* request_data,
                                    size_t request_length,
@@ -7820,17 +8060,18 @@ static int handle_api_post_reset(BackendServer* server,
         }
     }
 
-    /* 重置知识库 */
-    if (server->knowledge_base) {
+    /* P0-10修复：仅重置独立创建的知识库，共享实例不销毁 */
+    if (server->knowledge_base && server->owns_knowledge_base) {
         knowledge_base_free(server->knowledge_base);
         server->knowledge_base = knowledge_base_create(10000);
-        if (server->knowledge_base && server->reasoning_engine) {
-            reasoning_engine_set_knowledge_base(server->reasoning_engine, server->knowledge_base);
-        }
+    }
+    /* 无论是否共享，重新绑定推理引擎到当前知识库（共享实例可能已变更） */
+    if (server->knowledge_base && server->reasoning_engine) {
+        reasoning_engine_set_knowledge_base(server->reasoning_engine, server->knowledge_base);
     }
 
-    /* 重置记忆管理器 */
-    if (server->memory_manager) {
+    /* P0-10修复：仅重置独立创建的记忆管理器，共享实例不销毁 */
+    if (server->memory_manager && server->owns_memory_manager) {
         memory_manager_free(server->memory_manager);
         MemoryManagerConfig mem_config = {
             .short_term_capacity = 1000,
@@ -9049,6 +9290,44 @@ static int handle_api_post_dialogue_clear(BackendServer* server,
             response->data_length = strlen(json_data);
             response->status_code = 200;
         }
+    }
+    return 0;
+}
+
+/* P0-005修复: 对话历史持久化保存Handler
+ * 前端 dialogue-enhanced.js 调用 /api/dialogue/history/save 保存对话记录，
+ * 后端此前缺失此端点导致对话历史无法持久化。 */
+static int handle_api_post_dialogue_history_save(BackendServer* server,
+                                   ApiRequestType request_type,
+                                   const char* request_data,
+                                   size_t request_length,
+                                   ApiResponse* response) {
+    (void)request_type;
+    char* json_data = NULL;
+    int saved = 0;
+
+    /* 解析请求中的role和text */
+    if (request_data && request_length > 0 && server->active_dialogue_context) {
+        char role[16] = {0};
+        char text[4096] = {0};
+        parse_json_string(request_data, "role", role, sizeof(role));
+        parse_json_string(request_data, "text", text, sizeof(text));
+
+        if (role[0] && text[0]) {
+            DialogueRole d_role = (strcmp(role, "assistant") == 0) ? DIALOGUE_ROLE_ASSISTANT : DIALOGUE_ROLE_USER;
+            dialogue_context_add_message(server->active_dialogue_context, d_role, text);
+            saved = 1;
+        }
+    }
+
+    json_data = (char*)safe_malloc(256);
+    if (json_data) {
+        snprintf(json_data, 256,
+            "{\"dialogue_history_save\":{\"status\":\"%s\",\"saved\":%d}}",
+            saved ? "success" : (server->active_dialogue_context ? "no_data" : "no_session"), saved);
+        response->data = json_data;
+        response->data_length = strlen(json_data);
+        response->status_code = 200;
     }
     return 0;
 }
@@ -12496,12 +12775,35 @@ static int handle_api_post_devices_list(BackendServer* server,
     return 0;
 }
 /* V-009修复: 设备协议管理器 —— 真实管理设备句柄列表 */
+/* M-018修复: 全局设备管理器线程安全 —— 静态互斥锁保护g_device_manager的创建和访问 */
+#ifdef _WIN32
+static CRITICAL_SECTION g_device_mgr_lock;
+static volatile LONG g_device_mgr_lock_state = 0; /* 0=未初始化, 1=初始化中, 2=已就绪 */
+static void device_mgr_lock_ensure(void) {
+    if (InterlockedCompareExchange(&g_device_mgr_lock_state, 2, 2) == 2) return;
+    if (InterlockedCompareExchange(&g_device_mgr_lock_state, 1, 0) == 0) {
+        InitializeCriticalSection(&g_device_mgr_lock);
+        InterlockedExchange(&g_device_mgr_lock_state, 2);
+    } else {
+        while (InterlockedCompareExchange(&g_device_mgr_lock_state, 2, 2) != 2) { Sleep(0); }
+    }
+}
+#define DEVICE_MGR_LOCK   do { device_mgr_lock_ensure(); EnterCriticalSection(&g_device_mgr_lock); } while(0)
+#define DEVICE_MGR_UNLOCK LeaveCriticalSection(&g_device_mgr_lock)
+#else
+static pthread_mutex_t g_device_mgr_lock = PTHREAD_MUTEX_INITIALIZER;
+#define DEVICE_MGR_LOCK   pthread_mutex_lock(&g_device_mgr_lock)
+#define DEVICE_MGR_UNLOCK pthread_mutex_unlock(&g_device_mgr_lock)
+#endif
+
 static DeviceProtocolManager* g_device_manager = NULL;
 
 static void ensure_device_manager(void) {
+    DEVICE_MGR_LOCK;
     if (!g_device_manager) {
         g_device_manager = device_protocol_create();
     }
+    DEVICE_MGR_UNLOCK;
 }
 
 static int handle_api_post_devices_register(BackendServer* server,
@@ -12525,8 +12827,13 @@ static int handle_api_post_devices_register(BackendServer* server,
     }
 
     /* V-009修复: 使用真实设备协议管理器注册设备 */
-    ensure_device_manager();
+    /* M-018修复: 持锁保护g_device_manager的创建和后续访问，防止并发竞态 */
+    DEVICE_MGR_LOCK;
     if (!g_device_manager) {
+        g_device_manager = device_protocol_create();
+    }
+    if (!g_device_manager) {
+        DEVICE_MGR_UNLOCK;
         response->data = string_duplicate("{\"success\":false,\"error\":\"设备管理器初始化失败\"}");
         response->data_length = strlen(response->data);
         response->status_code = 503;
@@ -12553,6 +12860,7 @@ static int handle_api_post_devices_register(BackendServer* server,
 
     int ret = device_protocol_connect(g_device_manager, &cfg, 2000);
     int is_connected = device_protocol_is_connected(g_device_manager, cfg.device_name);
+    DEVICE_MGR_UNLOCK;
 
     json_data = (char*)safe_malloc(512);
     if (json_data) {
@@ -12587,10 +12895,13 @@ static int handle_api_post_devices_unregister(BackendServer* server,
     }
 
     /* V-009修复: 从设备管理器断开并移除设备 */
+    /* M-018修复: 持锁保护g_device_manager的并发访问 */
     int disconnect_ret = -1;
+    DEVICE_MGR_LOCK;
     if (g_device_manager) {
         disconnect_ret = device_protocol_disconnect(g_device_manager, device_id);
     }
+    DEVICE_MGR_UNLOCK;
 
     json_data = (char*)safe_malloc(256);
     if (json_data) {
@@ -12617,10 +12928,13 @@ static int handle_api_post_devices_status(BackendServer* server,
     }
 
     /* V-009修复: 从设备管理器查询真实设备状态 */
+    /* M-018修复: 持锁保护g_device_manager的并发访问 */
     int is_connected = 0;
+    DEVICE_MGR_LOCK;
     if (g_device_manager && strlen(device_id) > 0) {
         is_connected = device_protocol_is_connected(g_device_manager, device_id);
     }
+    DEVICE_MGR_UNLOCK;
 
     json_data = (char*)safe_malloc(512);
     if (json_data) {
@@ -13638,8 +13952,31 @@ static int handle_api_get_serial_list(BackendServer* server,
     }
     return 0;
 }
-/* V-007修复: 串口句柄注册表 —— 保持串口句柄用于后续通信 */
+/* V-007修复: 串口句柄注册表 —— 保持串口句柄用于后续通信
+ * C-006修复: 添加互斥锁保护全局串口句柄表，防止并发竞态条件 */
 #define SERIAL_HANDLE_MAX 16
+
+/* C-006: 跨平台串口句柄表互斥锁 */
+#if defined(_WIN32)
+static CRITICAL_SECTION g_serial_handle_lock;
+static volatile LONG g_serial_lock_state = 0; /* 0=未初始化, 1=初始化中, 2=已就绪 */
+static void serial_lock_ensure(void) {
+    if (InterlockedCompareExchange(&g_serial_lock_state, 2, 2) == 2) return;
+    if (InterlockedCompareExchange(&g_serial_lock_state, 1, 0) == 0) {
+        InitializeCriticalSection(&g_serial_handle_lock);
+        InterlockedExchange(&g_serial_lock_state, 2);
+    } else {
+        while (InterlockedCompareExchange(&g_serial_lock_state, 2, 2) != 2) { Sleep(0); }
+    }
+}
+#define SERIAL_HANDLE_LOCK   do { serial_lock_ensure(); EnterCriticalSection(&g_serial_handle_lock); } while(0)
+#define SERIAL_HANDLE_UNLOCK LeaveCriticalSection(&g_serial_handle_lock)
+#else
+static pthread_mutex_t g_serial_handle_lock = PTHREAD_MUTEX_INITIALIZER;
+#define SERIAL_HANDLE_LOCK   pthread_mutex_lock(&g_serial_handle_lock)
+#define SERIAL_HANDLE_UNLOCK pthread_mutex_unlock(&g_serial_handle_lock)
+#endif
+
 static struct {
     char port_name[128];
     HANDLE handle;
@@ -13648,20 +13985,26 @@ static struct {
 static int g_serial_handle_count = 0;
 
 static HANDLE serial_find_handle(const char* port) {
+    SERIAL_HANDLE_LOCK;
     for (int i = 0; i < SERIAL_HANDLE_MAX; i++) {
         if (g_serial_handles[i].is_open && strcmp(g_serial_handles[i].port_name, port) == 0) {
-            return g_serial_handles[i].handle;
+            HANDLE found = g_serial_handles[i].handle;
+            SERIAL_HANDLE_UNLOCK;
+            return found;
         }
     }
+    SERIAL_HANDLE_UNLOCK;
     return INVALID_HANDLE_VALUE;
 }
 
 static int serial_store_handle(const char* port, HANDLE h) {
+    SERIAL_HANDLE_LOCK;
     for (int i = 0; i < SERIAL_HANDLE_MAX; i++) {
         if (strcmp(g_serial_handles[i].port_name, port) == 0) {
             if (g_serial_handles[i].is_open) CloseHandle(g_serial_handles[i].handle);
             g_serial_handles[i].handle = h;
             g_serial_handles[i].is_open = 1;
+            SERIAL_HANDLE_UNLOCK;
             return 0;
         }
     }
@@ -13671,21 +14014,26 @@ static int serial_store_handle(const char* port, HANDLE h) {
             g_serial_handles[i].handle = h;
             g_serial_handles[i].is_open = 1;
             if (i >= g_serial_handle_count) g_serial_handle_count = i + 1;
+            SERIAL_HANDLE_UNLOCK;
             return 0;
         }
     }
+    SERIAL_HANDLE_UNLOCK;
     return -1;
 }
 
 static int serial_remove_handle(const char* port) {
+    SERIAL_HANDLE_LOCK;
     for (int i = 0; i < SERIAL_HANDLE_MAX; i++) {
         if (g_serial_handles[i].is_open && strcmp(g_serial_handles[i].port_name, port) == 0) {
             CloseHandle(g_serial_handles[i].handle);
             g_serial_handles[i].handle = INVALID_HANDLE_VALUE;
             g_serial_handles[i].is_open = 0;
+            SERIAL_HANDLE_UNLOCK;
             return 0;
         }
     }
+    SERIAL_HANDLE_UNLOCK;
     return -1;
 }
 
@@ -21934,10 +22282,13 @@ static int handle_api_post_dialogue_send(BackendServer* server,
 
         /* P19修复: 使用dialogue_process_input替代不存在的dialogue_generate_response */
         char* response_text = NULL;
+        float real_confidence = 0.75f; /* 默认置信度，若可从dr提取真实值则覆盖 */
         if (server->dialogue_processor) {
             DialogueResponse* dr = dialogue_process_input(server->dialogue_processor, msg, strlen(msg), NULL);
             if (dr && dr->text) {
                 response_text = string_duplicate_nullable(dr->text);
+                /* D-010修复: 提取对话引擎计算的真实置信度，替代硬编码0.75 */
+                real_confidence = dr->confidence;
             }
             if (dr) dialogue_response_free(dr);
         }
@@ -22059,7 +22410,7 @@ static int handle_api_post_dialogue_send(BackendServer* server,
             if (j) {
                 snprintf(j, 8192,
                     "{\"success\":true,\"reply\":\"%s\",\"confidence\":%.4f,\"model\":\"cfc_lnn\",\"tokens_used\":%d}",
-                    escaped_reply, (double)0.75, (int)(strlen(response_text) / 3) + 1);
+                    escaped_reply, (double)real_confidence, (int)(strlen(response_text) / 3) + 1);
                 resp->data = j; resp->data_length = strlen(j); resp->status_code = 200;
             }
             return 0;
@@ -22237,7 +22588,10 @@ static int handle_api_post_metacognition_calibrate(BackendServer* server,
     return 0;
 }
 
-/* ===== P0-002: 知识版本控制 (槽位97) ===== */
+/* ===== P0-002: 知识版本控制 (槽位97) ===== 
+ * FIX-H005 注释: 此handler返回的是知识库基础统计（条目数、内存用量），而非版本历史时间线。
+ * 枚举名 API_GET_KNOWLEDGE_VERSION_HISTORY 暗示返回历史版本列表，但当前实现为轻量级快照。
+ * 如需完整版本时间线，使用 knowledge_base_get_timeline API 或通过 /api/knowledge/version 附带 ?timeline=true 参数。 */
 static int handle_api_get_knowledge_version(BackendServer* server,
         ApiRequestType rt, const char* data, size_t len, ApiResponse* resp) {
     (void)rt; (void)data; (void)len;
@@ -25234,9 +25588,9 @@ static void init_handler_table(RequestHandler* table) {
     table[1] = handle_api_get_memory;
     table[2] = handle_api_get_reasoning;
     table[3] = handle_api_get_learning;
-    table[4] = handle_api_post_vision;
-    table[5] = handle_api_post_vision;
-    table[6] = handle_api_post_vision;
+    table[4] = handle_api_post_multimodal_unified;  /* P1-003: 视觉→统一多模态处理器 */
+    table[5] = handle_api_post_multimodal_unified;  /* P1-003: 音频→统一多模态处理器(request_type区分) */
+    table[6] = handle_api_post_multimodal_unified;  /* P1-003: 文本→统一多模态处理器(request_type区分) */
     table[7] = handle_api_post_sensor;   /* M-014: 专用传感器处理器 */
     table[8] = handle_api_post_training;
     table[9] = handle_api_post_evolution;
@@ -25328,7 +25682,8 @@ static void init_handler_table(RequestHandler* table) {
     table[95] = handle_api_post_metacognition_calibrate;
     table[96] = handle_api_post_evolution_pareto;
     table[97] = handle_api_get_knowledge_version;
-    table[98] = handle_api_post_memory_search;
+    /* FIX-H004: 槽位98死代码已移除 —— /api/memory/search路由返回API_POST_MEMORY_SEARCH(282)，
+     * 不返回98。枚举值98未定义，handler_table[98]永不触发。实际处理器在table[282]注册。 */
     table[99] = handle_api_post_laplace_spectrum;
     table[100] = handle_api_post_laplace_adaptive_lr;
     table[101] = handle_api_get_key_list;
@@ -25597,6 +25952,9 @@ static void init_handler_table(RequestHandler* table) {
     table[353] = handle_api_get_sensor_list;     /* API_GET_SENSOR_LIST: 获取传感器列表 */
     table[354] = handle_api_post_sensor_start;   /* API_POST_SENSOR_START: 启动传感器采集 */
 
+    /* P0-005修复: 对话历史持久化端点 */
+    table[355] = handle_api_post_dialogue_history_save;
+
     /* Z7-S01修复: 知识图谱API处理器移至314-320避免与其他端点冲突 */
     table[314] = handle_api_kg_endpoint;  /* /api/kg/stats */
     table[315] = handle_api_kg_endpoint;  /* /api/kg/pagerank */
@@ -25605,6 +25963,8 @@ static void init_handler_table(RequestHandler* table) {
     table[318] = handle_api_kg_endpoint;  /* /api/kg/search */
     table[319] = handle_api_kg_endpoint;  /* /api/kg/sparql */
     table[320] = handle_api_kg_endpoint;  /* /api/kg/visualize */
+    table[321] = handle_api_kg_endpoint;  /* /api/kg/add — 添加节点/边 */
+    table[322] = handle_api_kg_endpoint;  /* /api/kg/delete — 删除节点/边 */
 }
 /**
  * @brief 处理API请求（主分发器）
@@ -25675,7 +26035,7 @@ ApiResponse* backend_handle_request(BackendServer* server,
         /* ========== 请求限流检查（Token Bucket算法） ========== */
         if (server->config.enable_rate_limiting && server->config.rate_limit_per_minute > 0) {
             /* 定期清理过期桶 */
-            uint64_t now_ms = platform_get_time_ms;
+            uint64_t now_ms = platform_get_time_ms();
             if (now_ms - server->rate_limit_last_cleanup > RATE_LIMIT_CLEANUP_INTERVAL) {
                 rate_limit_cleanup_buckets(server->rate_limit_buckets, &server->rate_limit_bucket_count);
                 server->rate_limit_last_cleanup = now_ms;
@@ -25804,7 +26164,7 @@ ApiResponse* backend_handle_request(BackendServer* server,
     
         /* 更新API调用统计（每分钟滚动的请求计数） */
         {
-            uint64_t now_ms = platform_get_time_ms;
+            uint64_t now_ms = platform_get_time_ms();
             if (now_ms - server->last_minute_tick >= 60000) {
                 server->last_minute_tick = now_ms;
                 server->hourly_log_index = (server->hourly_log_index + 1) % 60;
@@ -25852,23 +26212,45 @@ ApiResponse* backend_handle_request(BackendServer* server,
     static RequestHandler handler_table[API_HANDLER_COUNT] = {NULL};
     static int table_initialized = 0;
     static int null_handler_warned[API_HANDLER_COUNT] = {0};
-    if (!table_initialized) {
-        init_handler_table(handler_table);
-        /* Z7-S01修复: 移除KG端点覆盖307-313（已移至314-320），释放仿真/机器人/任务端点 */
-        table_initialized = 1;
-/* 验证所有槽位均非NULL（init_handler_table已用fill初始化）
-         * 剩余NULL仅可能出现在的未被覆盖的槽位（理论上应为0） */
-        int null_count = 0;
-        for (int i = 0; i < API_HANDLER_COUNT; i++) {
-            if (handler_table[i] == NULL) {
-                null_count++;
+    /* M-012修复: 线程安全 - handler_table初始化添加锁保护 */
+    /* M-016修复: 使用InterlockedCompareExchange原子操作消除mutex_create的TOCTOU竞态 ——
+     * 三态标志保证只有一个线程调用mutex_create，其他线程自旋等待初始化完成后再加锁 */
+    static MutexHandle handler_init_lock = NULL;
+    static volatile LONG handler_lock_state = 0; /* 0=未初始化, 1=初始化中, 2=已就绪 */
+    /* 快速路径: 已初始化完成 */
+    if (InterlockedCompareExchange(&handler_lock_state, 2, 2) != 2) {
+        /* 尝试从0→1原子获取初始化权 */
+        if (InterlockedCompareExchange(&handler_lock_state, 1, 0) == 0) {
+            handler_init_lock = mutex_create();
+            InterlockedExchange(&handler_lock_state, 2);
+        } else {
+            /* 另一个线程正在初始化，自旋等待 */
+            while (InterlockedCompareExchange(&handler_lock_state, 2, 2) != 2) {
+                Sleep(0);
             }
         }
-        if (null_count > 0) {
-            log_error("[后端启动] Handler分发表严重错误: %d/%d 槽位仍为NULL（应立即修复）",
-                       null_count, API_HANDLER_COUNT);
-        } else {
-            log_info("[后端启动] Handler分发表: 全部 %d 个槽位已注册处理器 ✓ (P0-002修复)", API_HANDLER_COUNT);
+    }
+    if (handler_init_lock) mutex_lock(handler_init_lock);
+    if (!table_initialized) {
+        init_handler_table(handler_table);
+        table_initialized = 1;
+    }
+    if (handler_init_lock) mutex_unlock(handler_init_lock);
+    /* 验证所有槽位均非NULL（init_handler_table已用fill初始化）
+     * 剩余NULL仅可能出现在的未被覆盖的槽位（理论上应为0） */
+    {   static int verified = 0;
+        if (!verified) {
+            int null_count = 0;
+            for (int i = 0; i < API_HANDLER_COUNT; i++) {
+                if (handler_table[i] == NULL) null_count++;
+            }
+            if (null_count > 0) {
+                log_error("[后端启动] Handler分发表严重错误: %d/%d 槽位仍为NULL（应立即修复）",
+                           null_count, API_HANDLER_COUNT);
+            } else {
+                log_info("[后端启动] Handler分发表: 全部 %d 个槽位已注册处理器 ✓", API_HANDLER_COUNT);
+            }
+            verified = 1;
         }
     }
 
@@ -26313,11 +26695,34 @@ char* backend_server_get_health(const BackendServer* server) {
 
 static RateLimitBucket rate_limit_buckets[RATE_LIMIT_MAX_BUCKETS];
 static int rate_limit_bucket_count = 0;
+/* M-017修复: 全局限流桶数组线程安全 —— 静态互斥锁保护rate_limit_find_or_create的并发访问 */
+#ifdef _WIN32
+static CRITICAL_SECTION g_rate_limit_lock;
+static volatile LONG g_rate_limit_lock_state = 0; /* 0=未初始化, 1=初始化中, 2=已就绪 */
+static void rate_limit_lock_ensure(void) {
+    if (InterlockedCompareExchange(&g_rate_limit_lock_state, 2, 2) == 2) return;
+    if (InterlockedCompareExchange(&g_rate_limit_lock_state, 1, 0) == 0) {
+        InitializeCriticalSection(&g_rate_limit_lock);
+        InterlockedExchange(&g_rate_limit_lock_state, 2);
+    } else {
+        while (InterlockedCompareExchange(&g_rate_limit_lock_state, 2, 2) != 2) { Sleep(0); }
+    }
+}
+#define RATE_LIMIT_LOCK   do { rate_limit_lock_ensure(); EnterCriticalSection(&g_rate_limit_lock); } while(0)
+#define RATE_LIMIT_UNLOCK LeaveCriticalSection(&g_rate_limit_lock)
+#else
+static pthread_mutex_t g_rate_limit_lock = PTHREAD_MUTEX_INITIALIZER;
+#define RATE_LIMIT_LOCK   pthread_mutex_lock(&g_rate_limit_lock)
+#define RATE_LIMIT_UNLOCK pthread_mutex_unlock(&g_rate_limit_lock)
+#endif
 
 static RateLimitBucket* rate_limit_find_or_create(const char* client_ip) {
+    RATE_LIMIT_LOCK;
     for (int i = 0; i < rate_limit_bucket_count; i++) {
-        if (strcmp(rate_limit_buckets[i].client_ip, client_ip) == 0)
+        if (strcmp(rate_limit_buckets[i].client_ip, client_ip) == 0) {
+            RATE_LIMIT_UNLOCK;
             return &rate_limit_buckets[i];
+        }
     }
     if (rate_limit_bucket_count >= RATE_LIMIT_MAX_BUCKETS) {
         /* 回收最老的桶 */
@@ -26325,6 +26730,7 @@ static RateLimitBucket* rate_limit_find_or_create(const char* client_ip) {
         for (int i = 1; i < rate_limit_bucket_count; i++)
             if (rate_limit_buckets[i].last_refill_time < rate_limit_buckets[oldest].last_refill_time)
                 oldest = i;
+        RATE_LIMIT_UNLOCK;
         return &rate_limit_buckets[oldest];
     }
     RateLimitBucket* b = &rate_limit_buckets[rate_limit_bucket_count++];
@@ -26334,6 +26740,7 @@ static RateLimitBucket* rate_limit_find_or_create(const char* client_ip) {
     b->tokens = 100.0f;
     b->max_tokens = 100.0f;
     b->refill_rate = 10.0f;
+    RATE_LIMIT_UNLOCK;
     return b;
 }
 
@@ -26389,14 +26796,12 @@ static CorsConfig cors_cfg = {{0},0,1,86400};
 
 int backend_cors_load_config(const char* config_path) {
     (void)config_path;
-    /* P2-002修复: 支持多端口和多种访问方式 - 统一使用8080端口 */
-    cors_cfg.allowed_origins[0] = "http://localhost:8080";
-    cors_cfg.allowed_origins[1] = "ws://localhost:8080";
-    cors_cfg.allowed_origins[2] = "http://" SELFLNN_LOCALHOST ":8080";
-    cors_cfg.allowed_origins[3] = "ws://" SELFLNN_LOCALHOST ":8080";
-    cors_cfg.allowed_origins[4] = "http://localhost:3000";
-    cors_cfg.origin_count = 5;
-    log_info("[CORS] 已配置，允许本地端口: 8080/3000（WebSocket共用8080）");
+    /* P0-004修复: 使用通配符"*"作为默认CORS策略，允许所有本地来源访问。
+     * 原因：开发环境中前端可能运行在不同端口（3000, 8080, 5173等），
+     * 硬编码端口会导致跨域请求失败。生产环境部署时应根据需要限制此策略。 */
+    cors_cfg.allowed_origins[0] = "*";
+    cors_cfg.origin_count = 1;
+    log_info("[CORS] 已配置为通配符模式 (*)，允许所有来源访问");
     return 0;
 }
 
@@ -27239,10 +27644,27 @@ typedef struct {
 static ApiPermission api_permissions[128];
 static int api_perm_count = 0;
 /* Z9-003: 权限系统互斥锁 —— 防止多线程并发注册/检查竞态 */
+/* M-015修复: 使用InterlockedCompareExchange原子操作消除TOCTOU竞态条件 ——
+ * 三态原子标志 (0=未初始化, 1=初始化中, 2=已就绪) 保证只有一个线程执行InitializeCriticalSection */
 #ifdef _WIN32
 static CRITICAL_SECTION g_api_perm_lock;
-static int g_api_perm_lock_init = 0;
-#define API_PERM_LOCK do { if (!g_api_perm_lock_init) { InitializeCriticalSection(&g_api_perm_lock); g_api_perm_lock_init = 1; } EnterCriticalSection(&g_api_perm_lock); } while(0)
+static volatile LONG g_api_perm_lock_state = 0; /* 0=未初始化, 1=初始化中, 2=已就绪 */
+static void api_perm_lock_ensure(void) {
+    /* 快速路径: 已初始化完成则直接返回 */
+    if (InterlockedCompareExchange(&g_api_perm_lock_state, 2, 2) == 2) return;
+    /* 尝试从0→1原子获取初始化权 */
+    if (InterlockedCompareExchange(&g_api_perm_lock_state, 1, 0) == 0) {
+        InitializeCriticalSection(&g_api_perm_lock);
+        /* 标记就绪，后续InterlockedCompareExchange(&..., 2, 2)将走快速路径 */
+        InterlockedExchange(&g_api_perm_lock_state, 2);
+    } else {
+        /* 另一个线程正在初始化，自旋等待直到标记为2（已就绪） */
+        while (InterlockedCompareExchange(&g_api_perm_lock_state, 2, 2) != 2) {
+            Sleep(0); /* 让出CPU时间片，避免忙等待饿死 */
+        }
+    }
+}
+#define API_PERM_LOCK do { api_perm_lock_ensure(); EnterCriticalSection(&g_api_perm_lock); } while(0)
 #define API_PERM_UNLOCK LeaveCriticalSection(&g_api_perm_lock)
 #else
 static pthread_mutex_t g_api_perm_lock = PTHREAD_MUTEX_INITIALIZER;

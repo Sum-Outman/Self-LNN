@@ -10,6 +10,8 @@
  * 严格遵守需求："不可以使用任何假数据和虚拟数据"
  */
 
+'use strict';
+
 class DataEngine {
     constructor() {
         this.initialized = false;
@@ -255,9 +257,13 @@ class DataEngine {
                 this._fetchAllData().then(function() {
                     /* L-023修复: 首批数据成功后清除骨架屏 */
                     this.removeAllSkeletonClasses();
-                }.bind(this)).catch(function(){});
+                }.bind(this)).catch(function(err) {
+                    console.warn('[DataEngine] _fetchAllData失败:', err && err.message || '未知错误');
+                });
             }
-        }.bind(this)).catch(function() {});
+        }.bind(this)).catch(function(err) {
+            console.warn('[DataEngine] checkConnection失败:', err && err.message || '未知错误');
+        });
         var self = this;
         /* BUG修复: 使用递归setTimeout替代setInterval，防止_tick()并发重叠执行 */
         var scheduleNext = function() {

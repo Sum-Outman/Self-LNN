@@ -395,7 +395,7 @@ void pbft_system_destroy(PbftSystem* system) {
     /* result_buffer 是外部传入的指针，不由本模块分配，不能 free */
     system->result_buffer = NULL;
     if (system->log_entries) {
-        for (int i = 0; i < (int)system->log_capacity; i++) {
+        for (int i = 0; i < (int)system->log_count; i++) {
             if (system->log_entries[i].payload) safe_free((void**)&system->log_entries[i].payload);
         }
         safe_free((void**)&system->log_entries);
@@ -1578,5 +1578,5 @@ static void distributed_cleanup(void* ctx_ptr) {
     log_info("[分布式] 分布式训练子系统已清理 [节点%d, 同步%ld次, 传输%ld字节]",
              ctx->config.node_id, ctx->total_sync_count, ctx->total_bytes_synced);
 
-    safe_free(&ctx_ptr);
+    safe_free((void**)&ctx_ptr);
 }

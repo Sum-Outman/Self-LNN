@@ -3,6 +3,9 @@
  * 统一管理 MediaRecorder 生命周期、音频采集、Blob组装
  * 消除 voice-command.js / dialogue-enhanced.js / voice-control.html 中的三重重复实现
  */
+
+'use strict';
+
 class VoiceCaptureUtil {
     constructor(options) {
         options = options || {};

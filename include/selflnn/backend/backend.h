@@ -219,6 +219,8 @@ typedef enum {
     API_POST_SIMULATION_CLEAR = 308,       /**< 清空仿真场景 */
     API_POST_SIMULATION_COMMAND = 309,     /**< 仿真命令 */
     API_POST_ROBOT_PATH_PLAN = 310,        /**< 机器人路径规划 */
+    API_POST_KG_ADD = 321,                 /**< 知识图谱添加节点/边 POST /api/kg/add */
+    API_DELETE_KG_DELETE = 322,            /**< 知识图谱删除节点/边 DELETE /api/kg/delete */
     API_POST_CAMERA_SWITCH = 325,          /**< 切换摄像头 */
     API_POST_VIDEO_QUALITY = 326,          /**< 设置视频质量 */
 
@@ -384,6 +386,7 @@ typedef enum {
     API_GET_AGI_DIAGNOSTIC = 244,          /**< AGI诊断信息 /api/agi/diagnostic */
     API_GET_AGI_DIAGNOSTIC_EXPORT = 245,   /**< 导出AGI诊断 /api/agi/diagnostic/export */
     API_GET_DIALOGUE_SEND = 246,           /**< GET对话发送转发 /api/dialogue/send (转发到POST) */
+    API_SLOT_RESERVED_247 = 247,           /**< 预留槽位247（P0-#5修复注册handle_api_slot_reserved_247）*/
 
     /* ===== 系统/模型/推理端点（对齐路由表248-259） ===== */
     API_POST_SYSTEM_SHUTDOWN = 248,        /**< 关闭系统 /api/system/shutdown */
@@ -497,7 +500,10 @@ typedef enum {
     API_GET_SENSOR_LIST = 353,               /**< 获取传感器列表 GET /api/sensor/list */
     API_POST_SENSOR_START = 354,             /**< 启动传感器采集 POST /api/sensor/start */
 
-    /* ===== L-016修复: 哨兵值紧随最高枚举值 ===== */
+    /* ===== P0-005修复: 对话历史持久化端点 ===== */
+    API_POST_DIALOGUE_HISTORY_SAVE = 355,     /**< 对话历史持久化 POST /api/dialogue/history/save */
+
+    /* ===== L-016修复: 哨兵值紧随最高枚举值（API_REQUEST_COUNT = 356，handler_table大小自动适配） ===== */
     API_REQUEST_COUNT                        /**< 自动计算枚举最大值+1，反映API处理程序分发表大小 */
 } ApiRequestType;
 

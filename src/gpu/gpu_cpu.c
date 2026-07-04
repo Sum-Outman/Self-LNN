@@ -2743,18 +2743,23 @@ int gpu_kernel_cache_set_capacity(GpuContext* context, int capacity) {
     struct GpuContext* ctx = (struct GpuContext*)context;
     if (capacity < 0) return -1;
     if (capacity == 0) capacity = GPU_KERNEL_CACHE_DEFAULT_CAPACITY;
+    
+    /* H-013修复: 缩减时先释放多余的kernel，再realloc，防止访问已释放内存 */
     if (capacity < ctx->kernel_cache_size) {
         for (int i = ctx->kernel_cache_size - 1; i >= capacity; i--) {
             if (ctx->kernel_cache[i].kernel) {
                 gpu_kernel_free(ctx->kernel_cache[i].kernel);
+                ctx->kernel_cache[i].kernel = NULL;
             }
         }
-        ctx->kernel_cache_size = capacity;
     }
+    
     GpuKernelCacheEntry* new_cache = (GpuKernelCacheEntry*)
         realloc(ctx->kernel_cache, (size_t)capacity * sizeof(GpuKernelCacheEntry));
     if (!new_cache) return -1;
+    
     ctx->kernel_cache = new_cache;
+    ctx->kernel_cache_size = capacity;
     ctx->kernel_cache_capacity = capacity;
     return 0;
 }

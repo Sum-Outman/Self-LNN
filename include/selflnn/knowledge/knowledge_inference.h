@@ -218,6 +218,27 @@ int ki_bayesian_variable_elimination(
     float** cpt_list, int* cpt_var_indices, int* cpt_var_counts, int cpt_count,
     float* result_prob);
 
+/**
+ * @brief M-018修复: 知识推理→LNN连续状态桥接
+ *
+ * 将知识推理引擎的推理结果汇总映射为LNN状态扰动，
+ * 建立"符号化知识推理→连续动态LNN→自主决策"的完整数据闭环。
+ *
+ * 内部调用ki_multi_hop_reason和ki_forward_chain生成推理结果，
+ * 然后通过selflnn_consume_knowledge_inference将置信度加权
+ * 的推理事实映射为LNN输入偏置扰动。
+ *
+ * @param kie        知识推理引擎句柄
+ * @param lnn        LNN实例指针(void*避免头文件循环依赖)
+ * @param concepts   核心概念名称数组(NULL=使用所有已注册概念)
+ * @param conc_count 概念数量(0=自动探测引擎内注册概念)
+ * @param strength   扰动强度(0.0-1.0)
+ * @return 成功注入LNN的概念数，失败返回-1
+ */
+int ki_bridge_inference_to_lnn(KnowledgeInferenceEngine* kie, void* lnn,
+                                const char** concepts, int conc_count,
+                                float strength);
+
 void factor_free(void* f);
 
 #ifdef __cplusplus

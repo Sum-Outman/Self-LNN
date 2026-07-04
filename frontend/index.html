@@ -131,6 +131,8 @@
                             <li><a href="#safety">安全监控</a></li>
                             <li><a href="#voice-control">语音控制</a></li>
                             <li><a href="#teach">示教学习</a></li>
+                            <li><a href="#stereo">双目视觉</a></li>
+                            <li><a href="#agi-diagnostic">AGI诊断</a></li>
                         </ul>
                     </li>
                     <li class="nav-dropdown">
@@ -143,6 +145,9 @@
                             <li><a href="#api-docs">API文档</a></li>
                             <li><a href="#usage-logs">使用日志</a></li>
                             <li><a href="#sys-log-panel-section">系统日志</a></li>
+                            <li><a href="#robots">机器人列表</a></li>
+                            <li><a href="#agents">多智能体</a></li>
+                            <li><a href="#datasets">数据集管理</a></li>
                         </ul>
                     </li>
                 </ul>
@@ -3238,7 +3243,7 @@
                                         <span id="voice-output-status" class="voice-status-text">空闲</span>
                                     </div>
                                     <div class="dialogue-input-row">
-                                        <textarea class="dialogue-input" id="dialogue-input" placeholder="输入消息或文字指令..." rows="2" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault;sendDialogueMessage;}"></textarea>
+                                        <textarea class="dialogue-input" id="dialogue-input" placeholder="输入消息或文字指令..." rows="2" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendDialogueMessage();}"></textarea>
                                         <button class="btn btn-primary dialogue-send-btn" onclick="sendDialogueMessage()">发送</button>
                                     </div>
                                 </div>
@@ -6707,7 +6712,7 @@ response = requests.get(
     <script src="js/compatibility.js"></script>
     <script src="js/data-engine.js?v=15"></script>
     <script src="js/device-manager.js?v=1"></script>
-    <script src="js/voice-capture-util.js"></script>
+    <script src="js/voice-capture-util.js?v=17"></script>
     <script src="js/voice-command.js"></script>
     <script src="js/text-command.js"></script>
     <script src="js/visualization.js"></script>
@@ -7835,6 +7840,51 @@ response = requests.get(
                 }
             }, 1500);
         });
+    </script>
+    <script>
+        /* F-S03修复: 为智能代理、数据集管理、AGI诊断模块添加最低限度事件处理 */
+        /* 各按钮点击函数若未定义，则通过showNotification提示"该功能将在下一版本中开放" */
+        (function() {
+            'use strict';
+            var NOTIFY_MSG = '该功能将在下一版本中开放';
+            var notifyFn = function(name) {
+                if (typeof window.showNotification === 'function') {
+                    window.showNotification(name + ': ' + NOTIFY_MSG, 'info');
+                } else {
+                    console.log('[提示] ' + name + ': ' + NOTIFY_MSG);
+                }
+            };
+
+            /* 智能代理模块 */
+            if (typeof window.initMultiAgentSystem !== 'function') {
+                window.initMultiAgentSystem = function() { notifyFn('初始化多智能体'); };
+            }
+            if (typeof window.createAgent !== 'function') {
+                window.createAgent = function() { notifyFn('创建代理'); };
+            }
+            if (typeof window.broadcastTask !== 'function') {
+                window.broadcastTask = function() { notifyFn('广播任务'); };
+            }
+
+            /* 数据集管理模块 */
+            if (typeof window.loadDataset !== 'function') {
+                window.loadDataset = function(name) { notifyFn('加载数据集(' + (name || '?') + ')'); };
+            }
+            if (typeof window.uploadCustomDataset !== 'function') {
+                window.uploadCustomDataset = function() { notifyFn('上传自定义数据集'); };
+            }
+
+            /* AGI诊断模块 */
+            if (typeof window.runFullDiagnostic !== 'function') {
+                window.runFullDiagnostic = function() { notifyFn('运行完整诊断'); };
+            }
+            if (typeof window.exportDiagnosticReport !== 'function') {
+                window.exportDiagnosticReport = function() { notifyFn('导出诊断报告'); };
+            }
+            if (typeof window.quickHealthCheck !== 'function') {
+                window.quickHealthCheck = function() { notifyFn('快速健康检查'); };
+            }
+        })();
     </script>
     <script>window.__PAGE_READY = true;</script>
 </body>

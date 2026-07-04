@@ -36,8 +36,11 @@
 #include <intrin.h>
 #define ATOMIC_PTR(type) volatile type*
 
+/* C-009修复: Windows下volatile+MemoryBarrier确保跨ARM64/x86原子性。
+ * volatile确保编译器不重排读取，MemoryBarrier确保CPU级可见性。
+ * 对齐指针的读写在所有x86/ARM64 Windows上本身是原子的。 */
 #define atomic_load(ptr) (*(ptr))
-#define atomic_store(ptr, val) (*(ptr) = (val))
+#define atomic_store(ptr, val) do { *(ptr) = (val); } while(0)
 #define atomic_compare_exchange_strong(ptr, expected, desired) \
     (InterlockedCompareExchangePointer((void* volatile*)(ptr), (desired), *(expected)) == *(expected))
 #define atomic_fetch_add(ptr, val) InterlockedExchangeAdd((volatile LONG*)(ptr), (val))
@@ -48,7 +51,11 @@
 #include <stdatomic.h>
 typedef long LONG;  /* 与Windows LONG兼容的类型定义 */
 #define ATOMIC_PTR(type) _Atomic type*
-/* 使用__sync内置函数系列（跨GCC/Clang/ICC兼容） */
+/* C-009修复: 使用__atomic内置系列，支持显式memory order，兼容所有GCC/Clang */
+#define atomic_load(ptr) __atomic_load_n((ptr), __ATOMIC_ACQUIRE)
+#define atomic_store(ptr, val) __atomic_store_n((ptr), (val), __ATOMIC_RELEASE)
+#define atomic_compare_exchange_strong(ptr, expected, desired) \
+    __atomic_compare_exchange_n((ptr), (expected), (desired), 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)
 #define atomic_fetch_add(ptr, val) __sync_fetch_and_add((volatile LONG*)(ptr), (val))
 #define atomic_fetch_sub(ptr, val) __sync_fetch_and_sub((volatile LONG*)(ptr), (val))
 #define atomic_thread_fence(memory_order) __sync_synchronize()
@@ -69,7 +76,7 @@ static int compare_and_swap_uintptr(volatile intptr_t* ptr, intptr_t expected, i
  *   2. 若64位CAS不可用，自动回退到32位TaggedPtr+节点池方案
  *   3. 节点池通过TLS线程局部变量传递上下文，不修改公共函数签名
  */
-#if defined(__x86_64__) || defined(_M_X64) || defined(_WIN64) || defined(__aarch64__)
+#if defined(__x86_64__) || defined(_M_X64) || defined(_WIN64) || defined(__aarch64__) || defined(__LP64__) || defined(_LP64) || defined(__sparc_v9__) || defined(__riscv) && (__riscv_xlen == 64)
 /* ===== 第一层：64位平台完整标记指针（48位地址 + 16位版本） ===== */
 typedef uint64_t TaggedPtr;
 #define TAG_SHIFT 48
@@ -332,6 +339,10 @@ static inline void hazard_ptr_clear(int slot) {
 
 static int is_hazard_protected(void* ptr) {
     if (!ptr) return 0;
+    /* C-009修复: 添加读屏障——确保我们看到其他线程最新的slots写入。
+     * 在ARM/RISC-V等弱内存序平台上，没有此屏障可能读到过期NULL值，
+     * 导致误认为指针未被保护而错误释放。 */
+    atomic_thread_fence(0);  /* 完整内存屏障 */
     for (int t = 0; t < LF_MAX_THREADS; t++) {
         if (!g_hazard_tables[t].in_use) continue;
         for (int i = 0; i < MAX_HAZARD_SLOTS; i++) {

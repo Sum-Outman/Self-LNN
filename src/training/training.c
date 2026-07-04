@@ -60,8 +60,29 @@ static int _training_parse_url(const char* url, char* host, size_t host_size,
 #include "selflnn/utils/platform.h"
 static MutexHandle g_train_lr_mutex = NULL;
 static volatile int g_train_lr_mutex_done = 0;
+
+/* P1-1修复：使用原子CAS实现线程安全的一次性初始化，消除原非原子双重检查锁定的竞态条件 */
+static void training_ensure_mutex_init(void) {
+    if (!g_train_lr_mutex_done) {
+        MutexHandle new_mutex = mutex_create();
+        if (!new_mutex) return;
+        /* 原子比较交换：仅当g_train_lr_mutex为NULL时设置 */
+        MutexHandle old = NULL;
+#ifdef _WIN32
+        old = InterlockedCompareExchangePointer(
+            (PVOID volatile*)&g_train_lr_mutex, (PVOID)new_mutex, (PVOID)NULL);
+#else
+        old = __sync_val_compare_and_swap(&g_train_lr_mutex, NULL, new_mutex);
+#endif
+        if (old != NULL) {
+            /* 另一个线程先完成了初始化，释放我们创建的冗余mutex */
+            mutex_destroy(new_mutex);
+        }
+        g_train_lr_mutex_done = 1;
+    }
+}
 #define TRAIN_LR_LOCK() do { \
-    if (!g_train_lr_mutex_done) { g_train_lr_mutex = mutex_create(); g_train_lr_mutex_done = 1; } \
+    training_ensure_mutex_init(); \
     mutex_lock(g_train_lr_mutex); \
 } while(0)
 #define TRAIN_LR_UNLOCK() mutex_unlock(g_train_lr_mutex)
@@ -6842,6 +6863,11 @@ skip_optimizer_and_continue: /* NaN/Inf检测时跳转到此处跳过优化器 *
             trainer->history.val_accuracies[idx] = val_accuracy;
             trainer->history.learning_rates[idx] = trainer->state.learning_rate;
             trainer->history.train_modes[idx] = strdup(trainer->current_training_phase);
+            /* M-027修复: strdup可能返回NULL */
+            if (!trainer->history.train_modes[idx]) {
+                log_warning("[训练记录] strdup失败，使用默认模式名称");
+                trainer->history.train_modes[idx] = string_duplicate_nullable(trainer->current_training_phase);
+            }
             trainer->history.size++;
         }
 

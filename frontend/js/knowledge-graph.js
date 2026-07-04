@@ -327,11 +327,11 @@
             var escapedId = String(e.id).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'\\"');
             html += '<button class="del-btn" data-entry-id="' + escapedId + '" title="删除">✕</button>';
             html += '<div class="triple">';
-            html += '<span class="s">' + escapeHtml(e.subject) + '</span>';
+            html += '<span class="s">' + window.escapeHtml(e.subject) + '</span>';
             html += '<span style="color:rgba(255,255,255,0.2);font-size:0.6rem;">──</span>';
-            html += '<span class="p">' + escapeHtml(e.predicate) + '</span>';
+            html += '<span class="p">' + window.escapeHtml(e.predicate) + '</span>';
             html += '<span style="color:rgba(255,255,255,0.2);font-size:0.6rem;">──></span>';
-            html += '<span class="o">' + escapeHtml(e.object) + '</span>';
+            html += '<span class="o">' + window.escapeHtml(e.object) + '</span>';
             html += '</div>';
             html += '<div class="meta">类型: ' + e.type + ' &middot; 置信度: ' + (e.confidence === -1 ? '--' : e.confidence) + ' &middot; ' + new Date(e.timestamp).toLocaleString() + '</div>';
             html += '</div>';
@@ -339,11 +339,7 @@
         container.innerHTML = html;
     }
 
-    function escapeHtml(str) {
-        var div = document.createElement('div');
-        div.appendChild(document.createTextNode(str || ''));
-        return div.innerHTML;
-    }
+    /* P2-004修复: 使用全局统一的 window.escapeHtml，删除本地重复定义 */
 
 /* 不再发起独立HTTP请求，使用fetchKnowledgeFromBackend已有缓存数据 */
     function refreshStats() {
@@ -413,6 +409,13 @@
         var damping = 0.9;
         var centerForce = 0.01;
 
+        /* ZSF-100修复：预构建节点ID到索引的邻接映射表，消除边处理循环中的O(n)线性查找。
+         * 原代码每条边都做O(n)扫描，总开销O(e*n)；现改为O(1)哈希查找，总开销O(e)。 */
+        var nodeIndexMap = {};
+        for (var ni = 0; ni < nodes.length; ni++) {
+            nodeIndexMap[nodes[ni].id] = ni;
+        }
+
         /* 根据节点数量动态调整迭代次数 */
         var maxIterations = Math.min(Math.max(Math.floor(nodes.length * 1.5), 20), 200);
 /* 力布局节流，200节点时限制每帧计算量 */
@@ -441,12 +444,12 @@
             }
 
             for (var e = 0; e < edges.length; e++) {
-                var src = null, tgt = null;
-                for (var n = 0; n < nodes.length; n++) {
-                    if (nodes[n].id === edges[e].source) src = nodes[n];
-                    if (nodes[n].id === edges[e].target) tgt = nodes[n];
-                }
-                if (!src || !tgt) continue;
+                /* ZSF-100修复：使用预建邻接表O(1)查找，替代原有O(n)线性扫描 */
+                var srcIdx = nodeIndexMap[edges[e].source];
+                var tgtIdx = nodeIndexMap[edges[e].target];
+                if (srcIdx === undefined || tgtIdx === undefined) continue;
+                var src = nodes[srcIdx];
+                var tgt = nodes[tgtIdx];
                 var edx = tgt.x - src.x;
                 var edy = tgt.y - src.y;
                 var edist = Math.sqrt(edx * edx + edy * edy) || 1;
@@ -610,7 +613,7 @@
                         edgeInfo += '<div>' + ed.source + ' ──' + ed.label + '──> ' + ed.target + '</div>';
                     }
                 });
-                tooltip.innerHTML = '<b>' + escapeHtml(node.id) + '</b><br>连接: ' + node.connections + '<br>' + edgeInfo;
+                tooltip.innerHTML = '<b>' + window.escapeHtml(node.id) + '</b><br>连接: ' + node.connections + '<br>' + edgeInfo;
             } else {
                 var tt = document.getElementById('node-tooltip');
                 if (tt) tt.style.display = 'none';

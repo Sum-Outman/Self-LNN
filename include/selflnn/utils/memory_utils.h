@@ -275,32 +275,34 @@ int memory_lock(void* ptr, size_t size);
  */
 int memory_unlock(void* ptr, size_t size);
 
-/* 深拷贝宏定义 (用于知识库和决策引擎) */
+/* 深拷贝宏定义 (用于知识库和决策引擎)
+ * DEEP-FIX: 使用 safe_free 替代 raw free，统一分配器，
+ * 防止 mixed allocator (safe_malloc + raw free) 导致的堆损坏 */
 #define DEEP_COPY_STRING(dest, src) do { \
-    if (dest) { free(dest); dest = NULL; } \
-    if (src) { dest = (char*)malloc(strlen(src) + 1); if (dest) strcpy(dest, src); } \
+    if (dest) { safe_free((void**)&(dest)); } \
+    if (src) { dest = (char*)safe_malloc(strlen(src) + 1); if (dest) strcpy(dest, src); } \
 } while(0)
 
 #define DEEP_COPY_SCALAR(dest, src) do { (dest) = (src); } while(0)
 
 #define DEEP_COPY_BLOB(dest, size_dest, src, size_src) do { \
-    if (dest) { free(dest); dest = NULL; (size_dest) = 0; } \
+    if (dest) { safe_free((void**)&(dest)); (size_dest) = 0; } \
     if (src && (size_src) > 0) { \
-        dest = (char*)malloc(size_src); \
+        dest = (char*)safe_malloc(size_src); \
         if (dest) { memcpy(dest, src, size_src); (size_dest) = (size_src); } \
     } \
 } while(0)
 
 #define DEEP_COPY_STRING_SAFE(dest, src, free_fn) do { \
     if (dest) { free_fn((void**)&(dest)); dest = NULL; } \
-    if (src) { dest = (char*)malloc(strlen(src) + 1); if (dest) strcpy(dest, src); } \
+    if (src) { dest = (char*)safe_malloc(strlen(src) + 1); if (dest) strcpy(dest, src); } \
 } while(0)
 
-/* float数组深拷贝 */
+/* float数组深拷贝 - DEEP-FIX: 使用safe_malloc/safe_free */
 #define DEEP_COPY_FLOAT_ARRAY(dest, dest_count, src, src_count) do { \
-    if (dest) { free(dest); dest = NULL; (dest_count) = 0; } \
+    if (dest) { safe_free((void**)&(dest)); (dest_count) = 0; } \
     if (src && (src_count) > 0) { \
-        dest = (float*)malloc((src_count) * sizeof(float)); \
+        dest = (float*)safe_malloc((src_count) * sizeof(float)); \
         if (dest) { memcpy(dest, src, (src_count) * sizeof(float)); (dest_count) = (src_count); } \
     } \
 } while(0)

@@ -97,6 +97,8 @@ static inline void lnn_clip_gradients(float* grads, size_t count, float max_norm
  */
 LNN* lnn_create(const LNNConfig* config) {
     if (!config) {
+        selflnn_set_last_error(SELFLNN_ERROR_INVALID_PARAMETER,
+            "lnn_create", "配置指针为空", "请提供有效的LNNConfig配置");
         return NULL;
     }
     
@@ -117,12 +119,18 @@ LNN* lnn_create(const LNNConfig* config) {
     
     // 验证配置参数
     if (config->input_size == 0 || config->hidden_size == 0 || config->output_size == 0) {
+        selflnn_set_last_error(SELFLNN_ERROR_INVALID_PARAMETER,
+            "lnn_create", "无效的配置参数(input_size/hidden_size/output_size为0)",
+            "所有维度参数必须大于0");
         return NULL;
     }
     
     // 分配内存
     LNN* network = (LNN*)safe_malloc(sizeof(LNN));
     if (!network) {
+        selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY,
+            "lnn_create", "内存分配失败(LNN结构体)",
+            "请检查系统内存或减少模型参数规模");
         return NULL;
     }
     memset(network, 0, sizeof(LNN));
@@ -152,8 +160,8 @@ LNN* lnn_create(const LNNConfig* config) {
         network->config.enable_quaternion = 1;  // 默认启用四元数增强
     }
     
-    // 初始化CfC网络配置
-    CfCNetworkConfig cfc_config;
+    // 初始化CfC网络配置（零初始化避免未赋值字段包含栈上垃圾值）
+    CfCNetworkConfig cfc_config = {0};
     cfc_config.input_size = network->config.input_size;
     cfc_config.hidden_size = network->config.hidden_size;
     cfc_config.output_size = network->config.output_size;
@@ -170,6 +178,10 @@ LNN* lnn_create(const LNNConfig* config) {
     // 创建CfC网络
     network->cfc_network = cfc_create(&cfc_config);
     if (!network->cfc_network) {
+        /* ZSF-100修复：添加错误信息，使调用者可通过selflnn_get_last_error获取失败原因 */
+        selflnn_set_last_error(SELFLNN_ERROR_CFC_CREATE_FAILED, "lnn_create", __FILE__, __LINE__,
+            "CfC网络创建失败：输入大小=%zu, 隐藏大小=%zu, 层数=%d",
+            (size_t)cfc_config.input_size, (size_t)cfc_config.hidden_size, cfc_config.num_layers);
         safe_free((void**)&network);
         return NULL;
     }
@@ -391,13 +403,14 @@ void lnn_free(LNN* network) {
         safe_free((void**)&network->activation_checkpoint_sizes);
     }
 
-    // 释放缓冲区
+    // 释放缓冲区（含四元数预计算缓冲区，修复P0-2内存泄漏）
     safe_free((void**)&network->hidden_state);
     safe_free((void**)&network->cell_state);
     safe_free((void**)&network->input_buffer);
     safe_free((void**)&network->output_buffer);
     safe_free((void**)&network->error_buffer);
     safe_free((void**)&network->gradient_buffer);
+    safe_free((void**)&network->quaternion_pre_buf);
     
     // 释放网络结构
     safe_free((void**)&network);
@@ -761,10 +774,12 @@ int lnn_forward_state_sync_back(LNN* network, LNNForwardState* state) {
  * @param skip_cell_update 1=跳过cell参数更新（批量梯度累积模式）
  */
 int _lnn_backward_internal_ex(LNN* network, const float* target, float* loss, int skip_cell_update) {
+#ifdef LNN_DEBUG_BACKWARD
     fprintf(stderr, "[BWD] enter: os=%zu hs=%zu is=%zu layers=%d\n",
             network->config.output_size, network->config.hidden_size,
             network->config.input_size, network->config.num_layers);
     fflush(stderr);
+#endif
     clock_t start_time = clock();
     size_t output_size = network->config.output_size;
     size_t input_size = network->config.input_size;
@@ -815,16 +830,20 @@ int _lnn_backward_internal_ex(LNN* network, const float* target, float* loss, in
      *   4. 恢复LNN状态
      * 当前单样本模式(skip_cell_update=0)在批量训练时梯度方差大，
      * 如需批量训练建议启用此路径。 */
+#ifdef LNN_DEBUG_BACKWARD
     fprintf(stderr, "[BWD] before cfc_backward_ex: hs=%zu lr=%.6f skip=%d\n",
             hidden_size, network->config.learning_rate, skip_cell_update);
     fflush(stderr);
+#endif
     int result = cfc_backward_ex(network->cfc_network,
                             error_gradient,
                             network->gradient_buffer,
                             network->config.learning_rate,
                             skip_cell_update);
+#ifdef LNN_DEBUG_BACKWARD
     fprintf(stderr, "[BWD] after cfc_backward_ex: result=%d\n", result);
     fflush(stderr);
+#endif
     SELFLNN_CHECK(result == 0, SELFLNN_ERROR_NETWORK_CONFIG,
                  "CfC网络反向传播失败");
 /* 公共梯度裁剪替代内联循环 */

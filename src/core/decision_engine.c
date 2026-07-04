@@ -362,6 +362,12 @@ int decision_engine_set_objectives(DecisionEngine* engine,
         for (size_t i = 0; i < engine->num_objectives; i++) {
             engine->objectives[i].weight /= total_weight;
         }
+    } else {
+        /* DE-003修复: 权重全为0时均匀分配 */
+        float uniform = 1.0f / (float)engine->num_objectives;
+        for (size_t i = 0; i < engine->num_objectives; i++) {
+            engine->objectives[i].weight = uniform;
+        }
     }
     
     engine->objectives_set = 1;
@@ -827,7 +833,7 @@ int decision_engine_analyze(DecisionEngine* engine, DecisionResult* result) {
                     opponent_strategy = strategy_profile[1 - i]; /* 2人博弈: 另一个智能体 */
                 } else {
                     /* n>2: 计算其他智能体的策略频率分布，取众数 */
-                    int* freq = (int*)calloc(num_alts, sizeof(int));
+                    int* freq = (int*)safe_calloc(num_alts, sizeof(int));  /* M-002修复: safe_calloc替代裸calloc */
                     if (freq) {
                         for (size_t o = 0; o < num_alts; o++) {
                             if (o != i) freq[strategy_profile[o]]++;
@@ -1522,7 +1528,9 @@ int decision_audit_log_export_json(const DecisionAuditLog* log,
                           "{\"type\":\"%s\",\"time\":\"%s\",\"desc\":\"%s\","
                           "\"choices\":\"%s\",\"utility\":%.4f,"
                           "\"alts\":%d,\"auto\":%d,\"exec_ms\":%.2f}",
-                          type_names[e->log_type], e->timestamp, e->description,
+                          /* C-005修复: type_names数组边界检查 */
+                          (e->log_type >= 0 && e->log_type < 5) ? type_names[e->log_type] : "unknown",
+                          e->timestamp, e->description,
                           e->chosen_alternative, e->chosen_utility,
                           e->total_alternatives, e->is_autonomous, e->execution_time_ms);
         if (written < 0 || (size_t)written >= buffer_size - pos) return -1;

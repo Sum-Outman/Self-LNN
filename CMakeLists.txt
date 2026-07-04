@@ -22,6 +22,10 @@ endif()
 option(BUILD_TESTS "构建测试程序" ON)
 option(BUILD_EXAMPLES "构建示例程序" ON)
 option(ENABLE_GPU "启用GPU加速支持" ON)
+if(ENABLE_GPU)
+    add_definitions(-DENABLE_GPU)
+    message(STATUS "🚀 GPU加速已启用 — GPU后端接口将编译")
+endif()
 option(INSTALL_EXAMPLES "安装示例程序" OFF)
 
 # F-005/F-006: 外部运行时接口（纯IPC通信，不链接外部库）
@@ -56,7 +60,8 @@ set(CMAKE_C_EXTENSIONS OFF)
 
 # GCC/Clang: 公共基础编译选项（全局，因作用于所有静态库目标）
 if(NOT MSVC)
-    add_compile_options(-Wall -Wextra -ffast-math -fpermissive
+    # P2-11修复：移除-fpermissive，严格遵守C标准
+    add_compile_options(-Wall -Wextra -ffast-math
         -Wno-unused-parameter -Wno-unused-function -Wno-unused-variable
         -Wno-unused-but-set-variable -Wno-sign-compare
         -Wno-unknown-pragmas -Wno-comment -Wno-parentheses
@@ -302,7 +307,7 @@ if(BUILD_TESTS)
         ${CMAKE_CURRENT_SOURCE_DIR}/include
     )
     if(MINGW)
-        target_link_options(lnn_verify PRIVATE "-Wl,--start-group")
+        target_link_options(lnn_verify PRIVATE "-Wl,--start-group" "-Wl,--end-group")
     endif()
     target_link_libraries(lnn_verify PRIVATE
         selflnn_backend

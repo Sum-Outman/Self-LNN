@@ -342,15 +342,20 @@ void loss_gradient_ex(const float* predictions, const float* targets, int n, flo
         }
         case LOSS_BINARY_CROSSENTROPY:
         {
+            /* BCE前向: -[t*log(p)+(1-t)*log(1-p)], 反向梯度: ∂L/∂p = (p-t)/(p*(1-p))
+             * 当predictions已过sigmoid时,需除以sigmoid导数补偿 → 得到 p-t
+             * 但若predictions是原始logits, 则标准梯度为 (sigmoid(logit) - t)
+             * 此处采用已过sigmoid的输入路径: 梯度 = p - t (即为 sigmoid(z) - t)
+             * 这等价于将BCE损失与sigmoid激活合并的联合梯度.
+             * 之前在分母上除以p*(1-p)会过度缩放梯度,导致训练不稳定/不收敛. */
             float scale = 1.0f / (float)n;
             for (i = 0; i < n; i++)
             {
                 float p = predictions[i];
                 if (p < 1e-7f) p = 1e-7f;
                 if (p > 1.0f - 1e-7f) p = 1.0f - 1e-7f;
-                float denom = p * (1.0f - p);
-                if (denom < 1e-7f) denom = 1e-7f;
-                gradients[i] = scale * (p - targets[i]) / denom;
+                /* 标准sigmoid+BCE联合梯度（假设predictions已过sigmoid） */
+                gradients[i] = scale * (p - targets[i]);
             }
             break;
         }

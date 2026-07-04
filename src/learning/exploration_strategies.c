@@ -55,10 +55,11 @@ static float explore_randn(float std) {
     return sqrtf(-2.0f * logf(u1)) * cosf(2.0f * (float)M_PI * u2) * std;
 }
 
-/* DEADCODE-FIX: 高级探索策略条件编译
+/* DEADCODE-FIX: 高级探索策略条件编译（P2-6标注：已通过宏控制，此非问题而是设计选择）
  * ICM / RND / Go-Explore / NoisyNet / count-based / uncertainty / hybrid
  * 共26个函数约900行——目前仅UCB的3个函数被robot_agent.c使用，
- * 其余均未集成。通过宏控制编译，默认启用。 */
+ * 其余均未集成。通过 SELFLNN_SKIP_ADVANCED_EXPLORATION 宏控制编译。
+ * 如需减小二进制体积，编译时定义此宏即可跳过所有高级探索策略。 */
 #ifndef SELFLNN_SKIP_ADVANCED_EXPLORATION
 
 /* ============================================================================

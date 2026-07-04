@@ -515,7 +515,11 @@ int cfc_forward(CfCNetwork* network, const float* input,
  * @brief P0-BPTT: 分配/初始化cell级动量缓冲区
  */
 static int cfc_ensure_cell_momentum(CfCCell* cell) {
-    if (!cell) return -1;
+    if (!cell) {
+        selflnn_set_last_error(SELFLNN_ERROR_INVALID_PARAMETER,
+            "cfc_ensure_cell_momentum", "CfCCell指针为空", "内部错误：动量缓冲区要求有效cell");
+        return -1;
+    }
     if (cell->cell_momentum_initialized) return 0;
 
     size_t hidden = cell->config.hidden_size;
@@ -532,7 +536,12 @@ static int cfc_ensure_cell_momentum(CfCCell* cell) {
     total += hidden;          /* τ */
 
     cell->cell_momentum_buffer = (float*)safe_calloc(total * 2, sizeof(float));
-    if (!cell->cell_momentum_buffer) return -1;
+    if (!cell->cell_momentum_buffer) {
+        selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY,
+            "cfc_ensure_cell_momentum", "动量缓冲区内存分配失败",
+            "请减少hidden_size或检查系统内存");
+        return -1;
+    }
     cell->cell_velocity_buffer = cell->cell_momentum_buffer + total;
     cell->cell_momentum_size = total;
     cell->cell_momentum_initialized = 1;
@@ -736,9 +745,6 @@ int cfc_backward_ex(CfCNetwork* network, const float* error,
                  "CfC网络训练未启用");
     
     const CfCNetworkConfig* config = &network->config;
-    fprintf(stderr, "[BWD-CFC] enter: hs=%zu is=%zu os=%zu layers=%d\n",
-            config->hidden_size, config->input_size, config->output_size, config->num_layers);
-    fflush(stderr);
     size_t hidden_size = config->hidden_size;
     size_t input_size = config->input_size;
     size_t output_size = config->output_size;
@@ -748,9 +754,7 @@ int cfc_backward_ex(CfCNetwork* network, const float* error,
     if (input_size > max_layer_size) max_layer_size = input_size;
     if (output_size > max_layer_size) max_layer_size = output_size;
 
-    fprintf(stderr, "[BWD-CFC] max_layer=%zu ok\n", max_layer_size); fflush(stderr);
-
-    // 保存输入信号（第一层反向传播需要）
+    /* 保存输入信号（第一层反向传播需要） */
     float* saved_input = NULL;
     if (input_size > 0) {
         saved_input = (float*)safe_malloc(input_size * sizeof(float));
@@ -759,10 +763,10 @@ int cfc_backward_ex(CfCNetwork* network, const float* error,
         }
     }
 
-    // 初始化各层梯度缓冲区为0
+    /* 初始化各层梯度缓冲区为0 */
     memset(network->layer_gradients, 0, num_layers * max_layer_size * sizeof(float));
 
-    // 步骤1: 计算输出层梯度（包括输出投影矩阵的梯度）
+    /* 步骤1: 计算输出层梯度（包括输出投影矩阵的梯度） */
     float* output_gradient = network->layer_gradients + ((num_layers - 1) * max_layer_size);
     
     if (output_size != hidden_size && network->W_out_params) {
@@ -795,37 +799,22 @@ int cfc_backward_ex(CfCNetwork* network, const float* error,
     /* P0-002深度修复: 单样本路径清零cell梯度。
      * 批量路径(skip_cell_update=1)由调用方在batch开始时清零。 */
     if (!skip_cell_update) {
-        fprintf(stderr, "[BWD-CFC] zero_gradients...\n"); fflush(stderr);
         cfc_zero_cell_gradients(network);
-        fprintf(stderr, "[BWD-CFC] zero_gradients done\n"); fflush(stderr);
     }
 
-    // 步骤2: 逐层反向传播（从最后一层到第一层）
-    fprintf(stderr, "[BWD-CFC] layer_loop: layers=%d\n", num_layers); fflush(stderr);
+    /* 步骤2: 逐层反向传播（从最后一层到第一层） */
     for (int layer = num_layers - 1; layer >= 0; layer--) {
-        fprintf(stderr, "[BWD-CFC] layer=%d gradient=%p prev=%p\n",
-                layer, (void*)network->layer_gradients, (void*)gradient);
-        fflush(stderr);
         float* layer_gradient = network->layer_gradients + (layer * max_layer_size);
         float* prev_gradient = (layer > 0) ? 
             network->layer_gradients + ((layer - 1) * max_layer_size) : gradient;
-
-        fprintf(stderr, "[BWD-CFC] ln_check: norms=%p norms[l]=%p ln_temp=%p\n",
-                (void*)network->layer_norms,
-                network->layer_norms ? (void*)network->layer_norms[layer] : NULL,
-                (void*)network->ln_temp_buffer);
-        fflush(stderr);
 
         /* P0-001: 层归一化反向传播
          * 前向时 output = LN(cfc_output)，所以反向需要先通过LN反向传播
          * 将 dL/d(output_postLN) 转换为 dL/d(output_preLN)，然后传给cfc_cell_backward */
         if (network->layer_norms && network->layer_norms[layer] && network->ln_temp_buffer) {
-            fprintf(stderr, "[BWD-CFC] calling layer_norm_backward...\n"); fflush(stderr);
             layer_norm_backward((LayerNorm*)network->layer_norms[layer],
                                layer_gradient, network->ln_temp_buffer);
-            fprintf(stderr, "[BWD-CFC] layer_norm_backward done\n"); fflush(stderr);
             memcpy(layer_gradient, network->ln_temp_buffer, hidden_size * sizeof(float));
-            fprintf(stderr, "[BWD-CFC] memcpy done, about to memset\n"); fflush(stderr);
         }
 
         // 清零上一层梯度（准备接收）
@@ -1873,9 +1862,19 @@ static float power_iteration_max_eigenvalue(const float* J, size_t n, int max_it
 
 int cfc_detect_stiffness(CfCNetwork* network, const float* input,
                          const float* state, float* stiffness_ratio) {
-    if (!network || !input || !state || !stiffness_ratio) return -1;
+    if (!network || !input || !state || !stiffness_ratio) {
+        selflnn_set_last_error(SELFLNN_ERROR_INVALID_PARAMETER,
+            "cfc_detect_stiffness", "无效的输入参数",
+            "network/input/state/stiffness_ratio均不能为空");
+        return -1;
+    }
     size_t n = network->config.hidden_size;
-    if (n == 0) return -1;
+    if (n == 0) {
+        selflnn_set_last_error(SELFLNN_ERROR_INVALID_PARAMETER,
+            "cfc_detect_stiffness", "隐藏层大小为0",
+            "网络配置无效，hidden_size必须大于0");
+        return -1;
+    }
     size_t n2 = n * n;
     float* J = (float*)safe_calloc(n2, sizeof(float));
     if (!J) return -1;

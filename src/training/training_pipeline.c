@@ -32,7 +32,7 @@ extern void* selflnn_get_speech_recognizer(void);
 #include "selflnn/concurrency/thread_pool.h"
 #include "selflnn/multimodal/speech_recognition.h"
 #include "selflnn/multimodal/multimodal_unified_input.h"
-#include "selflnn/selflnn.h"
+/* selflnn.h 已在第14行包含，此处移除重复 #include */
 #include <stdlib.h>
 #include <string.h>
 #ifndef _USE_MATH_DEFINES
@@ -1446,7 +1446,7 @@ int training_pipeline_start(TrainingPipeline* pipeline) {
     lnn_cfg.loss_function = pipeline->loss_function;  /* FIX-003: 传递损失函数类型 */
 
 /* 若旧LNN是自己创建的(非共享)才free */
-    if (pipeline->network && pipeline->network != (LNN*)selflnn_get_shared_lnn) {
+    if (pipeline->network && pipeline->network != (LNN*)selflnn_get_shared_lnn()) {
         lnn_free(pipeline->network);
     }
 /* 使用共享LNN替代管道独立LNN。

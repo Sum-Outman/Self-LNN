@@ -156,7 +156,7 @@ static int rank_selection(const EvolutionPopulation* pop, unsigned int* rng) {
     if (!ranks || !sorted_fitness) {
         safe_free((void**)&ranks);
         safe_free((void**)&sorted_fitness);
-        return 0;
+        return -1;  /* M-024修复: 返回-1表示错误而非有效的个体索引 */
     }
 
     /* M-006修复: 使用qsort替代冒泡排序O(n²)→O(n log n)
@@ -187,7 +187,7 @@ static int rank_selection(const EvolutionPopulation* pop, unsigned int* rng) {
             if (!pairs) {
                 safe_free((void**)&ranks);
                 safe_free((void**)&sorted_fitness);
-                return 0;
+                return -1;  /* M-024修复: 返回-1表示分配失败 */
             }
             for (size_t i = 0; i < n; i++) {
                 pairs[i].fitness = pop->individuals[i].fitness;
@@ -1002,10 +1002,14 @@ int evolution_step(EvolutionEngine* engine) {
         if (rand_float(rng) < engine->config.crossover_rate && pop_size >= 2) {
             int p1_idx = select_parent(engine, pop);
             int p2_idx = select_parent(engine, pop);
-            if (p1_idx >= (int)pop_size) p1_idx = 0;
-            if (p2_idx >= (int)pop_size) p2_idx = 1;
+            /* rank_selection可返回-1(内存分配失败)，需下界检查 */
+            if (p1_idx < 0 || p1_idx >= (int)pop_size) p1_idx = 0;
+            if (p2_idx < 0 || p2_idx >= (int)pop_size) p2_idx = (pop_size > 1) ? 1 : 0;
             while (p2_idx == p1_idx && pop_size > 1) {
+                int max_retries = 20;  /* 防止select_parent反复返回-1导致无限循环 */
                 p2_idx = select_parent(engine, pop);
+                if (p2_idx < 0 || p2_idx >= (int)pop_size) p2_idx = (int)(rand_float(rng) * (float)pop_size);
+                if (--max_retries <= 0) break;
             }
 
             float* c1 = (float*)safe_malloc(chrom_size * sizeof(float));
@@ -1028,7 +1032,7 @@ int evolution_step(EvolutionEngine* engine) {
         } else {
             /* 直接变异现有个体 */
             int p_idx = select_parent(engine, pop);
-            if (p_idx >= (int)pop_size) p_idx = 0;
+            if (p_idx < 0 || p_idx >= (int)pop_size) p_idx = 0;  /* 下界保护 */
             if (copy_individual(&new_pop[i], &pop->individuals[p_idx]) != 0) continue;
             mutate(engine, new_pop[i].chromosome, chrom_size, mutation_rate);
             new_pop[i].id = (int)engine->eval_counter;
@@ -1054,6 +1058,37 @@ int evolution_step(EvolutionEngine* engine) {
         engine->stats.diversity_history[engine->stats.diversity_size] = pop->diversity;
         engine->stats.history_size++;
         engine->stats.diversity_size++;
+    }
+
+    /* DEEP-FIX: 多样性收敛检测 —— 种群多样性过低时触发重启/终止 */
+    {
+        float chrom_range = engine->config.chromosome_max - engine->config.chromosome_min;
+        float diversity_threshold = chrom_range * 1e-4f;  /* 染色体范围的0.01% */
+        if (pop->diversity < diversity_threshold && pop->generation > 10) {
+            /* 种群已收敛到极小区间 —— 检查是否已满足终止条件 */
+            float fitness_gain = pop->best_fitness - engine->stats.initial_best_fitness;
+            float avg_improvement_per_gen = pop->generation > 1 ?
+                fitness_gain / (float)pop->generation : fitness_gain;
+            if (avg_improvement_per_gen < 1e-6f || pop->generation > 50) {
+                /* 收敛已无实质性改善，返回1表示已收敛（调用方应终止演化） */
+                log_info("[演化引擎] 种群收敛(多样性=%.6f, 代数=%d, 最佳适应度=%.6f)",
+                         pop->diversity, pop->generation, pop->best_fitness);
+                pop->fitness_converged = 1;
+                return 1;
+            }
+            /* 多样性低但仍有改善 —— 增加变异率迫使探索 */
+            engine->config.mutation_rate *= 1.5f;
+            if (engine->config.mutation_rate > engine->config.mutation_rate_max)
+                engine->config.mutation_rate = engine->config.mutation_rate_max;
+            log_info("[演化引擎] 多样性低(%.6f)但仍有改善潜力，变异率提升至%.4f",
+                     pop->diversity, engine->config.mutation_rate);
+        }
+    }
+
+    /* DEEP-FIX: 最大代数硬上限 */
+    if (engine->stats.total_generations >= (size_t)engine->config.max_generations) {
+        log_info("[演化引擎] 达到最大代数限制(%d), 终止演化", engine->config.max_generations);
+        return 1;
     }
 
     /* 停滞重启 */
