@@ -144,7 +144,13 @@ static void cmaes_sym_matrix_sqrt(const float* C, size_t n, float* sqrt_C, float
 }
 
 CMAESState* cmaes_alloc(size_t dimension, float sigma, int lambda, int seed) {
+    /* P1-012修复: 补充sigma和lambda参数的合法性校验
+     * 原代码仅校验dimension，sigma<=0和lambda范围非法都会被静默接受 */
     if (dimension == 0 || dimension > CMAES_MAX_DIM) return NULL;
+    if (sigma <= 0.0f || sigma > 1000.0f) return NULL;  /* sigma必须为正且不超过合理上限 */
+    /* P1-012修复: 检测sigma为NaN或Inf */
+    if (!(sigma == sigma) || sigma != sigma) return NULL; /* isnan(sigma) */
+    if (lambda < CMAES_MIN_POP || lambda > CMAES_MAX_POP) return NULL; /* 种群大小范围 */
     CMAESState* state = (CMAESState*)safe_calloc(1, sizeof(CMAESState));
     if (!state) return NULL;
     if (cmaes_init(state, dimension, sigma, lambda, seed) != 0) {
@@ -302,12 +308,14 @@ void cmaes_set_bounds(CMAESState* state, const float* lower, const float* upper)
 void cmaes_set_stop_conditions(CMAESState* state, float stop_fitness, int max_generations,
                                 float tol_x, float tol_cov, float tol_fun, float tol_hist_fun) {
     if (!state) return;
-    if (stop_fitness > 0) state->stop_fitness = stop_fitness;
-    if (max_generations > 0) state->max_generations = max_generations;
-    if (tol_x > 0) state->tol_x = tol_x;
-    if (tol_cov > 0) state->tol_cov = tol_cov;
-    if (tol_fun > 0) state->tol_fun = tol_fun;
-    if (tol_hist_fun > 0) state->tol_hist_fun = tol_hist_fun;
+    /* P1-013修复: 将">0"改为">=0"允许用户设置零值的停止条件
+     * 使用-1.0f作为哨兵值表示"不修改此条件"，NaN检测保护 */
+    if (!(stop_fitness != stop_fitness) && stop_fitness >= 0.0f) state->stop_fitness = stop_fitness;
+    if (max_generations >= 0) state->max_generations = max_generations;
+    if (!(tol_x != tol_x) && tol_x >= 0.0f) state->tol_x = tol_x;
+    if (!(tol_cov != tol_cov) && tol_cov >= 0.0f) state->tol_cov = tol_cov;
+    if (!(tol_fun != tol_fun) && tol_fun >= 0.0f) state->tol_fun = tol_fun;
+    if (!(tol_hist_fun != tol_hist_fun) && tol_hist_fun >= 0.0f) state->tol_hist_fun = tol_hist_fun;
 }
 
 void cmaes_sample_population(CMAESState* state) {

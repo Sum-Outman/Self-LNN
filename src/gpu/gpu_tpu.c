@@ -616,9 +616,9 @@ static int npu_tpu_cpu_infer_fallback(NpuModel* model, const float** inputs,
                 float* lnn_input = (float*)safe_calloc(input_dim, sizeof(float));
                 if (lnn_input) {
                     memcpy(lnn_input, in, input_dim * sizeof(float));
-                    /* 调用真实LNN推理 */
-                    extern int lnn_forward(void* lnn, const float* input, float* output);
-                    if (lnn_forward(lnn, lnn_input, hidden) == 0) {
+                    /* FIX-EXTERN5: 使用头文件声明替代extern */
+                    int ret = lnn_forward(lnn, lnn_input, hidden);
+                    if (ret == 0) {
                         /* 取前output_dim个元素 */
                         size_t copy_dim = (input_dim < output_dim) ? input_dim : output_dim;
                         memcpy(out, hidden, copy_dim * sizeof(float));

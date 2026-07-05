@@ -44,6 +44,7 @@ typedef enum {
     ARCH_CHANGE_REMOVE_LAYER,          /**< 删除网络层（移除最后层） */
     ARCH_CHANGE_RESHAPE_ALL,           /**< 完全重建（改变所有维度参数） */
     ARCH_CHANGE_REPLACE_ARCHITECTURE,  /**< 用外部架构描述替换（NAS部署用） */
+    ARCH_CHANGE_ROLLBACK,              /**< 安全回滚操作（D-001修复：P0编译错误修复） */
 } ArchitectureChangeType;
 
 /* ============ 架构变更请求与结果 ============ */

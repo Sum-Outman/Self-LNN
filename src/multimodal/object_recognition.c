@@ -170,56 +170,8 @@ static float normalized_cross_correlation(const float* a, const float* b, int le
     return sum_ab / denom;
 }
 
-/* ======================================================================== */
-/* CfC深度学习基础数学函数 —— 从image_recognition_deep.c移植  */
-/* ======================================================================== */
-
-/* P2-5标注：以下向量运算函数与 image_recognition_deep.c 中对应函数功能重复，
- * 详见 image_recognition_deep.c 开头的 P2-5 标注。 */
-static float _or_cfc_sig(float x) { return 1.0f / (1.0f + expf(-x)); }
-
-static float _or_cfc_tanh_f(float x) {
-    float e2x = expf(2.0f * x);
-    return (e2x - 1.0f) / (e2x + 1.0f);
-}
-
-/* Xavier初始化 —— 适用于tanh/sigmoid激活函数层 */
-static void _or_cfc_xavier_init(float* w, int fan_in, int fan_out) {
-    float scale = sqrtf(2.0f / (float)(fan_in + fan_out));
-    for (int i = 0; i < fan_in * fan_out; i++) {
-        float u1 = secure_random_float();
-        float u2 = secure_random_float();
-        if (u1 < 1e-7f) u1 = 1e-7f;
-        w[i] = sqrtf(-2.0f * logf(u1)) * cosf(2.0f * (float)M_PI * u2) * scale;
-    }
-}
-
-/* 向量运算库 */
-static void _or_cfc_mat_vec_mul(const float* mat, const float* vec, float* out, int r, int c) {
-    for (int i = 0; i < r; i++) {
-        out[i] = 0.0f;
-        for (int j = 0; j < c; j++) out[i] += mat[i * c + j] * vec[j];
-    }
-}
-static void _or_cfc_vec_add(float* a, const float* b, int n) { for (int i = 0; i < n; i++) a[i] += b[i]; }
-static void _or_cfc_vec_hadamard(float* a, const float* b, int n) { for (int i = 0; i < n; i++) a[i] *= b[i]; }
-static void _or_cfc_vec_sigmoid(float* a, int n) { for (int i = 0; i < n; i++) a[i] = _or_cfc_sig(a[i]); }
-static void _or_cfc_vec_tanh(float* a, int n) { for (int i = 0; i < n; i++) a[i] = _or_cfc_tanh_f(a[i]); }
-static void _or_cfc_vec_scale(float* a, float s, int n) { for (int i = 0; i < n; i++) a[i] *= s; }
-static void _or_cfc_vec_copy(float* d, const float* s, int n) { memcpy(d, s, n * sizeof(float)); }
-
-static float _or_cfc_vec_dot(const float* a, const float* b, int n) {
-    float s = 0.0f; for (int i = 0; i < n; i++) s += a[i] * b[i]; return s;
-}
-
-/* Softmax归一化 */
-static void _or_cfc_softmax(float* logits, int n) {
-    float mv = logits[0];
-    for (int i = 1; i < n; i++) if (logits[i] > mv) mv = logits[i];
-    float sum = 0.0f;
-    for (int i = 0; i < n; i++) { logits[i] = expf(logits[i] - mv); sum += logits[i]; }
-    if (sum > 1e-10f) for (int i = 0; i < n; i++) logits[i] /= sum;
-}
+/* P1-015修复：向量运算函数已统一提取到 include/selflnn/math/vec_ops_shared.h */
+#include "selflnn/math/vec_ops_shared.h"
 
 /* CfC ODE步进 —— 核心连续时间液态神经网络前向传播
  * 公式: h(t+dt) = h(t)*exp(-dt/τ) + (1-exp(-dt/τ))*σ(W_gx·x+W_gh·h+b_g)⊙tanh(W_ax·x+W_ah·h+b_a) */
@@ -235,15 +187,15 @@ static void _or_cfc_ode_step(const float* in, int in_dim,
     float* t2   = t1 + h_dim;
     memset(gate, 0, h_dim * sizeof(float));
     memset(act, 0, h_dim * sizeof(float));
-    _or_cfc_mat_vec_mul(W_gx, in, t1, h_dim, in_dim);
-    _or_cfc_mat_vec_mul(W_gh, h, t2, h_dim, h_dim);
-    _or_cfc_vec_add(t1, t2, h_dim); _or_cfc_vec_add(t1, b_g, h_dim); _or_cfc_vec_sigmoid(t1, h_dim);
-    _or_cfc_vec_copy(gate, t1, h_dim);
-    _or_cfc_mat_vec_mul(W_ax, in, t1, h_dim, in_dim);
-    _or_cfc_mat_vec_mul(W_ah, h, t2, h_dim, h_dim);
-    _or_cfc_vec_add(t1, t2, h_dim); _or_cfc_vec_add(t1, b_a, h_dim); _or_cfc_vec_tanh(t1, h_dim);
-    _or_cfc_vec_copy(act, t1, h_dim);
-    _or_cfc_vec_hadamard(gate, act, h_dim);
+    vec_mat_mul(W_gx, in, t1, h_dim, in_dim);
+    vec_mat_mul(W_gh, h, t2, h_dim, h_dim);
+    vec_add(t1, t2, h_dim); vec_add(t1, b_g, h_dim); vec_sigmoid(t1, h_dim);
+    vec_copy(gate, t1, h_dim);
+    vec_mat_mul(W_ax, in, t1, h_dim, in_dim);
+    vec_mat_mul(W_ah, h, t2, h_dim, h_dim);
+    vec_add(t1, t2, h_dim); vec_add(t1, b_a, h_dim); vec_tanh(t1, h_dim);
+    vec_copy(act, t1, h_dim);
+    vec_hadamard(gate, act, h_dim);
     float decay = expf(-dt / tau);
     for (int i = 0; i < h_dim; i++) h[i] = h[i] * decay + (1.0f - decay) * gate[i];
     safe_free((void**)&gate);
@@ -276,16 +228,16 @@ static void _or_cfc_ode_step_backward(const float* in, int in_dim,
     (void)d_gate; (void)d_act; (void)d_pre_act;
     memset(pre_gate, 0, h_dim * sizeof(float));
     memset(pre_act, 0, h_dim * sizeof(float));
-    _or_cfc_mat_vec_mul(W_gx, in, t1, h_dim, in_dim);
-    _or_cfc_mat_vec_mul(W_gh, h, t2, h_dim, h_dim);
+    vec_mat_mul(W_gx, in, t1, h_dim, in_dim);
+    vec_mat_mul(W_gh, h, t2, h_dim, h_dim);
     for (int i = 0; i < h_dim; i++) pre_gate[i] = t1[i] + t2[i] + b_g[i];
     memcpy(gate, pre_gate, h_dim * sizeof(float));
-    _or_cfc_vec_sigmoid(gate, h_dim);
-    _or_cfc_mat_vec_mul(W_ax, in, t1, h_dim, in_dim);
-    _or_cfc_mat_vec_mul(W_ah, h, t2, h_dim, h_dim);
+    vec_sigmoid(gate, h_dim);
+    vec_mat_mul(W_ax, in, t1, h_dim, in_dim);
+    vec_mat_mul(W_ah, h, t2, h_dim, h_dim);
     for (int i = 0; i < h_dim; i++) pre_act[i] = t1[i] + t2[i] + b_a[i];
     memcpy(act, pre_act, h_dim * sizeof(float));
-    _or_cfc_vec_tanh(act, h_dim);
+    vec_tanh(act, h_dim);
     float decay = expf(-dt / tau);
     for (int i = 0; i < h_dim; i++) {
         d_driver[i] = (1.0f - decay) * dL_dh_new[i];
@@ -346,11 +298,11 @@ ObjectRecognizer* object_recognizer_create(void) {
     memset(or_obj->cfc_b_a, 0, CFC_OR_HIDDEN_DIM * sizeof(float));
     memset(or_obj->cfc_b_cls, 0, OR_MAX_CATEGORIES * sizeof(float));
     memset(or_obj->cfc_logits, 0, OR_MAX_CATEGORIES * sizeof(float));
-    _or_cfc_xavier_init(or_obj->cfc_W_gx, CFC_OR_INPUT_DIM, CFC_OR_HIDDEN_DIM);
-    _or_cfc_xavier_init(or_obj->cfc_W_ax, CFC_OR_INPUT_DIM, CFC_OR_HIDDEN_DIM);
-    _or_cfc_xavier_init(or_obj->cfc_W_gh, CFC_OR_HIDDEN_DIM, CFC_OR_HIDDEN_DIM);
-    _or_cfc_xavier_init(or_obj->cfc_W_ah, CFC_OR_HIDDEN_DIM, CFC_OR_HIDDEN_DIM);
-    _or_cfc_xavier_init(or_obj->cfc_W_cls, CFC_OR_HIDDEN_DIM, OR_MAX_CATEGORIES);
+    vec_init_kaiming(or_obj->cfc_W_gx, CFC_OR_INPUT_DIM, CFC_OR_HIDDEN_DIM);
+    vec_init_kaiming(or_obj->cfc_W_ax, CFC_OR_INPUT_DIM, CFC_OR_HIDDEN_DIM);
+    vec_init_kaiming(or_obj->cfc_W_gh, CFC_OR_HIDDEN_DIM, CFC_OR_HIDDEN_DIM);
+    vec_init_kaiming(or_obj->cfc_W_ah, CFC_OR_HIDDEN_DIM, CFC_OR_HIDDEN_DIM);
+    vec_init_kaiming(or_obj->cfc_W_cls, CFC_OR_HIDDEN_DIM, OR_MAX_CATEGORIES);
 
     /* 预定义类别名称，基于HSV颜色空间生成具有基本区分能力的初始模板 */
     const char* cats[] = {"人","车辆","动物","家具","电子设备","食物","工具","建筑物","植物","自然景观"};
@@ -469,12 +421,12 @@ static int object_cfc_forward(ObjectRecognizer* or_obj, const float* hog_feature
 
     /* 线性分类头: logits = W_cls · hidden + b_cls */
     memset(or_obj->cfc_logits, 0, nc * sizeof(float));
-    _or_cfc_mat_vec_mul(or_obj->cfc_W_cls, or_obj->cfc_hidden, or_obj->cfc_logits, nc, hd);
-    _or_cfc_vec_add(or_obj->cfc_logits, or_obj->cfc_b_cls, nc);
+    vec_mat_mul(or_obj->cfc_W_cls, or_obj->cfc_hidden, or_obj->cfc_logits, nc, hd);
+    vec_add(or_obj->cfc_logits, or_obj->cfc_b_cls, nc);
 
     /* Softmax概率输出 */
     memcpy(probs, or_obj->cfc_logits, nc * sizeof(float));
-    _or_cfc_softmax(probs, nc);
+    vec_softmax(probs, nc);
 
     /* 返回最优类别索引 */
     int best = 0;
@@ -543,13 +495,13 @@ int object_cfc_train(ObjectRecognizer* or_obj, const float* features,
 
             /* 2. 线性分类头 */
             memset(or_obj->cfc_logits, 0, categories * sizeof(float));
-            _or_cfc_mat_vec_mul(or_obj->cfc_W_cls, hidden_before, or_obj->cfc_logits, categories, hd);
-            _or_cfc_vec_add(or_obj->cfc_logits, or_obj->cfc_b_cls, categories);
+            vec_mat_mul(or_obj->cfc_W_cls, hidden_before, or_obj->cfc_logits, categories, hd);
+            vec_add(or_obj->cfc_logits, or_obj->cfc_b_cls, categories);
 
             /* 3. Softmax */
             float probs[OR_MAX_CATEGORIES];
             memcpy(probs, or_obj->cfc_logits, categories * sizeof(float));
-            _or_cfc_softmax(probs, categories);
+            vec_softmax(probs, categories);
 
             /* 4. 交叉熵损失 */
             total_loss += -logf(probs[label] + 1e-10f);
@@ -1304,17 +1256,18 @@ int or_load_model(ObjectRecognizer* or_obj, const char* filepath) {
     if (fread(cfc_check, 1, 4, fp) == 4 &&
         cfc_check[0] == 'C' && cfc_check[1] == 'F' &&
         cfc_check[2] == 'C' && cfc_check[3] == '1') {
-        fread(&or_obj->is_cfc_trained, sizeof(int), 1, fp);
-        fread(&or_obj->cfc_tau, sizeof(float), 1, fp);
-        fread(&or_obj->cfc_dt, sizeof(float), 1, fp);
-        fread(or_obj->cfc_W_gx, sizeof(float), CFC_OR_HIDDEN_DIM * CFC_OR_INPUT_DIM, fp);
-        fread(or_obj->cfc_W_ax, sizeof(float), CFC_OR_HIDDEN_DIM * CFC_OR_INPUT_DIM, fp);
-        fread(or_obj->cfc_W_gh, sizeof(float), CFC_OR_HIDDEN_DIM * CFC_OR_HIDDEN_DIM, fp);
-        fread(or_obj->cfc_W_ah, sizeof(float), CFC_OR_HIDDEN_DIM * CFC_OR_HIDDEN_DIM, fp);
-        fread(or_obj->cfc_b_g, sizeof(float), CFC_OR_HIDDEN_DIM, fp);
-        fread(or_obj->cfc_b_a, sizeof(float), CFC_OR_HIDDEN_DIM, fp);
-        fread(or_obj->cfc_W_cls, sizeof(float), OR_MAX_CATEGORIES * CFC_OR_HIDDEN_DIM, fp);
-        fread(or_obj->cfc_b_cls, sizeof(float), OR_MAX_CATEGORIES, fp);
+        /* P2-FIX-20: CfC权重段fread全部添加返回值检查，失败时关闭文件并返回-1 */
+        if (fread(&or_obj->is_cfc_trained, sizeof(int), 1, fp) != 1) { fclose(fp); return -1; }
+        if (fread(&or_obj->cfc_tau, sizeof(float), 1, fp) != 1) { fclose(fp); return -1; }
+        if (fread(&or_obj->cfc_dt, sizeof(float), 1, fp) != 1) { fclose(fp); return -1; }
+        if (fread(or_obj->cfc_W_gx, sizeof(float), CFC_OR_HIDDEN_DIM * CFC_OR_INPUT_DIM, fp) != (size_t)(CFC_OR_HIDDEN_DIM * CFC_OR_INPUT_DIM)) { fclose(fp); return -1; }
+        if (fread(or_obj->cfc_W_ax, sizeof(float), CFC_OR_HIDDEN_DIM * CFC_OR_INPUT_DIM, fp) != (size_t)(CFC_OR_HIDDEN_DIM * CFC_OR_INPUT_DIM)) { fclose(fp); return -1; }
+        if (fread(or_obj->cfc_W_gh, sizeof(float), CFC_OR_HIDDEN_DIM * CFC_OR_HIDDEN_DIM, fp) != (size_t)(CFC_OR_HIDDEN_DIM * CFC_OR_HIDDEN_DIM)) { fclose(fp); return -1; }
+        if (fread(or_obj->cfc_W_ah, sizeof(float), CFC_OR_HIDDEN_DIM * CFC_OR_HIDDEN_DIM, fp) != (size_t)(CFC_OR_HIDDEN_DIM * CFC_OR_HIDDEN_DIM)) { fclose(fp); return -1; }
+        if (fread(or_obj->cfc_b_g, sizeof(float), CFC_OR_HIDDEN_DIM, fp) != (size_t)(CFC_OR_HIDDEN_DIM)) { fclose(fp); return -1; }
+        if (fread(or_obj->cfc_b_a, sizeof(float), CFC_OR_HIDDEN_DIM, fp) != (size_t)(CFC_OR_HIDDEN_DIM)) { fclose(fp); return -1; }
+        if (fread(or_obj->cfc_W_cls, sizeof(float), OR_MAX_CATEGORIES * CFC_OR_HIDDEN_DIM, fp) != (size_t)(OR_MAX_CATEGORIES * CFC_OR_HIDDEN_DIM)) { fclose(fp); return -1; }
+        if (fread(or_obj->cfc_b_cls, sizeof(float), OR_MAX_CATEGORIES, fp) != (size_t)(OR_MAX_CATEGORIES)) { fclose(fp); return -1; }
     } else {
         /* v2格式: 无CfC段，CfC保持未训练（使用HOG模板匹配作为回退） */
         fseek(fp, cfc_pos, SEEK_SET);

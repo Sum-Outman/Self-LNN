@@ -297,6 +297,7 @@ struct CfCCell {
     void* cell_layer_norm;           /* LayerNorm* */
     void* enhanced_state;            /* CfcEnhancedState* */
     void* enhanced_config;           /* CfcEnhancedConfig* (曾为值类型) */
+    uint32_t enhanced_config_type_tag; /* D-011修复: 类型标签 0x43464345="CFCE" 用于void*安全检查 */
 };
 #endif
 
@@ -1031,6 +1032,55 @@ int cfc_cell_backward_liquid_memory(CfCCell* cell, const float* gradient, float*
  * @return int 成功返回0，失败返回-1
  */
 int cfc_cell_get_liquid_memory_state(const CfCCell* cell, float* modulation_out, float* gate_out);
+
+/* ============ D-004修复: 分层CfC与液态归一化扩展接口 ============ */
+
+/**
+ * @brief 分层CfC的分层前向传播（自底向上+自顶向下流）
+ *
+ * 支持多层级信息处理，每层CfC单元之间传递底部向上(bottom-up)和
+ * 顶部向下(top-down)信号流，适用于分层抽象学习。
+ *
+ * @param cell CfC单元句柄
+ * @param input 输入向量
+ * @param output 输出隐藏状态缓冲区
+ * @param bu_flows 底部向上流缓冲区（num_levels * hidden_size）
+ * @param td_flows 顶部向下流缓冲区（num_levels * hidden_size）
+ * @param num_levels 层级数量（必须 > 1）
+ * @return 0=成功, -1=参数无效
+ */
+int cfc_cell_hierarchical_forward(CfCCell* cell, const float* input,
+                                   float* output, float* bu_flows, float* td_flows,
+                                   int num_levels);
+
+/**
+ * @brief 液态记忆门控应用
+ *
+ * 将记忆门控信号应用于隐藏状态，使用记忆衰减因子
+ * 进行门控调制，实现长期记忆的逐步衰减。
+ *
+ * @param cell CfC单元句柄
+ * @param hidden_pre 门控前的隐藏状态
+ * @param input 输入向量
+ * @param hidden_post 门控后的隐藏状态输出
+ * @param memory_decay 记忆衰减因子 [0,1]
+ * @return 0=成功, -1=参数无效
+ */
+int cfc_cell_memory_gate_apply(CfCCell* cell, const float* hidden_pre,
+                                const float* input, float* hidden_post,
+                                float memory_decay);
+
+/**
+ * @brief 液时域层归一化
+ *
+ * 对CfC时间常数投影进行LayerNorm归一化，确保
+ * 时间常数在不同时间尺度下的数值稳定性。
+ *
+ * @param tau_projection 时间常数投影向量（原地修改）
+ * @param hidden_size 向量维度
+ * @return 0=成功, -1=参数无效
+ */
+int cfc_liquid_layernorm(float* tau_projection, size_t hidden_size);
 
 #ifdef __cplusplus
 }

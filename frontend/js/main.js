@@ -1,7 +1,7 @@
 ﻿// SELF-LNN AGI 管理系统 - 主JavaScript文件
 'use strict';
 var g_dataEngine = null;
-var g_usingDataEngine = false;
+var g_usingDataEngine = false;  /* P0-F01修复: 将在DataEngine创建成功后置为true */
 
 /* C-04修复: 全局事件监听器清理注册表，防止事件监听器泄漏 */
 window._eventCleanupList = window._eventCleanupList || [];
@@ -187,6 +187,7 @@ function ensureBrowserCompat() {
 
     try {
         g_dataEngine = safeCreateModule('DataEngine', function() { return new DataEngine(); });
+        if (g_dataEngine) { g_usingDataEngine = true; }  /* P0-F01修复: DataEngine创建成功时启用标志 */
         loadTrainingSchedulesFromStorage();
         g_deviceManager = safeCreateModule('DeviceManager', function() { return new DeviceManager(); });
         g_commandEngine = safeCreateModule('CommandEngine', function() { return new CommandEngine(); });
@@ -348,9 +349,13 @@ async function refreshAllSections() {
 
 /**
  * 检查后端连接状态（DataEngine现在统一管理，此函数不再主动发起请求）
+ * P1-F01修复: 添加防御性检查，若DataEngine未初始化则尝试重新创建
  */
 function checkBackendConnection() {
-    // DataEngine._tick() 是唯一的轮询通道，不再重复检查连接
+    if (!g_dataEngine && typeof DataEngine === 'function') {
+        g_dataEngine = new DataEngine();
+        g_usingDataEngine = !!g_dataEngine;
+    }
     showNotification('系统已启动，等待后端连接...', 'success');
 }
 
@@ -1256,7 +1261,7 @@ function showApiUnavailableError() {
     console.warn('后端未连接，显示断开状态（绝不生成虚假数据）');
     showNotification('⚠ 后端未连接，等待连接...', 'warning');
     
-    if (g_usingDataEngine && g_dataEngine) {
+    if (g_usingDataEngine && g_dataEngine && typeof g_dataEngine.start === 'function') {
         g_dataEngine.start(2000);
     }
     
@@ -1585,19 +1590,21 @@ function updateMemorySystem(memoryStatus) {
             const paragraphs = memoryInfo.querySelectorAll('p');
             if (paragraphs.length >= 3) {
                 if (memoryData.architecture && memoryData.architecture.short_term) {
-                    paragraphs[0].innerHTML = `容量: <strong>${memoryData.architecture.short_term.capacity}条</strong>`;
+                    /* P2-FIX-08: 使用escapeHtml转义后端数据防止XSS */
+                    paragraphs[0].innerHTML = `容量: <strong>${window.escapeHtml ? window.escapeHtml(String(memoryData.architecture.short_term.capacity)) : memoryData.architecture.short_term.capacity}条</strong>`;
                 } else {
                     paragraphs[0].innerHTML = '容量: <strong>--</strong>';
                 }
                 
                 if (memoryData.statistics && memoryData.statistics.total_items !== undefined) {
-                    paragraphs[1].innerHTML = `总条目: <strong>${memoryData.statistics.total_items}</strong>`;
+                    /* P2-FIX-08: XSS防护 - 转义后端数据 */
+                    paragraphs[1].innerHTML = `总条目: <strong>${window.escapeHtml ? window.escapeHtml(String(memoryData.statistics.total_items)) : memoryData.statistics.total_items}</strong>`;
                 } else {
                     paragraphs[1].innerHTML = '总条目: <strong>--</strong>';
                 }
                 
                 if (memoryData.statistics && memoryData.statistics.retrieval_success !== undefined) {
-                    paragraphs[2].innerHTML = `检索成功率: <strong>${(memoryData.statistics.retrieval_success * 100).toFixed(1)}%</strong>`;
+                    paragraphs[2].innerHTML = `检索成功率: <strong>${memoryData.statistics.retrieval_success !== undefined ? (memoryData.statistics.retrieval_success * 100).toFixed(1) : '--'}%</strong>`;
                 } else {
                     paragraphs[2].innerHTML = '检索成功率: <strong>--</strong>';
                 }
@@ -1739,14 +1746,15 @@ function updateLearningStatus(learningStatus) {
         if (learningTrend) {
             const paragraphs = learningTrend.querySelectorAll('p');
             if (paragraphs.length >= 3) {
+                /* P2-FIX-15: 使用textContent替代innerHTML防止后端数据XSS注入 */
                 if (learningData.architecture && learningData.architecture.types) {
-                    paragraphs[0].innerHTML = `学习类型: <strong>${learningData.architecture.types[0] || '--'}</strong>`;
+                    paragraphs[0].innerHTML = '学习类型: <strong>' + window.escapeHtml(learningData.architecture.types[0] || '--') + '</strong>';
                 } else {
                     paragraphs[0].innerHTML = '学习类型: <strong>--</strong>';
                 }
                 
                 if (learningData.architecture && learningData.architecture.components) {
-                    paragraphs[1].innerHTML = `主要组件: <strong>${learningData.architecture.components[0] || '--'}</strong>`;
+                    paragraphs[1].innerHTML = '主要组件: <strong>' + window.escapeHtml(learningData.architecture.components[0] || '--') + '</strong>';
                 } else {
                     paragraphs[1].innerHTML = '主要组件: <strong>--</strong>';
                 }
@@ -2744,7 +2752,8 @@ Ctrl + H: 显示帮助
 - 系统设置: 配置系统参数
     `;
     
-    SelfLnnNotify.show(helpMessage.replace(/\n/g, '<br>'), 'info', 12000);
+    /* P2-FIX-09: 添加window.前缀确保严格模式兼容 */
+    window.SelfLnnNotify.show(helpMessage.replace(/\n/g, '<br>'), 'info', 12000);
 }
 
 /* ===== 全局工具函数 - setText/setWidth（供 index.html 内联脚本使用） ===== */
@@ -2897,8 +2906,11 @@ async function moveForward() {
     showNotification('机器人前进中...', 'info');
     
     // 更新UI状态
-    document.getElementById('robot-status-mode').textContent = '手动控制：前进';
-    document.querySelector('.direction-btn.forward').style.background = 'rgba(0, 212, 255, 0.3)';
+    /* P1-F14修复: 添加DOM元素空值检查防止TypeError崩溃 */
+    var robotStatusEl = document.getElementById('robot-status-mode');
+    if (robotStatusEl) robotStatusEl.textContent = '手动控制：前进';
+    var forwardBtn = document.querySelector('.direction-btn.forward');
+    if (forwardBtn) forwardBtn.style.background = 'rgba(0, 212, 255, 0.3)';
     
     try {
         // 发送真实机器人控制命令
@@ -2974,8 +2986,10 @@ async function moveLeft() {
     showNotification('机器人左转中...', 'info');
     
     // 更新UI状态
-    document.getElementById('robot-status-mode').textContent = '手动控制：左转';
-    document.querySelector('.direction-btn.left').style.background = 'rgba(0, 212, 255, 0.3)';
+    var robotStatusEl = document.getElementById('robot-status-mode');
+    if (robotStatusEl) robotStatusEl.textContent = '手动控制：左转';
+    var leftBtn = document.querySelector('.direction-btn.left');
+    if (leftBtn) leftBtn.style.background = 'rgba(0, 212, 255, 0.3)';
     
     try {
         // 发送真实机器人控制命令（左转90度）
@@ -3009,8 +3023,10 @@ async function moveRight() {
     showNotification('机器人右转中...', 'info');
     
     // 更新UI状态
-    document.getElementById('robot-status-mode').textContent = '手动控制：右转';
-    document.querySelector('.direction-btn.right').style.background = 'rgba(0, 212, 255, 0.3)';
+    var robotStatusEl = document.getElementById('robot-status-mode');
+    if (robotStatusEl) robotStatusEl.textContent = '手动控制：右转';
+    var rightBtn = document.querySelector('.direction-btn.right');
+    if (rightBtn) rightBtn.style.background = 'rgba(0, 212, 255, 0.3)';
     
     try {
         // 发送真实机器人控制命令（右转90度）
@@ -3044,8 +3060,10 @@ async function stopMovement() {
     showNotification('机器人停止运动', 'warning');
     
     // 更新UI状态
-    document.getElementById('robot-status-mode').textContent = '手动控制：停止';
-    document.querySelector('.direction-btn.stop').style.background = 'rgba(255, 193, 7, 0.3)';
+    var robotStatusEl = document.getElementById('robot-status-mode');
+    if (robotStatusEl) robotStatusEl.textContent = '手动控制：停止';
+    var stopBtn = document.querySelector('.direction-btn.stop');
+    if (stopBtn) stopBtn.style.background = 'rgba(255, 193, 7, 0.3)';
     
     try {
         // 发送真实机器人停止命令
@@ -3128,14 +3146,19 @@ async function updateAngularSpeed(value) {
  * 前往目标位置
  */
 async function goToPosition() {
-    const targetX = parseFloat(document.getElementById('target-x').value) || 0;
-    const targetY = parseFloat(document.getElementById('target-y').value) || 0;
-    const targetZ = parseFloat(document.getElementById('target-z').value) || 0;
+    /* P1-F15修复: 添加DOM元素空值检查 */
+    var targetXEl = document.getElementById('target-x');
+    var targetYEl = document.getElementById('target-y');
+    var targetZEl = document.getElementById('target-z');
+    const targetX = targetXEl ? (parseFloat(targetXEl.value) || 0) : 0;
+    const targetY = targetYEl ? (parseFloat(targetYEl.value) || 0) : 0;
+    const targetZ = targetZEl ? (parseFloat(targetZEl.value) || 0) : 0;
     
     showNotification(`前往目标位置: X=${targetX}m, Y=${targetY}m, Z=${targetZ}m`, 'info');
     
     // 更新UI状态
-    document.getElementById('robot-status-mode').textContent = `自主导航到 (${targetX}, ${targetY}, ${targetZ})`;
+    var robotStatusEl = document.getElementById('robot-status-mode');
+    if (robotStatusEl) robotStatusEl.textContent = `自主导航到 (${targetX}, ${targetY}, ${targetZ})`;
     
     try {
         // 发送自主导航命令
@@ -3188,7 +3211,8 @@ async function executeAction(action) {
     };
     
     showNotification(`执行动作: ${actionNames[action] || action}`, 'info');
-    document.getElementById('robot-status-mode').textContent = `执行动作: ${actionNames[action] || action}`;
+    var robotStatusEl = document.getElementById('robot-status-mode');
+    if (robotStatusEl) robotStatusEl.textContent = `执行动作: ${actionNames[action] || action}`;
     
     // 调用真实机器人控制API
     try {
@@ -3452,7 +3476,8 @@ function addTaskToQueue() {
     showNotification(`✅ 任务 "${typeNames[taskType]}" 已添加到队列`, 'success');
     
     // 清空表单
-    document.getElementById('task-description').value = '';
+    var taskDescEl = document.getElementById('task-description');
+    if (taskDescEl) taskDescEl.value = '';
 }
 
 /**
@@ -3755,17 +3780,20 @@ function adjustVideoQuality(quality) {
  * 保存机器人配置
  */
 function saveRobotConfig() {
-    /* MID-001修复: 实际发送API请求保存配置，而非空操作 */
+    /* P1-F16修复: 添加所有DOM元素的安全访问 */
+    function getVal(id) { var el = document.getElementById(id); return el ? el.value : ''; }
+    function getText(id) { var el = document.getElementById(id); return el ? el.textContent : ''; }
+    function getChecked(id) { var el = document.getElementById(id); return el ? !!el.checked : false; }
     const configData = {
-        connectionType: document.getElementById('connection-type').value,
-        robotIp: document.getElementById('robot-ip').value,
-        robotPort: document.getElementById('robot-port').value,
-        maxSpeed: document.getElementById('max-speed-value').textContent,
-        collisionDetection: document.getElementById('collision-detection').checked,
-        safetyDistance: document.getElementById('safety-distance-value').textContent,
-        controlFrequency: document.getElementById('control-frequency').value,
-        logLevel: document.getElementById('log-level').value,
-        autoUpdate: document.getElementById('auto-update').checked
+        connectionType: getVal('connection-type'),
+        robotIp: getVal('robot-ip'),
+        robotPort: getVal('robot-port'),
+        maxSpeed: getText('max-speed-value'),
+        collisionDetection: getChecked('collision-detection'),
+        safetyDistance: getText('safety-distance-value'),
+        controlFrequency: getVal('control-frequency'),
+        logLevel: getVal('log-level'),
+        autoUpdate: getChecked('auto-update')
     };
     
     if (typeof window.SelfLnnApi !== 'undefined' && typeof window.SelfLnnApi.saveRobotConfig === 'function') {
@@ -4315,18 +4343,16 @@ async function refreshLNNStatus() {
             const result = await window.SelfLnnApi.getLNNStatus();
             
             if (result.success && result.data) {
-                const status = result.data;
+                /* W6修复: 后端返回 {"lnn":{...}}，需访问 result.data.lnn 获取LNN状态 */
+                const status = result.data.lnn || result.data;
                 showNotification('✅ LNN状态已更新', 'success');
                 
                 // 更新UI状态
-                // 这里可以根据实际返回的数据结构更新UI
-                // 例如：更新稳定性、收敛率、动态响应等指标
+                var cps = document.querySelectorAll('.circle-progress');
+                var cts = document.querySelectorAll('.circle-text');
+                var cfs = document.querySelectorAll('.circle-fill');
                 if (status.stability !== undefined) {
                     const stabilityPercent = Math.min(100, Math.max(0, status.stability * 100));
-                    var cps = document.querySelectorAll('.circle-progress');
-                    var cts = document.querySelectorAll('.circle-text');
-                    var cfs = document.querySelectorAll('.circle-fill');
-                    if (cps[0]) cps[0].setAttribute('data-percent', stabilityPercent);
                     if (cts[0]) cts[0].textContent = stabilityPercent.toFixed(1) + '%';
                     if (cfs[0]) {
                         var circ = 2 * Math.PI * 36;
@@ -5090,7 +5116,9 @@ function exportVisualizationData() {
 function connectVisualizationWebSocket() {
     if (!window.SelfLnnWebSocket) return;
 
-    window.SelfLnnWebSocket.on('training_status', function(data) {
+    /* C-004修复: 后端ws_push发射消息类型为'training_progress'，
+     * 同时保留'training_status'监听向后兼容旧版后端 */
+    var _trainingProgressHandler = function(data) {
         if (!window.visualizationManager) return;
         if (data.loss !== undefined) {
             window.visualizationManager.updateLossData(data.loss, data.val_loss);
@@ -5108,7 +5136,9 @@ function connectVisualizationWebSocket() {
                 data.gradient_norm || 0
             );
         }
-    });
+    };
+    window.SelfLnnWebSocket.on('training_progress', _trainingProgressHandler);
+    window.SelfLnnWebSocket.on('training_status', _trainingProgressHandler);
 
     window.SelfLnnWebSocket.on('system_status', function(data) {
         if (!window.visualizationManager) return;
@@ -6229,13 +6259,19 @@ function initDialogueTemperature() {
 async function toggleAgiFeature(feature, enabled) {
     const result = await window.SelfLnnApi.toggleAgiFeature(feature, enabled);
     if (result.success) {
+        /* S-006修复: 补全所有AGI功能的中文标签映射 */
         const label = feature === 'self_cognition' ? '自我认知' :
                       feature === 'self_decision' ? '自我决策' :
                       feature === 'self_execution' ? '自主执行' :
                       feature === 'self_learning' ? '自我学习' :
                       feature === 'self_evolution' ? '自我演化' :
                       feature === 'imitation_learning' ? '模仿学习' :
-                      feature === 'self_correction' ? '自我修正' : feature;
+                      feature === 'self_correction' ? '自我修正' :
+                      feature === 'self_reflection' ? '自我反思' :
+                      feature === 'planning' ? '计划能力' :
+                      feature === 'metacognition' ? '元认知' :
+                      feature === 'multi_robot' ? '多机器人控制' :
+                      feature === 'curiosity' ? '好奇心探索' : feature;
         showNotification(label + '已' + (enabled ? '启用' : '关闭'), 'success');
     } else {
         const checkbox = document.querySelector('#feature-' + feature.replace(/_/g, '-'));
@@ -8648,7 +8684,7 @@ async function toggleMultimodalVoiceInput() {
         showNotification('录音功能不可用：VoiceCaptureUtil未加载', 'warning');
         return;
     }
-    VoiceCaptureUtil.quickCapture({
+    VoiceCaptureUtil.quickCapture({   // P1-F02修复注释: 在全局作用域中可访问
         maxDuration: 10000,
         onStart: function() {
             if (btn) { btn.textContent = '停止录音'; btn.style.background = '#e74c3c'; }
@@ -8813,6 +8849,77 @@ function toggleCameraPreview() {
 }
 window.toggleCameraPreview = toggleCameraPreview;
 
+/* P0-003修复: 暴露所有HTML onclick使用但未挂载到window的函数 */
+/* 导航与面板切换 */
+window.navigateTo = navigateTo;
+
+/* 仪表盘 */
+window.refreshDashboard = refreshDashboard;
+
+/* LNN控制 */
+window.refreshLNNStatus = refreshLNNStatus;
+window.saveLNNParameters = saveLNNParameters;
+window.resetLNNParameters = resetLNNParameters;
+window.calibrateLNN = calibrateLNN;
+window.exportLNNConfig = exportLNNConfig;
+
+/* 训练控制 */
+window.startTrainingQuick = startTrainingQuick;
+
+/* 模型管理 */
+window.loadModel = loadModel;
+window.loadNewModel = loadNewModel;
+window.startModel = startModel;
+window.stopModel = stopModel;
+window.unloadModel = unloadModel;
+window.saveModelConfig = saveModelConfig;
+
+/* 系统操作 */
+window.backupSystem = backupSystem;
+window.emergencyStop = emergencyStop;
+
+/* 多模态 */
+window.refreshMultimodalStatus = refreshMultimodalStatus;
+window.saveMultimodalConfig = saveMultimodalConfig;
+window.resetMultimodalConfig = resetMultimodalConfig;
+window.testMultimodalProcessing = testMultimodalProcessing;
+window.stopMultimodalProcessing = stopMultimodalProcessing;
+
+/* 机器人控制 */
+window.refreshRobotStatus = refreshRobotStatus;
+window.moveForward = moveForward;
+window.moveLeft = moveLeft;
+window.stopMovement = stopMovement;
+window.moveRight = moveRight;
+window.moveBackward = moveBackward;
+window.goToPosition = goToPosition;
+window.executeAction = executeAction;
+
+/* 传感器/视频 */
+window.toggleSensorStream = toggleSensorStream;
+window.setChartRange = setChartRange;
+window.toggleVideoStream = toggleVideoStream;
+window.captureSnapshot = captureSnapshot;
+
+/* 机器人配置 */
+window.saveRobotConfig = saveRobotConfig;
+window.resetRobotConfig = resetRobotConfig;
+
+/* 诊断 */
+window.runSelfDiagnostic = runSelfDiagnostic;
+window.exportDiagnosticData = exportDiagnosticData;
+
+/* ROS/Gazebo */
+window.configureROS = configureROS;
+window.controlGazebo = controlGazebo;
+
+/* API统计与任务队列 */
+window.refreshApiUsageStats = refreshApiUsageStats;
+window.loadTaskQueue = loadTaskQueue;
+window.pauseTask = pauseTask;
+window.cancelTask = cancelTask;
+window.addTaskToQueue = addTaskToQueue;
+
 /* ================================================================
  *: 全局定时器清理 - 页面卸载时清除所有活跃定时器
  * 防止内存泄漏和后台持续请求
@@ -8822,13 +8929,19 @@ window.addEventListener('beforeunload', function() {
     window._cleanupAllEventListeners();
     /* 清理已知的全局定时器 */
     if (window._trainingPollInterval) { clearInterval(window._trainingPollInterval); delete window._trainingPollInterval; }
-    if (window._statusPollInterval) { clearInterval(window._statusPollInterval); delete window._statusPollInterval; }
-    if (window._sensorStreamInterval) { clearInterval(window._sensorStreamInterval); delete window._sensorStreamInterval; }
-    if (window._rosGazeboRefreshTimer) { clearInterval(window._rosGazeboRefreshTimer); delete window._rosGazeboRefreshTimer; }
+    /* P1-F07: _statusPollInterval从未赋值，死代码已移除 */
+    /* P1-F08: sensorStreamInterval是模块级let变量而非window属性 */
+    if (typeof sensorStreamInterval !== 'undefined' && sensorStreamInterval) { clearInterval(sensorStreamInterval); sensorStreamInterval = null; }
+    /* P1-F09: _rosGazeboRefreshTimer从未赋值，死代码已移除 */
     if (g_rosGazeboRefreshTimer) { clearInterval(g_rosGazeboRefreshTimer); g_rosGazeboRefreshTimer = null; }
-    if (window._multimodalStreamInterval) { clearInterval(window._multimodalStreamInterval); delete window._multimodalStreamInterval; }
+    /* P1-F10: multimodalPollTimer变量名匹配修复 */
+    if (window.multimodalPollTimer) { clearInterval(window.multimodalPollTimer); delete window.multimodalPollTimer; }
     if (window._allPanelsRefreshTimer) { clearInterval(window._allPanelsRefreshTimer); delete window._allPanelsRefreshTimer; }
     if (typeof fleetPollInterval !== 'undefined' && fleetPollInterval) { clearInterval(fleetPollInterval); fleetPollInterval = null; }
+    /* P1-F11: 清理设备管理器内部定时器和Worker */
+    if (g_deviceManager && typeof g_deviceManager.destroy === 'function') {
+        try { g_deviceManager.destroy(); } catch(e) {}
+    }
     /* 清理知识图谱定时器 (C-03修复) */
     if (window._kgIntervalIds && window._kgIntervalIds.length) {
         window._kgIntervalIds.forEach(function(id) { clearInterval(id); });

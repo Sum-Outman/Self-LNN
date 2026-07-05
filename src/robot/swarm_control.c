@@ -1442,8 +1442,9 @@ int swarm_allocate_hungarian(SwarmController* controller)
     int i, j;
     for (i = 0; i < n_tasks; i++)
         if (controller->tasks[i].is_completed || controller->tasks[i].is_assigned) { swarm_unlock(controller); return 0; }
-    /* P3-071修复: 超出HUNGARIAN_MAX(256)时回退到贪婪/拍卖分配，而非直接失败 */
-    if (n_tasks > HUNGARIAN_MAX || n_robots > HUNGARIAN_MAX) {
+    /* FIX-HUNGARIAN-1: 将 > 改为 >=，数组大小为HUNGARIAN_MAX(256)，但迭代使用1-indexing到m，
+     * 当m=256时循环 i<=m 会访问索引256，造成u[256]/v[256]/p[256]/way[256]越界 */
+    if (n_tasks >= HUNGARIAN_MAX || n_robots >= HUNGARIAN_MAX) {
         swarm_unlock(controller);
         return swarm_allocate_tasks(controller);
     }

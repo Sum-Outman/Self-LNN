@@ -1422,8 +1422,7 @@ int learning_self_evolve(LearningEngine* engine,
      * 而是将问题提升到EvolutionEngine，由其执行完整的GA/CMA-ES/
      * 结构变异等深度演化操作。这确保了"自我演化进化能力"路径统一。 */
     if (engine->self_evolution.stagnation_counter >= 10) {
-        /* 尝试获取全局演化引擎 */
-        extern void* selflnn_get_evolution_engine(void);
+        /* FIX-EXTERN8: selflnn_get_evolution_engine已在selflnn.h声明 */
         void* evo_handle = selflnn_get_evolution_engine();
         if (evo_handle) {
             EvolutionEngine* evo = (EvolutionEngine*)evo_handle;

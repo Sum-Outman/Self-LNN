@@ -14,7 +14,7 @@ target_include_directories(selflnn_distributed PUBLIC
 
 target_link_libraries(selflnn_distributed PRIVATE
     selflnn_core
-    selflnn_utils
+    utils
     selflnn_concurrency
 )
 

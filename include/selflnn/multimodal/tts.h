@@ -219,6 +219,25 @@ void tts_engine_mark_trained(TTSEngine* engine);
 int tts_engine_is_healthy(TTSEngine* engine);
 
 /**
+ * @brief 为TTS引擎设置共享LNN实例（用于质量评估）
+ * INCON-02: 补充SELFLNN_API声明
+ * @param engine 引擎句柄
+ * @param lnn 共享LNN实例指针
+ * @return int 成功返回0，失败返回-1
+ */
+SELFLNN_API int tts_engine_set_lnn(TTSEngine* engine, struct LNN* lnn);
+
+/**
+ * @brief 评估合成音频质量
+ * INCON-02: 补充SELFLNN_API声明
+ * @param waveform 音频波形数据
+ * @param num_samples 样本数
+ * @param sample_rate 采样率
+ * @return float 质量分数（0.0~1.0）
+ */
+SELFLNN_API float tts_evaluate_quality(const float* waveform, int num_samples, int sample_rate);
+
+/**
  * @brief 设置音高偏移
  * @param engine 引擎句柄
  * @param pitch 音高偏移（半音，范围[-12, 12]）
@@ -304,6 +323,26 @@ int tts_text_to_pinyin(TTSEngine* engine, const char* text, TTS_Pinyin* output, 
  * @return 1=精确匹配, 0=启发式近似
  */
 int tts_pinyin_lookup(uint16_t codepoint, int* out_init, int* out_final, int* out_tone);
+
+/**
+ * @brief 多音字语境感知拼音查找（P2-FIX-16）
+ * 
+ * 基于前后字语境对多音字进行简单消歧。
+ * 首先在精确拼音表中查找，命中后检查是否为多音字并应用语境消歧。
+ * 目前支持10个最常见多音字（了/长/重/行/乐/好/少/还/得/地）。
+ * 
+ * @param codepoint Unicode码点
+ * @param prev_cp 前一字码点（0表示无）
+ * @param next_cp 后一字码点（0表示无）
+ * @param prev_prev_cp 前两字码点（用于两字词缀匹配，0表示无）
+ * @param out_init 输出声母索引
+ * @param out_final 输出韵母索引
+ * @param out_tone 输出声调(0-4)
+ * @return 1=找到拼音, 0=未找到
+ */
+int tts_pinyin_lookup_with_context(uint16_t codepoint,
+    uint16_t prev_cp, uint16_t next_cp, uint16_t prev_prev_cp,
+    int* out_init, int* out_final, int* out_tone);
 
 /**
  * @brief 从GB2312编码查找拼音（快速辅助函数）

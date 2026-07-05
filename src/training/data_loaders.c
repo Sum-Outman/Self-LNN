@@ -607,8 +607,14 @@ TrainingDataset* data_load_json(const char* filepath, const char* input_field,
 
     char* json_text = (char*)safe_malloc((size_t)file_size + 1);
     if (!json_text) { fclose(fp); return NULL; }
-    size_t read_size = (size_t)fread(json_text, 1, (size_t)file_size, fp);
+    size_t read_size = fread(json_text, 1, (size_t)file_size, fp);
     fclose(fp);
+    /* P2-FIX-24: 完整检查fread返回值，防止部分读取 */
+    if (read_size != (size_t)file_size) {
+        safe_free((void**)&json_text);
+        log_error("[JSON加载器] 文件读取不完整: 期望 %ld 字节, 实际读取 %zu 字节", file_size, read_size);
+        return NULL;
+    }
     json_text[read_size] = '\0';
 
     const char* p = json_text;

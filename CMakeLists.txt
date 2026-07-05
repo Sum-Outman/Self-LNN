@@ -18,7 +18,13 @@ if(MSVC)
     endif()
 endif()
 
-# 构建选项
+# H-005修复: 显式定义PROJECT_VERSION_TWEAK和PROJECT_VERSION_FULL
+# CMake的project(VERSION)只设置MAJOR/MINOR/PATCH，Tweak位需手动定义
+set(PROJECT_VERSION_TWEAK "0")
+set(PROJECT_VERSION_FULL "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}.${PROJECT_VERSION_PATCH}.${PROJECT_VERSION_TWEAK}")
+
+# C-007修复: 条件性安装docs目录（目录已创建并有.gitkeep）
+option(INSTALL_DOCS "安装文档目录" OFF)
 option(BUILD_TESTS "构建测试程序" ON)
 option(BUILD_EXAMPLES "构建示例程序" ON)
 option(ENABLE_GPU "启用GPU加速支持" ON)
@@ -61,7 +67,11 @@ set(CMAKE_C_EXTENSIONS OFF)
 # GCC/Clang: 公共基础编译选项（全局，因作用于所有静态库目标）
 if(NOT MSVC)
     # P2-11修复：移除-fpermissive，严格遵守C标准
-    add_compile_options(-Wall -Wextra -ffast-math
+    # M-003修复: -ffast-math破坏IEEE 754精度，对CfC闭式解和ODE求解器数值稳定性有风险
+    # 使用 -fno-math-errno -fno-trapping-math -fno-rounding-math 替代，
+    # 保留大部分性能优化但保持结合律（associative math对ODE求解器最关键）
+    add_compile_options(-Wall -Wextra
+        -fno-math-errno -fno-trapping-math -fno-rounding-math
         -Wno-unused-parameter -Wno-unused-function -Wno-unused-variable
         -Wno-unused-but-set-variable -Wno-sign-compare
         -Wno-unknown-pragmas -Wno-comment -Wno-parentheses
@@ -76,7 +86,8 @@ if(NOT MSVC)
     set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -O3 -march=native")
     set(CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO} -O3 -march=native -g")
     set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -O0 -g")
-    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--allow-multiple-definition")
+    # M-004修复: 移除 --allow-multiple-definition，该标志会掩盖真实符号冲突bug
+    # 若出现多重定义链接错误，应修复源文件中的符号冲突而非使用此标志
 endif()
 
 # MSVC: 公共基础编译选项（全局，因作用于所有静态库目标）
@@ -140,19 +151,21 @@ message(STATUS "构建配置: BUILD_TESTS=${BUILD_TESTS}")
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 # 子目录
-add_subdirectory(src/core)
 add_subdirectory(src/math)
+add_subdirectory(src/utils)
+# M-004修复: src/base(基础错误处理库)置于concurrency之前，为并发模块提供独立依赖
+add_subdirectory(src/base)
+add_subdirectory(src/concurrency)
+add_subdirectory(src/core)
 add_subdirectory(src/multimodal)
 add_subdirectory(src/memory)
 add_subdirectory(src/reasoning)
 add_subdirectory(src/learning)
 add_subdirectory(src/training)
-add_subdirectory(src/utils)
 add_subdirectory(src/backend)
 add_subdirectory(src/robot)
 add_subdirectory(src/knowledge)
 add_subdirectory(src/gpu)
-add_subdirectory(src/concurrency)
 add_subdirectory(src/cognition)
 add_subdirectory(src/agi)
 add_subdirectory(src/evolution)
@@ -239,9 +252,9 @@ add_executable(selflnn
 target_link_libraries(selflnn PRIVATE
     selflnn_backend
     selflnn_multisystem
+    selflnn_multimodal
     selflnn_core
     selflnn_math
-    selflnn_multimodal
     selflnn_memory
     selflnn_reasoning
     selflnn_learning
@@ -262,7 +275,8 @@ target_link_libraries(selflnn PRIVATE
 
 if(MSVC)
     target_link_libraries(selflnn PRIVATE uuid ole32 mmdevapi propsys winmm)
-    set_target_properties(selflnn PROPERTIES LINK_FLAGS "/STACK:67108864 /FORCE:MULTIPLE")
+    set_target_properties(selflnn PROPERTIES LINK_FLAGS "/STACK:67108864")
+    # M-004修复: 移除 /FORCE:MULTIPLE，该标志会掩盖真实符号冲突bug
     # 修复#2: CRT/Windows宏定义改为target级别，仅对selflnn可执行目标生效
     target_compile_definitions(selflnn PRIVATE
         _CRT_SECURE_NO_WARNINGS _USE_MATH_DEFINES
@@ -312,9 +326,9 @@ if(BUILD_TESTS)
     target_link_libraries(lnn_verify PRIVATE
         selflnn_backend
         selflnn_multisystem
+        selflnn_multimodal
         selflnn_core
         selflnn_math
-        selflnn_multimodal
         selflnn_memory
         selflnn_reasoning
         selflnn_learning
@@ -358,7 +372,10 @@ endif()
 
 # 安装规则
 install(DIRECTORY include/ DESTINATION include)
-install(DIRECTORY docs/ DESTINATION docs)
+# C-007修复: 仅在INSTALL_DOCS开启时安装docs目录
+if(INSTALL_DOCS)
+    install(DIRECTORY docs/ DESTINATION docs)
+endif()
 
 if(BUILD_FRONTEND)
     install(DIRECTORY ${CMAKE_SOURCE_DIR}/frontend/ DESTINATION frontend

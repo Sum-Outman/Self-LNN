@@ -121,7 +121,7 @@ static void compute_strides(size_t* strides, const int* shape, int ndim, TensorS
 
 Tensor* tensor_create(const int* shape, int ndim, TensorDataType dtype) {
     // 参数检查
-    if (!shape || ndim <= 0 || ndim > 8) { // 限制最大维度为8
+    if (!shape || ndim <= 0 || ndim > SELFLNN_MAX_TENSOR_DIMS) { /* P3-FIX-02: 使用宏替换硬编码8 */
         selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
                               "无效的张量形状参数");
         return NULL;

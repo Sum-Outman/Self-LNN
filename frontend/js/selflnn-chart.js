@@ -110,6 +110,8 @@ class SelfLnnChart {
     }
 
     _getDrawArea() {
+        /* L-010修复: 添加canvas空值保护 */
+        if (!this.canvas) return { x: 0, y: 0, w: 0, h: 0 };
         const pad = { top: 15, right: 15, bottom: 25, left: 45 };
         if (this.options.scales && this.options.scales.x && this.options.scales.x.display === false) {
             pad.bottom = 5;
@@ -725,3 +727,6 @@ class SelfLnnChart {
         this.canvas = null;
     }
 }
+
+/* D-005修复: 显式全局导出，与所有其他17个JS模块风格统一 */
+window.SelfLnnChart = SelfLnnChart;

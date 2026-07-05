@@ -136,7 +136,8 @@ static int validate_modality_signals(const float* signals[SELFLNN_MAX_MODALITIES
         if (!modality_present[m] || !signals[m] || signal_sizes[m] == 0) continue;
         int has_data = 0;
         for (size_t i = 0; i < signal_sizes[m]; i++) {
-            if (fabsf(signals[m][i]) > 1e-10f) { has_data = 1; break; }
+            /* P2-FIX-07: 有效性阈值可配置化，替代硬编码1e-10f */
+            if (fabsf(signals[m][i]) > SELFLNN_SIGNAL_VALIDITY_THRESHOLD) { has_data = 1; break; }
         }
         if (has_data) valid_count++;
     }
@@ -870,7 +871,8 @@ int multimodal_unified_input_train_step(UnifiedInputState* state,
      * (sigmoid导数、tanh导数、ODE连续演化路径)，导致梯度完全错误。
      * 必须要求LNN反向传播可用，不可回退到恒等传播。 */
     if (!used_real_backprop) {
-        fprintf(stderr, "[多模态统一输入错误] LNN反向传播不可用，拒绝使用恒等近似梯度回退！请确保LNN已正确初始化并绑定。\n");
+        /* L-007修复: 使用统一日志宏替代fprintf(stderr)，生产环境日志可路由 */
+        log_error("[多模态统一输入] LNN反向传播不可用，拒绝使用恒等近似梯度回退！请确保LNN已正确初始化并绑定。");
 /* grad_combined是栈数组，不可对栈地址调用safe_free */
         return SELFLNN_ERROR_ALGORITHM_FAILURE;
     }
@@ -902,6 +904,8 @@ int multimodal_unified_input_train_step(UnifiedInputState* state,
         if (!state->projection_matrices[m] || !state->projection_biases[m]) continue;
 
         size_t input_dim = state->last_raw_sizes[m];
+        /* P1-011修复: 确保正向和反向传播使用相同的截断维度
+         * 正向传播中也使用了SELFLNN_MAX_CONTROL_DIM截断，保持一致性 */
         if (input_dim > SELFLNN_MAX_CONTROL_DIM) input_dim = SELFLNN_MAX_CONTROL_DIM;
 
         /* 计算L2归一化因子（与forward pass一致） */

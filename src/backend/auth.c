@@ -19,18 +19,30 @@
 /* ZSFJJJ-01: SHA-256实现已移至 math_utils.c，此处使用共享实现 */
 
 /* ZSFJJJ-01: HMAC-SHA256 使用共享SHA-256流式接口 */
+/* L-005修复: 实现完整RFC2104密钥处理 ——
+ * key_len < 64: 零填充至64字节（memset已做）
+ * key_len > 64: 先用SHA-256哈希压缩为32字节，再零填充至64字节
+ * key_len = 64: 直接使用 */
 static void hmac_sha256(const uint8_t* key, size_t key_len,
                         const uint8_t* msg, size_t msg_len,
                         uint8_t output[AUTH_HASH_LEN]) {
     uint8_t k_ipad[64], k_opad[64];
     uint8_t inner_hash[AUTH_HASH_LEN];
     memset(k_ipad, 0, 64); memset(k_opad, 0, 64);
-    size_t klen = key_len < 64 ? key_len : 64;
-    /* L-011修复说明：当前HMAC实现采用简化密钥处理方式 ——
-     * 当key_len < 64时直接复制短密钥（而非标准RFC2104的零填充+哈希扩展）。
-     * 已知限制：短密钥(<64字节)安全性弱于标准HMAC，生产环境建议使用≥64字节密钥。 */
-    memcpy(k_ipad, key, klen);
-    memcpy(k_opad, key, klen);
+    
+    /* RFC2104 标准密钥处理 */
+    if (key_len > 64) {
+        /* 长密钥：先用SHA-256哈希压缩为32字节，再放入64字节块前半段（后半段由memset零填充） */
+        selflnn_sha256_ctx_t key_ctx;
+        selflnn_sha256_init(&key_ctx);
+        selflnn_sha256_update(&key_ctx, key, key_len);
+        selflnn_sha256_final(&key_ctx, k_ipad);
+        memcpy(k_opad, k_ipad, AUTH_HASH_LEN);
+    } else {
+        /* 短密钥：memcpy到零填充的64字节块（等效于RFC2104的零填充） */
+        memcpy(k_ipad, key, key_len);
+        memcpy(k_opad, key, key_len);
+    }
     for (size_t i = 0; i < 64; i++) {
         k_ipad[i] ^= 0x36;
         k_opad[i] ^= 0x5c;

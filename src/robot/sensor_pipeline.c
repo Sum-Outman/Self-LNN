@@ -128,9 +128,11 @@ static int ws_server_handshake(int client_fd) {
              "Sec-WebSocket-Accept: %s\r\n"
              "\r\n", accept_b64);
 #ifdef _WIN32
-    send(client_fd, response, (int)strlen(response), 0);
+    /* FIX-IO2: 检查send返回值，防止部分发送或错误被静默忽略 */
+    int send_ret = send(client_fd, response, (int)strlen(response), 0);
+    if (send_ret < 0) return -1;
 #else
-    write(client_fd, response, strlen(response));
+    if (write(client_fd, response, strlen(response)) < 0) return -1;
 #endif
     return 0;
 }
@@ -1475,22 +1477,30 @@ int sensor_pipeline_export_to_file(SensorPipeline* pipeline, int sensor_id,
     FILE* fp = fopen(filename, "wb");
     if (!fp) return SENSOR_PIPELINE_ERROR_GENERAL;
 
+    /* FIX-FWRITE1: 检查fwrite返回值，失败时返回错误而非静默成功 */
     uint32_t magic = 0x53454E53;
     uint32_t num_entries = (uint32_t)count;
-    fwrite(&magic, sizeof(magic), 1, fp);
-    fwrite(&num_entries, sizeof(num_entries), 1, fp);
+    if (fwrite(&magic, sizeof(magic), 1, fp) != 1 ||
+        fwrite(&num_entries, sizeof(num_entries), 1, fp) != 1) {
+        fclose(fp); return SENSOR_PIPELINE_ERROR_WRITE;
+    }
     for (int i = 0; i < count; i++)
     {
         uint32_t type = (uint32_t)entries[i].sensor_type;
         uint32_t size = (uint32_t)entries[i].data_size;
         double ts = entries[i].timestamp;
         float conf = entries[i].confidence;
-        fwrite(&type, sizeof(type), 1, fp);
-        fwrite(&size, sizeof(size), 1, fp);
-        fwrite(&ts, sizeof(ts), 1, fp);
-        fwrite(&conf, sizeof(conf), 1, fp);
-        if (size > 0 && entries[i].data)
-            fwrite(entries[i].data, 1, size, fp);
+        if (fwrite(&type, sizeof(type), 1, fp) != 1 ||
+            fwrite(&size, sizeof(size), 1, fp) != 1 ||
+            fwrite(&ts, sizeof(ts), 1, fp) != 1 ||
+            fwrite(&conf, sizeof(conf), 1, fp) != 1) {
+            fclose(fp); return SENSOR_PIPELINE_ERROR_WRITE;
+        }
+        if (size > 0 && entries[i].data) {
+            if (fwrite(entries[i].data, 1, size, fp) != size) {
+                fclose(fp); return SENSOR_PIPELINE_ERROR_WRITE;
+            }
+        }
     }
     fclose(fp);
     return SENSOR_PIPELINE_OK;

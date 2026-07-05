@@ -76,6 +76,8 @@ typedef struct {
     int dep_count;
     int dependents[64];
     int dependent_count;
+    /* AGI-007修复: 老化计数器字段，用于优先级提升 */
+    int aging_counter;
 } ScheduledTask;
 
 struct TaskScheduler {
@@ -219,6 +221,53 @@ static int ts_dependencies_met(TaskScheduler* s, ScheduledTask* t) {
 }
 
 /**
+ * @brief AGI-008修复: 从优先级队列中移除指定任务
+ * 队列使用单链表: queue_heads[p]→queue_next[*]→...→queue_tails[p]
+ */
+static void ts_queue_remove(TaskScheduler* s, int tid) {
+    if (tid < 0 || tid >= TS_MAX_TASKS) return;
+    ScheduledTask* t = &s->tasks[tid];
+    int p = (int)t->priority;
+    if (p < 0 || p >= TS_PRIORITY_LEVELS) return;
+    int prev = -1;
+    int cur = s->queue_heads[p];
+    while (cur != -1) {
+        if (cur == tid) {
+            if (prev == -1) {
+                s->queue_heads[p] = s->queue_next[tid];
+            } else {
+                s->queue_next[prev] = s->queue_next[tid];
+            }
+            if (s->queue_tails[p] == tid) {
+                s->queue_tails[p] = prev;
+            }
+            s->queue_next[tid] = -1;
+            return;
+        }
+        prev = cur;
+        cur = s->queue_next[cur];
+    }
+}
+
+/**
+ * @brief AGI-008修复: 将任务插入对应优先级队列尾部
+ */
+static void ts_queue_insert(TaskScheduler* s, int tid) {
+    if (tid < 0 || tid >= TS_MAX_TASKS) return;
+    ScheduledTask* t = &s->tasks[tid];
+    int p = (int)t->priority;
+    if (p < 0 || p >= TS_PRIORITY_LEVELS) return;
+    s->queue_next[tid] = -1;
+    if (s->queue_tails[p] == -1) {
+        s->queue_heads[p] = tid;
+        s->queue_tails[p] = tid;
+    } else {
+        s->queue_next[s->queue_tails[p]] = tid;
+        s->queue_tails[p] = tid;
+    }
+}
+
+/**
  * @brief K-038: 选择下一个任务(最高优先级、依赖满足)
  */
 static int ts_select_next(TaskScheduler* s) {
@@ -235,11 +284,15 @@ static int ts_select_next(TaskScheduler* s) {
                     if (t->aging_counter > 5 && t->priority < TS_PRIORITY_LEVELS - 1) {
                         t->priority++;  /* 提升一级 */
                         t->aging_counter = 0;
+                        /* 先保存下一个任务ID（ts_queue_remove会修改链表） */
+                        int next_tid = s->queue_next[tid];
                         /* 从旧队列移除并插入到新优先级队列首部 */
                         ts_queue_remove(s, tid);
                         ts_queue_insert(s, tid);
-                        /* 当前扫描中断，下次tick处理 */
-                        return -1;
+                        /* P0-M004修复: 使用已保存的next_tid继续扫描当前优先级,
+                         * 避免return -1中断导致其他就绪任务被延迟 */
+                        tid = next_tid;
+                        continue;
                     }
                 } else {
                     return tid;

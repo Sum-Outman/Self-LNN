@@ -4666,8 +4666,15 @@ Trainer* trainer_create(const TrainingConfig* config, LNN* network) {
     // 初始化P1-6分布式训练容错和恢复增强字段
     trainer->elastic_enabled = config->use_distributed_training && config->distributed_num_nodes > 1;
     trainer->stale_gradient_enabled = config->use_distributed_training && config->distributed_num_nodes > 1;
-    trainer->stale_gradient_coefficients = NULL;
-    trainer->stale_gradient_counters = NULL;
+    /* FIX-004修复: stale_gradient数组为空壳(NUUL)，实际初始化分配内存 */
+    if (trainer->stale_gradient_enabled) {
+        int num_nodes = config->distributed_num_nodes;
+        trainer->stale_gradient_coefficients = (float*)safe_calloc(num_nodes, sizeof(float));
+        trainer->stale_gradient_counters = (int*)safe_calloc(num_nodes, sizeof(int));
+        if (trainer->stale_gradient_coefficients) {
+            for (int i = 0; i < num_nodes; i++) trainer->stale_gradient_coefficients[i] = 1.0f;
+        }
+    }
     trainer->leader_election_enabled = config->use_distributed_training && config->distributed_num_nodes > 1;
     trainer->auto_resume_enabled = config->use_distributed_training && config->distributed_enable_checkpointing;
     trainer->auto_resume_checkpoint_path = NULL;
@@ -5895,7 +5902,12 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
 /* 梯度收敛健康监测
              * 每100步检测梯度统计，预防梯度消失/爆炸和过拟合 */
             {
-                static int grad_monitor_counter = 0;
+                /* FIX-RACE3修复: TLS替代全局static消除训练并发数据竞争 */
+#ifdef _WIN32
+                static __declspec(thread) int grad_monitor_counter = 0;
+#else
+                static _Thread_local int grad_monitor_counter = 0;
+#endif
                 grad_monitor_counter++;
                 if (grad_monitor_counter % 100 == 0 && trainer->gradients_size > 0) {
                     float grad_sum = 0.0f, grad_sq = 0.0f, grad_max = 0.0f;
@@ -5970,6 +5982,10 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
                             trainer->failure_recovery_attempts < trainer->failure_recovery_max_attempts) {
                             distributed_failure_rebuild_topology(trainer, failed_nodes, num_failed);
                             trainer->failure_recovery_attempts++;
+                            /* TR-001修复: 恢复成功则重置计数器，避免3次后永久失去容错 */
+                            if (trainer->distributed_topology && trainer->distributed_topology->active) {
+                                trainer->failure_recovery_attempts = 0;
+                            }
                             if (trainer->config.verbose) {
                                 printf("F-08: 节点故障恢复，重建拓扑，尝试次数=%d\n",
                                        trainer->failure_recovery_attempts);
@@ -16063,11 +16079,16 @@ int trainer_save_incremental_checkpoint(Trainer* trainer, const char* filepath) 
             uint8_t* sig_data = (uint8_t*)safe_malloc(sig_data_size);
             if (sig_data) {
                 fseek(fp, sig_data_start, SEEK_SET);
-                fread(sig_data, 1, sig_data_size, fp);
-                uint8_t signature[32];
-                ckpt_hmac_sign(sig_data, sig_data_size, signature);
-                fseek(fp, 0, SEEK_END);
-                fwrite(signature, 1, 32, fp);
+                /* P2-FIX-23: HMAC签名数据段fread添加返回值检查 */
+                if (fread(sig_data, 1, sig_data_size, fp) != sig_data_size) {
+                    safe_free((void**)&sig_data);
+                    log_warn("[检查点] HMAC签名数据读取失败，跳过签名计算");
+                } else {
+                    uint8_t signature[32];
+                    ckpt_hmac_sign(sig_data, sig_data_size, signature);
+                    fseek(fp, 0, SEEK_END);
+                    fwrite(signature, 1, 32, fp);
+                }
                 safe_free((void**)&sig_data);
             }
         }

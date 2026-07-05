@@ -44,17 +44,9 @@ CfCNetwork* cfc_create(const CfCNetworkConfig* config);
  */
 void cfc_free(CfCNetwork* network);
 
-/**
- * @brief CfC网络前向传播（连续时间动态演化）
- * @param network CfC网络句柄
- * @param input 输入向量 [input_size]
- * @param hidden_state 隐藏状态缓冲区 [hidden_size]（输入/输出）
- * @param cell_state 细胞状态缓冲区 [hidden_size]（输入/输出）
- * @param output 输出向量缓冲区 [output_size]
- * @return 0成功，负值失败
- */
-int cfc_forward(CfCNetwork* network, const float* input,
-                float* hidden_state, float* cell_state, float* output);
+/* M-001修复: cfc_forward声明由 cfc_network.h 提供（本文件第6行已include）。
+ * 此处不再重复声明，避免双文件同步维护负担。
+ * 调用方通过包含 cfc.h 即可获得完整CfC API（经由 cfc_network.h 传递）。 */
 
 /**
  * @brief CfC网络反向传播（梯度计算与参数更新）

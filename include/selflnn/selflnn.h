@@ -228,6 +228,56 @@ extern "C" {
  * 类型定义
  * ================================================================ */
 
+/* L-004修复: 不透明指针类型声明 —— 替代 void*，提供编译期类型安全
+ * 每个类型对应一个子系统单例，外部仅持有不透明指针，
+ * 内部结构体定义在各自模块的 .c 文件中通过 SELFLNN_IMPLEMENTATION 暴露。
+ * 多重前向声明在C11中合法（6.7.2.3p5），与子头文件中的声明兼容。 */
+typedef struct SelfCognition        SelfCognition;
+typedef struct MetaCognition        MetaCognition;
+typedef struct KnowledgeGraph       KnowledgeGraph;
+typedef struct GraphReasoner        GraphReasoner;
+typedef struct GpuContext           GpuContext;
+typedef struct DialogueProcessor    DialogueProcessor;
+typedef struct DialogueMemory       DialogueMemory;
+typedef struct PlanningSystem       PlanningSystem;
+typedef struct OnlineLearner        OnlineLearner;
+typedef struct MultiAgentSystem     MultiAgentSystem;
+typedef struct EvolutionEngine      EvolutionEngine;
+typedef struct AutoLearning         AutoLearning;
+typedef struct ReasoningEngine      ReasoningEngine;
+typedef struct CausalReasoningEngine CausalReasoningEngine;
+typedef struct MemoryManager        MemoryManager;
+typedef struct KnowledgeBase        KnowledgeBase;
+typedef struct KnowledgeInference   KnowledgeInference;
+typedef struct ThreadPool           ThreadPool;
+typedef struct SafetyMonitor        SafetyMonitor;
+typedef struct DataPipeline         DataPipeline;
+typedef struct SpeechRecognizer     SpeechRecognizer;
+typedef struct ProductDesignEngine  ProductDesignEngine;
+typedef struct MultiSystemControl   MultiSystemControl;
+typedef struct SelfProgrammingEngine SelfProgrammingEngine;
+typedef struct DistributedContext   DistributedContext;
+typedef struct NasSystem            NasSystem;
+typedef struct LaplaceUnified       LaplaceUnified;
+typedef struct AudioCapture         AudioCapture;
+typedef struct TtsEngine            TtsEngine;
+typedef struct ComputerOperation    ComputerOperation;
+typedef struct AuditLogger          AuditLogger;
+typedef struct ContentFilter        ContentFilter;
+typedef struct LoadBalancer         LoadBalancer;
+typedef struct RwLockMap            RwLockMap;
+typedef struct PbftSystem           PbftSystem;
+typedef struct TrainingPipeline     TrainingPipeline;
+typedef struct SecurityMonitorDeep  SecurityMonitorDeep;
+typedef struct TeachingLoop         TeachingLoop;
+typedef struct MultimodalTeaching   MultimodalTeaching;
+typedef struct UnifiedSignalProcessor UnifiedSignalProcessor;
+typedef struct UnifiedSignalProcessorAdvanced UnifiedSignalProcessorAdvanced;
+typedef struct UnifiedSignalProcessorTraining UnifiedSignalProcessorTraining;
+typedef struct TeachingSystem       TeachingSystem;
+typedef struct UnifiedState         UnifiedState;  /* 统一状态（与UnifiedLNNState互补） */
+/* LNN/UnifiedLNNState 已在 lnn.h / unified_lnn_state.h 中声明 */
+
 typedef struct {
     int state_dimension;
     int multimodal_channels;
@@ -376,56 +426,56 @@ SELFLNN_API const ProductDesignLabels* selflnn_get_product_design_labels(void);
  * ================================================================ */
 
 /* ---- 4a. 核心认知模块 ---- */
-SELFLNN_API void* selflnn_get_self_cognition(void); /* 自我认知系统 */
-SELFLNN_API void* selflnn_get_metacognition(void); /* 元认知系统 */
-SELFLNN_API void* selflnn_get_knowledge_graph(void); /* 知识图谱 */
-SELFLNN_API void* selflnn_get_graph_reasoner(void); /* P1: 图推理引擎 — 链路预测/多跳增强/嵌入相似度 */
-SELFLNN_API void* selflnn_get_gpu_context(void); /* GPU上下文 */
-SELFLNN_API void* selflnn_get_dialogue_processor(void);
-SELFLNN_API void* selflnn_get_dialogue_memory(void);    /* 对话记忆管理器（F-007修复） */
-SELFLNN_API void* selflnn_get_planning_system(void);
+SELFLNN_API SelfCognition*    selflnn_get_self_cognition(void);
+SELFLNN_API MetaCognition*    selflnn_get_metacognition(void);
+SELFLNN_API KnowledgeGraph*   selflnn_get_knowledge_graph(void);
+SELFLNN_API GraphReasoner*    selflnn_get_graph_reasoner(void);
+SELFLNN_API GpuContext*       selflnn_get_gpu_context(void);
+SELFLNN_API DialogueProcessor* selflnn_get_dialogue_processor(void);
+SELFLNN_API DialogueMemory*   selflnn_get_dialogue_memory(void);
+SELFLNN_API PlanningSystem*   selflnn_get_planning_system(void);
 
 /* ---- 4b. 学习与演化模块 ---- */
-SELFLNN_API void* selflnn_get_online_learner(void);
-SELFLNN_API void* selflnn_get_multi_agent_system(void); /* H-015集成 */
-SELFLNN_API void* selflnn_get_evolution_engine(void);
-SELFLNN_API void* selflnn_get_auto_learning(void);
+SELFLNN_API OnlineLearner*    selflnn_get_online_learner(void);
+SELFLNN_API MultiAgentSystem* selflnn_get_multi_agent_system(void);
+SELFLNN_API EvolutionEngine*  selflnn_get_evolution_engine(void);
+SELFLNN_API AutoLearning*     selflnn_get_auto_learning(void);
 
 /* ---- 4c. 推理与知识模块 ---- */
-SELFLNN_API void* selflnn_get_reasoning_engine(void);
-SELFLNN_API void* selflnn_get_causal_reasoning_engine(void); /* M-022: 因果推理→规划桥接 */
-SELFLNN_API void* selflnn_get_memory_manager(void);
-SELFLNN_API void* selflnn_get_knowledge_base(void);
-SELFLNN_API void* selflnn_get_knowledge_inference(void);
+SELFLNN_API ReasoningEngine*       selflnn_get_reasoning_engine(void);
+SELFLNN_API CausalReasoningEngine* selflnn_get_causal_reasoning_engine(void);
+SELFLNN_API MemoryManager*         selflnn_get_memory_manager(void);
+SELFLNN_API KnowledgeBase*         selflnn_get_knowledge_base(void);
+SELFLNN_API KnowledgeInference*    selflnn_get_knowledge_inference(void);
 
 /* ---- 4d. 基础设施模块 ---- */
-SELFLNN_API void* selflnn_get_thread_pool(void);
-SELFLNN_API void* selflnn_get_safety_monitor(void);
-SELFLNN_API void* selflnn_get_data_pipeline(void);
-SELFLNN_API void* selflnn_get_speech_recognizer(void);
-SELFLNN_API void selflnn_set_speech_recognizer(void* sr);
-SELFLNN_API void* selflnn_get_product_design_engine(void);  /* APP10: 产品设计引擎 */
-SELFLNN_API void selflnn_set_product_design_engine(void* engine);
-SELFLNN_API void* selflnn_get_multisystem_control(void);     /* APP13: 多系统控制 */
-SELFLNN_API void* selflnn_get_self_programming_engine(void); /* 自我编程引擎 */
-SELFLNN_API void* selflnn_get_distributed_context(void); /* 分布式上下文 */
-SELFLNN_API void* selflnn_get_nas_system(void); /* NAS系统 */
-SELFLNN_API void* selflnn_get_laplace_unified(void); /* 拉普拉斯 */
-SELFLNN_API void* selflnn_get_audio_capture(void); /* 音频采集 */
-SELFLNN_API void* selflnn_get_tts_engine(void); /* TTS引擎 */
-SELFLNN_API void* selflnn_get_computer_operation(void); /* 计算机操作 */
-SELFLNN_API void* selflnn_get_audit_logger(void); /* 审计日志 */
-SELFLNN_API void* selflnn_get_content_filter(void); /* 内容过滤 */
-SELFLNN_API void* selflnn_get_load_balancer(void); /* 负载均衡 */
-SELFLNN_API void* selflnn_get_rw_lock_map(void); /* 读写锁映射(F-009) */
-SELFLNN_API void* selflnn_get_pbft_system(void); /* PBFT共识(F-006) */
-SELFLNN_API void* selflnn_get_training_pipeline(void); /* 训练管线 */
-SELFLNN_API void  selflnn_set_training_pipeline(void* pipeline); /* 训练管线注册 */
-SELFLNN_API size_t selflnn_get_config_state_dimension(void); /* 获取状态维度 */
-SELFLNN_API void   selflnn_set_laplace_metrics(const float* metrics, int count); /* 拉普拉斯指标更新 */
-SELFLNN_API void* selflnn_get_security_monitor_deep(void); /* 深度安全监控 */
-SELFLNN_API void* selflnn_get_teaching_loop(void); /* 教学闭环系统 */
-SELFLNN_API void* selflnn_get_multimodal_teaching(void); /* 多模态教学系统 */
+SELFLNN_API ThreadPool*            selflnn_get_thread_pool(void);
+SELFLNN_API SafetyMonitor*         selflnn_get_safety_monitor(void);
+SELFLNN_API DataPipeline*          selflnn_get_data_pipeline(void);
+SELFLNN_API SpeechRecognizer*      selflnn_get_speech_recognizer(void);
+SELFLNN_API void                   selflnn_set_speech_recognizer(SpeechRecognizer* sr);
+SELFLNN_API ProductDesignEngine*   selflnn_get_product_design_engine(void);
+SELFLNN_API void                   selflnn_set_product_design_engine(ProductDesignEngine* engine);
+SELFLNN_API MultiSystemControl*    selflnn_get_multisystem_control(void);
+SELFLNN_API SelfProgrammingEngine* selflnn_get_self_programming_engine(void);
+SELFLNN_API DistributedContext*    selflnn_get_distributed_context(void);
+SELFLNN_API NasSystem*             selflnn_get_nas_system(void);
+SELFLNN_API LaplaceUnified*        selflnn_get_laplace_unified(void);
+SELFLNN_API AudioCapture*          selflnn_get_audio_capture(void);
+SELFLNN_API TtsEngine*             selflnn_get_tts_engine(void);
+SELFLNN_API ComputerOperation*     selflnn_get_computer_operation(void);
+SELFLNN_API AuditLogger*           selflnn_get_audit_logger(void);
+SELFLNN_API ContentFilter*         selflnn_get_content_filter(void);
+SELFLNN_API LoadBalancer*          selflnn_get_load_balancer(void);
+SELFLNN_API RwLockMap*             selflnn_get_rw_lock_map(void);
+SELFLNN_API PbftSystem*            selflnn_get_pbft_system(void);
+SELFLNN_API TrainingPipeline*      selflnn_get_training_pipeline(void);
+SELFLNN_API void                   selflnn_set_training_pipeline(TrainingPipeline* pipeline);
+SELFLNN_API size_t                 selflnn_get_config_state_dimension(void);
+SELFLNN_API void                   selflnn_set_laplace_metrics(const float* metrics, int count);
+SELFLNN_API SecurityMonitorDeep*   selflnn_get_security_monitor_deep(void);
+SELFLNN_API TeachingLoop*          selflnn_get_teaching_loop(void);
+SELFLNN_API MultimodalTeaching*    selflnn_get_multimodal_teaching(void);
 
 /* ---- 4e. 事件驱动即时自检 ---- */
 SELFLNN_API void dcpipeline_request_immediate_check(void);
@@ -433,9 +483,12 @@ SELFLNN_API int  dcpipeline_is_immediate_check_requested(void);
 SELFLNN_API void dcpipeline_clear_immediate_check(void);
 
 /* ---- 4f. 多模态处理模块 ---- */
-SELFLNN_API void* selflnn_get_unified_signal_processor(void);
-SELFLNN_API void* selflnn_get_unified_signal_processor_advanced(void);  /* P2-003: 高级自适应路由器 */
-SELFLNN_API void* selflnn_get_unified_signal_processor_training(void);  /* P2-003: 训练混合策略 */
+SELFLNN_API UnifiedSignalProcessor*          selflnn_get_unified_signal_processor(void);
+SELFLNN_API UnifiedSignalProcessorAdvanced*  selflnn_get_unified_signal_processor_advanced(void);
+SELFLNN_API UnifiedSignalProcessorTraining*  selflnn_get_unified_signal_processor_training(void);
+
+/* P2-007修复: selflnn_get_teaching_system的显式声明 */
+SELFLNN_API TeachingSystem* selflnn_get_teaching_system(void);
 
 /* ================================================================
  * 5. 单一LNN模型管理 —— 全模态共享同一个连续动态系统
@@ -443,20 +496,18 @@ SELFLNN_API void* selflnn_get_unified_signal_processor_training(void);  /* P2-00
  *    任何模块禁止自行调用 lnn_create 创建独立LNN。
  * ================================================================ */
 
-SELFLNN_API void* selflnn_get_lnn(void);
-SELFLNN_API void* selflnn_get_shared_lnn(void);
+SELFLNN_API LNN* selflnn_get_lnn(void);
+SELFLNN_API LNN* selflnn_get_shared_lnn(void);
 SELFLNN_API LNN* selflnn_get_or_create_lnn(const LNNConfig* config);
-SELFLNN_API void* selflnn_get_unified_lnn_state(void);
-SELFLNN_API void* selflnn_get_unified_state(void);
+SELFLNN_API UnifiedLNNState* selflnn_get_unified_lnn_state(void);
+SELFLNN_API UnifiedState*    selflnn_get_unified_state(void);
 SELFLNN_API void selflnn_enforce_single_lnn(void);
 SELFLNN_API int selflnn_is_single_lnn_enforced(void);
 SELFLNN_API int selflnn_register_module(int module_id, void* instance, int uses_shared_lnn);
 SELFLNN_API int selflnn_module_uses_shared_lnn(int module_id);
 
-/* LNN并发安全：带锁保护的前向传播
- * 在调用lnn_forward前后自动加锁/解锁，确保并发调用不会互相污染CfC隐藏状态。
- * 所有多线程环境下对LNN的前向传播调用应使用此函数替代直接调用lnn_forward。 */
-SELFLNN_API int selflnn_safe_forward(void* lnn, const float* input, float* output);
+/* LNN并发安全：带锁保护的前向传播 */
+SELFLNN_API int selflnn_safe_forward(LNN* lnn, const float* input, float* output);
 
 /* ================================================================
  * 6. 训练与检查点 —— 模型训练/加载/保存

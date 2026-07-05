@@ -264,10 +264,12 @@ int selflnn_config_save_to_file(const char* filepath, const SystemConfig* config
     fprintf(fp, "  \"websocket_port\": %d,\n", config->websocket_port > 0 ? config->websocket_port : SELFLNN_WEBSOCKET_PORT);
     fprintf(fp, "  \"distributed_port\": %d,\n", config->distributed_port > 0 ? config->distributed_port : 8765);
     if (config->model_path && config->model_path[0]) {
-        fprintf(fp, "  \"model_path\": \"%s\"\n", config->model_path);
+        fprintf(fp, "  \"model_path\": \"%s\",\n", config->model_path);
     } else {
-        fprintf(fp, "  \"model_path\": \"\"\n");
+        fprintf(fp, "  \"model_path\": \"\",\n");
     }
+    /* 【A-001修复】补全 mixed_precision_mode 字段保存 */
+    fprintf(fp, "  \"mixed_precision_mode\": %d\n", config->mixed_precision_mode);
     fprintf(fp, "}\n");
 
     fclose(fp);

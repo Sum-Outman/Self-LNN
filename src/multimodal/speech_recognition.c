@@ -25,8 +25,8 @@
 #include <stdio.h>
 #include <float.h>
 
-/* rng_uniform声明来自math_utils.h */
-extern float rng_uniform(float min, float max);
+/* P2-FIX-03: 用正式include替代裸extern声明，确保类型安全 */
+#include "selflnn/utils/math_utils.h"
 
 /* =============================================================== *
  * 常量定义                                                         *

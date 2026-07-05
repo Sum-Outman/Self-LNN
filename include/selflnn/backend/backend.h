@@ -221,6 +221,16 @@ typedef enum {
     API_POST_ROBOT_PATH_PLAN = 310,        /**< 机器人路径规划 */
     API_POST_KG_ADD = 321,                 /**< 知识图谱添加节点/边 POST /api/kg/add */
     API_DELETE_KG_DELETE = 322,            /**< 知识图谱删除节点/边 DELETE /api/kg/delete */
+    
+    /* 【CRIT-2修复】知识图谱命名枚举（原使用硬编码314-320） */
+    API_GET_KG_STATS = 314,                /**< 知识图谱统计 GET /api/kg/stats */
+    API_GET_KG_PAGERANK = 315,             /**< PageRank排名 GET /api/kg/pagerank */
+    API_GET_KG_COMMUNITIES = 316,          /**< 社区检测状态 GET /api/kg/communities */
+    API_POST_KG_PATH = 317,                /**< 实体间路径查询 POST /api/kg/path */
+    API_POST_KG_SEARCH = 318,              /**< 图谱语义搜索 POST /api/kg/search */
+    API_POST_KG_SPARQL = 319,              /**< SPARQL查询 POST /api/kg/sparql */
+    API_GET_KG_VISUALIZE = 320,            /**< 图谱可视化JSON导出 GET /api/kg/visualize */
+    
     API_POST_CAMERA_SWITCH = 325,          /**< 切换摄像头 */
     API_POST_VIDEO_QUALITY = 326,          /**< 设置视频质量 */
 
@@ -445,6 +455,9 @@ typedef enum {
     /* ===== 产品设计 ===== */
     API_POST_PRODUCT_DESIGN = 270,         /**< 产品设计生成 */
     API_GET_PRODUCT_SPEC = 271,            /**< 获取产品规格 */
+    /* 【CRIT-3修复】产品设计状态和使用日志命名枚举 */
+    API_GET_PRODUCT_STATUS = 300,          /**< 获取产品设计引擎状态 /api/product/status */
+    API_GET_USAGE_LOGS = 301,              /**< 获取系统使用日志 /api/usage-logs */
     API_POST_TRAINING_SCHEDULE = 272, /**< 创建训练计划 /api/training/schedule */
 
     /* ===== H-012: 串口数据接收独立端点 ===== */

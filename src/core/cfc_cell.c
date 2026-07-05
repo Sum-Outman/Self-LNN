@@ -59,6 +59,15 @@
         } \
     } while(0)
 
+/* P1-005修复: 文件作用域线程局部存储，替代函数内static __thread
+ * MSVC不支持函数作用域的__declspec(thread) static，
+ * 将xs_state提升到文件作用域解决跨平台兼容性 */
+#ifdef _WIN32
+static __declspec(thread) unsigned long long xs_state[2] = {0, 0};
+#else
+static _Thread_local unsigned long long xs_state[2] = {0, 0};
+#endif
+
 /**
  * @brief CfC单元状态缓冲区安全检查宏（用于返回void的函数）
  * 当状态缓冲区为空时直接返回，防止空指针崩溃
@@ -78,9 +87,9 @@
  * @param seed 种子值（保留接口兼容性，实际使用密码学安全随机数）
  */
 static float random_uniform_seeded(float min, float max, unsigned int seed) {
-    /* seed非零时使用确定性Xorshift128+保证可复现，seed=0时使用密码学安全随机数 */
+    /* P1-005修复: 将static __thread改为文件作用域_Thread_local，消除跨平台兼容性问题
+     * MSVC不支持函数作用域内的__declspec(thread) static变量 */
     if (seed != 0) {
-        static __thread unsigned long long xs_state[2] = {0, 0};
         if (xs_state[0] == 0 && xs_state[1] == 0) {
             xs_state[0] = (unsigned long long)seed ^ 0xDEADBEEFCAFEBABEULL;
             xs_state[1] = (unsigned long long)(~seed) ^ 0x8BADF00DC0FFEEEEULL;
@@ -732,7 +741,9 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
 /* output_gate保存缓冲区 */
         !cell->state->saved_output_gate ||
         /* Z3-001: 前向传播tau缓冲区 */
-        !cell->forward_tau_used) {
+        !cell->forward_tau_used ||
+        /* P0-H001修复: ode_rhs_temp缓冲区NULL检查, 防止ODE求解器解引用NULL */
+        !cell->state->ode_rhs_temp) {
         cfc_cell_free(cell);
         return NULL;
     }
@@ -932,6 +943,8 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
     if (cell->config.use_auto_solver) {
         cell->enhanced_config = safe_malloc(sizeof(CfcEnhancedConfig));
         *(CfcEnhancedConfig*)cell->enhanced_config = cfc_enhanced_default_config();
+        /* D-011修复: 设置类型标签用于void*安全检查 */
+        cell->enhanced_config_type_tag = 0x43464345; /* "CFCE" */
         ((CfcEnhancedConfig*)cell->enhanced_config)->enable_auto_solver = 1;
         cell->enhanced_state = cfc_enhanced_state_create();
         if (!cell->enhanced_state) {
@@ -1130,6 +1143,7 @@ void cfc_cell_free(CfCCell* cell) {
         cell->enhanced_state = NULL;
     }
     safe_free((void**)&cell->enhanced_config);
+    cell->enhanced_config_type_tag = 0; /* D-011修复: 释放后清零类型标签 */
 
     // 释放四元数CfC缓冲区（P2.4）
     safe_free((void**)&cell->quaternion_weights);
@@ -1643,8 +1657,11 @@ static int cfc_cell_dp54_step(CfCCell* cell, const float* input,
                                const float* prev_state, float delta_t,
                                float* output)
 {
+    /* 【P0-001修复】入口参数空指针检查，防止调用链传递NULL导致崩溃 */
+    if (!cell || !prev_state || !output) return -1;
     (void)input;
     size_t n = cell->config.hidden_size;
+    if (n == 0) return -1;
     /* 使用堆分配替代VLA栈分配，避免16KB栈溢出风险 */
     float* y_state = (float*)safe_malloc(n * sizeof(float));
     float* workspace = (float*)safe_malloc(ode_dp54_workspace_size(n) * sizeof(float));
@@ -1683,8 +1700,11 @@ static int cfc_cell_rosenbrock_step(CfCCell* cell, const float* input,
                                      const float* prev_state, float delta_t,
                                      float* output)
 {
+    /* 【P0-001修复】入口参数空指针检查 */
+    if (!cell || !prev_state || !output) return -1;
     (void)input;
     size_t n = cell->config.hidden_size;
+    if (n == 0) return -1;
     RosenbrockConfig cfg = cell->config.rosenbrock_config;
 
     /* 当配置了有效的自适应容差参数时，优先使用自适应步长求解器 */
@@ -1777,7 +1797,10 @@ static int cfc_cell_symplectic_step(CfCCell* cell, const float* input,
                                      const float* prev_state, float delta_t,
                                      float* output)
 {
+    /* 【P0-001修复】入口参数空指针检查 */
+    if (!cell || !prev_state || !output) return -1;
     size_t n = cell->config.hidden_size;
+    if (n == 0) return -1;
 
 /* 使用input_size而非hidden_size(n)作为memcpy大小，避免内存越界 */
     if (cell->state->input_buffer && input)
@@ -2017,7 +2040,8 @@ static int cfc_cell_rosenbrock_parallel(CfCCell* cell, const float* input,
     /* 并行RHS求值：计算雅可比矩阵 */
     float* J = cell->state->rosenbrock_jacobian;
     if (J) {
-        memset(J, 0, n * n * sizeof(float));
+        /* R-005修复: 使用size_t安全乘法避免int溢出。n*n*sizeof(float)可能超出INT_MAX。 */
+        memset(J, 0, (size_t)n * (size_t)n * sizeof(float));
         float eps = cell->config.rosenbrock_config.finite_diff_eps > 0.0f ?
                      cell->config.rosenbrock_config.finite_diff_eps : 1e-6f;
 
@@ -2291,10 +2315,16 @@ int cfc_cell_forward(CfCCell* cell, const float* input, float* hidden_state) {
     
     // 自动求解器选择（P3.4）：若启用，则在每个前向步骤前检测刚度并自动切换求解器
     if (cell->config.use_auto_solver && cell->enhanced_state) {
+        /* D-011修复: 添加enhanced_config类型安全检查 */
+        CfcEnhancedConfig* enh_cfg = NULL;
+        if (cell->enhanced_config != NULL && cell->enhanced_config_type_tag == 0x43464345) {
+            /* 类型标签 0x43464345 = "CFCE" 验证enhanced_config为有效CfcEnhancedConfig */
+            enh_cfg = (CfcEnhancedConfig*)cell->enhanced_config;
+        }
         cfc_select_solver_by_stiffness(cell,
                                        cell->state->input_buffer,
                                        cell->state->state,
-                                       cell->enhanced_config ? &((CfcEnhancedConfig*)cell->enhanced_config)->auto_solver : NULL,
+                                       enh_cfg ? &enh_cfg->auto_solver : NULL,
                                        cell->enhanced_state);
     }
 
@@ -6040,6 +6070,7 @@ int cfc_cell_enable_hierarchical(CfCCell* cell, const HierarchicalCfCConfig* con
         safe_free((void**)&cell->hierarchical_gate_weight_grad);
         safe_free((void**)&cell->hierarchical_activation_weight_grad);
         safe_free((void**)&hd);
+        cell->hierarchical_data = NULL; /* P1-005b修复: 失败路径置NULL防止cfc_cell_free双重释放 */
         return -1;
     }
     float fast_tau = config->fast_time_constant;

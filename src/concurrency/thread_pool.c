@@ -1376,7 +1376,6 @@ int thread_pool_resize(ThreadPool* pool, size_t new_num_threads) {
     // 线程池正在运行：执行运行时调整
     if (new_num_threads < old_num_threads) {
         // 减少线程数量：标记多余线程为停止状态
-        // 实际线程将在完成当前任务后退出
         for (size_t i = new_num_threads; i < old_num_threads; i++) {
             pool->threads[i].state = THREAD_STATE_STOPPING;
         }
@@ -1387,6 +1386,14 @@ int thread_pool_resize(ThreadPool* pool, size_t new_num_threads) {
 #else
         pthread_cond_broadcast(&pool->task_cond);
 #endif
+        
+        /* FIX-010修复: 释放旧队列数组和锁数组，防止缩减后内存泄漏 */
+        for (size_t i = new_num_threads; i < old_num_threads; i++) {
+            if (pool->thread_queues) {
+                ThreadPoolTask* q = pool->thread_queues[i % old_num_threads];
+                while (q) { ThreadPoolTask* n = q->next; safe_free((void**)&q); q = n; }
+            }
+        }
         
         // 更新配置
         pool->config.num_threads = new_num_threads;

@@ -10,7 +10,7 @@
  *            堆分配CTC矩阵、扩展字符解码映射
  */
 #include "selflnn/multimodal/ocr.h"
-#include "selflnn/core/lnn.h"
+/* C-001修复: 移除冗余 selflnn/core/lnn.h include。cfc_ocr_net.c内部ODE/softmax/空间编码均为自实现,不调用任何lnn_*函数。 */
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/secure_random.h"
 #include <stdlib.h>

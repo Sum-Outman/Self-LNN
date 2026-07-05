@@ -18,8 +18,8 @@
 #include <math.h>
 #include <float.h>
 
-/* rng_uniform声明 */
-extern float rng_uniform(float min, float max);
+/* FIX-EXTERN9: math_utils.h已包含，移除冗余extern声明 */
+#include "selflnn/utils/math_utils.h"
 
 /* =============================================================== *
  * 内部辅助函数                                                     *

@@ -1812,6 +1812,17 @@ int ode_rosenbrock_adaptive_solve(ODERHSFunc rhs, void* ctx,
 
         if (h < min_step) h = min_step;
         if (h > max_step) h = max_step;
+        /* P1-008修复: NaN/Inf检测和步长下溢检测
+         * 原代码仅检测rejected>10，但当error为NaN时（IEEE 754规定NaN比较永远为false），
+         * 既不进入接受也不进入拒绝分支，导致无限循环。 */
+        if (isnan(error) || isinf(error)) {
+            log_warn("[ODE] 自适应求解器遇到NaN/Inf误差，中止步进");
+            break;
+        }
+        if (h <= min_step * 1.5f) {
+            log_warn("[ODE] 步长下降到min_step边界，中止步进");
+            break;
+        }
         if (rejected > 10) break;
     }
 

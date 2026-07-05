@@ -2054,9 +2054,18 @@ int multimodal_unified_pipeline(const float** modality_data, const int* modality
             for (int m = 0; m < n_mod; m++) input_dims[m] = modality_dims[m];
             int latent_dim = MM_FUSION_DEFAULT_LATENT;
             int hidden_dim = (output_dim < MM_FUSION_DEFAULT_HIDDEN) ? output_dim : MM_FUSION_DEFAULT_HIDDEN;
-            /* 静态缓存CfC融合状态，避免每次调用init/free导致无法学习 */
+            /* P2-FIX-05: 添加互斥锁保护静态缓存，消除多线程竞态条件
+             * cached_fusion在无锁环境下被多线程共享，存在use-after-free风险 */
             static MmCfcFusionState* cached_fusion = NULL;
             static int cached_n_mod = 0;
+            #ifdef _WIN32
+            static CRITICAL_SECTION fusion_cache_lock; static int lock_inited = 0;
+            if (!lock_inited) { InitializeCriticalSection(&fusion_cache_lock); lock_inited = 1; }
+            EnterCriticalSection(&fusion_cache_lock);
+            #else
+            static pthread_mutex_t fusion_cache_lock = PTHREAD_MUTEX_INITIALIZER;
+            pthread_mutex_lock(&fusion_cache_lock);
+            #endif
             if (!cached_fusion || cached_n_mod != n_mod) {
                 if (cached_fusion) { mm_cfc_unified_fusion_free(cached_fusion); }
                 cached_fusion = mm_cfc_unified_fusion_init(
@@ -2064,6 +2073,11 @@ int multimodal_unified_pipeline(const float** modality_data, const int* modality
                     MM_FUSION_DEFAULT_ODE_STEPS, MM_FUSION_DEFAULT_TAU, MM_FUSION_DEFAULT_DT);
                 cached_n_mod = n_mod;
             }
+            #ifdef _WIN32
+            LeaveCriticalSection(&fusion_cache_lock);
+            #else
+            pthread_mutex_unlock(&fusion_cache_lock);
+            #endif
             safe_free((void**)&input_dims);
             if (cached_fusion) {
                 float *fusion_out = (float*)safe_calloc((size_t)hidden_dim, sizeof(float));

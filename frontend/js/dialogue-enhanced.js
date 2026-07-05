@@ -20,6 +20,10 @@ class DialogueEnhanced {
         this.multimodalEnabled = false;
         this.lastCapturedImage = null;
 
+        /* S-008修复: 显式声明流式对话回调属性，避免隐式外部赋值风险 */
+        this.onDialogueToken = null;       /* 流式token回调(P0-001修复) */
+        this.onDialogueResponse = null;    /* 完整响应回调 */
+
         this.onVoiceInputStart = null;
         this.onVoiceInputStop = null;
         this.onVoiceInputResult = null;
@@ -32,6 +36,11 @@ class DialogueEnhanced {
     get isRecording() { return this._capturer ? this._capturer.isRecording : false; }
 
     async startVoiceInput(micStream) {
+        /* P1-F17修复: 防御性this上下文检查 */
+        if (!(this instanceof DialogueEnhanced)) {
+            if (window.g_dialogueEnhanced) return window.g_dialogueEnhanced.startVoiceInput(micStream);
+            return { success: false, error: 'DialogueEnhanced实例不可用' };
+        }
         if (this.isRecording) return;
         if (this._capturer) { this._capturer.destroy(); this._capturer = null; }
         try {
@@ -158,9 +167,7 @@ class DialogueEnhanced {
             this.audioPlayer.src = '';
             this.audioPlayer = null;
         }
-        if (window.speechSynthesis) {
-            window.speechSynthesis.cancel();
-        }
+        /* P1-F03修复: 根据"禁止任何降级处理"规范，移除speechSynthesis浏览器TTS残留调用 */
         this.isSpeaking = false;
         this.isPlayingQueue = false;
     }
@@ -169,9 +176,7 @@ class DialogueEnhanced {
         if (this.audioPlayer && !this.audioPlayer.paused) {
             this.audioPlayer.pause();
         }
-        if (window.speechSynthesis && window.speechSynthesis.speaking) {
-            window.speechSynthesis.pause();
-        }
+        /* P1-F03修复: 移除speechSynthesis.pause残留 */
     }
 
     resumeSpeaking() {

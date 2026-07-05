@@ -288,6 +288,27 @@ int speech_recognizer_load_model(SpeechRecognizer* recognizer,
 float speech_ctc_compute_loss(const float* logits, int num_frames,
                                const int* labels, int num_labels, int vocab_size);
 
+/* ============ D-009修复: LNN网络绑定接口 ============ */
+
+/**
+ * @brief 设置语音识别器的共享LNN网络指针
+ *
+ * 语音识别器使用共享的LNN实例进行CfC液态状态演化，
+ * 而非维护私有网络。通过此接口绑定全局LNN实例。
+ *
+ * @param recognizer 语音识别器句柄
+ * @param lnn 共享LNN实例指针（void*以支持前向声明）
+ */
+void speech_recognizer_set_lnn_network(SpeechRecognizer* recognizer, void* lnn);
+
+/**
+ * @brief 获取语音识别器当前绑定的LNN网络指针
+ *
+ * @param recognizer 语音识别器句柄
+ * @return LNN实例指针，未绑定时返回NULL
+ */
+void* speech_recognizer_get_lnn_network(const SpeechRecognizer* recognizer);
+
 #ifdef __cplusplus
 }
 #endif

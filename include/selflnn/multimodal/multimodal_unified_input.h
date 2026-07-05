@@ -21,9 +21,17 @@ extern "C" {
 #endif
 
 #define SELFLNN_MAX_CONTROL_DIM 64  /**< 控制信号最大维度: 64覆盖典型机器人关节(7轴臂×2=14) + 移动基(6DOF) + 灵巧手(16) + 冗余控制, 共50+维预留安全余量(L-001: 可通过编译宏覆盖) */
+/* P2-FIX-01: 添加#ifndef保护避免与unified_signal_processor_advanced.h中的重定义冲突
+ * 两个文件都定义了SELFLNN_MAX_MODALITIES但值不同(9 vs 4)，此处定义权威值9 */
+#ifndef SELFLNN_MAX_MODALITIES
 #define SELFLNN_MAX_MODALITIES 9
+#endif
 #define SELFLNN_UNIFIED_INPUT_DIM (SELFLNN_MAX_MODALITIES * SELFLNN_MAX_CONTROL_DIM)
 #define SELFLNN_UNIFIED_PROJECTION_DIM 256
+/* P2-FIX-07: 信号有效性阈值，可被编译宏覆盖以满足不同模态需求 */
+#ifndef SELFLNN_SIGNAL_VALIDITY_THRESHOLD
+#define SELFLNN_SIGNAL_VALIDITY_THRESHOLD 1e-10f
+#endif
 
 /**
  * @brief 统一输入方法枚举

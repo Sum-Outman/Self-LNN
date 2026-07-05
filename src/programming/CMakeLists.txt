@@ -19,7 +19,7 @@ target_include_directories(selflnn_programming PUBLIC
 target_link_libraries(selflnn_programming PRIVATE 
     selflnn_core 
     selflnn_memory
-    selflnn_utils
+    utils
 )
 
 # 安装规则

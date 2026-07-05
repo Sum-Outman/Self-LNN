@@ -21,8 +21,7 @@
 #include "selflnn/training/distributed_training.h" /* 分布式梯度同步 */
 #include "selflnn/evolution/evolution_engine.h" /* 结构变异 */
 
-extern void* selflnn_get_speech_recognizer(void);
-/* selflnn_get_distributed_context 已在 selflnn.h 中声明（M-031修复，不再使用extern绕过） */
+#include "selflnn/selflnn.h"                        /* 统一SELFLNN接口，含selflnn_get_speech_recognizer等辅助函数 */
 
 #include "selflnn/core/optimizer.h"
 #include "selflnn/utils/memory_utils.h"
@@ -443,7 +442,16 @@ static int pipeline_distributed_gradient_sync(TrainingPipeline* pipeline) {
     if ((wc == 0 && bc == 0) || (!weight_grads && !bias_grads)) return 0;
 
     /* 将权重梯度和偏置梯度合并到一个连续缓冲区用于AllReduce */
+    /* 【P0-002修复】整数溢出检查：wc+bc和total_params*sizeof(float)均需验证 */
+    if (wc > SIZE_MAX - bc) {
+        log_error("[分布式同步] wc+bc整数溢出 (wc=%zu, bc=%zu)", wc, bc);
+        return -1;
+    }
     size_t total_params = wc + bc;
+    if (total_params > SIZE_MAX / sizeof(float)) {
+        log_error("[分布式同步] 缓冲区大小溢出 (total_params=%zu)", total_params);
+        return -1;
+    }
     float* combined_grads = (float*)safe_malloc(total_params * sizeof(float));
     if (!combined_grads) return -1;
 
@@ -760,7 +768,12 @@ static RawImage* load_raw_rgb_image(const char* filepath) {
 
     fseek(fp, *(int*)&header[10], SEEK_SET);
     for (int y = height - 1; y >= 0; y--) {
-        fread(raw + (size_t)y * width * 3, 1, (size_t)(width * 3), fp);
+        /* P2-FIX-22: BMP像素行fread添加返回值检查 */
+        if (fread(raw + (size_t)y * width * 3, 1, (size_t)(width * 3), fp) != (size_t)(width * 3)) {
+            fclose(fp);
+            safe_free((void**)&raw);
+            return NULL;
+        }
         if (row_size > width * 3) fseek(fp, row_size - width * 3, SEEK_CUR);
     }
     fclose(fp);
@@ -849,7 +862,12 @@ static int extract_audio_features(const char* filepath,
 
     short* pcm = (short*)safe_malloc(num_samples * sizeof(short));
     if (!pcm) { fclose(fp); return -1; }
-    fread(pcm, sizeof(short), num_samples, fp);
+    /* P2-FIX-22: PCM音频数据fread添加返回值检查 */
+    if (fread(pcm, sizeof(short), num_samples, fp) != num_samples) {
+        safe_free((void**)&pcm);
+        fclose(fp);
+        return -1;
+    }
     fclose(fp);
 
     size_t out_pos = 0;
@@ -978,10 +996,16 @@ static int scan_data_directory(const char* dirpath, char files[][MAX_FILEPATH], 
         FindClose(hFind);
     }
 #else
-    char cmd[MAX_FILEPATH + 128];
-    snprintf(cmd, sizeof(cmd), "ls %s/*.bin %s/*.bmp %s/*.BMP %s/*.wav %s/*.WAV %s/*.pcm %s/*.PCM 2>/dev/null | head -%d",
+    /* S-005修复: snprintf中dirpath被重复7次使用，当dirpath接近MAX_FILEPATH时
+     * sizeof(cmd)仅为MAX_FILEPATH+128可能导致缓冲区溢出。
+     * 改用动态分配确保安全。 */
+    size_t cmd_needed = 120 + 7 * strlen(dirpath) + 20; /* 格式串长度 + 7*路径 + head -%d */
+    char* cmd = (char*)safe_malloc(cmd_needed);
+    if (!cmd) return 0;
+    snprintf(cmd, cmd_needed, "ls %s/*.bin %s/*.bmp %s/*.BMP %s/*.wav %s/*.WAV %s/*.pcm %s/*.PCM 2>/dev/null | head -%d",
              dirpath, dirpath, dirpath, dirpath, dirpath, dirpath, dirpath, max_files);
     FILE* fp = popen(cmd, "r");
+    safe_free((void**)&cmd);
     if (!fp) return 0;
     char line[MAX_FILEPATH];
     while (fgets(line, sizeof(line), fp) && count < max_files) {

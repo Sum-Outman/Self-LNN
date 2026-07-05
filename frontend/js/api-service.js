@@ -57,7 +57,17 @@ var SUBSYSTEM_ENDPOINT_MAP = {
     '/camera':        'camera',
     '/laplace':       'laplace',
     '/auto-learn':    'auto_learn',
-    '/capability':    'capability'
+    '/capability':    'capability',
+    /* 【M-001修复】补全缺失的子系统映射，避免熔断器误判为unknown */
+    '/kg':            'knowledge',    /* 知识图谱子系统 */
+    '/task':          'agi',          /* 任务调度→AGI */
+    '/model':         'system',       /* 模型管理→系统 */
+    '/system':        'system',       /* 系统管理 */
+    '/decision':      'reasoning',    /* 决策日志→推理 */
+    '/sensor':        'sensor',       /* 传感器管道 */
+    '/fleet':         'robot',        /* 机器人集群 */
+    '/multi-agent':   'agent',        /* 多智能体 */
+    '/usage-logs':    'system'        /* 使用日志→系统 */
 };
 
 class ApiService {
@@ -226,7 +236,8 @@ class ApiService {
 /* 配置驱动查找 */
         var path = endpoint.replace(/^https?:\/\/[^\/]+/, '');
         /* BUG-15修复：使用Object.keys避免for...in遍历原型链上的属性 */
-        var keys = Object.keys(SUBSYSTEM_ENDPOINT_MAP);
+        /* P2-FIX-10修复：按前缀长度降序排序，确保/api-docs优先于/api匹配 */
+        var keys = Object.keys(SUBSYSTEM_ENDPOINT_MAP).sort(function(a, b) { return b.length - a.length; });
         for (var i = 0; i < keys.length; i++) {
             var prefix = keys[i];
             if (path.indexOf(prefix) === 0) {
@@ -1584,36 +1595,10 @@ class ApiService {
     }
     
     /**
-     * 开始训练任务
+     * 开始训练任务 - C-006修复: 改为startTraining别名，消除重复代码
      */
     async startTrainingJob(config) {
-        try {
-            // 尝试调用后端API开始训练任务
-            const response = await this.request('/training/start', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify(config)
-            });
-            
-            if (!response.ok) {
-                throw new Error(`HTTP错误: ${response.status}`);
-            }
-            
-            const data = await response.json();
-            return {
-                success: true,
-                data: data
-            };
-        } catch (error) {
-            console.error('开始训练任务失败:', error);
-            return {
-                success: false,
-                error: error.message || '训练任务后端连接失败，请检查服务器状态',
-                data: null
-            };
-        }
+        return await this.startTraining(config);
     }
     
     /**
@@ -1648,6 +1633,14 @@ class ApiService {
         }
     }
     
+    /**
+     * 停止训练任务 - 别名，供外部统一调用
+     * C-005修复: 为agi-controller.js和voice-command.js提供stopTraining入口
+     */
+    async stopTraining() {
+        return await this.stopTrainingJob();
+    }
+
     /**
      * 停止训练任务
      */
@@ -1799,16 +1792,32 @@ class ApiService {
         }
     }
 
-    async getModelStatus() {
+    /**
+     * 获取模型信息 - C-012修复: 使用正确的/model/info端点
+     */
+    async getModelInfo() {
         try {
-            const response = await this.request('/status');
+            const response = await this.request('/model/info');
             if (!response.ok) throw new Error('HTTP错误: ' + response.status);
             const data = await response.json();
-            /* 从系统状态中提取模型相关信息 */
+            return { success: true, data: data };
+        } catch (error) {
+            return { success: false, error: error.message, data: null };
+        }
+    }
+
+    /**
+     * 获取模型状态 - C-011修复: 使用/model/info端点而非/status
+     */
+    async getModelStatus() {
+        try {
+            const response = await this.request('/model/info');
+            if (!response.ok) throw new Error('HTTP错误: ' + response.status);
+            const data = await response.json();
             return {
                 success: true,
                 data: {
-                    model: data.lnn || data,
+                    model: data.lnn || data.model || data,
                     status: data.status || 'unknown',
                     uptime: data.uptime || 0
                 }
@@ -2072,7 +2081,8 @@ class ApiService {
         }
     }
 
-    async getSensorStatus() {
+    /* L-013修复: 重命名方法，明确语义为机器人传感器而非通用传感器状态 */
+    async getRobotSensorStatus() {
         try {
             const response = await this.request('/robot/sensor');
             if (!response.ok) {
@@ -2085,6 +2095,9 @@ class ApiService {
             return { success: false, error: error.message, data: null };
         }
     }
+
+    /* 向后兼容别名 */
+    async getSensorStatus() { return await this.getRobotSensorStatus(); }
 
     async getSecurityStatus() {
 /* 原调用/status通用端点改为/safety/status安全专用端点 */
@@ -3103,7 +3116,7 @@ class ApiService {
      */
     stopMediaStream(handle) {
         if (handle && typeof handle.stop === 'function') {
-            handle.stop;
+            handle.stop();
             return { success: true };
         }
         return { success: false, error: '无效的控制句柄' };
@@ -3199,8 +3212,8 @@ class ApiService {
             var ctx = new AudioCtx;
             duration = duration || 500;
             frequency = frequency || 440;
-            var oscillator = ctx.createOscillator;
-            var gainNode = ctx.createGain;
+            var oscillator = ctx.createOscillator();
+            var gainNode = ctx.createGain();
             oscillator.type = 'sine';
             oscillator.frequency.value = frequency;
             gainNode.gain.setValueAtTime(0.3, ctx.currentTime);
@@ -3897,10 +3910,14 @@ class ApiService {
     /**
      * 导出仿真场景（通过后端 simulation/command 端点配合导出请求）
      * POST /api/simulation/command → body: { cmd: "export" }
+     * 【C-002修复】原使用GET方法，但后端声明为POST，已修正
      */
     async simulationExport() {
         try {
-            var resp = await this.request('/simulation/command', { method: 'GET' });
+            var resp = await this.request('/simulation/command', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ cmd: 'export' })
+            });
             var data = await resp.json();
             return { success: resp.ok, data: data };
         } catch (e) { return { success: false, error: e.message }; }
@@ -4599,12 +4616,11 @@ class ApiService {
         } catch (e) { return { success: false, error: e.message }; }
     }
 
+    /* 【H-001修复】GET请求不应携带body（违反HTTP规范），改为查询参数 */
     async fileList(dir) {
         try {
-            var resp = await this.request('/files/list', {
-                method: 'GET', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ dir: dir || '.' })
-            });
+            var queryDir = encodeURIComponent(dir || '.');
+            var resp = await this.request('/files/list?dir=' + queryDir, { method: 'GET' });
             var data = await resp.json();
             return { success: resp.ok, data: data };
         } catch (e) { return { success: false, error: e.message }; }
@@ -4620,17 +4636,9 @@ class ApiService {
         } catch (e) { return { success: false, error: e.message }; }
     }
 
-    /**
-     * I-L03: 获取帕累托前沿
-     * GET /api/evolution/pareto → 返回多目标优化的帕累托前沿数据
-     */
-    async getParetoFront() {
-        try {
-            var resp = await this.request('/evolution/pareto', {method: 'GET'});
-            var data = await resp.json();
-            return { success: resp.ok, data: data };
-        } catch (e) { return { success: false, error: e.message }; }
-    }
+    /* 【C-001修复】移除getParetoFront()重复方法，统一使用getEvolutionPareto()。
+     * 原getParetoFront用GET调用/evolution/pareto，但后端声明为POST，会导致405错误。
+     * getEvolutionPareto()已正确使用POST方法，无需重复。 */
 
     /* ==================== 机器人坐标控制 API ==================== */
 
@@ -4696,9 +4704,10 @@ class ApiService {
         } catch (e) { return { success: false, error: e.message }; }
     }
 
+    /* 【C-003修复】原使用GET方法，但后端声明为POST，已修正 */
     async exportKnowledge() {
         try {
-            var resp = await this.request('/knowledge/export', { method: 'GET' });
+            var resp = await this.request('/knowledge/export', { method: 'POST' });
             var data = await resp.json();
             return { success: resp.ok, data: data };
         } catch (e) { return { success: false, error: e.message }; }
@@ -6625,6 +6634,149 @@ class ApiService {
             var d = await r.json();
             return { success: r.ok, data: d };
         } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* === H-007修复: 后端已实现但前端缺失的API封装补充(20个) === */
+
+    /* --- GPU诊断与基准测试 --- */
+    /* getGpuDiagnostic: 获取GPU诊断报告 */
+    /* GET /api/gpu/diagnostic */
+    async getGpuDiagnostic() {
+        try { var r = await this.request('/gpu/diagnostic'); var d = await r.json(); return { success: r.ok, data: d }; }
+        catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* postGpuBenchmark: 运行GPU基准测试 */
+    /* POST /api/gpu/benchmark */
+    async postGpuBenchmark() {
+        try { var r = await this.request('/gpu/benchmark', { method: 'POST' }); var d = await r.json(); return { success: r.ok, data: d }; }
+        catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* --- 数据集管理 --- */
+    /* getDatasets: 获取数据集列表 */
+    /* GET /api/dataset/list */
+    async getDatasets() {
+        try { var r = await this.request('/dataset/list'); var d = await r.json(); return { success: r.ok, data: d }; }
+        catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* createDataset: 创建新数据集 */
+    /* POST /api/dataset/create */
+    async createDataset(config) {
+        try { var r = await this.request('/dataset/create', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config || {}) }); var d = await r.json(); return { success: r.ok, data: d }; }
+        catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* getDatasetStats: 获取数据集统计信息 */
+    /* GET /api/dataset/stats */
+    async getDatasetStats(datasetId) {
+        try { var r = await this.request('/dataset/stats?dataset_id=' + encodeURIComponent(datasetId || '')); var d = await r.json(); return { success: r.ok, data: d }; }
+        catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* --- 演化系统 --- */
+    /* getEvolutionStatus: 获取演化系统状态 */
+    /* GET /api/evolution/status */
+    async getEvolutionStatus() {
+        try { var r = await this.request('/evolution/status'); var d = await r.json(); return { success: r.ok, data: d }; }
+        catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* --- 知识库版本与导入导出 --- */
+    /* getKnowledgeVersion: 获取知识库版本信息 */
+    /* GET /api/knowledge/version */
+    async getKnowledgeVersion() {
+        try { var r = await this.request('/knowledge/version'); var d = await r.json(); return { success: r.ok, data: d }; }
+        catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* exportKnowledge: 导出知识库数据 */
+    /* POST /api/knowledge/export */
+    async exportKnowledge() {
+        try { var r = await this.request('/knowledge/export', { method: 'POST' }); var d = await r.json(); return { success: r.ok, data: d }; }
+        catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* importKnowledge: 导入知识库数据 */
+    /* POST /api/knowledge/import */
+    async importKnowledge(data) {
+        try { var r = await this.request('/knowledge/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data || {}) }); var d = await r.json(); return { success: r.ok, data: d }; }
+        catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* --- 系统诊断与日志 --- */
+    /* getSystemDiagnostic: 运行系统诊断 */
+    /* GET /api/system/diagnostic */
+    async getSystemDiagnostic() {
+        try { var r = await this.request('/system/diagnostic'); var d = await r.json(); return { success: r.ok, data: d }; }
+        catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* exportDiagnosticData: 导出诊断数据 */
+    /* GET /api/system/export_diagnostic */
+    async exportDiagnosticData() {
+        try { var r = await this.request('/system/export_diagnostic'); var d = await r.json(); return { success: r.ok, data: d }; }
+        catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* getSystemLogs: 获取系统日志 */
+    /* GET /api/system/logs */
+    async getSystemLogs() {
+        try { var r = await this.request('/system/logs'); var d = await r.json(); return { success: r.ok, data: d }; }
+        catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* restartSystem: 重启系统 */
+    /* POST /api/system/restart */
+    async restartSystem() {
+        try { var r = await this.request('/system/restart', { method: 'POST' }); var d = await r.json(); return { success: r.ok, data: d }; }
+        catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* --- 摄像头控制 --- */
+    /* getCameraDevices: 获取可用摄像头列表 */
+    /* GET /api/camera/devices */
+    async getCameraDevices() {
+        try { var r = await this.request('/camera/devices'); var d = await r.json(); return { success: r.ok, data: d }; }
+        catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* startCameraCapture: 启动摄像头采集 */
+    /* POST /api/camera/capture/start */
+    async startCameraCapture(deviceId) {
+        try { var r = await this.request('/camera/capture/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ device_id: deviceId }) }); var d = await r.json(); return { success: r.ok, data: d }; }
+        catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* stopCameraCapture: 停止摄像头采集 */
+    /* POST /api/camera/capture/stop */
+    async stopCameraCapture() {
+        try { var r = await this.request('/camera/capture/stop', { method: 'POST' }); var d = await r.json(); return { success: r.ok, data: d }; }
+        catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* --- 音频采集 --- */
+    /* startAudioCapture: 启动音频采集 */
+    /* POST /api/audio/capture/start */
+    async startAudioCapture(deviceId) {
+        try { var r = await this.request('/audio/capture/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ device_id: deviceId }) }); var d = await r.json(); return { success: r.ok, data: d }; }
+        catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* stopAudioCapture: 停止音频采集 */
+    /* POST /api/audio/capture/stop */
+    async stopAudioCapture() {
+        try { var r = await this.request('/audio/capture/stop', { method: 'POST' }); var d = await r.json(); return { success: r.ok, data: d }; }
+        catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* --- 知识图谱SPARQL查询 --- */
+    /* kgSparql: 执行SPARQL语义查询 */
+    /* POST /api/kg/sparql */
+    async kgSparql(query) {
+        try { var r = await this.request('/kg/sparql', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query: query }) }); var d = await r.json(); return { success: r.ok, data: d }; }
+        catch (e) { return { success: false, error: e.message }; }
     }
 
 }

@@ -43,10 +43,37 @@ static int audio_semantic_next_power_of_two(int n) {
     return p;
 }
 
-/* FFT实现（完整实现， 处理，支持任意长度输入） */
-static void audio_semantic_compute_fft(float* data, int n, float* real_out, float* imag_out) {
+/* 【P2-FIX-14】直接DFT计算（O(n²)复杂度，仅用于回退方案）
+ * 当Bluestein递归深度超过安全阈值或内存分配失败时，
+ * 回退到直接DFT以保证计算正确性和稳定性。
+ * 注意：仅作为防御性回退，正常路径不会触发。
+ */
+static void audio_semantic_compute_dft(float* data, int n, float* real_out, float* imag_out) {
+    for (int i = 0; i < n; i++) {
+        real_out[i] = 0.0f;
+        imag_out[i] = 0.0f;
+        for (int k = 0; k < n; k++) {
+            float angle = (float)(-2.0f * M_PI * i * k / n);
+            real_out[i] += data[k] * cosf(angle);
+            imag_out[i] += data[k] * sinf(angle);
+        }
+    }
+}
+
+/* 【P2-FIX-14】Bluestein递归深度安全阈值
+ * 当n很大时（如n=30000），N会接近65536，理论上递归深度为log2(N)≈16层。
+ * 虽然当前Bluestein分支中的N总是2的幂次（仅一层递归），但为防止未来
+ * 代码演进中引入深层递归导致的栈溢出风险，设置安全阈值为12层。
+ * 超过阈值时回退到直接DFT计算。
+ */
+#define AUDIO_SEMANTIC_FFT_MAX_RECURSION_DEPTH 12
+
+/* FFT实现 - 带递归深度保护的内部实现
+ * 【P2-FIX-14】添加recursion_depth参数，防止深层递归导致栈溢出
+ */
+static void audio_semantic_compute_fft_impl(float* data, int n, float* real_out, float* imag_out, int recursion_depth) {
     /* 完整FFT实现：Cooley-Tukey算法，迭代版本
-     *  处理，实现完整的复数FFT计算
+     * 处理，实现完整的复数FFT计算
      * 输入：data（时域信号，长度n）
      * 输出：real_out, imag_out（频域实部和虚部，长度n）
      * 支持任意长度输入：使用Bluestein算法（Chirp Z-Transform）处理非2的幂次
@@ -58,6 +85,16 @@ static void audio_semantic_compute_fft(float* data, int n, float* real_out, floa
     if ((n & (n - 1)) == 0) {
         // n是2的幂次，使用标准Cooley-Tukey FFT
         goto perform_fft;
+    }
+    
+    /* 【P2-FIX-14】递归深度安全阀
+     * 若递归深度超过阈值，回退到直接DFT计算。
+     * 虽然当前Bluestein路径中N总是2的幂次（理论仅1层递归），
+     * 但此防御措施可防止未来代码变更引入的深层递归风险。
+     */
+    if (recursion_depth >= AUDIO_SEMANTIC_FFT_MAX_RECURSION_DEPTH) {
+        audio_semantic_compute_dft(data, n, real_out, imag_out);
+        return;
     }
     
     // 非2的幂次：使用Bluestein算法（Chirp Z-Transform）
@@ -73,15 +110,7 @@ static void audio_semantic_compute_fft(float* data, int n, float* real_out, floa
     if (!a_real || !a_imag || !b_real || !b_imag) {
         safe_free((void**)&a_real); safe_free((void**)&a_imag); safe_free((void**)&b_real); safe_free((void**)&b_imag);
         // 分配失败时回退到直接DFT计算
-        for (int i = 0; i < n; i++) {
-            real_out[i] = 0.0f;
-            imag_out[i] = 0.0f;
-            for (int k = 0; k < n; k++) {
-                float angle = (float)(-2.0f * M_PI * i * k / n);
-                real_out[i] += data[k] * cosf(angle);
-                imag_out[i] += data[k] * sinf(angle);
-            }
-        }
+        audio_semantic_compute_dft(data, n, real_out, imag_out);
         return;
     }
     
@@ -109,15 +138,15 @@ static void audio_semantic_compute_fft(float* data, int n, float* real_out, floa
     }
     
     // 步骤3：对a和b分别进行FFT
-    // 递归调用自身（N是2的幂次）
+    // 【P2-FIX-14】递归调用使用 _impl 并传递 recursion_depth + 1
     float* A_real = (float*)safe_malloc(N * sizeof(float));
     float* A_imag = (float*)safe_malloc(N * sizeof(float));
     float* B_real = (float*)safe_malloc(N * sizeof(float));
     float* B_imag = (float*)safe_malloc(N * sizeof(float));
     
     if (A_real && A_imag && B_real && B_imag) {
-        audio_semantic_compute_fft(a_real, N, A_real, A_imag);
-        audio_semantic_compute_fft(b_real, N, B_real, B_imag);
+        audio_semantic_compute_fft_impl(a_real, N, A_real, A_imag, recursion_depth + 1);
+        audio_semantic_compute_fft_impl(b_real, N, B_real, B_imag, recursion_depth + 1);
         
         // 步骤4：逐点相乘 A[k] = A[k] * B[k]
         for (int k = 0; k < N; k++) {
@@ -131,7 +160,7 @@ static void audio_semantic_compute_fft(float* data, int n, float* real_out, floa
         for (int k = 0; k < N; k++) {
             A_imag[k] = -A_imag[k];
         }
-        audio_semantic_compute_fft(A_real, N, a_real, a_imag);
+        audio_semantic_compute_fft_impl(A_real, N, a_real, a_imag, recursion_depth + 1);
         for (int k = 0; k < N; k++) {
             a_imag[k] = -a_imag[k] / N;
             a_real[k] = a_real[k] / N;
@@ -147,15 +176,7 @@ static void audio_semantic_compute_fft(float* data, int n, float* real_out, floa
         }
     } else {
         // 内存分配失败，使用直接DFT
-        for (int i = 0; i < n; i++) {
-            real_out[i] = 0.0f;
-            imag_out[i] = 0.0f;
-            for (int k = 0; k < n; k++) {
-                float angle = (float)(-2.0f * M_PI * i * k / n);
-                real_out[i] += data[k] * cosf(angle);
-                imag_out[i] += data[k] * sinf(angle);
-            }
-        }
+        audio_semantic_compute_dft(data, n, real_out, imag_out);
     }
     
     safe_free((void**)&a_real); safe_free((void**)&a_imag); safe_free((void**)&b_real); safe_free((void**)&b_imag);
@@ -164,7 +185,7 @@ static void audio_semantic_compute_fft(float* data, int n, float* real_out, floa
     
 perform_fft:
     // 标准Cooley-Tukey FFT（n是2的幂次）
-    // 位反转置换
+    // 【P2-FIX-14】此分支为纯迭代实现，不使用递归，无栈溢出风险
     
     // 位反转置换
     for (int i = 0; i < n; i++) {
@@ -221,6 +242,11 @@ perform_fft:
             }
         }
     }
+}
+
+/* FFT实现（对外接口，递归深度从0开始） */
+static void audio_semantic_compute_fft(float* data, int n, float* real_out, float* imag_out) {
+    audio_semantic_compute_fft_impl(data, n, real_out, imag_out, 0);
 }
 
 static void audio_semantic_compute_power_spectrum(float* real, float* imag, int n, float* power) {

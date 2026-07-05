@@ -119,8 +119,7 @@ MultimodalManager* multimodal_manager_create(const MultimodalManagerConfig* conf
         HapticCfcConfig hc_cfg = haptic_cfc_get_default_config();
         manager->haptic_cfc_proc = haptic_cfc_create(&hc_cfg);
 
-        /* H-006修复：注册全局处理器供haptic_learning.c使用 */
-        extern void haptic_enhance_set_global_processor(HapticCfcProcessor* proc);
+        /* 【P1-002修复】移除裸extern声明，改用 haptic_enhance.h 头文件中的正式声明 */
         haptic_enhance_set_global_processor(manager->haptic_cfc_proc);
 
         HapticTextureConfig ht_cfg = haptic_texture_get_default_config();
@@ -359,17 +358,15 @@ int multimodal_manager_process(MultimodalManager* manager,
     }
 
     /* H-018集成: 在触觉数据到达时进行CfC触觉深度处理 */
-    if (manager->haptic_cfc_proc && sensor_input) {
-        SensorInput* si = (SensorInput*)sensor_input;
-        /* 将传感器输入转换为HapticReading结构进行CfC处理 */
+    /* MM-001修复: 触觉处理优先使用专用haptic_data参数而非传感器数据 */
+    if (manager->haptic_cfc_proc && haptic_data) {
         HapticReading hr;
         memset(&hr, 0, sizeof(HapticReading));
-        if (si->sensor_values && si->sensor_count > 0) {
-            size_t press_copy = si->sensor_count < 16 ? si->sensor_count : 16;
+        if (haptic_data[0] > 0.0f || haptic_data[1] > 0.0f) {
+            size_t press_copy = 16;
             for (size_t i = 0; i < press_copy; i++)
-                hr.pressure[i] = si->sensor_values[i];
-            /* L-003修复：带溢出检查的安全类型转换，防止size_t到int截断 */
-            hr.sensor_count = (si->sensor_count > (size_t)INT_MAX) ? INT_MAX : (int)si->sensor_count;
+                hr.pressure[i] = (i < 64) ? haptic_data[i] : 0.0f;
+            hr.sensor_count = 16;
         }
         float cfc_features[64];
         int contact = 0, slip = 0;

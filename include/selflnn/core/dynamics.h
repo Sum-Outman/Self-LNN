@@ -119,6 +119,73 @@ int dynamics_set_config(DynamicsSystem* system, const DynamicsConfig* config);
 int dynamics_get_stats(const DynamicsSystem* system, float* avg_velocity,
                        float* max_velocity, float* stability);
 
+/* ============ D-003修复: 微分动力学扩展接口 ============ */
+
+/**
+ * @brief 可微分前向动力学（生成平滑轨迹）
+ *
+ * 执行离散时间步的可微分前向仿真，生成完整状态轨迹。
+ * 支持接触动力学和ODE积分，适用于梯度优化（微分物理）。
+ *
+ * @param system 动态系统实例
+ * @param initial_state 初始状态向量（dim=state_dim）
+ * @param state_dim 状态向量维度
+ * @param control_input 控制输入向量（dim=control_dim, 可为NULL）
+ * @param control_dim 控制输入维度
+ * @param dt 时间步长（秒）
+ * @param num_steps 仿真步数
+ * @param trajectory 输出轨迹缓冲区（大小 >= state_dim * (num_steps+1)）
+ * @param trajectory_size 轨迹缓冲区大小
+ * @return 0=成功, -1=参数无效, -2=维度不匹配, -3=缓冲区不足
+ */
+int dynamics_differentiable_forward(DynamicsSystem* system,
+                                     const float* initial_state, size_t state_dim,
+                                     const float* control_input, size_t control_dim,
+                                     float dt, int num_steps,
+                                     float* trajectory, size_t trajectory_size);
+
+/**
+ * @brief 可微分反向动力学（伴随法梯度传播）
+ *
+ * 通过轨迹反向传播损失梯度，使用伴随灵敏度法(CfC伴随法)
+ * 计算关于动力学参数的梯度。支持通过整个物理仿真过程进行端到端学习。
+ *
+ * @param system 动态系统实例
+ * @param trajectory 前向传播生成的状态轨迹
+ * @param state_dim 状态向量维度
+ * @param loss_gradient 损失关于最终状态的梯度（dim=grad_dim）
+ * @param grad_dim 梯度维度
+ * @param dt 时间步长（秒）
+ * @param num_steps 仿真步数
+ * @param param_gradient 输出参数梯度缓冲区（大小 >= param_grad_size）
+ * @param param_grad_size 参数梯度缓冲区大小
+ * @return 0=成功, -1=参数无效
+ */
+int dynamics_differentiable_backward(DynamicsSystem* system,
+                                      const float* trajectory, size_t state_dim,
+                                      const float* loss_gradient, size_t grad_dim,
+                                      float dt, int num_steps,
+                                      float* param_gradient, size_t param_grad_size);
+
+/**
+ * @brief 接触力梯度计算
+ *
+ * 计算两物体间接触力的空间梯度，用于机器人抓取/操作
+ * 的力控制优化和接触动力学学习。
+ *
+ * @param system 动态系统实例
+ * @param object_pos_a 物体A位置向量
+ * @param object_pos_b 物体B位置向量
+ * @param contact_distance 接触判定距离阈值
+ * @param force_gradient 输出力梯度矩阵（dim=grad_size）
+ * @param grad_size 梯度向量大小
+ * @return 0=成功, -1=参数无效
+ */
+int dynamics_compute_contact_gradient(DynamicsSystem* system,
+                                       const float* object_pos_a, const float* object_pos_b,
+                                       float contact_distance,
+                                       float* force_gradient, size_t grad_size);
+
 #ifdef __cplusplus
 }
 #endif

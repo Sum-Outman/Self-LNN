@@ -292,8 +292,8 @@ int optimizer_step(Optimizer* optimizer, float* parameters, float* gradients,
                 float b2_corr = (1.0f - *optimizer->beta2_power);
                 if (b1_corr < 1e-7f) b1_corr = 1e-7f;
                 if (b2_corr < 1e-7f) b2_corr = 1e-7f;
-                m_hat = optimizer->momentum_buffer[i] / b1_corr;
-                v_hat = optimizer->velocity_buffer[i] / b2_corr;
+                float m_hat = optimizer->momentum_buffer[i] / b1_corr;
+                float v_hat = optimizer->velocity_buffer[i] / b2_corr;
 
                 parameters[i] -= lr * m_hat / (sqrtf(v_hat) + eps);
             }
@@ -315,11 +315,13 @@ int optimizer_step(Optimizer* optimizer, float* parameters, float* gradients,
                 optimizer->velocity_buffer[i] = b2 * optimizer->velocity_buffer[i] +
                                                 (1.0f - b2) * gradients[i] * gradients[i];
 
-                float m_hat = optimizer->momentum_buffer[i] / (1.0f - *optimizer->beta1_power);
-                float v_hat = optimizer->velocity_buffer[i] / (1.0f - *optimizer->beta2_power);
-                /* DEEP-FIX: AdamW添加下溢保护 */
-                { float bc=1.0f-*optimizer->beta1_power; if(bc<1e-7f)bc=1e-7f; m_hat=optimizer->momentum_buffer[i]/bc; }
-                { float bc=1.0f-*optimizer->beta2_power; if(bc<1e-7f)bc=1e-7f; v_hat=optimizer->velocity_buffer[i]/bc; }
+                /* P0-H002修复: 将下溢保护合并到主计算中, 消除重复计算 */
+                float bc1 = 1.0f - *optimizer->beta1_power;
+                float bc2 = 1.0f - *optimizer->beta2_power;
+                if (bc1 < 1e-7f) bc1 = 1e-7f;
+                if (bc2 < 1e-7f) bc2 = 1e-7f;
+                float m_hat = optimizer->momentum_buffer[i] / bc1;
+                float v_hat = optimizer->velocity_buffer[i] / bc2;
 
                 parameters[i] -= lr * (m_hat / (sqrtf(v_hat) + eps) + wd * parameters[i]);
             }

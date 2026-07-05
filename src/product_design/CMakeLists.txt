@@ -17,7 +17,7 @@ target_include_directories(selflnn_product_design PUBLIC
 target_link_libraries(selflnn_product_design PRIVATE 
     selflnn_core 
     selflnn_memory
-    selflnn_utils
+    utils
     selflnn_reasoning
 )
 

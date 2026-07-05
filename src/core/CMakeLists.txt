@@ -7,7 +7,6 @@ add_library(selflnn_core
     cfc_cell.c
     dynamics.c
     state.c
-    errors.c
     laplace.c
     laplace_fft.c
     quaternion_lnn.c
@@ -55,8 +54,10 @@ target_include_directories(selflnn_core PUBLIC
 )
 
 # quaternion_lnn.c、selflnn.c需要GPU函数，始终链接GPU桩库
-target_link_libraries(selflnn_core PUBLIC selflnn_gpu selflnn_math utils)
-target_link_libraries(selflnn_core PRIVATE selflnn_multimodal)
+# C-001修复: 移除 PRIVATE selflnn_multimodal 打破 core↔multimodal 循环依赖。
+# selflnn.c是core中唯一引用multimodal的文件,但最终可执行文件selflnn同时链接两者,
+# 静态库的符号解析在最终链接阶段完成,无需在core库层面声明此依赖。
+target_link_libraries(selflnn_core PUBLIC selflnn_base selflnn_gpu selflnn_math utils)
 
 # 安装规则
 install(TARGETS selflnn_core
@@ -100,6 +101,7 @@ install(FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/quaternion_enhanced.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/quaternion_optimizer.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/quaternion_lnn_kernels.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/architecture_controller.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/graph_optimization.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/core/graph_optimization_ext.h
     DESTINATION include/selflnn/core

@@ -4290,6 +4290,12 @@ int cuda_forward_dense(GpuContext* ctx, const float* input, const float* weights
         return -1;
     }
 
+    /* S-004修复: size_t到int截断保护 —— 大模型(>2B参数)时前置返回 */
+    if (batch_size > (size_t)INT_MAX || output_size > (size_t)INT_MAX || input_size > (size_t)INT_MAX) {
+        set_cuda_error_string("cuda_forward_dense: 矩阵维度超出int范围");
+        cudaFree(d_input); cudaFree(d_weights); cudaFree(d_temp); cudaFree(d_output);
+        return -1;
+    }
     int m_int = (int)batch_size, n_int = (int)output_size, k_int = (int)input_size;
     float alpha_f = 1.0f, beta_f = 0.0f;
     int transA = 0, transB = 1;
@@ -4762,7 +4768,13 @@ int cuda_batch_norm_forward(GpuContext* ctx, const float* input, float* output,
             return -1;
         }
 
-        int bs_int = (int)batch_size, f_int = (int)features;
+        /* S-004修复: size_t到int截断保护 */
+    if (batch_size > (size_t)INT_MAX || features > (size_t)INT_MAX) {
+        cudaFree(d_input); cudaFree(d_grad_output); cudaFree(d_grad_input);
+        cudaFree(d_gamma); cudaFree(d_mean); cudaFree(d_var);
+        return -1;
+    }
+    int bs_int = (int)batch_size, f_int = (int)features;
         cuda_backend_kernel_set_arg(kernel, 0, sizeof(void*), &d_input);
         cuda_backend_kernel_set_arg(kernel, 1, sizeof(void*), &d_gamma);
         cuda_backend_kernel_set_arg(kernel, 2, sizeof(void*), &d_beta);
@@ -5732,7 +5744,7 @@ int gpu_benchmark_throughput(float* bandwidth_gbps, float* compute_tflops, int* 
     }
     *compute_tflops = (float)sm_count * (float)cores_per_sm * gpu_clock_ghz * 2.0f / 1000.0f;
 
-    cudaEventDestroy(start_ev);
-    cudaEventDestroy(stop_ev);
+    /* R-001修复: 移除重复的cudaEventDestroy调用。
+     * start_ev/stop_ev已在第5720-5721行被销毁，此处重复释放导致CUDA双重释放错误。 */
     return 0;
 }

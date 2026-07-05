@@ -208,12 +208,13 @@ int mr_record_ab_result(ModelRegistry* mr, int model_id, int version_used, int s
 int mr_get_ab_stats(const ModelRegistry* mr, int model_id, float* rate_a, float* rate_b, int* winner) {
     ModelEntry* e = find_model((ModelRegistry*)mr, model_id);
     if (!e || !rate_a || !rate_b || !winner) return -1;
+    /* FIX-005修复: AB测试统计只统计实际使用的版本，未使用的版本不进入分母 */
     int sa = 0, sb = 0, ta = 0, tb = 0;
     for (int i = 0; i < e->ab_result_count; i++) {
-        if (e->ab_results_a[i] > 0) { sa++; ta++; }
-        else if (e->ab_results_a[i] == 0) ta++;
-        if (e->ab_results_b[i] > 0) { sb++; tb++; }
-        else if (e->ab_results_b[i] == 0) tb++;
+        int used_a = (e->ab_results_a[i] != 0);  /* 0=未使用此版本 */
+        int used_b = (e->ab_results_b[i] != 0);
+        if (used_a) { ta++; if (e->ab_results_a[i] > 0) sa++; }
+        if (used_b) { tb++; if (e->ab_results_b[i] > 0) sb++; }
     }
     *rate_a = ta > 0 ? (float)sa / (float)ta : 0.0f;
     *rate_b = tb > 0 ? (float)sb / (float)tb : 0.0f;

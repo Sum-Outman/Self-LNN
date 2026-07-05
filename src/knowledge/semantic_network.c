@@ -1686,39 +1686,53 @@ SemanticNetwork* semantic_network_load(const char* filename) {
         fclose(file); return NULL;
     }
     
+    /* P2-FIX-19: fread返回值检查 - 头部4个count字段 */
     size_t concept_count = 0, relation_count = 0;
     int next_cid = 0, next_rid = 0;
-    fread(&concept_count, sizeof(size_t), 1, file);
-    fread(&relation_count, sizeof(size_t), 1, file);
-    fread(&next_cid, sizeof(int), 1, file);
-    fread(&next_rid, sizeof(int), 1, file);
+    if (fread(&concept_count, sizeof(size_t), 1, file) != 1) { fclose(file); return NULL; }
+    if (fread(&relation_count, sizeof(size_t), 1, file) != 1) { fclose(file); return NULL; }
+    if (fread(&next_cid, sizeof(int), 1, file) != 1) { fclose(file); return NULL; }
+    if (fread(&next_rid, sizeof(int), 1, file) != 1) { fclose(file); return NULL; }
     
     SemanticNetwork* net = semantic_network_create(concept_count + 16, relation_count + 16);
     if (!net) { fclose(file); return NULL; }
     
     SemanticConcept** loaded_concepts = (SemanticConcept**)safe_calloc(concept_count + 1, sizeof(SemanticConcept*));
     
-    for (size_t i = 0; i < concept_count; i++) {
-        int has; fread(&has, sizeof(int), 1, file);
+    /* P2-FIX-19: 概念加载循环 - 13处fread返回值检查 */
+    size_t i;
+    for (i = 0; i < concept_count; i++) {
+        int has; if (fread(&has, sizeof(int), 1, file) != 1) break;
         if (!has) { loaded_concepts[i] = NULL; continue; }
-        int id, type; fread(&id, sizeof(int), 1, file); fread(&type, sizeof(int), 1, file);
-        int name_len; fread(&name_len, sizeof(int), 1, file);
+        int id, type;
+        if (fread(&id, sizeof(int), 1, file) != 1) break;
+        if (fread(&type, sizeof(int), 1, file) != 1) break;
+        int name_len; if (fread(&name_len, sizeof(int), 1, file) != 1) break;
         char name_buf[256] = {0};
-        if (name_len > 0 && name_len < 256) fread(name_buf, 1, (size_t)name_len, file);
-        int desc_len; fread(&desc_len, sizeof(int), 1, file);
+        if (name_len > 0 && name_len < 256) {
+            if (fread(name_buf, 1, (size_t)name_len, file) != (size_t)name_len) break;
+        }
+        int desc_len; if (fread(&desc_len, sizeof(int), 1, file) != 1) break;
         char desc_buf[512] = {0};
-        if (desc_len > 0 && desc_len < 512) fread(desc_buf, 1, (size_t)desc_len, file);
-        size_t emb_sz; fread(&emb_sz, sizeof(size_t), 1, file);
+        if (desc_len > 0 && desc_len < 512) {
+            if (fread(desc_buf, 1, (size_t)desc_len, file) != (size_t)desc_len) break;
+        }
+        size_t emb_sz; if (fread(&emb_sz, sizeof(size_t), 1, file) != 1) break;
         float* emb = NULL;
         if (emb_sz > 0 && emb_sz < 4096) {
             emb = (float*)safe_malloc(emb_sz * sizeof(float));
-            if (emb) fread(emb, sizeof(float), emb_sz, file);
+            if (emb) {
+                if (fread(emb, sizeof(float), emb_sz, file) != emb_sz) {
+                    safe_free((void**)&emb);
+                    break;
+                }
+            }
         }
         float spec, typ, conf; int inst;
-        fread(&spec, sizeof(float), 1, file);
-        fread(&typ, sizeof(float), 1, file);
-        fread(&conf, sizeof(float), 1, file);
-        fread(&inst, sizeof(int), 1, file);
+        if (fread(&spec, sizeof(float), 1, file) != 1) break;
+        if (fread(&typ, sizeof(float), 1, file) != 1) break;
+        if (fread(&conf, sizeof(float), 1, file) != 1) break;
+        if (fread(&inst, sizeof(int), 1, file) != 1) break;
         SemanticConcept* c = semantic_network_add_concept(net, (ConceptType)type, name_buf,
                                                    desc_len > 0 ? desc_buf : NULL,
                                                    emb, emb_sz, spec, typ);
@@ -1730,18 +1744,31 @@ SemanticNetwork* semantic_network_load(const char* filename) {
             safe_free((void**)&emb);
         }
     }
+    /* P2-FIX-19: 概念循环fread失败 → 清理已分配资源并返回NULL */
+    if (i < concept_count) {
+        semantic_network_destroy(net);
+        safe_free((void**)&loaded_concepts);
+        fclose(file);
+        return NULL;
+    }
     
-    for (size_t i = 0; i < relation_count; i++) {
-        int has; fread(&has, sizeof(int), 1, file);
+    /* P2-FIX-19: 关系加载循环 - 9处fread返回值检查 */
+    for (i = 0; i < relation_count; i++) {
+        int has; if (fread(&has, sizeof(int), 1, file) != 1) break;
         if (!has) continue;
         int id, type, src_id, tgt_id;
-        fread(&id, sizeof(int), 1, file); fread(&type, sizeof(int), 1, file);
-        fread(&src_id, sizeof(int), 1, file); fread(&tgt_id, sizeof(int), 1, file);
-        int label_len; fread(&label_len, sizeof(int), 1, file);
+        if (fread(&id, sizeof(int), 1, file) != 1) break;
+        if (fread(&type, sizeof(int), 1, file) != 1) break;
+        if (fread(&src_id, sizeof(int), 1, file) != 1) break;
+        if (fread(&tgt_id, sizeof(int), 1, file) != 1) break;
+        int label_len; if (fread(&label_len, sizeof(int), 1, file) != 1) break;
         char label_buf[256] = {0};
-        if (label_len > 0 && label_len < 256) fread(label_buf, 1, (size_t)label_len, file);
+        if (label_len > 0 && label_len < 256) {
+            if (fread(label_buf, 1, (size_t)label_len, file) != (size_t)label_len) break;
+        }
         float str, conf;
-        fread(&str, sizeof(float), 1, file); fread(&conf, sizeof(float), 1, file);
+        if (fread(&str, sizeof(float), 1, file) != 1) break;
+        if (fread(&conf, sizeof(float), 1, file) != 1) break;
         SemanticConcept* src = (src_id >= 0 && (size_t)src_id < concept_count) ? loaded_concepts[src_id] : NULL;
         SemanticConcept* tgt = (tgt_id >= 0 && (size_t)tgt_id < concept_count) ? loaded_concepts[tgt_id] : NULL;
         if (src && tgt) {
@@ -1750,6 +1777,13 @@ SemanticNetwork* semantic_network_load(const char* filename) {
                                           label_len > 0 ? label_buf : NULL,
                                           str, conf);
         }
+    }
+    /* P2-FIX-19: 关系循环fread失败 → 清理已分配资源并返回NULL */
+    if (i < relation_count) {
+        semantic_network_destroy(net);
+        safe_free((void**)&loaded_concepts);
+        fclose(file);
+        return NULL;
     }
     
     net->next_concept_id = next_cid;

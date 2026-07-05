@@ -15,6 +15,7 @@
     --theme-text-secondary: #a0a0a0;
     --theme-accent: #00d4ff;
     --theme-accent-secondary: #ff6b9d;
+    --theme-border: rgba(255, 255, 255, 0.12);  /* P0-F04修复: 添加缺失的边框颜色变量 */
     --theme-danger: #ff4444;
     --theme-success: #22c55e;
     --theme-warning: #eab308;

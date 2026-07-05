@@ -26,6 +26,7 @@
         window.__PAGE_READY = false;
         /* _wsManager桥接到全局SelfLnnWebSocket，避免重复连接 */
         window._wsManager = {
+            isConnected: false,  /* P0-F02修复: 添加isConnected属性，由SelfLnnWebSocket的回调更新 */
             init: function() {
                 var self = this;
                 var gws = window.SelfLnnWebSocket;
@@ -38,6 +39,12 @@
                             '已重试' + self._retryCount + '次，SelfLnnWebSocket模块未就绪，停止重试。');
                     }
                     return;
+                }
+                /* D-002修复: 使用onStatusChange替代不存在的onConnected/onDisconnected方法 */
+                if (typeof gws.onStatusChange === 'function') {
+                    gws.onStatusChange(function(status) {
+                        self.isConnected = !!(status && status.connected);
+                    });
                 }
                 gws.on('*', function(data) { self._notify({type:'ws_message', data:data}); });
             },
@@ -54,11 +61,10 @@
         };
         /* 全局保护：合并页面中hidden section的DOM引用安全 */
         window._e = function(id,fn) { var el=document.getElementById(id); if(el) try{fn(el)}catch(e){} };
-        /* 全局节流：延迟所有API请求直到服务器就绪，防止并发洪流压垮后端 */
-        window._apiReady = false;
-        window._apiQueue = [];
-        window._safeApi = function(fn) { if (window._apiReady) return fn; window._apiQueue.push(fn); };
-        setTimeout(function() { window._apiReady = true; window._apiQueue.forEach(function(f){ try{f();}catch(e){} }); window._apiQueue = []; }, 2000);
+        /* 全局节流：延迟所有API请求直到服务器就绪，防止并发洪流压垮后端
+         * D-008修复: 清理重复的_apiReady/_safeApi死代码，统一使用__PAGE_READY机制
+         */
+        window._apiReady = true; /* 立即就绪，实际API调用由ApiService内部重试机制保证 */
         /* 所有度量初始显示"未连接"，后端连接后由data-engine更新为真实数据 */
         /* 数据源策略: 不使用任何硬编码演示数据。data-engine是唯一数据源。 */
         /* data-source="backend" 属性标记由真实后端提供的指标 */
@@ -121,6 +127,8 @@
                             <li><a href="#product-design">产品设计</a></li>
                             <li><a href="#device-control">设备控制</a></li>
                             <li><a href="#devices">设备管理</a></li>
+                            <li><a href="#self-learning">自主学习</a></li>
+                            <li><a href="#imitation-learning">模仿学习</a></li>
                         </ul>
                     </li>
                     <li class="nav-dropdown">
@@ -6170,7 +6178,7 @@ response = requests.get(
                 /* 尝试获取详细API使用日志 */
                 var logs = [];
                 try {
-                    var logResp = await window.SelfLnnApi.getApiStats;
+                    var logResp = await window.SelfLnnApi.getApiStats();
                     if (logResp.success && logResp.data) {
                         logs = logResp.data.logs || logResp.data.requests || []
                     }
@@ -6501,10 +6509,10 @@ response = requests.get(
             }
             /* 自动检测后端状态 */
             setTimeout(function() {
-                scanGpuDiagnostic;
-                enumerateAudioDevices;
-                enumerateCameraDevices;
-                listDatasets;
+                scanGpuDiagnostic();
+                enumerateAudioDevices();
+                enumerateCameraDevices();
+                listDatasets();
             }, 500);
         });
     </script>
@@ -6682,6 +6690,132 @@ response = requests.get(
             </div>
         </section>
 
+        <!-- ======== 自主学习 ======== F-103: 前端补全 -->
+        <section id="self-learning" class="section">
+            <div class="section-header">
+                <h2>自主学习系统</h2>
+                <p>文件监控、实体抽取、知识自动发现与在线学习状态</p>
+            </div>
+            <div class="dashboard-grid">
+                <div class="card">
+                    <div class="card-header"><h3>学习控制</h3></div>
+                    <div class="card-content">
+                        <div class="metric">
+                            <span class="metric-label">自主学习状态</span>
+                            <span class="metric-value" id="auto-learn-status" style="color:#4a9eff;">检查中...</span>
+                        </div>
+                        <div style="display:flex;gap:8px;margin-top:16px;">
+                            <button onclick="toggleAutoLearn(true)" class="btn btn-primary" style="flex:1;">启动学习</button>
+                            <button onclick="toggleAutoLearn(false)" class="btn btn-danger" style="flex:1;">停止学习</button>
+                        </div>
+                        <button onclick="triggerAutoScan()" class="btn btn-secondary" style="width:100%;margin-top:8px;">手动触发扫描</button>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header"><h3>学习统计</h3></div>
+                    <div class="card-content">
+                        <div class="metric"><span class="metric-label">已发现实体数</span><span class="metric-value" id="auto-entity-count">-</span></div>
+                        <div class="metric"><span class="metric-label">已抽取关系数</span><span class="metric-value" id="auto-relation-count">-</span></div>
+                        <div class="metric"><span class="metric-label">知识导入次数</span><span class="metric-value" id="auto-import-count">-</span></div>
+                        <div class="metric"><span class="metric-label">监控文件数</span><span class="metric-value" id="auto-file-count">-</span></div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header"><h3>发现日志</h3></div>
+                    <div class="card-content">
+                        <div id="auto-discover-log" style="max-height:200px;overflow-y:auto;font-size:12px;font-family:monospace;background:#1a1a2e;color:#4a9eff;padding:12px;border-radius:4px;">
+                            <div style="color:#888;">等待学习数据...</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header"><h3>学习配置</h3></div>
+                    <div class="card-content">
+                        <div class="form-group">
+                            <label>监控目录</label>
+                            <input type="text" id="auto-watch-dir" placeholder="例如: ./data/training" class="form-input" value="./data">
+                        </div>
+                        <div class="form-group">
+                            <label>文件类型过滤</label>
+                            <input type="text" id="auto-file-filter" placeholder="md,json,csv,txt" class="form-input" value="md,json,csv,txt">
+                        </div>
+                        <div class="form-group">
+                            <label>扫描间隔(秒)</label>
+                            <input type="number" id="auto-scan-interval" class="form-input" value="300" min="10">
+                        </div>
+                        <button onclick="applyAutoLearnConfig()" class="btn btn-primary" style="width:100%;">应用配置</button>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ======== 模仿学习 ======== F-104: 前端补全 -->
+        <section id="imitation-learning" class="section">
+            <div class="section-header">
+                <h2>模仿学习系统</h2>
+                <p>行为克隆(BC)、DAgger、逆强化学习(IRL) — 从演示中学习策略</p>
+            </div>
+            <div class="dashboard-grid">
+                <div class="card">
+                    <div class="card-header"><h3>演示管理</h3></div>
+                    <div class="card-content">
+                        <div class="form-group">
+                            <label>演示数据(JSON格式)</label>
+                            <textarea id="im-demo-data" rows="4" class="form-input" placeholder='{"states":[0.1,0.2,...],"actions":[0.5,-0.3,...],"reward":1.0}'></textarea>
+                        </div>
+                        <div class="form-group">
+                            <label>演示标签</label>
+                            <input type="text" id="im-demo-label" placeholder="例如: 抓取动作演示" class="form-input">
+                        </div>
+                        <div class="form-group">
+                            <label>算法选择</label>
+                            <select id="im-algorithm" class="form-input">
+                                <option value="bc">行为克隆 (BC)</option>
+                                <option value="dagger">DAgger</option>
+                                <option value="irl">逆强化学习 (IRL)</option>
+                            </select>
+                        </div>
+                        <button onclick="submitImitationDemo()" class="btn btn-primary" style="width:100%;">提交演示</button>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header"><h3>训练控制</h3></div>
+                    <div class="card-content">
+                        <div class="form-group">
+                            <label>训练轮数</label>
+                            <input type="number" id="im-epochs" class="form-input" value="50" min="1">
+                        </div>
+                        <div class="form-group">
+                            <label>学习率</label>
+                            <input type="number" id="im-lr" class="form-input" value="0.001" step="0.0001" min="0.0001">
+                        </div>
+                        <button onclick="startImitationTrain()" class="btn btn-primary" style="width:100%;">开始训练</button>
+                        <button onclick="refreshImitationStatus()" class="btn btn-secondary" style="width:100%;margin-top:8px;">刷新状态</button>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header"><h3>训练状态</h3></div>
+                    <div class="card-content">
+                        <div class="metric"><span class="metric-label">算法</span><span class="metric-value" id="im-algo-name">-</span></div>
+                        <div class="metric"><span class="metric-label">演示数量</span><span class="metric-value" id="im-demo-count">0</span></div>
+                        <div class="metric"><span class="metric-label">训练损失</span><span class="metric-value" id="im-loss">-</span></div>
+                        <div class="metric"><span class="metric-label">策略准确率</span><span class="metric-value" id="im-accuracy">-</span></div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header"><h3>策略预测</h3></div>
+                    <div class="card-content">
+                        <div class="form-group">
+                            <label>输入状态(逗号分隔)</label>
+                            <input type="text" id="im-predict-input" placeholder="0.1, 0.2, 0.3" class="form-input">
+                        </div>
+                        <button onclick="predictImitationAction()" class="btn btn-primary" style="width:100%;">预测动作</button>
+                        <div id="im-predict-result" style="margin-top:12px;padding:10px;background:#1a1a2e;color:#4a9eff;border-radius:4px;font-family:monospace;display:none;"></div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
     </main>
 
         <!-- 底部状态栏 -->
@@ -6721,10 +6855,11 @@ response = requests.get(
     <script src="js/knowledge-graph.js"></script>
     <script src="js/training-push.js"></script>
     <script src="js/training-center.js"></script>
-    <script src="js/main.js?v=211"></script>
+    <!-- H-001修复: simulation-control.js移到main.js之前加载，避免初始化时序问题 -->
     <script src="js/simulation-control.js"></script>
+    <script src="js/main.js?v=211"></script>
     <script>
-        // 更新当前时间
+        // 更新当前时间 - M-006修复: 注册定时器使状态栏时间实时更新
         function updateTime() {
             const now = new Date();
             const timeEl = document.getElementById('current-time');
@@ -6739,6 +6874,9 @@ response = requests.get(
             });
             timeEl.textContent = timeString;
         }
+        /* M-006修复: 启动时立即执行一次，然后每秒更新 */
+        updateTime();
+        setInterval(updateTime, 1000);
         
         // API服务实例（复用全局SelfLnnApi）
         var apiService = window.SelfLnnApi;
@@ -7884,6 +8022,99 @@ response = requests.get(
             if (typeof window.quickHealthCheck !== 'function') {
                 window.quickHealthCheck = function() { notifyFn('快速健康检查'); };
             }
+        })();
+    </script>
+    <!-- ======== F-103/F-104: 自主学习和模仿学习JS函数 ======== -->
+    <script>
+        (function() {
+            var nm = window.NOTICE || function(m,t){ if(window.showNotification)showNotification(m,t||'info'); };
+            /** 自主学习 **/
+            window.toggleAutoLearn = function(enabled) {
+                window.SelfLnnApi.autoLearnToggle(enabled).then(function(r){
+                    var d = r.data || r;
+                    var el = document.getElementById('auto-learn-status');
+                    if (el) { el.textContent = enabled ? '运行中' : '已停止'; el.style.color = enabled ? '#4caf50' : '#ff5252'; }
+                    nm('自主学习已' + (enabled?'启动':'停止'), 'success');
+                }).catch(function(){ nm('操作失败，请检查后端连接', 'danger'); });
+            };
+            window.triggerAutoScan = function() {
+                window.SelfLnnApi.autoLearnScan().then(function(r){
+                    var d = r.data || r;
+                    var log = document.getElementById('auto-discover-log');
+                    if (log) { log.innerHTML = '<div style="color:#4caf50;">扫描完成: 发现 '+(d.found||0)+' 条新知识</div>' + log.innerHTML; }
+                    setTextEl('auto-entity-count', d.entities||'-');
+                    setTextEl('auto-relation-count', d.relations||'-');
+                    nm('扫描完成', 'success');
+                }).catch(function(){ nm('扫描失败', 'danger'); });
+            };
+            window.applyAutoLearnConfig = function() {
+                var dir = document.getElementById('auto-watch-dir').value;
+                var filter = document.getElementById('auto-file-filter').value;
+                var interval = parseInt(document.getElementById('auto-scan-interval').value)||300;
+                window.SelfLnnApi.request('/learning/auto/config', {
+                    method:'POST',
+                    body: JSON.stringify({watch_dir:dir, file_filter:filter, scan_interval_sec:interval})
+                }, 1).then(function(){ nm('自主学习配置已应用', 'success'); }).catch(function(){ nm('配置失败', 'danger'); });
+            };
+            window.refreshAutoLearn = function() {
+                window.SelfLnnApi.autoLearnStats().then(function(r){
+                    var d = r.data || r;
+                    var el = document.getElementById('auto-learn-status');
+                    if (el) { el.textContent = d.enabled ? '运行中' : '已停止'; el.style.color = d.enabled ? '#4caf50' : '#ff5252'; }
+                    setTextEl('auto-entity-count', d.entity_count||0);
+                    setTextEl('auto-relation-count', d.relation_count||0);
+                    setTextEl('auto-import-count', d.import_count||0);
+                    setTextEl('auto-file-count', d.watched_files||0);
+                }).catch(function(){});
+            };
+            /** 模仿学习 **/
+            window.submitImitationDemo = function() {
+                var data = document.getElementById('im-demo-data').value;
+                var label = document.getElementById('im-demo-label').value;
+                var algo = document.getElementById('im-algorithm').value;
+                if (!data) { nm('请输入演示数据', 'warning'); return; }
+                try { var parsed = JSON.parse(data); } catch(e) { nm('JSON格式错误', 'warning'); return; }
+                window.SelfLnnApi.imitationDemonstration({data:parsed, label:label, algorithm:algo}).then(function(r){
+                    var d = r.data || r;
+                    if (d.success) { nm('演示已提交', 'success'); refreshImitationStatus(); }
+                    else { nm('提交失败', 'danger'); }
+                }).catch(function(){ nm('连接失败', 'danger'); });
+            };
+            window.startImitationTrain = function() {
+                var epochs = parseInt(document.getElementById('im-epochs').value)||50;
+                var lr = parseFloat(document.getElementById('im-lr').value)||0.001;
+                window.SelfLnnApi.imitationTrain({epochs:epochs, learning_rate:lr}).then(function(r){
+                    var d = r.data || r;
+                    nm(d.success?'训练已启动':'训练失败', d.success?'success':'danger');
+                    if (d.success) refreshImitationStatus();
+                }).catch(function(){ nm('训练请求失败', 'danger'); });
+            };
+            window.refreshImitationStatus = function() {
+                window.SelfLnnApi.getImitationStatus().then(function(r){
+                    var d = r.data || r;
+                    setTextEl('im-algo-name', d.algorithm||'bc');
+                    setTextEl('im-demo-count', d.demonstration_count||0);
+                    setTextEl('im-loss', d.training_loss!=null ? d.training_loss.toFixed(4) : '-');
+                    setTextEl('im-accuracy', d.accuracy!=null ? (d.accuracy*100).toFixed(1)+'%' : '-');
+                    });
+                }).catch(function(){});
+            };
+            window.predictImitationAction = function() {
+                var inp = document.getElementById('im-predict-input').value;
+                if (!inp) { nm('请输入状态值', 'warning'); return; }
+                var states = inp.split(',').map(function(s){ return parseFloat(s.trim()); });
+                window.SelfLnnApi.imitationPredict({state:states}).then(function(r){
+                    var d = r.data || r;
+                    var el = document.getElementById('im-predict-result');
+                    if (el) {
+                        el.style.display = 'block';
+                        el.textContent = '预测动作: ' + JSON.stringify(d.actions||d.action||d);
+                    }
+                }).catch(function(){ nm('预测失败', 'danger'); });
+            };
+            function setTextEl(id, val) { var el = document.getElementById(id); if (el) el.textContent = val; }
+            function fmtPct(v) { return v != null ? (v*100).toFixed(1)+'%' : '--'; }
+            function fmtNum(v) { return v != null ? v.toFixed(2) : '--'; }
         })();
     </script>
     <script>window.__PAGE_READY = true;</script>

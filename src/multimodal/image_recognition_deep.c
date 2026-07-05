@@ -27,88 +27,8 @@
 #define PCFC_MAX_CH 8
 #define PCFC_HD 32
 
-/* P2-5标注：以下向量运算函数(_sig/_tanh_f/_kaiming_init/_mat_vec_mul/_vec_sigmoid/_vec_tanh)
- * 与 object_recognition.c 中 _or_cfc_sig/_or_cfc_tanh_f/_or_cfc_xavier_init 功能重复。
- * 两个模块独立维护相同的基础运算库，增加了维护成本。
- * 后续应提取到 src/math/ 作为共享数学工具函数。 */
-static float _sig(float x) { return 1.0f / (1.0f + expf(-x)); }
-
-static float _tanh_f(float x) {
-    float e2x = expf(2.0f * x);
-    return (e2x - 1.0f) / (e2x + 1.0f);
-}
-
-/* K-011修复：使用加密安全随机数替代rand() */
-/* Kaiming初始化：适用于tanh/sigmoid激活函数层
- * 公式：std = sqrt(2.0 / (fan_in + fan_out)) */
-static void _kaiming_init(float* w, int fan_in, int fan_out) {
-    float scale = sqrtf(2.0f / (float)(fan_in + fan_out));
-    for (int i = 0; i < fan_in * fan_out; i++) {
-        float u1 = secure_random_float();
-        float u2 = secure_random_float();
-        if (u1 < 1e-7f) u1 = 1e-7f;
-        w[i] = sqrtf(-2.0f * logf(u1)) * cosf(2.0f * (float)M_PI * u2) * scale;
-    }
-}
-
-/* He/Kaiming初始化：适用于ReLU及变体激活函数层
- * 公式：std = sqrt(2.0 / fan_in)
- * 对ReLU激活的层使用此初始化可以避免梯度消失，保持前向传播方差 */
-static void _he_init(float* w, int fan_in, int fan_out) {
-    float scale = sqrtf(2.0f / (float)fan_in);
-    for (int i = 0; i < fan_in * fan_out; i++) {
-        float u1 = secure_random_float();
-        float u2 = secure_random_float();
-        if (u1 < 1e-7f) u1 = 1e-7f;
-        w[i] = sqrtf(-2.0f * logf(u1)) * cosf(2.0f * (float)M_PI * u2) * scale;
-    }
-}
-
-static void _mat_vec_mul(const float* mat, const float* vec, float* out, int r, int c) {
-    for (int i = 0; i < r; i++) {
-        out[i] = 0.0f;
-        for (int j = 0; j < c; j++) out[i] += mat[i * c + j] * vec[j];
-    }
-}
-
-static void _vec_add(float* a, const float* b, int n) { for (int i = 0; i < n; i++) a[i] += b[i]; }
-static void _vec_hadamard(float* a, const float* b, int n) { for (int i = 0; i < n; i++) a[i] *= b[i]; }
-static void _vec_sigmoid(float* a, int n) { for (int i = 0; i < n; i++) a[i] = _sig(a[i]); }
-static void _vec_tanh(float* a, int n) { for (int i = 0; i < n; i++) a[i] = _tanh_f(a[i]); }
-static void _vec_scale(float* a, float s, int n) { for (int i = 0; i < n; i++) a[i] *= s; }
-static void _vec_copy(float* d, const float* s, int n) { memcpy(d, s, n * sizeof(float)); }
-
-static float _vec_dot(const float* a, const float* b, int n) {
-    float s = 0.0f; for (int i = 0; i < n; i++) s += a[i] * b[i]; return s;
-}
-
-static float _vec_norm(const float* a, int n) { return sqrtf(_vec_dot(a, a, n)); }
-
-static void _vec_normalize(float* a, int n) {
-    float norm = _vec_norm(a, n);
-    if (norm > 1e-10f) _vec_scale(a, 1.0f / norm, n);
-}
-
-static float _l2_dist(const float* a, const float* b, int n) {
-    float s = 0.0f;
-    for (int i = 0; i < n; i++) { float d = a[i] - b[i]; s += d * d; }
-    return sqrtf(s);
-}
-
-static float _cos_sim(const float* a, const float* b, int n) {
-    float dot = 0.0f, na = 0.0f, nb = 0.0f;
-    for (int i = 0; i < n; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
-    float denom = sqrtf(na * nb);
-    return (denom > 1e-10f) ? dot / denom : 0.0f;
-}
-
-static void _softmax(float* logits, int n) {
-    float mv = logits[0];
-    for (int i = 1; i < n; i++) if (logits[i] > mv) mv = logits[i];
-    float sum = 0.0f;
-    for (int i = 0; i < n; i++) { logits[i] = expf(logits[i] - mv); sum += logits[i]; }
-    if (sum > 1e-10f) for (int i = 0; i < n; i++) logits[i] /= sum;
-}
+/* P1-015修复：向量运算函数已统一提取到 include/selflnn/math/vec_ops_shared.h */
+#include "selflnn/math/vec_ops_shared.h"
 
 static void _cfc_ode_step(const float* in, int in_dim,
                            const float* W_gx, const float* W_ax,
@@ -123,15 +43,15 @@ static void _cfc_ode_step(const float* in, int in_dim,
     float* t2   = t1 + h_dim;
     memset(gate, 0, h_dim * sizeof(float));
     memset(act, 0, h_dim * sizeof(float));
-    _mat_vec_mul(W_gx, in, t1, h_dim, in_dim);
-    _mat_vec_mul(W_gh, h, t2, h_dim, h_dim);
-    _vec_add(t1, t2, h_dim); _vec_add(t1, b_g, h_dim); _vec_sigmoid(t1, h_dim);
-    _vec_copy(gate, t1, h_dim);
-    _mat_vec_mul(W_ax, in, t1, h_dim, in_dim);
-    _mat_vec_mul(W_ah, h, t2, h_dim, h_dim);
-    _vec_add(t1, t2, h_dim); _vec_add(t1, b_a, h_dim); _vec_tanh(t1, h_dim);
-    _vec_copy(act, t1, h_dim);
-    _vec_hadamard(gate, act, h_dim);
+    vec_mat_mul(W_gx, in, t1, h_dim, in_dim);
+    vec_mat_mul(W_gh, h, t2, h_dim, h_dim);
+    vec_add(t1, t2, h_dim); vec_add(t1, b_g, h_dim); vec_sigmoid(t1, h_dim);
+    vec_copy(gate, t1, h_dim);
+    vec_mat_mul(W_ax, in, t1, h_dim, in_dim);
+    vec_mat_mul(W_ah, h, t2, h_dim, h_dim);
+    vec_add(t1, t2, h_dim); vec_add(t1, b_a, h_dim); vec_tanh(t1, h_dim);
+    vec_copy(act, t1, h_dim);
+    vec_hadamard(gate, act, h_dim);
     float decay = expf(-dt / tau);
     for (int i = 0; i < h_dim; i++) h[i] = h[i] * decay + (1.0f - decay) * gate[i];
     safe_free((void**)&gate);
@@ -167,16 +87,16 @@ static void _cfc_ode_step_backward(const float* in, int in_dim,
     (void)d_act; (void)d_pre_act;
     memset(pre_gate, 0, h_dim * sizeof(float));
     memset(pre_act, 0, h_dim * sizeof(float));
-    _mat_vec_mul(W_gx, in, t1, h_dim, in_dim);
-    _mat_vec_mul(W_gh, h, t2, h_dim, h_dim);
+    vec_mat_mul(W_gx, in, t1, h_dim, in_dim);
+    vec_mat_mul(W_gh, h, t2, h_dim, h_dim);
     for (int i = 0; i < h_dim; i++) pre_gate[i] = t1[i] + t2[i] + b_g[i];
     memcpy(gate, pre_gate, h_dim * sizeof(float));
-    _vec_sigmoid(gate, h_dim);
-    _mat_vec_mul(W_ax, in, t1, h_dim, in_dim);
-    _mat_vec_mul(W_ah, h, t2, h_dim, h_dim);
+    vec_sigmoid(gate, h_dim);
+    vec_mat_mul(W_ax, in, t1, h_dim, in_dim);
+    vec_mat_mul(W_ah, h, t2, h_dim, h_dim);
     for (int i = 0; i < h_dim; i++) pre_act[i] = t1[i] + t2[i] + b_a[i];
     memcpy(act, pre_act, h_dim * sizeof(float));
-    _vec_tanh(act, h_dim);
+    vec_tanh(act, h_dim);
     float decay = expf(-dt / tau);
     for (int i = 0; i < h_dim; i++) {
         d_driver[i] = (1.0f - decay) * dL_dh_new[i];
@@ -277,21 +197,21 @@ IRDFineClassifier* ird_fine_create(const IRDFineConfig* config) {
     if (!c) return NULL;
     memcpy(&c->cfg, config, sizeof(IRDFineConfig));
     int hd = config->feature_dim, id = config->input_dim;
-    _kaiming_init(c->W_gx_p, id, hd); _kaiming_init(c->W_ax_p, id, hd);
-    _kaiming_init(c->W_gh_p, hd, hd); _kaiming_init(c->W_ah_p, hd, hd);
+    vec_init_kaiming(c->W_gx_p, id, hd); vec_init_kaiming(c->W_ax_p, id, hd);
+    vec_init_kaiming(c->W_gh_p, hd, hd); vec_init_kaiming(c->W_ah_p, hd, hd);
     memset(c->b_g_p, 0, hd * sizeof(float)); memset(c->b_a_p, 0, hd * sizeof(float));
-    _kaiming_init(c->W_gx_part, hd, hd); _kaiming_init(c->W_ax_part, hd, hd);
-    _kaiming_init(c->W_gh_part, hd, hd); _kaiming_init(c->W_ah_part, hd, hd);
+    vec_init_kaiming(c->W_gx_part, hd, hd); vec_init_kaiming(c->W_ax_part, hd, hd);
+    vec_init_kaiming(c->W_gh_part, hd, hd); vec_init_kaiming(c->W_ah_part, hd, hd);
     memset(c->b_g_part, 0, hd * sizeof(float)); memset(c->b_a_part, 0, hd * sizeof(float));
-    _kaiming_init(c->W_fine, hd, config->num_fine_categories);
+    vec_init_kaiming(c->W_fine, hd, config->num_fine_categories);
     memset(c->b_fine, 0, config->num_fine_categories * sizeof(float));
-    _kaiming_init(c->W_coarse, hd, config->num_coarse_categories);
+    vec_init_kaiming(c->W_coarse, hd, config->num_coarse_categories);
     memset(c->b_coarse, 0, config->num_coarse_categories * sizeof(float));
-    _kaiming_init(c->bilin_W, hd, hd); _kaiming_init(c->bilin_proj, 2, hd);
-    _kaiming_init(c->pW_gx, PCFC_MAX_CH, PCFC_HD);
-    _kaiming_init(c->pW_ax, PCFC_MAX_CH, PCFC_HD);
-    _kaiming_init(c->pW_gh, PCFC_HD, PCFC_HD);
-    _kaiming_init(c->pW_ah, PCFC_HD, PCFC_HD);
+    vec_init_kaiming(c->bilin_W, hd, hd); vec_init_kaiming(c->bilin_proj, 2, hd);
+    vec_init_kaiming(c->pW_gx, PCFC_MAX_CH, PCFC_HD);
+    vec_init_kaiming(c->pW_ax, PCFC_MAX_CH, PCFC_HD);
+    vec_init_kaiming(c->pW_gh, PCFC_HD, PCFC_HD);
+    vec_init_kaiming(c->pW_ah, PCFC_HD, PCFC_HD);
     memset(c->pb_g, 0, PCFC_HD * sizeof(float));
     memset(c->pb_a, 0, PCFC_HD * sizeof(float));
     c->training_completed = 0;
@@ -329,7 +249,7 @@ static void _extract_patches_cfc(IRDFineClassifier* clf, const float* img,
             _cfc_ode_step(patch_h, PCFC_HD, clf->W_gx_p, clf->W_ax_p,
                           clf->W_gh_p, clf->W_ah_p, clf->b_g_p, clf->b_a_p,
                           hidden, hd, tau, dt);
-            _vec_copy(&pf[pi * hd], hidden, hd);
+            vec_copy(&pf[pi * hd], hidden, hd);
             pi++;
         }
     }
@@ -338,7 +258,7 @@ static void _extract_patches_cfc(IRDFineClassifier* clf, const float* img,
 
 static void _saliency(const float* pf, int np, int hd, float* sal, int* ns, float th) {
     float mx = 0.0f;
-    for (int i = 0; i < np; i++) { float n = _vec_norm(&pf[i * hd], hd); sal[i] = n; if (n > mx) mx = n; }
+    for (int i = 0; i < np; i++) { float n = vec_norm(&pf[i * hd], hd); sal[i] = n; if (n > mx) mx = n; }
     *ns = 0;
     if (mx > 1e-6f) { for (int i = 0; i < np; i++) { sal[i] /= mx; if (sal[i] > th) (*ns)++; } }
 }
@@ -352,10 +272,10 @@ static void _agg_global(const float* pf, int np, int hd, const float* sal, float
 static void _bilinear(const float* gf, const float* lf, float* bl, int hd,
                        const float* W) {
     float pg[256], pl[256]; memset(pg, 0, hd * sizeof(float)); memset(pl, 0, hd * sizeof(float));
-    _mat_vec_mul(W, gf, pg, hd, hd); _mat_vec_mul(W, lf, pl, hd, hd);
+    vec_mat_mul(W, gf, pg, hd, hd); vec_mat_mul(W, lf, pl, hd, hd);
     for (int i = 0; i < hd; i++) bl[i] = pg[i] * pl[i];
     for (int i = 0; i < hd; i++) bl[i] = copysignf(sqrtf(fabsf(bl[i]) + 1e-8f), bl[i]);
-    _vec_normalize(bl, hd);
+    vec_normalize(bl, hd);
 }
 
 static void _locate_parts(IRDFineClassifier* clf, const float* pf, int np,
@@ -385,7 +305,7 @@ static void _locate_parts(IRDFineClassifier* clf, const float* pf, int np,
         parts[sel].x = (float)cx; parts[sel].y = (float)cy;
         parts[sel].width = (float)ps; parts[sel].height = (float)ps;
         parts[sel].discriminative_score = bs;
-        _vec_copy(parts[sel].feature_vector, &pf[bi * hd], hd);
+        vec_copy(parts[sel].feature_vector, &pf[bi * hd], hd);
         memcpy(parts[sel].saliency_map, sal, np * sizeof(float));
         parts[sel].num_salient_patches = ns;
         sel++;
@@ -422,22 +342,22 @@ int ird_fine_classify(IRDFineClassifier* clf, const float* img,
     }
     if (res->num_parts > 0) {
         float tw = 0.0f; for (int p = 0; p < res->num_parts; p++) tw += res->parts[p].discriminative_score;
-        if (tw > 1e-10f) _vec_scale(res->local_feature, 1.0f / tw, hd);
+        if (tw > 1e-10f) vec_scale(res->local_feature, 1.0f / tw, hd);
     }
     if (clf->cfg.enable_bilinear_pooling)
         _bilinear(res->global_feature, res->local_feature, res->bilinear_feature, hd, clf->bilin_W);
     else
-        _vec_copy(res->bilinear_feature, res->global_feature, hd);
+        vec_copy(res->bilinear_feature, res->global_feature, hd);
 
     float clog[64];
-    _mat_vec_mul(clf->W_coarse, res->bilinear_feature, clog, clf->cfg.num_coarse_categories, hd);
-    _vec_add(clog, clf->b_coarse, clf->cfg.num_coarse_categories);
-    _softmax(clog, clf->cfg.num_coarse_categories);
+    vec_mat_mul(clf->W_coarse, res->bilinear_feature, clog, clf->cfg.num_coarse_categories, hd);
+    vec_add(clog, clf->b_coarse, clf->cfg.num_coarse_categories);
+    vec_softmax(clog, clf->cfg.num_coarse_categories);
 
     float flog[256];
-    _mat_vec_mul(clf->W_fine, res->bilinear_feature, flog, clf->cfg.num_fine_categories, hd);
-    _vec_add(flog, clf->b_fine, clf->cfg.num_fine_categories);
-    _softmax(flog, clf->cfg.num_fine_categories);
+    vec_mat_mul(clf->W_fine, res->bilinear_feature, flog, clf->cfg.num_fine_categories, hd);
+    vec_add(flog, clf->b_fine, clf->cfg.num_fine_categories);
+    vec_softmax(flog, clf->cfg.num_fine_categories);
 
     int bc = 0; float bcc = 0.0f;
     for (int i = 0; i < clf->cfg.num_coarse_categories; i++) { if (clog[i] > bcc) { bcc = clog[i]; bc = i; } }
@@ -486,8 +406,8 @@ int ird_fine_train(IRDFineClassifier* clf, const float* im, const int* lb,
             if (ret) continue;
             int la = lb[s]; if (la < 0 || la >= nf) continue;
             float log[256];
-            _mat_vec_mul(clf->W_fine, r.bilinear_feature, log, nf, hd);
-            _vec_add(log, clf->b_fine, nf); _softmax(log, nf);
+            vec_mat_mul(clf->W_fine, r.bilinear_feature, log, nf, hd);
+            vec_add(log, clf->b_fine, nf); vec_softmax(log, nf);
             tl += -logf(log[la] + 1e-10f);
             float grad[256];
             for (int i = 0; i < nf; i++) grad[i] = log[i] - (i == la ? 1.0f : 0.0f);
@@ -544,7 +464,7 @@ int ird_fine_train(IRDFineClassifier* clf, const float* im, const int* lb,
 
             /* 计算显著性权重 */
             float sal[256];
-            for (int i = 0; i < np; i++) sal[i] = _vec_norm(&hidden_states[i * hd], hd);
+            for (int i = 0; i < np; i++) sal[i] = vec_norm(&hidden_states[i * hd], hd);
             float mx_sal = 0.0f;
             for (int i = 0; i < np; i++) if (sal[i] > mx_sal) mx_sal = sal[i];
             float tw = 0.0f;
@@ -560,14 +480,14 @@ int ird_fine_train(IRDFineClassifier* clf, const float* im, const int* lb,
             if (clf->cfg.enable_bilinear_pooling) {
                 float pg[256], pl[256];
                 memset(pg, 0, hd * sizeof(float)); memset(pl, 0, hd * sizeof(float));
-                _mat_vec_mul(clf->bilin_W, r.global_feature, pg, hd, hd);
-                _mat_vec_mul(clf->bilin_W, r.local_feature, pl, hd, hd);
+                vec_mat_mul(clf->bilin_W, r.global_feature, pg, hd, hd);
+                vec_mat_mul(clf->bilin_W, r.local_feature, pl, hd, hd);
                 float bl_raw[256], bl_sqrt[256], d_bl[256];
                 for (int i = 0; i < hd; i++) {
                     bl_raw[i] = pg[i] * pl[i];
                     bl_sqrt[i] = copysignf(sqrtf(fabsf(bl_raw[i]) + 1e-8f), bl_raw[i]);
                 }
-                float norm = _vec_norm(bl_sqrt, hd);
+                float norm = vec_norm(bl_sqrt, hd);
                 for (int i = 0; i < hd; i++) {
                     float d_sqrt = 0.5f / (sqrtf(fabsf(bl_raw[i]) + 1e-8f) + 1e-8f);
                     float scale = (norm > 1e-10f) ? (1.0f / norm) : 1.0f;
@@ -765,13 +685,13 @@ IRDOpenSetRecognizer* ird_open_set_create(const IRDOpenSetConfig* config) {
     rec->nndr_threshold = config->nndr_threshold;
     rec->weibull_thresh = 0.5f;
     int hd = config->feature_dim, id = config->input_dim;
-    _kaiming_init(rec->W_gx, id, hd); _kaiming_init(rec->W_ax, id, hd);
+    vec_init_kaiming(rec->W_gx, id, hd); vec_init_kaiming(rec->W_ax, id, hd);
     memset(rec->b_g, 0, hd * sizeof(float)); memset(rec->b_a, 0, hd * sizeof(float));
     memset(rec->hidden, 0, hd * sizeof(float));
-    _kaiming_init(rec->pW_gx, PCFC_MAX_CH, PCFC_HD);
-    _kaiming_init(rec->pW_ax, PCFC_MAX_CH, PCFC_HD);
-    _kaiming_init(rec->pW_gh, PCFC_HD, PCFC_HD);
-    _kaiming_init(rec->pW_ah, PCFC_HD, PCFC_HD);
+    vec_init_kaiming(rec->pW_gx, PCFC_MAX_CH, PCFC_HD);
+    vec_init_kaiming(rec->pW_ax, PCFC_MAX_CH, PCFC_HD);
+    vec_init_kaiming(rec->pW_gh, PCFC_HD, PCFC_HD);
+    vec_init_kaiming(rec->pW_ah, PCFC_HD, PCFC_HD);
     memset(rec->pb_g, 0, PCFC_HD * sizeof(float));
     memset(rec->pb_a, 0, PCFC_HD * sizeof(float));
     rec->num_known_classes = 0; rec->total_samples = 0;
@@ -841,7 +761,7 @@ int ird_open_set_learn_known(IRDOpenSetRecognizer* recognizer, const float* feat
         float* sum_ptr = &class_sums[ci * hd];
         float cnt = (float)(class_counts[ci] > 0 ? class_counts[ci] : 1);
         for (int d = 0; d < hd; d++) proto[d] = sum_ptr[d] / cnt;
-        _vec_normalize(proto, hd);
+        vec_normalize(proto, hd);
         recognizer->total_samples += class_counts[ci];
     }
 
@@ -854,7 +774,7 @@ int ird_open_set_learn_known(IRDOpenSetRecognizer* recognizer, const float* feat
             int lbl = labels[i]; if (lbl < 0) continue;
             int ci_check = class_to_idx[lbl % 65536];
             if (ci_check == ci) {
-                float d = _l2_dist(&features[i * hd], proto, hd);
+                float d = vec_l2_dist(&features[i * hd], proto, hd);
                 if (d < min_d) min_d = d;
             }
         }
@@ -947,7 +867,7 @@ int ird_open_set_predict(IRDOpenSetRecognizer* recognizer, const float* features
     float second_min = FLT_MAX;
 
     for (int ci = 0; ci < nc; ci++) {
-        dists[ci] = _l2_dist(query_h, &recognizer->prototypes[ci * hd], hd);
+        dists[ci] = vec_l2_dist(query_h, &recognizer->prototypes[ci * hd], hd);
         if (dists[ci] < min_dist) {
             second_min = min_dist;
             min_dist = dists[ci];
@@ -1019,12 +939,12 @@ static int _os_extract_image_features(IRDOpenSetRecognizer* recognizer, const fl
                           recognizer->b_g, recognizer->b_a,
                           recognizer->hidden, hd,
                           recognizer->cfg.cfc_time_constant, recognizer->cfg.cfc_delta_t);
-            _vec_add(features, recognizer->hidden, hd);
+            vec_add(features, recognizer->hidden, hd);
             patch_count++;
         }
     }
-    if (patch_count > 0) _vec_scale(features, 1.0f / (float)patch_count, hd);
-    _vec_normalize(features, hd);
+    if (patch_count > 0) vec_scale(features, 1.0f / (float)patch_count, hd);
+    vec_normalize(features, hd);
     return 0;
 }
 
@@ -1148,16 +1068,16 @@ IRDFewShotRecognizer* ird_few_shot_create(const IRDFewShotConfig* config) {
     if (!rec) return NULL;
     memcpy(&rec->cfg, config, sizeof(IRDFewShotConfig));
     int hd = config->embedding_dim, id = config->input_dim;
-    _kaiming_init(rec->W_embed, id, hd);
+    vec_init_kaiming(rec->W_embed, id, hd);
     memset(rec->b_embed, 0, hd * sizeof(float));
-    _kaiming_init(rec->W_gx, id, hd); _kaiming_init(rec->W_ax, id, hd);
-    _kaiming_init(rec->W_gh, hd, hd); _kaiming_init(rec->W_ah, hd, hd);
+    vec_init_kaiming(rec->W_gx, id, hd); vec_init_kaiming(rec->W_ax, id, hd);
+    vec_init_kaiming(rec->W_gh, hd, hd); vec_init_kaiming(rec->W_ah, hd, hd);
     memset(rec->b_g, 0, hd * sizeof(float)); memset(rec->b_a, 0, hd * sizeof(float));
     rec->tau = config->cfc_time_constant; rec->dt = config->cfc_delta_t;
-    _kaiming_init(rec->pW_gx, PCFC_MAX_CH, PCFC_HD);
-    _kaiming_init(rec->pW_ax, PCFC_MAX_CH, PCFC_HD);
-    _kaiming_init(rec->pW_gh, PCFC_HD, PCFC_HD);
-    _kaiming_init(rec->pW_ah, PCFC_HD, PCFC_HD);
+    vec_init_kaiming(rec->pW_gx, PCFC_MAX_CH, PCFC_HD);
+    vec_init_kaiming(rec->pW_ax, PCFC_MAX_CH, PCFC_HD);
+    vec_init_kaiming(rec->pW_gh, PCFC_HD, PCFC_HD);
+    vec_init_kaiming(rec->pW_ah, PCFC_HD, PCFC_HD);
     memset(rec->pb_g, 0, PCFC_HD * sizeof(float));
     memset(rec->pb_a, 0, PCFC_HD * sizeof(float));
     rec->num_support = 0; rec->num_classes = 0; rec->initialized = 0;
@@ -1185,7 +1105,7 @@ static int _embed_image_cfc(IRDFewShotRecognizer* rec, const float* img,
                           embedding, hd, tau, dt);
         }
     }
-    _vec_normalize(embedding, hd);
+    vec_normalize(embedding, hd);
     return 0;
 }
 
@@ -1241,7 +1161,7 @@ int ird_few_shot_compute_prototypes(IRDFewShotRecognizer* rec) {
         if (rec->prototype_counts[ci] > 0) {
             float inv = 1.0f / (float)rec->prototype_counts[ci];
             for (int j = 0; j < hd; j++) rec->prototypes[ci * hd + j] *= inv;
-            _vec_normalize(&rec->prototypes[ci * hd], hd);
+            vec_normalize(&rec->prototypes[ci * hd], hd);
         }
     }
     return 0;
@@ -1267,8 +1187,8 @@ int ird_few_shot_predict_from_features(IRDFewShotRecognizer* rec,
     int dm = rec->cfg.distance_metric;
     float dists[256];
     for (int ci = 0; ci < nc; ci++) {
-        dists[ci] = (dm == 0) ? _l2_dist(features, &rec->prototypes[ci * hd], hd)
-                              : (1.0f - _cos_sim(features, &rec->prototypes[ci * hd], hd));
+        dists[ci] = (dm == 0) ? vec_l2_dist(features, &rec->prototypes[ci * hd], hd)
+                              : (1.0f - vec_cos_sim(features, &rec->prototypes[ci * hd], hd));
     }
     int si[256];
     for (int ci = 0; ci < nc; ci++) si[ci] = ci;
@@ -1310,7 +1230,7 @@ int ird_few_shot_finetune(IRDFewShotRecognizer* rec, const float* images,
 
             float probs[256]; float max_p = -1e10f;
             for (int ci = 0; ci < nc; ci++) {
-                float sim = _cos_sim(emb, &rec->prototypes[ci * hd], hd);
+                float sim = vec_cos_sim(emb, &rec->prototypes[ci * hd], hd);
                 probs[ci] = sim; if (sim > max_p) max_p = sim;
             }
             float sum_e = 0.0f;
@@ -1395,7 +1315,7 @@ int ird_few_shot_update_prototype(IRDFewShotRecognizer* rec, int label,
     if (!rec || !new_prototype || label < 0 || label >= rec->cfg.max_way) return -1;
     int hd = rec->cfg.embedding_dim;
     memcpy(&rec->prototypes[label * hd], new_prototype, hd * sizeof(float));
-    _vec_normalize(&rec->prototypes[label * hd], hd);
+    vec_normalize(&rec->prototypes[label * hd], hd);
     if (label + 1 > rec->num_classes) rec->num_classes = label + 1;
     rec->initialized = 1;
     return 0;
@@ -1478,21 +1398,21 @@ IRDZeroShotRecognizer* ird_zero_shot_create(const IRDZeroShotConfig* config) {
     if (!rec) return NULL;
     memcpy(&rec->cfg, config, sizeof(IRDZeroShotConfig));
     int hd = config->feature_dim, sd = config->semantic_dim, ad = config->attribute_dim;
-    _kaiming_init(rec->W_vis_sem, hd, sd);
+    vec_init_kaiming(rec->W_vis_sem, hd, sd);
     memset(rec->b_vis_sem, 0, sd * sizeof(float));
-    _kaiming_init(rec->W_attr_pred, hd, ad);
+    vec_init_kaiming(rec->W_attr_pred, hd, ad);
     memset(rec->b_attr_pred, 0, ad * sizeof(float));
-    _kaiming_init(rec->W_gx, config->input_dim, hd);
-    _kaiming_init(rec->W_ax, config->input_dim, hd);
-    _kaiming_init(rec->W_gh, hd, hd);
-    _kaiming_init(rec->W_ah, hd, hd);
+    vec_init_kaiming(rec->W_gx, config->input_dim, hd);
+    vec_init_kaiming(rec->W_ax, config->input_dim, hd);
+    vec_init_kaiming(rec->W_gh, hd, hd);
+    vec_init_kaiming(rec->W_ah, hd, hd);
     memset(rec->b_g, 0, hd * sizeof(float));
     memset(rec->b_a, 0, hd * sizeof(float));
     memset(rec->hidden, 0, hd * sizeof(float));
-    _kaiming_init(rec->pW_gx, PCFC_MAX_CH, PCFC_HD);
-    _kaiming_init(rec->pW_ax, PCFC_MAX_CH, PCFC_HD);
-    _kaiming_init(rec->pW_gh, PCFC_HD, PCFC_HD);
-    _kaiming_init(rec->pW_ah, PCFC_HD, PCFC_HD);
+    vec_init_kaiming(rec->pW_gx, PCFC_MAX_CH, PCFC_HD);
+    vec_init_kaiming(rec->pW_ax, PCFC_MAX_CH, PCFC_HD);
+    vec_init_kaiming(rec->pW_gh, PCFC_HD, PCFC_HD);
+    vec_init_kaiming(rec->pW_ah, PCFC_HD, PCFC_HD);
     memset(rec->pb_g, 0, PCFC_HD * sizeof(float));
     memset(rec->pb_a, 0, PCFC_HD * sizeof(float));
     rec->margin = config->margin;
@@ -1504,16 +1424,16 @@ void ird_zero_shot_free(IRDZeroShotRecognizer* rec) { safe_free((void**)&rec); }
 
 static void _map_visual_to_semantic(const float* vis, float* sem_out, int hd, int sd,
                                       const float* W, const float* b) {
-    _mat_vec_mul(W, vis, sem_out, sd, hd);
-    _vec_add(sem_out, b, sd);
-    _vec_normalize(sem_out, sd);
+    vec_mat_mul(W, vis, sem_out, sd, hd);
+    vec_add(sem_out, b, sd);
+    vec_normalize(sem_out, sd);
 }
 
 static void _predict_attributes(const float* vis, float* attrs, int hd, int ad,
                                   const float* W, const float* b) {
-    _mat_vec_mul(W, vis, attrs, ad, hd);
-    _vec_add(attrs, b, ad);
-    for (int i = 0; i < ad; i++) attrs[i] = _sig(attrs[i]);
+    vec_mat_mul(W, vis, attrs, ad, hd);
+    vec_add(attrs, b, ad);
+    for (int i = 0; i < ad; i++) attrs[i] = vec_sigmoid_f(attrs[i]);
 }
 
 int ird_zero_shot_set_class_attributes(IRDZeroShotRecognizer* rec, const float* attributes,
@@ -1549,10 +1469,10 @@ int ird_zero_shot_learn_mapping(IRDZeroShotRecognizer* rec, const float* visual_
         const float* sem_pos = &semantic_features[s * sd];
         float pred_sem[256];
         _map_visual_to_semantic(vis, pred_sem, hd, sd, rec->W_vis_sem, rec->b_vis_sem);
-        float pos_sim = _cos_sim(pred_sem, sem_pos, sd);
+        float pos_sim = vec_cos_sim(pred_sem, sem_pos, sd);
         int neg_idx = (s + 1) % num_samples;
         const float* sem_neg = &semantic_features[neg_idx * sd];
-        float neg_sim = _cos_sim(pred_sem, sem_neg, sd);
+        float neg_sim = vec_cos_sim(pred_sem, sem_neg, sd);
         float hinge = margin - pos_sim + neg_sim;
         if (hinge > 0.0f) {
             loss += hinge;
@@ -1605,7 +1525,7 @@ int ird_zero_shot_predict_from_features(IRDZeroShotRecognizer* rec, const float*
 
     float sims[256];
     for (int ci = 0; ci < nc; ci++) {
-        sims[ci] = _cos_sim(pred_sem, &rec->semantic_prototypes[ci * sd], sd);
+        sims[ci] = vec_cos_sim(pred_sem, &rec->semantic_prototypes[ci * sd], sd);
     }
     int best = 0; float bs = sims[0];
     for (int ci = 1; ci < nc; ci++) { if (sims[ci] > bs) { bs = sims[ci]; best = ci; } }
@@ -2056,19 +1976,29 @@ int ird_load_pretrained_weights(IRDDeepManager* manager, const char* path) {
         SAFE_FREAD_ARR(c->pW_gh, f);      SAFE_FREAD_ARR(c->pW_ah, f);
         SAFE_FREAD_ARR(c->pb_g, f);       SAFE_FREAD_ARR(c->pb_a, f);
     } else if (flags[0]) {
+        /* P1-003修复: 添加静态断言验证架构常量与文件格式的一致性
+         * 当架构参数变更时，此处编译会失败，提醒开发者同步更新skip_size
+         * 注意: 256=IRDFineCfg默认hidden, 32=默认patch_dim, 64=默认coarse_dim */
+        #if IRD_FINE_HIDDEN != 256 || IRD_FINE_PATCH != 32 || IRD_FINE_COARSE != 64
+        #error "IRDFine架构常量已变更，请同步更新下面的skip_size计算"
+        #endif
         /* 文件中存在权重但管理器未初始化该子模型，跳过对应数据 */
         size_t skip_size = sizeof(IRDFineConfig) + sizeof(int)
-            + (256 * 32 + 256 * 32 + 256 * 256 + 256 * 256) * sizeof(float)
-            + (256 + 256) * sizeof(float)
-            + (256 * 256 + 256 * 256 + 256 * 256 + 256 * 256) * sizeof(float)
-            + (256 + 256) * sizeof(float)
-            + (256 * 256 + 256) * sizeof(float)
-            + (64 * 256 + 64) * sizeof(float)
-            + (256 * 256 + 256 * 2) * sizeof(float)
+            + (IRD_FINE_HIDDEN * IRD_FINE_PATCH + IRD_FINE_HIDDEN * IRD_FINE_PATCH + IRD_FINE_HIDDEN * IRD_FINE_HIDDEN + IRD_FINE_HIDDEN * IRD_FINE_HIDDEN) * sizeof(float)
+            + (IRD_FINE_HIDDEN + IRD_FINE_HIDDEN) * sizeof(float)
+            + (IRD_FINE_HIDDEN * IRD_FINE_HIDDEN + IRD_FINE_HIDDEN * IRD_FINE_HIDDEN + IRD_FINE_HIDDEN * IRD_FINE_HIDDEN + IRD_FINE_HIDDEN * IRD_FINE_HIDDEN) * sizeof(float)
+            + (IRD_FINE_HIDDEN + IRD_FINE_HIDDEN) * sizeof(float)
+            + (IRD_FINE_HIDDEN * IRD_FINE_HIDDEN + IRD_FINE_HIDDEN) * sizeof(float)
+            + (IRD_FINE_COARSE * IRD_FINE_HIDDEN + IRD_FINE_COARSE) * sizeof(float)
+            + (IRD_FINE_HIDDEN * IRD_FINE_HIDDEN + IRD_FINE_HIDDEN * 2) * sizeof(float)
             + (PCFC_HD * PCFC_MAX_CH + PCFC_HD * PCFC_MAX_CH) * sizeof(float)
             + (PCFC_HD * PCFC_HD + PCFC_HD * PCFC_HD) * sizeof(float)
             + (PCFC_HD + PCFC_HD) * sizeof(float);
-        fseek(f, (long)skip_size, SEEK_CUR);
+        /* P1-003修复: 使用long long替代long避免Windows LLP64截断 */
+        if (skip_size > 0x7FFFFFFF) {
+            log_warn("[图像识别] skip_size超过2GB，文件格式可能需要升级");
+        }
+        fseek(f, (long long)skip_size, SEEK_CUR);
     }
 
     /* ---- 开放集识别器权重 ---- */

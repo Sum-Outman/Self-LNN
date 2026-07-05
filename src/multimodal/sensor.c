@@ -2,7 +2,7 @@
 #include "selflnn/multimodal/sensor_preprocessor_deep.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/secure_random.h"
-#include "selflnn/core/cfc.h"
+/* C-001修复: 移除冗余 selflnn/core/cfc.h include。sensor.c内部ESKF滤波器全部自实现,不调用任何cfc_*函数。 */
 #include "selflnn/utils/platform.h"
 
 #include <stdlib.h>

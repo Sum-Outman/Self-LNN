@@ -18,8 +18,8 @@
 #include <stdio.h>
 #include <float.h>
 
-/* extern: rng_uniform 来自 math_utils.h */
-extern float rng_uniform(float min, float max);
+/* FIX-EXTERN1: math_utils.h已在文件顶部包含，移除冗余extern声明 */
+#include "selflnn/utils/math_utils.h"
 
 /* =============================================================== *
  * 内部常量定义                                                     *
@@ -312,8 +312,8 @@ const char* tts_get_pinyin_string(const TTS_Pinyin* pinyin) {
  * @brief 汉字→拼音查找（实现在 tts_pinyin_real.c）
  * 使用二分查找精确表(7174汉字) + Unicode启发式回退
  * 覆盖 GB2312一级汉字 + 常用3500字 + HSK词汇汉字
- */
-extern int tts_pinyin_lookup(uint16_t codepoint, int* out_init, int* out_final, int* out_tone);
+ * FIX-EXTERN3: tts_pinyin_lookup已在tts.h中声明(第11行已include)，移除冗余extern */
+
 
 static int init_pinyin_table(TTSEngine* engine) {
 /* 使用布尔标志替代不安全哨兵指针(uintptr_t)1 */

@@ -1929,20 +1929,22 @@ RDFTripleStore* rdf_triple_store_load(const char* filename) {
         if (fread(&ntype, sizeof(ntype), 1, fp) != 1) break;
         char val_buf[1024] = {0};
         uint32_t vlen;
-        fread(&vlen, sizeof(vlen), 1, fp);
+        /* P2-FIX-02: 检查fread返回值，防止损坏文件导致使用未初始化数据 */
+        if (fread(&vlen, sizeof(vlen), 1, fp) != 1) break;
         if (vlen > 0) {
             size_t read_len = vlen < sizeof(val_buf) ? vlen : sizeof(val_buf) - 1;
-            fread(val_buf, 1, read_len, fp);
+            if (fread(val_buf, 1, read_len, fp) != read_len) break;
         }
         char dt_buf[256] = {0};
         uint8_t has_dt;
-        fread(&has_dt, 1, 1, fp);
+        /* P2-FIX-02: 检查fread返回值 */
+        if (fread(&has_dt, 1, 1, fp) != 1) break;
         if (has_dt) {
             uint32_t dtlen;
-            fread(&dtlen, sizeof(dtlen), 1, fp);
+            if (fread(&dtlen, sizeof(dtlen), 1, fp) != 1) break;
             if (dtlen > 0) {
                 size_t read_len = dtlen < sizeof(dt_buf) ? dtlen : sizeof(dt_buf) - 1;
-                fread(dt_buf, 1, read_len, fp);
+                if (fread(dt_buf, 1, read_len, fp) != read_len) break;
             }
         }
         char lang_buf[64] = {0};

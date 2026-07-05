@@ -98,6 +98,12 @@ struct UnifiedLNNState {
 #define GRADIENT_OSCILLATION_THRESHOLD 3
 #define GRADIENT_COSINE_WINDOW 0.7f       /* 余弦相似度低于此值视为方向冲突 */
 
+/* P1-007修复: 将硬编码梯度截断和门控范围定义为可配置宏
+ * 训练过程中不同模态可能需要不同的截断阈值 */
+#define CROSS_MODAL_GRAD_MAX  0.1f    /* 梯度单步最大更新量 */
+#define CROSS_MODAL_GATE_UPPER 1.0f   /* 门控上界：完全开启 */
+#define CROSS_MODAL_GATE_LOWER -0.5f  /* 门控下界：部分抑制（不等零实现连续控制） */
+
 static float uniform_random(void) {
     /* 使用加密安全随机数生成器替代rand()，确保权重初始化安全性 */
     return secure_random_float() * 2.0f - 1.0f;
@@ -119,7 +125,9 @@ static float xavier_scale(size_t fan_in, size_t fan_out) {
  */
 static int modality_online_zscore_normalize(UnifiedLNNState* state, int modality,
                                              float* raw, size_t size) {
+    /* FIX-BOUNDARY: 添加模态索引边界检查，防止数组越界 */
     if (!state || !raw || size == 0) return -1;
+    if (modality < 0 || modality >= UNIFIED_LNN_MAX_MODALITIES) return -1;
     if (!state->modality_running_mean[modality]) {
         state->modality_running_mean[modality] = (float*)safe_calloc(size, sizeof(float));
         state->modality_running_var[modality]  = (float*)safe_calloc(size, sizeof(float));
@@ -491,6 +499,8 @@ int unified_lnn_state_step(UnifiedLNNState* state,
 
     if (!any_present) {
         memset(output, 0, max_output_size * sizeof(float));
+        /* FIX-MUTEX-LEAK-1: 补充缺失的MUTEX_UNLOCK */
+        MUTEX_UNLOCK(&state->state_lock);
         return 0;
     }
 
@@ -561,6 +571,8 @@ int unified_lnn_state_step(UnifiedLNNState* state,
         selflnn_set_last_error(SELFLNN_ERROR_NOT_INITIALIZED, __func__, __FILE__, __LINE__,
                               "统一LNN状态处理器：共享LNN未绑定，禁止直通退化处理");
         memset(output, 0, max_output_size * sizeof(float));
+        /* FIX-MUTEX-LEAK-2: 补充缺失的MUTEX_UNLOCK */
+        MUTEX_UNLOCK(&state->state_lock);
         return -1;
     }
     int lnn_result = lnn_forward(state->shared_lnn,
@@ -828,14 +840,15 @@ int unified_lnn_state_train_step(UnifiedLNNState* state,
                         }
 
                         float grad_total = grad_l1 + grad_hidden;
-                        if (grad_total > 0.1f) grad_total = 0.1f;
-                        if (grad_total < -0.1f) grad_total = -0.1f;
+                        /* P1-007修复: 使用定义宏替代硬编码截断值，便于不同模态独立调参 */
+                        if (grad_total > CROSS_MODAL_GRAD_MAX) grad_total = CROSS_MODAL_GRAD_MAX;
+                        if (grad_total < -CROSS_MODAL_GRAD_MAX) grad_total = -CROSS_MODAL_GRAD_MAX;
 
                         state->cross_modal_gates[m][n] -= lr_gate * grad_total;
-                        if (state->cross_modal_gates[m][n] > 1.0f)
-                            state->cross_modal_gates[m][n] = 1.0f;
-                        if (state->cross_modal_gates[m][n] < -0.5f)
-                            state->cross_modal_gates[m][n] = -0.5f;
+                        if (state->cross_modal_gates[m][n] > CROSS_MODAL_GATE_UPPER)
+                            state->cross_modal_gates[m][n] = CROSS_MODAL_GATE_UPPER;
+                        if (state->cross_modal_gates[m][n] < CROSS_MODAL_GATE_LOWER)
+                            state->cross_modal_gates[m][n] = CROSS_MODAL_GATE_LOWER;
                     }
                 }
 
@@ -954,14 +967,26 @@ UnifiedLNNState* unified_lnn_state_load(const char* filepath) {
             }
         }
     }
-    fread(state->output_weight, sizeof(float), state_dim * config.output_dimension, f);
-    fread(state->output_bias, sizeof(float), config.output_dimension, f);
+    /* P2-004修复: 检查fread返回值，防止截断文件导致权重矩阵包含垃圾数据 */
+    if (fread(state->output_weight, sizeof(float), state_dim * config.output_dimension, f)
+        != (size_t)(state_dim * config.output_dimension)) {
+        unified_lnn_state_free(state); fclose(f); return NULL;
+    }
+    if (fread(state->output_bias, sizeof(float), config.output_dimension, f)
+        != (size_t)config.output_dimension) {
+        unified_lnn_state_free(state); fclose(f); return NULL;
+    }
 
     /* 架构优化: v2格式额外读取门控矩阵 */
     if (is_v2) {
         int N = UNIFIED_LNN_MAX_MODALITIES;
-        fread(state->cross_modal_gates, sizeof(float), N * (N + 1), f);
-        fread(&state->modality_isolation_enabled, sizeof(int), 1, f);
+        if (fread(state->cross_modal_gates, sizeof(float), N * (N + 1), f)
+            != (size_t)(N * (N + 1))) {
+            unified_lnn_state_free(state); fclose(f); return NULL;
+        }
+        if (fread(&state->modality_isolation_enabled, sizeof(int), 1, f) != 1) {
+            unified_lnn_state_free(state); fclose(f); return NULL;
+        }
     }
 
     fclose(f);

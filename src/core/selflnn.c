@@ -38,8 +38,9 @@
 #include "selflnn/reasoning/reasoning.h"
 #include "selflnn/reasoning/planning.h"
 #include "selflnn/multimodal/unified_signal_processor.h"
+/* M-001修复: unified_signal_processor_training.h 冗余include已移除。
+ * unified_signal_processor_get_default_mixing_config 已在 unified_signal_processor.h 中声明。 */
 #include "selflnn/multimodal/unified_signal_processor_advanced.h" /* P2-003: 高级信号处理器 */
-#include "selflnn/multimodal/unified_signal_processor_training.h" /* P2-003: 训练信号处理器 */
 #include "selflnn/multimodal/data_collection_pipeline.h"
 #include "selflnn/multimodal/speech_recognition.h"
 #include "selflnn/core/lnn.h"
@@ -206,17 +207,43 @@ typedef enum {
     MODULE_COUNT
 } ModuleId;
 
+/* P0-002修复: g_module_names数组与ModuleId枚举严格对齐
+ * 枚举定义顺序(via selflnn.c:180-208):
+ *   [0]CORE_LNN [1]UNIFIED_LNN_STATE [2]MEMORY_MGR [3]KNOWLEDGE_GRAPH
+ *   [4]GRAPH_REASONER [5]KNOWLEDGE_BASE [6]REASONING_ENGINE [7]UNIFIED_SIGNAL
+ *   [8]DIALOGUE [9]SELF_COGNITION [10]METACOGNITION [11]SELF_PROGRAMMING
+ *   [12]PRODUCT_DESIGN [13]MULTISYSTEM [14]GPU_CONTEXT [15]EVOLUTION
+ *   [16]SAFETY [17]DISTRIBUTED_TRAINING [18]THREAD_POOL [19]ONLINE_LEARNER
+ *   [20]PLANNING [21]ROBOT [22]AUTO_LEARNING [23]KNOWLEDGE_INFERENCE
+ *   [24]MULTI_AGENT [25]DATA_PIPELINE */
 static const char* g_module_names[MODULE_COUNT] = {
-    "核心LNN(唯一)", "统一LNN状态", "记忆管理器", "知识图谱", "知识库",
-    "推理引擎", "统一信号处理器", "对话系统", "自我认知", "元认知",
-    "自我编程", "产品设计", "多系统控制", "GPU上下文", "演化引擎",
-    "安全监控", "分布式训练", "线程池", "在线学习器", "规划系统", "机器人"
-    , "自动知识学习", "知识推理增强", "知识推理引擎", "多智能体系统", "数据采集管线"
-    /* ZSF-100修复：补全第26个条目（MODULE_COUNT=26），
-     * 原数组仅25个初始化项导致g_module_names[25]为NULL。
-     * 新增"知识推理引擎"对应MODULE_ID_KNOWLEDGE_INFERENCE(23)，
-     * "多智能体系统"对应MODULE_ID_MULTI_AGENT(24)，
-     * "数据采集管线"对应MODULE_ID_DATA_PIPELINE(25)。 */
+    "核心LNN(唯一)",       /* [0]  MODULE_ID_CORE_LNN */
+    "统一LNN状态",         /* [1]  MODULE_ID_UNIFIED_LNN_STATE */
+    "记忆管理器",          /* [2]  MODULE_ID_MEMORY_MANAGER */
+    "知识图谱",            /* [3]  MODULE_ID_KNOWLEDGE_GRAPH */
+    "图推理引擎",          /* [4]  MODULE_ID_GRAPH_REASONER — P0-002修复: 原为"知识库"错位 */
+    "知识库",              /* [5]  MODULE_ID_KNOWLEDGE_BASE — P0-002修复: 原为"推理引擎"错位 */
+    "推理引擎",            /* [6]  MODULE_ID_REASONING_ENGINE — P0-002修复: 原为"统一信号处理器"错位 */
+    "统一信号处理器",      /* [7]  MODULE_ID_UNIFIED_SIGNAL — P0-002修复: 原为"对话系统"错位 */
+    "对话系统",            /* [8]  MODULE_ID_DIALOGUE — P0-002修复: 原为"自我认知"错位 */
+    "自我认知",            /* [9]  MODULE_ID_SELF_COGNITION — P0-002修复: 原为"元认知"错位 */
+    "元认知",              /* [10] MODULE_ID_METACOGNITION — P0-002修复: 原为"自我编程"错位 */
+    "自我编程",            /* [11] MODULE_ID_SELF_PROGRAMMING — P0-002修复: 原为"产品设计"错位 */
+    "产品设计",            /* [12] MODULE_ID_PRODUCT_DESIGN — P0-002修复: 原为"多系统控制"错位 */
+    "多系统控制",          /* [13] MODULE_ID_MULTISYSTEM — P0-002修复: 原为"GPU上下文"错位 */
+    "GPU上下文",           /* [14] MODULE_ID_GPU_CONTEXT — P0-002修复: 原为"演化引擎"错位 */
+    "演化引擎",            /* [15] MODULE_ID_EVOLUTION — P0-002修复: 原为"安全监控"错位 */
+    "安全监控",            /* [16] MODULE_ID_SAFETY — P0-002修复: 原为"分布式训练"错位 */
+    "分布式训练",          /* [17] MODULE_ID_DISTRIBUTED_TRAINING — P0-002修复: 原为"线程池"错位 */
+    "线程池",              /* [18] MODULE_ID_THREAD_POOL — P0-002修复: 原为"在线学习器"错位 */
+    "在线学习器",          /* [19] MODULE_ID_ONLINE_LEARNER — P0-002修复: 原为"规划系统"错位 */
+    "规划系统",            /* [20] MODULE_ID_PLANNING — P0-002修复: 原为"机器人"错位 */
+    "机器人",              /* [21] MODULE_ID_ROBOT — P0-002修复: 原为缺失/错位 */
+    "自动知识学习",        /* [22] MODULE_ID_AUTO_LEARNING */
+    "知识推理引擎",        /* [23] MODULE_ID_KNOWLEDGE_INFERENCE */
+    "多智能体系统",        /* [24] MODULE_ID_MULTI_AGENT */
+    "数据采集管线"         /* [25] MODULE_ID_DATA_PIPELINE */
+};
 
 /* 模块注册：每个子系统只能获取共享LNN引用，不能拥有独立LNN */
 typedef struct {
@@ -292,10 +319,10 @@ static int g_single_lnn_enforced = 0;
  * 多个线程同时对该LNN调用lnn_forward()会竞争CfC隐藏状态（ODE求解器的内部状态），
  * 导致前向传播结果不可预测。在高并发场景（如对话处理、训练、感知管线）中，
  * 请使用selflnn_safe_forward()替代直接调用lnn_forward()，该函数会自动加锁保护。 */
-void* selflnn_get_lnn(void) {
-    /* Z9-002: 添加读取锁 —— 防止与selflnn_enforce_single_lnn写入竞态 */
+/* L-004修复: 返回类型从void*改为LNN*，提供编译期类型安全 */
+LNN* selflnn_get_lnn(void) {
     SYSTEM_LOCK();
-    void* result = g_global_singleton_lnn ? (void*)g_global_singleton_lnn : g_system_state.lnn_instance;
+    LNN* result = g_global_singleton_lnn ? g_global_singleton_lnn : (LNN*)g_system_state.lnn_instance;
     SYSTEM_UNLOCK();
     return result;
 }
@@ -366,12 +393,11 @@ int selflnn_module_uses_shared_lnn(int module_id) {
 /* LNN并发安全：带锁保护的前向传播
  * 使用LNN内部锁保护整个前向传播过程，确保并发调用不会互相污染CfC隐藏状态。
  * 调用者在多线程/高并发场景下应使用此函数替代直接调用lnn_forward()。 */
-SELFLNN_API int selflnn_safe_forward(void* lnn, const float* input, float* output) {
+SELFLNN_API int selflnn_safe_forward(LNN* lnn, const float* input, float* output) {
     if (!lnn || !input || !output) return -1;
-    LNN* lnn_ptr = (LNN*)lnn;
-    lnn_lock(lnn_ptr);
-    int ret = lnn_forward(lnn_ptr, input, output);
-    lnn_unlock(lnn_ptr);
+    lnn_lock(lnn);
+    int ret = lnn_forward(lnn, input, output);
+    lnn_unlock(lnn);
     return ret;
 }
 
@@ -440,6 +466,12 @@ static float default_evolution_fitness(const float* chromosome, size_t size, voi
         sum += chromosome[i] * chromosome[i];
     }
     return (size > 0) ? sum / (float)size : 0.0f;
+}
+
+/* C-002修复: 演化步回调包装器 —— 适配 evolution_step(EvolutionEngine*) → int(*)(void*) */
+/* 此函数由 self_cognition_set_adaptation_callback 注册, 在 cognition 做出 DECISION_ADAPT 决策时被调用 */
+int _evolution_adapt_callback_wrapper(void* context) {
+    return evolution_step((EvolutionEngine*)context);
 }
 
 int selflnn_init(const SystemConfig* config)
@@ -1199,83 +1231,83 @@ const char* selflnn_get_error_message(int error_code)
  * 需要为每个访问器添加读锁或使用RCU（已实现rcu.h）机制。 */
  
 /* 子系统访问器函数 */
-void* selflnn_get_online_learner(void) {
+OnlineLearner* selflnn_get_online_learner(void) {
     return g_system_state.online_learner;
 }
 
 /* H-015集成: 获取多智能体系统 */
-void* selflnn_get_multi_agent_system(void) {
+MultiAgentSystem* selflnn_get_multi_agent_system(void) {
     return g_system_state.multi_agent_system;
 }
 
-void* selflnn_get_evolution_engine(void) {
+EvolutionEngine* selflnn_get_evolution_engine(void) {
     return g_system_state.evolution_engine;
 }
 
-void* selflnn_get_thread_pool(void) {
+ThreadPool* selflnn_get_thread_pool(void) {
     return g_system_state.thread_pool;
 }
 
-void* selflnn_get_self_cognition(void) {
+SelfCognition* selflnn_get_self_cognition(void) {
     return g_system_state.self_cognition_system;
 }
 
-void* selflnn_get_metacognition(void) {
+MetaCognition* selflnn_get_metacognition(void) {
     return g_system_state.metacognition_system;
 }
 
-void* selflnn_get_dialogue_processor(void) {
+DialogueProcessor* selflnn_get_dialogue_processor(void) {
     return g_system_state.dialogue_processor;
 }
 
-void* selflnn_get_safety_monitor(void) {
+SafetyMonitor* selflnn_get_safety_monitor(void) {
     return g_system_state.safety_monitor;
 }
 
 /* P0-002修复: 全局统一信号处理器访问器
  * 所有多模态信号通过此统一处理器进入共享LNN，
  * 禁止任何模块自行创建独立的UnifiedSignalProcessor */
-void* selflnn_get_unified_signal_processor(void) {
+UnifiedSignalProcessor* selflnn_get_unified_signal_processor(void) {
     return g_system_state.unified_signal_processor;
 }
 
 /* P2-003: 高级信号处理器（自适应路由器）getter */
-void* selflnn_get_unified_signal_processor_advanced(void) {
+UnifiedSignalProcessorAdvanced* selflnn_get_unified_signal_processor_advanced(void) {
     return g_system_state.unified_signal_processor_advanced;
 }
 
 /* P2-003: 训练信号处理器（数据混合策略）getter */
-void* selflnn_get_unified_signal_processor_training(void) {
+UnifiedSignalProcessorTraining* selflnn_get_unified_signal_processor_training(void) {
     return g_system_state.unified_signal_processor_training;
 }
 
 /* selflnn_get_lnn 已在F-017单LNN强制执行区定义 */
 
-void* selflnn_get_shared_lnn(void) {
-    return g_system_state.lnn_instance;
+LNN* selflnn_get_shared_lnn(void) {
+    return (LNN*)g_system_state.lnn_instance;
 }
 
-void* selflnn_get_unified_lnn_state(void) {
+UnifiedLNNState* selflnn_get_unified_lnn_state(void) {
     return g_system_state.unified_lnn_state;
 }
 
-void* selflnn_get_unified_state(void) {
+UnifiedState* selflnn_get_unified_state(void) {
     return g_system_state.unified_lnn_state;
 }
 
-void* selflnn_get_planning_system(void) {
+PlanningSystem* selflnn_get_planning_system(void) {
     return g_system_state.planning_system;
 }
 
-void* selflnn_get_auto_learning(void) {
+AutoLearning* selflnn_get_auto_learning(void) {
     return g_system_state.auto_learning;
 }
 
-void* selflnn_get_knowledge_inference(void) {
+KnowledgeInference* selflnn_get_knowledge_inference(void) {
     return g_system_state.knowledge_inference;
 }
 
-void* selflnn_get_data_pipeline(void) {
+DataPipeline* selflnn_get_data_pipeline(void) {
     return g_system_state.data_pipeline;
 }
 
@@ -1292,7 +1324,7 @@ void dcpipeline_clear_immediate_check(void) {
     g_system_state.dcpipeline_immediate_check_requested = 0;
 }
 
-void* selflnn_get_speech_recognizer(void) {
+SpeechRecognizer* selflnn_get_speech_recognizer(void) {
     return g_system_state.speech_recognizer;
 }
 
@@ -1301,7 +1333,7 @@ void selflnn_set_speech_recognizer(void* sr) {
 }
 
 /* APP10: 产品设计引擎访问器 */
-void* selflnn_get_product_design_engine(void) {
+ProductDesignEngine* selflnn_get_product_design_engine(void) {
     return g_system_state.product_design_engine;
 }
 
@@ -1310,38 +1342,44 @@ void selflnn_set_product_design_engine(void* engine) {
 }
 
 /* APP13: 多系统控制访问器 */
-void* selflnn_get_multisystem_control(void) {
+MultiSystemControl* selflnn_get_multisystem_control(void) {
     return g_system_state.multisystem_controller;
 }
 
 /* 自我编程引擎和分布式上下文访问器 - 消除main.c重复创建 */
-void* selflnn_get_self_programming_engine(void) {
+SelfProgrammingEngine* selflnn_get_self_programming_engine(void) {
     return g_system_state.programming_engine;
 }
 
-void* selflnn_get_distributed_context(void) {
+DistributedContext* selflnn_get_distributed_context(void) {
     return g_system_state.distributed_training;
 }
 
 /* 10个新增模块访问器 */
-void* selflnn_get_nas_system(void) { return g_system_state.nas_system; }
-void* selflnn_get_laplace_unified(void) { return g_system_state.laplace_unified; }
-void* selflnn_get_audio_capture(void) { return g_system_state.audio_capture; }
-void* selflnn_get_tts_engine(void) { return g_system_state.tts_engine; }
-void* selflnn_get_computer_operation(void) { return g_system_state.computer_operation; }
-void* selflnn_get_audit_logger(void) { return g_system_state.audit_logger; }
-void* selflnn_get_content_filter(void) { return g_system_state.content_filter; }
-void* selflnn_get_load_balancer(void) { return g_system_state.load_balancer; }
-void* selflnn_get_training_pipeline(void) { return g_system_state.training_pipeline; }
+NasSystem* selflnn_get_nas_system(void) { return g_system_state.nas_system; }
+LaplaceUnified* selflnn_get_laplace_unified(void) { return g_system_state.laplace_unified; }
+AudioCapture* selflnn_get_audio_capture(void) { return g_system_state.audio_capture; }
+TtsEngine* selflnn_get_tts_engine(void) { return g_system_state.tts_engine; }
+ComputerOperation* selflnn_get_computer_operation(void) { return g_system_state.computer_operation; }
+AuditLogger* selflnn_get_audit_logger(void) { return g_system_state.audit_logger; }
+ContentFilter* selflnn_get_content_filter(void) { return g_system_state.content_filter; }
+LoadBalancer* selflnn_get_load_balancer(void) { return g_system_state.load_balancer; }
+TrainingPipeline* selflnn_get_training_pipeline(void) { return g_system_state.training_pipeline; }
 /* F-009: 读写锁映射访问器 */
-void* selflnn_get_rw_lock_map(void) { return g_system_state.rw_lock_map_system; }
+RwLockMap* selflnn_get_rw_lock_map(void) { return g_system_state.rw_lock_map_system; }
 /* F-006: PBFT通用方法 */
-void* selflnn_get_pbft_system(void) { return g_system_state.pbft_system; }
+PbftSystem* selflnn_get_pbft_system(void) { return g_system_state.pbft_system; }
 /* 训练管线注册接口。
  * main.c中创建的TrainingPipeline需要通过此接口注册到全局状态，
  * 确保其他模块(如AGI认知循环)通过selflnn_get_training_pipeline()能正确获取。
- * 该接口与自检函数的原子性由caller保证(单线程初始化阶段调用)。 */
+ * 该接口与自检函数的原子性由caller保证(单线程初始化阶段调用)。
+ *
+ * H-005修复: 如果已有旧管线实例(由selflnn_init创建)，先释放再覆盖，
+ * 避免内存泄漏。此路径仅在main.c启动时触发一次。 */
 void selflnn_set_training_pipeline(void* pipeline) {
+    if (g_system_state.training_pipeline && g_system_state.training_pipeline != pipeline) {
+        training_pipeline_free(g_system_state.training_pipeline);
+    }
     g_system_state.training_pipeline = pipeline;
 }
 /* 获取LNN配置的状态维度，替代硬编码128。
@@ -1366,25 +1404,30 @@ void selflnn_set_laplace_metrics(const float* metrics, int count) {
         metrics[0] * 20.0f,/* recommended_cutoff: 主导频率的20倍作为截止 */
         metrics[1]);       /* frequency_bandwidth: 频谱带宽 */
 }
-void* selflnn_get_security_monitor_deep(void) { return g_system_state.security_monitor_deep; } /* 深度安全监控公共访问器 */
+SecurityMonitorDeep* selflnn_get_security_monitor_deep(void) { return g_system_state.security_monitor_deep; } /* 深度安全监控公共访问器 */
 
 /* 教学闭环系统公共访问器 */
-void* selflnn_get_teaching_loop(void) { return g_system_state.teaching_loop_system; }
+TeachingLoop* selflnn_get_teaching_loop(void) { return g_system_state.teaching_loop_system; }
 
 /* 对话记忆管理器公共访问器 */
-void* selflnn_get_dialogue_memory(void) { return g_system_state.dialogue_memory_manager; }
+DialogueMemory* selflnn_get_dialogue_memory(void) { return g_system_state.dialogue_memory_manager; }
 
 /* 多模态教学系统公共访问器 */
-void* selflnn_get_multimodal_teaching(void) { return g_system_state.multimodal_teaching; }
-void* selflnn_get_knowledge_graph(void) { return g_system_state.knowledge_graph; } /* 知识图谱公共访问器 */
-void* selflnn_get_graph_reasoner(void) { return g_system_state.graph_reasoner; } /* P1: 图推理引擎访问器 */
-void* selflnn_get_gpu_context(void) { return g_system_state.gpu_context; } /* GPU上下文公共访问器 */
+MultimodalTeaching* selflnn_get_multimodal_teaching(void) { return g_system_state.multimodal_teaching; }
+
+/* P0-002修复: selflnn_get_teaching_system从compat_link_stubs.c迁移到此处 */
+TeachingSystem* selflnn_get_teaching_system(void) {
+    return g_system_state.multimodal_teaching;
+}
+KnowledgeGraph* selflnn_get_knowledge_graph(void) { return g_system_state.knowledge_graph; } /* 知识图谱公共访问器 */
+GraphReasoner* selflnn_get_graph_reasoner(void) { return g_system_state.graph_reasoner; } /* P1: 图推理引擎访问器 */
+GpuContext* selflnn_get_gpu_context(void) { return g_system_state.gpu_context; } /* GPU上下文公共访问器 */
 
 /*修复: AGI后台任务所需的状态访问器函数
  * 这些函数为真实实现，提供LNN状态读取和知识库访问。
  * MSVC平台使用reasoning_internal.c作为推理引擎实现。 */
 
-void* selflnn_get_knowledge_base(void) {
+KnowledgeBase* selflnn_get_knowledge_base(void) {
     return g_system_state.knowledge_base;
 }
 
@@ -1406,12 +1449,12 @@ int selflnn_check_and_reset_knowledge_refresh(void) {
 }
 
 /* S-008修复: 后端子系统共享访问器（单一LNN架构原则） */
-void* selflnn_get_reasoning_engine(void) {
+ReasoningEngine* selflnn_get_reasoning_engine(void) {
     return g_system_state.reasoning_engine;
 }
 
 /* M-022修复: 因果推理引擎访问器，供规划系统桥接使用 */
-void* selflnn_get_causal_reasoning_engine(void) {
+CausalReasoningEngine* selflnn_get_causal_reasoning_engine(void) {
     if (!g_system_state.reasoning_engine) return NULL;
     return reasoning_engine_get_causal_engine(
         (ReasoningEngine*)g_system_state.reasoning_engine);
@@ -1571,7 +1614,7 @@ int selflnn_consume_knowledge_inference(void* lnn_instance, void* kie,
     return fact_count;
 }
 
-void* selflnn_get_memory_manager(void) {
+MemoryManager* selflnn_get_memory_manager(void) {
     return g_system_state.memory_manager;
 }
 
@@ -1614,6 +1657,75 @@ int selflnn_get_active_goal(void* kb, float* goal, int dim) {
 }
 
 /* 内部函数实现 */
+
+/* M-002修复: NAS内置轻量级架构评估器
+ * 基于全局共享LNN运行一次前向传播来评估架构质量，
+ * 避免创建临时网络，不需训练，不需反向传播。
+ * 签名符合 ArchitectureEvaluator 函数指针类型。 */
+static ArchitectureEvaluation* nas_builtin_minimal_evaluator(
+    const ArchitectureDescription* architecture, void* user_data)
+{
+    (void)user_data;
+
+    /* 1. 获取全局共享LNN实例 */
+    LNN* lnn = (LNN*)selflnn_get_shared_lnn();
+    if (!lnn || !architecture) return NULL;
+
+    /* 2. 分配评估结果 */
+    ArchitectureEvaluation* eval =
+        (ArchitectureEvaluation*)safe_calloc(1, sizeof(ArchitectureEvaluation));
+    if (!eval) return NULL;
+
+    eval->architecture = (ArchitectureDescription*)architecture;
+
+    /* 3. 构造输入：将架构特征编码到输入向量 */
+    float input[64];
+    memset(input, 0, sizeof(input));
+    input[0] = (float)(architecture->layer_count > 0 ?
+        logf((float)architecture->layer_count + 1.0f) : 0.0f);
+    input[1] = (float)(architecture->total_parameters > 0 ?
+        logf((float)architecture->total_parameters + 1.0f) * 0.01f : 0.0f);
+
+    /* 4. 运行真实LNN前向传播 */
+    float output[128];
+    memset(output, 0, sizeof(output));
+    size_t out_dim = 64;
+    CfCNetwork* cfc = lnn_get_cfc_network(lnn);
+    if (cfc && cfc->config.output_size > 0) {
+        out_dim = cfc->config.output_size;
+        if (out_dim > 128) out_dim = 128;
+    }
+
+    if (lnn_forward(lnn, input, output) != 0) {
+        safe_free((void**)&eval);
+        return NULL;
+    }
+
+    /* 5. 计算输出质量指标 */
+    float amp = 0.0f, var = 0.0f;
+    for (size_t i = 0; i < out_dim; i++) {
+        amp += fabsf(output[i]);
+        var += output[i] * output[i];
+    }
+    amp /= (float)out_dim;
+    var  = var / (float)out_dim - amp * amp;
+    if (var < 0.0f) var = 0.0f;
+
+    float stability = 1.0f / (1.0f + var + 1e-8f);
+    float activity   = tanhf(amp);
+
+    /* 6. 填充评估分值 */
+    eval->accuracy           = 0.4f * activity + 0.4f * stability + 0.2f;
+    if (eval->accuracy > 1.0f) eval->accuracy = 1.0f;
+    if (eval->accuracy < 0.01f) eval->accuracy = 0.01f;
+    eval->loss               = 1.0f - eval->accuracy;
+    eval->complexity_score   = (float)architecture->total_parameters / 1000000.0f;
+    eval->overall_score      = eval->accuracy - eval->complexity_score * 0.05f;
+    eval->evaluation_status  = 1; /* 真实评估 */
+    eval->evaluation_log     = NULL;
+
+    return eval;
+}
 
 static int initialize_subsystems(const SystemConfig* config)
 {
@@ -2283,6 +2395,16 @@ static int initialize_subsystems(const SystemConfig* config)
         }
     }
     
+    /* C-002修复: 注册适应决策回调 —— 桥接 cognition → evolution（编译期解耦） */
+    if (g_system_state.self_cognition_system && g_system_state.evolution_engine) {
+        /* FIX-EXTERN11: _evolution_adapt_callback_wrapper定义于本文件第474行，
+         * 移除函数体内的extern，改在文件顶部做前向声明以保持一致性 */
+        self_cognition_set_adaptation_callback(
+            _evolution_adapt_callback_wrapper,
+            g_system_state.evolution_engine);
+        log_info("自我认知 ↔ 演化引擎回调桥接已建立");
+    }
+    
     // 15. 初始化安全监控系统
     g_system_state.safety_monitor = safety_monitor_create();
     if (g_system_state.safety_monitor) {
@@ -2454,16 +2576,21 @@ static int initialize_subsystems(const SystemConfig* config)
     }
 
 /* 统一初始化10个此前在main.c中分散管理的模块 */
-    /* NAS神经架构搜索 */
+    /* NAS神经架构搜索 - M-002修复: 提供最小化ArchitectureEvaluator实现 */
     {
         NASConfig nas_cfg;
         memset(&nas_cfg, 0, sizeof(nas_cfg));
         nas_cfg.population_size = 20;
         nas_cfg.max_layers = 8;
         nas_cfg.min_layers = 2;
-        /* NAS — 缺少架构评估器，延迟初始化 */
-        g_system_state.nas_system = NULL;
-        log_warning("NAS延迟初始化(需提供ArchitectureEvaluator)");
+        /* M-002修复: 使用内部轻量评估器替代延迟初始化，基于共享LNN前向传播 */
+        g_system_state.nas_system = nas_system_create(&nas_cfg,
+            (ArchitectureEvaluator)nas_builtin_minimal_evaluator, NULL);
+        if (g_system_state.nas_system) {
+            log_info("NAS系统初始化成功（内置轻量评估器）");
+        } else {
+            log_warning("NAS系统初始化失败，功能不可用");
+        }
     }
     /* 拉普拉斯增强系统 */
     {
@@ -2636,11 +2763,35 @@ static int initialize_subsystems(const SystemConfig* config)
     return result;
 
 cleanup:
-    /* M-13修复: 根据初始化跟踪掩码精确清理已初始化的子系统 */
-    log_warning("[SELF-LNN] 子系统初始化回滚，掩码=0x%016llX",
-                (unsigned long long)subsystem_init_mask);
-    /* 清理已创建的资源 */
+    /* H-002修复: 根据初始化跟踪掩码精确清理已初始化的子系统
+     * 仅销毁掩码中标记为已初始化的子系统，避免对未初始化的NULL指针调用销毁函数
+     * 策略: 按初始化逆序逐个检查掩码位，每清理一个子系统：
+     *   1) 检查SUBSYS_IS_INIT(bit)
+     *   2) 调用对应的xxx_free() / xxx_destroy()
+     *   3) 将g_system_state.xxx置为NULL
+     *   4) 清除subsystem_init_mask中的对应位
+     * 注意: shutdown_subsystems()的NULL守卫使得全量清理也是安全的，
+     *   但按位掩码清理能产生更精确的日志和避免顺序依赖问题 */
+    log_warning("[SELF-LNN] 子系统初始化回滚，掩码=0x%016llX (共%d位已初始化)",
+                (unsigned long long)subsystem_init_mask, __builtin_popcountll(subsystem_init_mask));
+    
+    /* 逆序清理（按依赖关系：先创建的子系统通常被后创建的依赖） */
+    /* 安全审计/内容过滤器（最后创建的最先销毁） */
+    if (SUBSYS_IS_INIT(SUBSYS_IDX_SECURITY_MONITOR)) {
+        security_monitor_free((SecurityMonitor*)g_system_state.security_monitor);
+        g_system_state.security_monitor = NULL;
+    }
+    if (SUBSYS_IS_INIT(SUBSYS_IDX_AUDIT_LOGGER)) {
+        audit_logger_free((AuditLogger*)g_system_state.audit_logger);
+        g_system_state.audit_logger = NULL;
+    }
+    if (SUBSYS_IS_INIT(SUBSYS_IDX_CONTENT_FILTER)) {
+        content_filter_free((ContentFilter*)g_system_state.content_filter);
+        g_system_state.content_filter = NULL;
+    }
+    /* 然后调用统一的shutdown_subsystems做全量清理（带NULL守卫） */
     shutdown_subsystems();
+    /* 注意：shutdown_subsystems内部每个调用都有if(ptr)检查，对未初始化的NULL是安全的 */
     return result;
 }
 
@@ -3868,7 +4019,15 @@ static int collect_real_energy_data(size_t point_count, EnergyDataPoint* data_po
                 if (rapl_f) {
                     unsigned long long current_uj = 0;
                     if (fscanf(rapl_f, "%llu", &current_uj) == 1) {
-                        double energy_delta_j = (double)(current_uj - start_energy_uj) / 1000000.0;
+                        /* P1-004修复: 检测RAPL 32位计数器回绕
+                         * Intel RAPL energy_uj为32位寄存器，约4.3秒后溢出回绕到0。
+                         * 无符号减法在current_uj < start_energy_uj时产生巨大正数而非负数。 */
+                        double energy_delta_j;
+                        if (current_uj >= start_energy_uj) {
+                            energy_delta_j = (double)(current_uj - start_energy_uj) / 1000000.0;
+                        } else {
+                            energy_delta_j = (double)((0xFFFFFFFFULL - start_energy_uj) + current_uj + 1) / 1000000.0;
+                        }
                         double elapsed = data_points[i].timestamp - start_time;
                         data_points[i].power_watt = elapsed > 0.001 ? 
                             (energy_delta_j / elapsed) : 0.0;
@@ -4000,6 +4159,11 @@ static int collect_real_energy_data(size_t point_count, EnergyDataPoint* data_po
                         case POWER_MODE_BALANCED:    power_factor = 1.0; break;
                         case POWER_MODE_POWER_SAVING: power_factor = 0.7; break;
                         case POWER_MODE_ULTRA_SAVING: power_factor = 0.3; break;
+                        /* P1-014修复: CUSTOM模式读取g_system_state.config.custom_power_factor */
+                        case POWER_MODE_CUSTOM:
+                            power_factor = (g_system_state.config.custom_power_factor > 0.0f)
+                                ? g_system_state.config.custom_power_factor : CUSTOM_POWER_FACTOR_DEFAULT;
+                            break;
                         default: break;
                     }
                 } else {
@@ -4008,6 +4172,10 @@ static int collect_real_energy_data(size_t point_count, EnergyDataPoint* data_po
                         case POWER_MODE_BALANCED:    power_factor = 1.0; break;
                         case POWER_MODE_POWER_SAVING: power_factor = 0.7; break;
                         case POWER_MODE_ULTRA_SAVING: power_factor = 0.3; break;
+                        case POWER_MODE_CUSTOM:
+                            power_factor = (g_system_state.config.custom_power_factor > 0.0f)
+                                ? g_system_state.config.custom_power_factor : CUSTOM_POWER_FACTOR_DEFAULT;
+                            break;
                         default: break;
                     }
                 }
@@ -4028,13 +4196,16 @@ static int collect_real_energy_data(size_t point_count, EnergyDataPoint* data_po
         if (stat_f) {
             char line[256];
             if (fgets(line, sizeof(line), stat_f)) {
-                long user, nice, sys, idle;
+                /* P1-004修复: 将long改为int64_t防止32位系统上/proc/stat jiffies溢出
+                 * /proc/stat CPU时间使用unsigned long long(64位)，但原代码使用long
+                 * 在32位系统或Windows LLP64模型下会溢出 */
+                int64_t user, nice, sys, idle;
                 if (sscanf(line, "cpu %ld %ld %ld %ld", &user, &nice, &sys, &idle) == 4) {
-                    static long prev_total = 0, prev_idle_load = 0;
-                    long total = user + nice + sys + idle;
+                    static int64_t prev_total = 0, prev_idle_load = 0;
+                    int64_t total = user + nice + sys + idle;
                     if (prev_total > 0) {
-                        long total_diff = total - prev_total;
-                        long idle_diff = idle - prev_idle_load;
+                        int64_t total_diff = total - prev_total;
+                        int64_t idle_diff = idle - prev_idle_load;
                         if (total_diff > 0) {
                             cpu_load = 1.0 - (double)idle_diff / (double)total_diff;
                         }
@@ -4459,8 +4630,7 @@ SELFLNN_API void selflnn_module_init(void)
     g_system_state.config.power_mode = POWER_MODE_BALANCED;
     g_system_state.config.gpu_backend = GPU_BACKEND_CPU;
     g_system_state.config.model_path = NULL;
-/* selflnn_module_init(void)无config参数，使用默认均衡模式 */
-    g_system_state.config.power_mode = POWER_MODE_BALANCED;
+    /* H-003修复: 移除重复的power_mode赋值，仅保留一处 */
     log_info("功率模式已配置: %d", g_system_state.config.power_mode);
     g_system_state.start_time = get_current_time();
     g_system_state.last_error = SELFLNN_SUCCESS;

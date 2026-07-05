@@ -14,39 +14,40 @@ float loss_compute(const float* predictions, const float* targets, int n, LossTy
     return loss_compute_ex(predictions, targets, n, loss_type, NULL);
 }
 
-/* 损失函数默认超参数——可通过setter函数在运行时修改 */
-static float g_default_focal_gamma = 2.0f;
-static float g_default_focal_alpha = 0.25f;
-static float g_default_dice_smooth = 1e-6f;
-static float g_default_triplet_margin = 1.0f;
-static float g_default_huber_delta = 1.0f;
-static float g_default_quantile_tau = 0.5f;
+/* 损失函数默认超参数——使用C11 _Atomic保证多线程读写安全（R-003修复） */
+static _Atomic float g_default_focal_gamma = 2.0f;
+static _Atomic float g_default_focal_alpha = 0.25f;
+static _Atomic float g_default_dice_smooth = 1e-6f;
+static _Atomic float g_default_triplet_margin = 1.0f;
+static _Atomic float g_default_huber_delta = 1.0f;
+static _Atomic float g_default_quantile_tau = 0.5f;
 
-/* 可配置超参数setter函数 */
-void loss_set_default_focal_gamma(float gamma) { g_default_focal_gamma = gamma; }
-void loss_set_default_focal_alpha(float alpha) { g_default_focal_alpha = alpha; }
-void loss_set_default_dice_smooth(float smooth) { g_default_dice_smooth = smooth; }
-void loss_set_default_triplet_margin(float margin) { g_default_triplet_margin = margin; }
-void loss_set_default_huber_delta(float delta) { g_default_huber_delta = delta; }
-void loss_set_default_quantile_tau(float tau) { g_default_quantile_tau = tau; }
+/* 可配置超参数setter函数 —— 使用atomic_store保证写入可见性 */
+#include <stdatomic.h>
+void loss_set_default_focal_gamma(float gamma) { atomic_store(&g_default_focal_gamma, gamma); }
+void loss_set_default_focal_alpha(float alpha) { atomic_store(&g_default_focal_alpha, alpha); }
+void loss_set_default_dice_smooth(float smooth) { atomic_store(&g_default_dice_smooth, smooth); }
+void loss_set_default_triplet_margin(float margin) { atomic_store(&g_default_triplet_margin, margin); }
+void loss_set_default_huber_delta(float delta) { atomic_store(&g_default_huber_delta, delta); }
+void loss_set_default_quantile_tau(float tau) { atomic_store(&g_default_quantile_tau, tau); }
 
 static float get_gamma(const LossConfig* c) {
-    return (c && c->focal_gamma > 0.0f) ? c->focal_gamma : g_default_focal_gamma;
+    return (c && c->focal_gamma > 0.0f) ? c->focal_gamma : atomic_load(&g_default_focal_gamma);
 }
 static float get_alpha(const LossConfig* c) {
-    return (c && c->focal_alpha > 0.0f) ? c->focal_alpha : g_default_focal_alpha;
+    return (c && c->focal_alpha > 0.0f) ? c->focal_alpha : atomic_load(&g_default_focal_alpha);
 }
 static float get_smooth(const LossConfig* c) {
-    return (c && c->dice_smooth > 0.0f) ? c->dice_smooth : g_default_dice_smooth;
+    return (c && c->dice_smooth > 0.0f) ? c->dice_smooth : atomic_load(&g_default_dice_smooth);
 }
 static float get_margin(const LossConfig* c) {
-    return (c && c->triplet_margin > 0.0f) ? c->triplet_margin : g_default_triplet_margin;
+    return (c && c->triplet_margin > 0.0f) ? c->triplet_margin : atomic_load(&g_default_triplet_margin);
 }
 static float get_tau(const LossConfig* c) {
-    return (c && c->quantile_tau > 0.0f) ? c->quantile_tau : g_default_quantile_tau;
+    return (c && c->quantile_tau > 0.0f) ? c->quantile_tau : atomic_load(&g_default_quantile_tau);
 }
 static float get_huber_delta(const LossConfig* c) {
-    return (c && c->huber_delta > 0.0f) ? c->huber_delta : g_default_huber_delta;
+    return (c && c->huber_delta > 0.0f) ? c->huber_delta : atomic_load(&g_default_huber_delta);
 }
 
 float loss_compute_ex(const float* predictions, const float* targets, int n,
@@ -491,7 +492,11 @@ void loss_gradient_ex(const float* predictions, const float* targets, int n, flo
         {
             float margin = get_margin(config);
             int num_triplets = n / 3;
-            if (num_triplets < 1) return;
+            /* P0-H003修复: 提前返回前将梯度缓冲置零，防止调用者读到未定义值 */
+            if (num_triplets < 1) {
+                if (gradients) memset(gradients, 0, n * sizeof(float));
+                return;
+            }
             float inv_n = 1.0f / (float)num_triplets;
             for (i = 0; i < num_triplets * 3; i += 3)
             {

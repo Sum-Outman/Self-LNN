@@ -36,11 +36,10 @@ install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../include/selflnn/cognition/
     FILES_MATCHING PATTERN "*.h")
 
 # 链接依赖库（显式添加所有实际使用的模块依赖）
-# 移除selflnn_agi依赖，打破selflnn_agi ↔ selflnn_cognition循环依赖
-# cognition是底层认知模块，不应依赖上层agi模块。如需共享类型，应提取到public头文件。
+# C-002修复: 移除 selflnn_evolution 依赖, cognition通过回调模式运行时绑定evolution
+# cognition是底层认知模块,不应直接依赖上层evolution模块。
 target_link_libraries(selflnn_cognition PRIVATE 
     selflnn_core
-    selflnn_evolution
     selflnn_knowledge
     selflnn_gpu
     selflnn_memory

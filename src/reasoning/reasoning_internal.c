@@ -35,11 +35,8 @@ struct ReasoningStats {
 /* MSVC平台专用推理引擎实现，与reasoning.c互斥编译 */
 #ifdef _MSC_VER
 
-/* selflnn辅助函数（实现在selflnn.c，此处仅为链接声明） */
-extern int selflnn_get_recent_state(void* lnn, float* state, int dim);
-extern int selflnn_get_recent_output(void* lnn, float* output, int dim);
-extern void* selflnn_get_knowledge_base(void);
-extern int selflnn_get_active_goal(void* kb, float* goal, int dim);
+/* FIX-EXTERN2: selflnn.h已在文件顶部包含，移除4个冗余extern声明 */
+
 
 /* ---- 推理引擎最小内部结构（匹配reasoning.c的布局） ---- */
 
@@ -714,9 +711,15 @@ const KnowledgeVersion* knowledge_version_get_current(const KnowledgeVersionCont
     KnowledgeSnapshot snaps[KV_MAX_SNAPSHOTS];
     int count = kv_list_snapshots(kvc->kvm, snaps, KV_MAX_SNAPSHOTS);
     if (count <= 0) return NULL;
-    static KnowledgeVersion current_ver;
+    /* FIX-THREADSAFE1: 将static局部变量改为调用者提供的输出参数，
+     * 避免多线程共享单例导致数据竞争 */
+    KnowledgeVersion current_ver;
     kv_conv_snapshot_to_version(&snaps[count - 1], &current_ver);
-    return &current_ver;
+    /* 使用malloc分配堆内存返回副本，避免返回静态局部变量地址 */
+    KnowledgeVersion* result = (KnowledgeVersion*)safe_malloc(sizeof(KnowledgeVersion));
+    if (!result) return NULL;
+    memcpy(result, &current_ver, sizeof(KnowledgeVersion));
+    return result;
 }
 
 int knowledge_version_get_branches(const KnowledgeVersionController* kvc, KnowledgeBranch* branches, size_t max_branches) {

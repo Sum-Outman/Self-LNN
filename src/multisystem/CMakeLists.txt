@@ -20,7 +20,7 @@ target_include_directories(selflnn_multisystem PUBLIC
 target_link_libraries(selflnn_multisystem PRIVATE 
     selflnn_core 
     selflnn_memory
-    selflnn_utils
+    utils
     selflnn_concurrency
 )
 

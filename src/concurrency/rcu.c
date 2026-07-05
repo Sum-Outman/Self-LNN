@@ -432,7 +432,8 @@ int rcu_update_pointer(RcuDomain* domain, void* volatile* shared_ptr,
 void rcu_synchronize(RcuDomain* domain) {
     if (!domain || !domain->is_initialized) return;
 
-    int registered = domain->registered_thread_count;
+    /* FIX-012修复: 使用原子读取registered_thread_count */
+    int registered = atomic_load(&domain->registered_thread_count);
     if (registered <= 0) {
         rcu_process_callbacks(domain);
         /* L-010: 无注册线程时也处理epoch回调 */

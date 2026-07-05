@@ -954,7 +954,10 @@ int ontology_evolution_apply_change(OntologyEvolution* evo,
                     return -1;
             } else if (entry->element_type == ONT_OBJECT_PROPERTY) {
                 char domain[256] = {0}, range[256] = {0};
-                if (entry->old_value) sscanf(entry->old_value, "%255[^,],%255s", domain, range);
+                /* FIX-SSCANF4: 检查sscanf返回值，非2字段则保持domain/range为空 */
+                if (entry->old_value && sscanf(entry->old_value, "%255[^,],%255s", domain, range) != 2) {
+                    domain[0] = '\0'; range[0] = '\0';
+                }
                 if (!ontology_add_object_property(ont, entry->element_name,
                     entry->description, domain[0] ? domain : NULL,
                     range[0] ? range : NULL))
@@ -1175,7 +1178,10 @@ int ontology_evolution_rollback(OntologyEvolution* evo, int version) {
                 char lcopy[2048] = {0};
                 memcpy(lcopy, line2, line_len2 < 2047 ? line_len2 : 2047);
                 int elem_id = 0;
-                sscanf(lcopy, "%*c:%d:", &elem_id);
+                /* FIX-SSCANF5: 检查sscanf返回值，失败时elem_id=0可能导致访问错误元素 */
+                if (sscanf(lcopy, "%*c:%d:", &elem_id) != 1) {
+                    elem_id = -1;  /* 标记为无效 */
+                }
                 /* 查找对应元素 */
                 OntElement* subj = NULL;
                 if (line2[0] == 'C' && elem_id < new_ont->class_count)
@@ -1324,6 +1330,7 @@ char* ontology_export_owl(Ontology* ont) {
     char* buf = (char*)safe_calloc(buf_size, 1);
     if (!buf) return NULL;
     size_t pos = 0;
+    /* FIX-SNPRINTF: 每次snprintf后检查pos>=buf_size防止链式拼接溢出 */
 
     pos += snprintf(buf + pos, buf_size - pos,
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
@@ -1333,12 +1340,14 @@ char* ontology_export_owl(Ontology* ont) {
         "         xmlns:onto=\"#\">\n\n"
         "<owl:Ontology rdf:about=\"%s\"/>\n\n",
         ont->name ? ont->name : "unknown");
+    if (pos >= buf_size) goto ontology_export_truncated;
 
     /* 导出类 */
     for (int i = 0; i < ont->class_count; i++) {
         OntElement* cls = ont->classes[i];
         pos += snprintf(buf + pos, buf_size - pos,
             "<owl:Class rdf:ID=\"%s\"/>\n", cls->name ? cls->name : "");
+        if (pos >= buf_size) goto ontology_export_truncated;
 
         /* 导出公理 */
         for (int r = 0; r < cls->related_count; r++) {
@@ -1397,8 +1406,13 @@ char* ontology_export_owl(Ontology* ont) {
     }
 
     pos += snprintf(buf + pos, buf_size - pos, "</rdf:RDF>\n");
+    if (pos >= buf_size) goto ontology_export_truncated;
     return buf;
-}
+
+ontology_export_truncated:
+    log_warn("[Ontology] XML导出缓冲区溢出(%zu字节)，结果已截断", buf_size);
+    buf[buf_size - 1] = '\0';
+    return buf;
 
 /* ============================================================================
  * KB-11: 自动本体学习+跨领域对齐

@@ -12,8 +12,7 @@
 #include "selflnn/gpu/gpu.h"
 #include "selflnn/core/lnn.h"
 
-/* selflnn_get_lnn外部声明 */
-extern void* selflnn_get_lnn(void);
+/* FIX-EXTERN7: selflnn_get_lnn已在selflnn.h中声明，移除冗余extern */
 
 #include <stdlib.h>
 #include <string.h>

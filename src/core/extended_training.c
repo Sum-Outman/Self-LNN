@@ -1239,9 +1239,9 @@ SELFLNN_API int lnn_self_supervised_pretrain(LNN* network,
                     idx = (idx + 7) % num_samples;
                 }
                 const float* neg_data = data + idx * feature_dim;
-                float neg_hidden[256] = {0}, neg_cell[256] = {0};
+                /* R-006修复: 移除未使用的栈数组neg_hidden/neg_cell。
+                 * 原声明浪费2048字节栈空间且给维护者造成困惑。 */
                 _lnn_forward_internal(network, neg_data, negatives + n * emb_dim);
-                (void)neg_hidden; (void)neg_cell;
             }
 
             float loss_val = 0.0f;
@@ -1249,11 +1249,15 @@ SELFLNN_API int lnn_self_supervised_pretrain(LNN* network,
                                 emb_dim, 0.1f, &loss_val);
             epoch_loss += loss_val;
 
-            float target_emb[512] = {0};
-            for (size_t d = 0; d < emb_dim && d < 512; d++) {
+            /* R-002修复: 动态分配target_emb替代固定栈数组[512],防止hidden_size>512时栈溢出 */
+            float* target_emb = (float*)safe_malloc(emb_dim * sizeof(float));
+            if (!target_emb) { safe_free((void**)&aug_positive); safe_free((void**)&negatives); continue; }
+            memset(target_emb, 0, emb_dim * sizeof(float));
+            for (size_t d = 0; d < emb_dim; d++) {
                 target_emb[d] = anchor_emb[d] * 0.5f + pos_emb[d] * 0.5f;
             }
             _lnn_backward_internal(network, target_emb, &loss_val);
+            safe_free((void**)&target_emb);
 
             safe_free((void**)&aug_positive);
             safe_free((void**)&negatives);

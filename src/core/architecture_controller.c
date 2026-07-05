@@ -27,7 +27,7 @@
 #include <math.h>
 #include <time.h>
 
-extern uint64_t lnn_get_forward_count(const LNN* network);
+/* INCON-04: 删除悬空extern声明 lnn_get_forward_count（该函数在整个项目中不存在） */
 
 /* ============ 维度范围常量 ============ */
 #define ARCH_MIN_HIDDEN_SIZE    32    /**< 隐藏层最小尺寸 */
@@ -39,7 +39,14 @@ extern uint64_t lnn_get_forward_count(const LNN* network);
 #define ARCH_MAX_HISTORY_ENTRIES 128  /**< 变更历史最大记录数 */
 
 /* ============ 内部随机数生成 ============ */
-static unsigned int arch_rng_state = 0xDEADBEEF;
+/* P1-009修复: 将RNG状态从文件级static改为线程局部存储，消除多线程数据竞争
+ * 原代码 arch_rng_state 为全局static，NAS搜索线程与训练线程并发修改
+ * 导致伪随机序列交错、可复现性破坏 */
+#ifdef _WIN32
+static __declspec(thread) unsigned int arch_rng_state = 0xDEADBEEF;
+#else
+static _Thread_local unsigned int arch_rng_state = 0xDEADBEEF;
+#endif
 
 static float arch_random_uniform(float min_val, float max_val) {
     arch_rng_state = arch_rng_state * 1103515245 + 12345;

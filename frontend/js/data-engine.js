@@ -330,6 +330,8 @@ class DataEngine {
             clearTimeout(this.timerId);
             this.timerId = null;
         }
+        /* P1-F12修复: 停止时清理模块注册表，防止重启时重复注册 */
+        if (this._pollModules) { this._pollModules.clear(); }
         this.initialized = false;
         this._backendConnected = false;
     }
@@ -373,12 +375,25 @@ class DataEngine {
 
     /**
      * 通知所有监听器
+     * M-008修复: 添加结构化克隆支持，处理Float32Array等不可JSON序列化的类型
      */
     _notifyListeners() {
-        const snapshot = JSON.parse(JSON.stringify(this.data));
+        var snapshot;
+        try {
+            /* 优先使用structuredClone（支持Float32Array等类型） */
+            if (typeof structuredClone === 'function') {
+                snapshot = structuredClone(this.data);
+            } else {
+                snapshot = JSON.parse(JSON.stringify(this.data));
+            }
+        } catch (e) {
+            /* 回退到浅拷贝 */
+            console.warn('[DataEngine] 数据快照创建失败，使用浅拷贝:', e && e.message ? e.message : e);
+            snapshot = Object.assign({}, this.data);
+        }
         snapshot._backendConnected = this._backendConnected;
         snapshot._lastError = this._lastError;
-        this.listeners.forEach(cb => {
+        this.listeners.forEach(function(cb) {
             try { cb(snapshot); } catch (e) { console.error('[DataEngine] 监听器回调异常:', e && e.message ? e.message : e); }
         });
     }

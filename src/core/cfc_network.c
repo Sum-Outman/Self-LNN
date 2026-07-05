@@ -149,6 +149,22 @@ CfCNetwork* cfc_create(const CfCNetworkConfig* config) {
         (output_size_cfg * hidden_size_cfg + output_size_cfg) : 0;
     size_t total_param_size = total_w + total_b + out_proj_param_size;
     float* param_block = (float*)safe_calloc(total_param_size, sizeof(float));
+    /* P1-006修复: param_block分配失败时回滚清理已分配的per-layer数组 */
+    if (!param_block) {
+        /* P0-002修复: 错误路径全面清理并返回NULL而非-1
+         * 原return -1导致返回类型为CfCNetwork*时产生无效指针 */
+        for (size_t l = 0; l < network->num_layers; l++) {
+            if (network->layers && network->layers[l]) {
+                cfc_cell_free(network->layers[l]);
+            }
+        }
+        safe_free((void**)&network->layers);
+        safe_free((void**)&network->per_layer_w_offset);
+        safe_free((void**)&network->per_layer_b_offset);
+        safe_free((void**)&network->per_layer_w_size);
+        safe_free((void**)&network);
+        return NULL;
+    }
     network->weight_matrix = param_block;               /* 指向层0权重起始 */
     network->bias_vector = param_block ? param_block + total_w : NULL; /* 指向偏置区域起始 */
 

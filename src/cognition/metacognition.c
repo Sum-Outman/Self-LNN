@@ -389,11 +389,17 @@ int metacognition_monitor(MetacognitionSystem* system,
         return -1;
     }
     
-    /* 计算监控指标 */
+    /* 计算监控指标
+     * P0-M011修复: 区分current_value和confidence的计算
+     * current_value = 输入数据的置信度指标（反映当前认知状态）
+     * confidence = 系统对监控结果本身的信心（与不确定性反向相关） */
     result->type = system->monitoring_config.monitoring_type;
     result->current_value = calculate_confidence(input_data, data_size);
-    result->confidence = calculate_confidence(input_data, data_size);
     result->uncertainty = calculate_uncertainty(system, input_data, data_size);
+    /* 置信度与不确定性反向相关: 不确定性越低，置信度越高 */
+    result->confidence = 1.0f - result->uncertainty;
+    if (result->confidence < 0.0f) result->confidence = 0.0f;
+    if (result->confidence > 1.0f) result->confidence = 1.0f;
     
 /* 拉普拉斯频域分析 → 元认知监控稳定性修正
      * 对输入数据进行拉普拉斯频域稳定性分析，

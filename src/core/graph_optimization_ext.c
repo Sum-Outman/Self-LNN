@@ -66,7 +66,12 @@ static void internal_mat_mul(const float* A, const float* B, float* C, int m, in
 }
 
 static int internal_cholesky_decompose(float* L, const float* A, int n) {
-    static int regularization_count = 0;
+    /* FIX-RACE1修复: TLS替代全局static避免多线程数据竞争 */
+#ifdef _WIN32
+    static __declspec(thread) int regularization_count = 0;
+#else
+    static _Thread_local int regularization_count = 0;
+#endif
     for (int j = 0; j < n; j++) {
         float s = 0.0f;
         for (int k = 0; k < j; k++)

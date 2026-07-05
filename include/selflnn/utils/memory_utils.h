@@ -307,9 +307,7 @@ int memory_unlock(void* ptr, size_t size);
     } \
 } while(0)
 
-/* R004: Bypass safe_alloc magic checks for VS 2026 /O2 compatibility.
- * When enabled, safe_malloc/safe_free delegate directly to malloc/free. */
-void memory_utils_bypass_safe_alloc(int bypass);
+/* INCON-03: 删除重复的 memory_utils_bypass_safe_alloc 声明（已在145行保留） */
 
 #ifdef __cplusplus
 }

@@ -2254,19 +2254,20 @@ SELFLNN_API int distributed_checkpoint_load(DistributedContext* ctx, const char*
         return -1;
     }
 
-    fread(&version, sizeof(version), 1, fp);
-    fread(&file_node_id, sizeof(file_node_id), 1, fp);
-    fread(&file_num_nodes, sizeof(file_num_nodes), 1, fp);
+    /* P2-FIX-21: 检查点恢复段fread全部添加返回值检查，失败时关闭文件并返回-1 */
+    if (fread(&version, sizeof(version), 1, fp) != 1) { fclose(fp); return -1; }
+    if (fread(&file_node_id, sizeof(file_node_id), 1, fp) != 1) { fclose(fp); return -1; }
+    if (fread(&file_num_nodes, sizeof(file_num_nodes), 1, fp) != 1) { fclose(fp); return -1; }
 
     /* 恢复通信统计 */
-    fread(&ctx->stats, sizeof(ctx->stats), 1, fp);
+    if (fread(&ctx->stats, sizeof(ctx->stats), 1, fp) != 1) { fclose(fp); return -1; }
 
     /* 恢复法定人数状态 */
-    fread(&ctx->quorum, sizeof(ctx->quorum), 1, fp);
+    if (fread(&ctx->quorum, sizeof(ctx->quorum), 1, fp) != 1) { fclose(fp); return -1; }
 
     /* 恢复梯度版本 */
-    fread(&ctx->grad_versions, sizeof(ctx->grad_versions), 1, fp);
-    fread(&ctx->global_version_counter, sizeof(ctx->global_version_counter), 1, fp);
+    if (fread(&ctx->grad_versions, sizeof(ctx->grad_versions), 1, fp) != 1) { fclose(fp); return -1; }
+    if (fread(&ctx->global_version_counter, sizeof(ctx->global_version_counter), 1, fp) != 1) { fclose(fp); return -1; }
 
     fclose(fp);
     log_info("检查点已加载: %s (node_id=%d, num_nodes=%d)", filepath, file_node_id, file_num_nodes);

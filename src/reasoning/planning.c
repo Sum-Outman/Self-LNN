@@ -1719,10 +1719,12 @@ PlanningSystem* planning_system_create(const PlanningConfig* config) {
     system->lf_fitness_history = (float*)safe_calloc(system->lf_history_size, sizeof(float));
 
     system->evolution_convergence_count = 0;
-    system->deep_evolution_enabled = 0;
-    system->enable_deep_evolution = 0;
-    system->evolution_initialized = 0;
-    system->cmaes_initialized = 0;
+    /* P0-M002修复: CMA-ES和深度演化默认启用，并设置延迟初始化标记
+     * 原代码默认全部关闭导致高阶优化策略形同虚设 */
+    system->deep_evolution_enabled = 1;
+    system->enable_deep_evolution = 1;
+    system->evolution_initialized = 1;
+    system->cmaes_initialized = 1;
     system->num_pareto_objectives = 0;
     system->pareto_front_size = 0;
     system->pareto_front_indices = NULL;

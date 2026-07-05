@@ -144,8 +144,8 @@
         pdSetStatus('<div style="text-align:center;padding:20px"><span style="color:#4fc3f7">查询引擎状态...</span></div>', true);
 
         window.SelfLnnApi.request('/product/status', {
-            method: 'GET',
-            headers: { 'Content-Type': 'application/json' }
+            method: 'GET'
+            /* L-007修复: GET请求不应包含Content-Type头 */
         })
         .then(function(resp) { return resp.json(); })
         .then(function(data) {
@@ -171,12 +171,15 @@
         });
     }
 
-    function pdEscapeHtml(text) {
-        if (!text) return '';
-        var div = document.createElement('div');
-        div.appendChild(document.createTextNode(text));
-        return div.innerHTML;
-    }
+    /* P1-F06修复: 使用全局escapeHtml替代局部pdEscapeHtml，消除代码重复 */
+    var pdEscapeHtml = (typeof window.escapeHtml === 'function') ?
+        window.escapeHtml :
+        function escapeFallback(text) {
+            if (!text) return '';
+            var d = document.createElement('div');
+            d.appendChild(document.createTextNode(String(text)));
+            return d.innerHTML;
+        };
 
     /* 初始化：绑定导航切换事件 */
     document.addEventListener('DOMContentLoaded', function() {

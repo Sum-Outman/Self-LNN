@@ -7692,6 +7692,144 @@ int tts_pinyin_lookup_gb2312(unsigned char gb_hi, unsigned char gb_lo,
     return 0;
 }
 
+/* ================================================================
+ * P2-FIX-16: 多音字语境消歧表（10个最常见多音字）
+ * 
+ * 每个多音字有默认读音（与rp_table一致）和替代读音。
+ * context_char 为语境触发字符，context_pos 表示语境位置：
+ *   -1 = 前一字触发（如"长"前有"生"→zhang3）
+ *    1 = 后一字触发（如"重"后有"要"→zhong4）
+ * is_prefix=1 表示前缀匹配（如"了"后跟着"解"→liao3）
+ * 
+ * 编码: bits[5:0]=声母(1-23) bits[13:8]=韵母(1-38) bits[15:14]=声调(0-4)
+ * ================================================================ */
+typedef struct {
+    uint16_t cp;            /* 多音字Unicode码点 */
+    uint16_t default_code;  /* 默认读音编码（与rp_table相同的默认读音） */
+    uint16_t alt_code;      /* 替代读音编码 */
+    uint16_t context_char;  /* 语境触发字符 */
+    int context_pos;        /* 语境位置: -1=前一字, 1=后一字 */
+    int is_prefix;          /* 是否前缀匹配（1=看前两字作为词, 0=精确匹配单个字） */
+} MultiToneEntry;
+
+/* 多音字消歧表
+ * 每个字的default_code = rp_table中的编码（系统默认返回的读音）
+ * alt_code = 在特定语境下应使用的替代读音
+ * 
+ * 编码说明（与rp_table一致）:
+ *   声母索引: B=1,P=2,M=3,F=4,D=5,T=6,N=7,L=8,G=9,K=10,H=11,
+ *             J=12,Q=13,X=14,ZH=15,CH=16,SH=17,R=18,Z=19,C=20,S=21,Y=22,W=23
+ *   韵母索引: A=1,O=2,E=3,I=4,U=5,V=6,AI=7,EI=8,UI=9,AO=10,OU=11,
+ *             IU=12,IE=13,VE=14,ER=15,AN=16,EN=17,IN=18,UN=19,VN=20,
+ *             ANG=21,ENG=22,ING=23,ONG=24,IA=25,IAO=26,IAN=27,IANG=28,
+ *             IONG=29,UA=30,UO=31,UAI=32,UAN=33,UANG=34,UE=35,
+ *             UENG=36,VAN=37,VANG=38
+ *   声调: 0=轻声,1=一声,2=二声,3=三声,4=四声
+ */
+static const MultiToneEntry mt_table[] = {
+    /* 了 U+4E86: 默认le(了) / liao3(了解) */
+    /* default: L=8, E=3, tone=0; alt: L=8, IAO=26, tone=3 */
+    {0x4E86, ((8&63)|((3&63)<<8)|((0&3)<<14)), ((8&63)|((26&63)<<8)|((3&3)<<14)),
+     0x89E3 /* 解 */, 1, 1},
+
+    /* 长 U+957F: 默认chang2(长) / zhang3(生长) */
+    /* default: CH=16, ANG=21, tone=2; alt: ZH=15, ANG=21, tone=3 */
+    {0x957F, ((16&63)|((21&63)<<8)|((2&3)<<14)), ((15&63)|((21&63)<<8)|((3&3)<<14)),
+     0x751F /* 生 */, -1, 0},
+
+    /* 重 U+91CD: 默认chong2(重新) / zhong4(重要) */
+    /* default: CH=16, ONG=24, tone=2; alt: ZH=15, ONG=24, tone=4 */
+    {0x91CD, ((16&63)|((24&63)<<8)|((2&3)<<14)), ((15&63)|((24&63)<<8)|((4&3)<<14)),
+     0x8981 /* 要 */, 1, 0},
+
+    /* 行 U+884C: 默认hang2(行) / xing2(行走) */
+    /* default: H=11, ANG=21, tone=2; alt: X=14, ING=23, tone=2 */
+    {0x884C, ((11&63)|((21&63)<<8)|((2&3)<<14)), ((14&63)|((23&63)<<8)|((2&3)<<14)),
+     0x8D70 /* 走 */, 1, 0},
+
+    /* 乐 U+4E50: 默认le4(快乐) / yue4(音乐) */
+    /* default: L=8, E=3, tone=4; alt: Y=22, VE=14, tone=4 */
+    {0x4E50, ((8&63)|((3&63)<<8)|((4&3)<<14)), ((22&63)|((14&63)<<8)|((4&3)<<14)),
+     0x97F3 /* 音 */, -1, 0},
+
+    /* 好 U+597D: 默认hao3(好) / hao4(爱好) */
+    /* default: H=11, AO=10, tone=3; alt: H=11, AO=10, tone=4 */
+    {0x597D, ((11&63)|((10&63)<<8)|((3&3)<<14)), ((11&63)|((10&63)<<8)|((4&3)<<14)),
+     0x7231 /* 爱 */, -1, 0},
+
+    /* 少 U+5C11: 默认shao3(多少) / shao4(少年) */
+    /* default: SH=17, AO=10, tone=3; alt: SH=17, AO=10, tone=4 */
+    {0x5C11, ((17&63)|((10&63)<<8)|((3&3)<<14)), ((17&63)|((10&63)<<8)|((4&3)<<14)),
+     0x5E74 /* 年 */, 1, 0},
+
+    /* 还 U+8FD8: 默认hai2(还是) / huan2(归还) */
+    /* default: H=11, AI=7, tone=2; alt: H=11, UAN=33, tone=2 */
+    {0x8FD8, ((11&63)|((7&63)<<8)|((2&3)<<14)), ((11&63)|((33&63)<<8)|((2&3)<<14)),
+     0x5F52 /* 归 */, 1, 0},
+
+    /* 得 U+5F97: 默认de2(得到) / dei3(得亏) */
+    /* default: D=5, E=3, tone=2; alt: D=5, EI=8, tone=3 */
+    {0x5F97, ((5&63)|((3&63)<<8)|((2&3)<<14)), ((5&63)|((8&63)<<8)|((3&3)<<14)),
+     0x4E8F /* 亏 */, 1, 0},
+
+    /* 地 U+5730: 默认de(地) / di4(地方) */
+    /* default: D=5, E=3, tone=0; alt: D=5, I=4, tone=4 */
+    {0x5730, ((5&63)|((3&63)<<8)|((0&3)<<14)), ((5&63)|((4&63)<<8)|((4&3)<<14)),
+     0x65B9 /* 方 */, 1, 0},
+};
+
+#define MT_TABLE_SIZE (sizeof(mt_table)/sizeof(mt_table[0]))
+
+/**
+ * @brief 多音字语境感知查找（P2-FIX-16）
+ * 
+ * 检查给定码点是否是多音字，并根据前后字语境判断应使用的读音。
+ * 如果语境匹配替代读音，则输出替代读音；否则输出默认读音。
+ * 
+ * @param codepoint 汉字Unicode码点
+ * @param prev_cp 前一个汉字码点（0表示无）
+ * @param next_cp 后一个汉字码点（0表示无）
+ * @param prev_prev_cp 前两个汉字码点（用于两字词缀匹配，0表示无）
+ * @param out_init 输出声母索引
+ * @param out_final 输出韵母索引
+ * @param out_tone 输出声调(0-4)
+ * @return 1=有多音字消歧结果, 0=未命中多音字表
+ */
+int tts_pinyin_lookup_with_context(uint16_t codepoint,
+    uint16_t prev_cp, uint16_t next_cp, uint16_t prev_prev_cp,
+    int* out_init, int* out_final, int* out_tone) {
+    
+    /* 遍历多音字表查找匹配 */
+    for (int i = 0; i < (int)MT_TABLE_SIZE; i++) {
+        if (mt_table[i].cp != codepoint) continue;
+        
+        /* 找到多音字条目，检查语境 */
+        uint16_t ctx_char = mt_table[i].context_char;
+        int use_alt = 0;
+        
+        if (mt_table[i].context_pos == -1) {
+            /* 前一字触发: 如"生长"→长读zhang3, "音乐"→乐读yue4, "爱好"→好读hao4 */
+            use_alt = (prev_cp == ctx_char);
+        } else if (mt_table[i].context_pos == 1) {
+            /* 后一字触发: 如"重要"→重读zhong4, "行走"→行读xing2, "少年"→少读shao4 */
+            if (mt_table[i].is_prefix) {
+                /* 前缀匹配: 前两字匹配（如"了解"→了读liao3） */
+                use_alt = (prev_cp == ctx_char) || (prev_prev_cp == ctx_char);
+            } else {
+                use_alt = (next_cp == ctx_char);
+            }
+        }
+        
+        uint16_t code = use_alt ? mt_table[i].alt_code : mt_table[i].default_code;
+        *out_init  = (int)(code & 0x3F);
+        *out_final = (int)((code >> 8) & 0x3F);
+        *out_tone  = (int)((code >> 14) & 0x3);
+        return 1;
+    }
+    
+    return 0;
+}
+
 int tts_pinyin_table_size(void) { return RP_TABLE_SIZE; }
 
 /* ================================================================

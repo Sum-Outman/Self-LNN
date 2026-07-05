@@ -32,7 +32,10 @@ struct ContentFilter {
 
     void* lnn_instance;     /* 外部绑定的LNN（可为NULL） */
     void* internal_cfc;     /* L-021修复: 内部独立的2层CfC分类器（无外部LNN时使用） */
-    int enable_semantic;    
+    int enable_semantic;
+
+    /* FIX-007修复: 添加互斥锁保护rule_count/rules并发访问 */
+    void* lock;
 };
 
 static const char* content_category_default_name(ContentCategory category) {
@@ -67,6 +70,10 @@ static int content_contains_pattern(const char* text_lower, const char* pattern_
 ContentFilter* content_filter_create(void) {
     ContentFilter* filter = (ContentFilter*)safe_calloc(1, sizeof(ContentFilter));
     if (!filter) return NULL;
+
+    /* FIX-007修复: 初始化并发锁 */
+    filter->lock = mutex_create();
+    if (!filter->lock) { safe_free((void**)&filter); return NULL; }
 
     /* 添加默认规则 - 暴力内容 */
     {
@@ -228,6 +235,8 @@ void content_filter_destroy(ContentFilter* filter) {
         lnn_free((LNN*)filter->internal_cfc);
         filter->internal_cfc = NULL;
     }
+    /* FIX-007修复: 释放互斥锁 */
+    if (filter->lock) mutex_destroy(filter->lock);
     safe_free((void**)&filter);
 }
 
@@ -246,9 +255,15 @@ int content_filter_set_lnn(ContentFilter* filter, void* lnn_instance) {
 
 int content_filter_add_rule(ContentFilter* filter, const ContentFilterRule* rule) {
     if (!filter || !rule) return -1;
-    if (filter->rule_count >= CONTENT_FILTER_MAX_RULES) return -1;
+    /* FIX-007修复: 获取锁保护rule_count */
+    mutex_lock(filter->lock);
+    if (filter->rule_count >= CONTENT_FILTER_MAX_RULES) {
+        mutex_unlock(filter->lock); return -1;
+    }
     filter->rules[filter->rule_count++] = *rule;
-    return filter->rule_count - 1;
+    int result = filter->rule_count - 1;
+    mutex_unlock(filter->lock);
+    return result;
 }
 
 int content_filter_add_pattern(ContentFilter* filter, ContentCategory category,
@@ -297,7 +312,10 @@ int content_filter_check(ContentFilter* filter, const char* content,
     int highest_action = 0;
 
     /* ===== 第一层：关键词模式匹配 ===== */
-    for (int i = 0; i < filter->rule_count; i++) {
+    /* FIX-007修复: 获取读锁保护rules数组遍历 */
+    mutex_lock(filter->lock);
+    int snapshot_rule_count = filter->rule_count;
+    for (int i = 0; i < snapshot_rule_count; i++) {
         const ContentFilterRule* r = &filter->rules[i];
         if (!r->enabled || r->pattern_count == 0) continue;
 
@@ -325,6 +343,7 @@ int content_filter_check(ContentFilter* filter, const char* content,
             }
         }
     }
+    mutex_unlock(filter->lock);  /* FIX-007: 释放读锁 */
 
     /* ===== 第二层：LNN语义评估（补充过滤维度） =====
      * 在关键词匹配之后，使用LNN对完整文本进行语义级安全评估。
@@ -576,7 +595,8 @@ int content_filter_load_rules_from_file(ContentFilter* filter, const char* filep
         rule.action_type = (strcmp(action, "block") == 0) ? 2 :
                            (strcmp(action, "flag") == 0) ? 1 : 0;
 
-        if (content_filter_add_rule(filter, &rule) == 0) {
+        /* CONTENT-010修复: content_filter_add_rule返回新索引(>=0成功), 仅==0判断会跳过后面的规则 */
+        if (content_filter_add_rule(filter, &rule) >= 0) {
             loaded++;
         }
     }

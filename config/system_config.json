@@ -43,5 +43,29 @@
     "spectral_efficiency_target": 0.7,
     "update_interval_sec": 1800
   },
-  "_comment": "训练/安全/进化/拉普拉斯配置段已补全。所有值已与代码默认值对齐。"
+  "agi": {
+    "self_evolution_enabled": false,
+    "self_learning_enabled": true,
+    "self_decision_enabled": true,
+    "self_execution_enabled": true,
+    "imitation_learning_enabled": false,
+    "self_correction_enabled": true,
+    "reflection_enabled": true,
+    "planning_enabled": true,
+    "background_loop_interval_sec": 10
+  },
+  "self_cognition": {
+    "enabled": true,
+    "metacognition_enabled": true,
+    "self_reflection_interval_minutes": 30,
+    "thought_chain_depth": 5,
+    "correction_max_iterations": 3
+  },
+  "system": {
+    "auto_restart_on_failure": false,
+    "auto_save_interval_minutes": 60,
+    "log_level": "info",
+    "web_ui_enabled": true
+  },
+  "_comment": "L-002修复: 已补全agi/self_cognition/system配置段。所有值已与代码默认值对齐。M-006验证: training.mixed_precision为字符串格式(由config_loader.c映射为SystemConfig.mixed_precision_mode int枚举)，这是正确的设计。"
 }

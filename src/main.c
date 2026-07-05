@@ -3,6 +3,8 @@
 #define SELFLNN_IMPLEMENTATION
 #define SELFLNN_CORE_INTERNAL
 
+/* M-001修复: 引入CMake生成的统一版本头文件，替换硬编码VERSION_MAJOR/MINOR/PATCH */
+#include "selflnn/version.h"
 #include "selflnn/backend/backend.h"
 #include "selflnn/backend/websocket_push.h"
 #include "selflnn/cognition/self_cognition.h"
@@ -67,6 +69,7 @@
 #include <signal.h>
 #include <time.h>
 #include <math.h>
+#include <stdint.h> /* P2-001修复: 为intptr_t类型提供显式声明 */
 
 #ifdef _WIN32
 #include <windows.h>
@@ -128,9 +131,21 @@ static int g_consolidate_interval_sec  = 600;
 static int g_evolution_interval_sec    = 600;
 static int g_training_interval_sec     = 300;
 
-#define VERSION_MAJOR 1
-#define VERSION_MINOR 5
-#define VERSION_PATCH 0
+/* M-001修复: 版本号统一从CMake生成的version.h获取，不再硬编码
+ * 构建时 CMake 从 project(selflnn VERSION 1.5.0) 自动填充 version.h.in → version.h
+ * 本地开发无CMake时使用以下后备宏 */
+#ifndef SELFLNN_VERSION_MAJOR
+#define SELFLNN_VERSION_MAJOR 1
+#endif
+#ifndef SELFLNN_VERSION_MINOR
+#define SELFLNN_VERSION_MINOR 5
+#endif
+#ifndef SELFLNN_VERSION_PATCH
+#define SELFLNN_VERSION_PATCH 0
+#endif
+#define VERSION_MAJOR SELFLNN_VERSION_MAJOR
+#define VERSION_MINOR SELFLNN_VERSION_MINOR
+#define VERSION_PATCH SELFLNN_VERSION_PATCH
 
 static BackendServer* g_server = NULL;
 WSPushServer* g_ws_push_server = NULL;
@@ -681,6 +696,22 @@ static void agi_bg_evolution_step(void) {
     memset(&stats, 0, sizeof(EvolutionStats));
     int result = evolution_step((EvolutionEngine*)evo);
     evolution_get_stats((EvolutionEngine*)evo, &stats);
+    /* C-002修复: 将演化进展注入自我认知系统（替代直接读取EvolutionStats） */
+    {
+        void* scs = selflnn_get_self_cognition();
+        if (scs) {
+            float progress = 0.0f;
+            if (stats.total_generations > 0) {
+                float gen_progress = 0.3f;  /* 有演化历史则为正 */
+                float fitness_score = fminf(1.0f, fabsf(stats.final_best_fitness));
+                float convergence = fminf(1.0f, stats.convergence_speed);
+                float improvement = fminf(1.0f, fabsf(stats.improvement));
+                progress = gen_progress * 0.25f + fitness_score * 0.35f +
+                           convergence * 0.2f + improvement * 0.2f;
+            }
+            self_cognition_set_evolution_progress((SelfCognitionSystem*)scs, progress);
+        }
+    }
     if (result == 0) {
         log_info("[AGI后台] 演化步完成，代=%zu，最佳适应度=%.6f",
                  stats.total_generations, stats.final_best_fitness);
@@ -2276,13 +2307,17 @@ static void generate_random_key(char* key, size_t key_size)
 static void signal_handler(int sig)
 {
     (void)sig;
+    /* S-001修复: SIGSEGV后从信号处理器返回是C标准未定义行为。
+     * 程序可能在已损坏的内存状态下继续执行，访问g_agi_running导致二次崩溃。
+     * 即使是第一次SIGSEGV也应立即_exit退出，不可尝试优雅关闭。
+     * 仅在真正由raise()触发的可控场景才可能安全返回。 */
     if (sig == SIGSEGV) {
-        /* H-MED-003修复: 信号处理器中使用volatile sig_atomic_t确保原子读写，避免数据竞争 */
         static volatile sig_atomic_t segv_count = 0;
-        if (++segv_count > 2) {
-            /* 多次SIGSEGV，直接中止 */
+        /* 记录首次崩溃: 立即退出不返回 */
+        if (++segv_count >= 1) {
             _exit(128 + sig);
         }
+        _exit(128 + sig);  /* 第一次也直接退出 */
     }
     /* H-002修复: 信号处理中避免使用任何可能持锁的函数。
      * Windows使用WriteFile(GetStdHandle)绕过CRT锁；
@@ -2416,6 +2451,7 @@ int main(int argc, char** argv)
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
     signal(SIGBREAK, signal_handler);
+    signal(SIGSEGV, signal_handler);       /* S-002修复: Windows也注册SIGSEGV */
 #else
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
@@ -2425,9 +2461,18 @@ int main(int argc, char** argv)
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
     sigaction(SIGHUP, &sa, NULL);
-    /* SIGSEGV紧急状态保存 */
-    /* H-001修复: 移除SA_RESETHAND，改用信号处理器内计数器控制 */
+    /* S-003修复: 补全POSIX信号处理 */
     sigaction(SIGSEGV, &sa, NULL);
+    /* 网络服务关键信号 —— 防止未处理的SIGPIPE导致进程终止 */
+    sa.sa_handler = SIG_IGN;  /* SIGPIPE: 写入已关闭套接字时静默忽略 */
+    sigaction(SIGPIPE, &sa, NULL);
+    /* 恢复SIGSEGV处理器（SIGPIPE覆盖了sa.sa_handler） */
+    sa.sa_handler = signal_handler;
+    sigaction(SIGABRT, &sa, NULL);         /* abort()调用时优雅退出 */
+    sigaction(SIGFPE, &sa, NULL);          /* 浮点异常(除零等) */
+    sigaction(SIGILL, &sa, NULL);          /* 非法指令 */
+    sigaction(SIGBUS, &sa, NULL);          /* 总线错误(未对齐访问) */
+    sigaction(SIGQUIT, &sa, NULL);         /* Ctrl+\ 触发 */
 #endif
 
     print_system_info(config.port, SELFLNN_WEBSOCKET_PORT);

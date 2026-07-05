@@ -416,10 +416,12 @@ int emergency_stop_execute(EmergencyStopSystem* system, EmergencyStopLevel level
                 system->hardware_stop_callback(EMERGENCY_LEVEL_KILL, system->hardware_stop_ctx);
             }
             /* 释放所有非必要资源 */
+            /* SAFETY-005修复: KILL后清零snapshot_count避免后续遍历释放的悬垂指针 */
             for (int i = 0; i < system->snapshot_count; i++) {
                 safe_free((void**)&system->snapshots[i].system_state);
                 safe_free((void**)&system->snapshots[i].overlay_data);
             }
+            system->snapshot_count = 0;
             snprintf(system->status.status_message,
                      sizeof(system->status.status_message),
                      "终止: 所有线程已强制终止，资源已释放");

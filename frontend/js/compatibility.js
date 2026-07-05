@@ -56,7 +56,10 @@ class BrowserCompat {
     _checkWebGL() {
         try {
             var canvas = document.createElement('canvas');
-            return !!(canvas.getContext('webgl') || canvas.getContext('experimental-webgl'));
+            var result = !!(canvas.getContext('webgl') || canvas.getContext('experimental-webgl'));
+            /* L-009修复: 显式释放临时Canvas引用，提示GC回收 */
+            canvas = null;
+            return result;
         } catch (e) {
             return false;
         }

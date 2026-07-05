@@ -22,14 +22,11 @@ set_target_properties(selflnn_evolution PROPERTIES
     SOVERSION 1
 )
 
-# P1-008修复完成 —— 循环依赖 selflnn_evolution ↔ selflnn_cognition 已打破。
-# selflnn_cognition以PRIVATE方式链接，仅evolution内部使用，不传播给依赖者。
-# cognition通过selflnn_evolution（非别名）直接引用evolution。
-# 长期方案：提取共享接口到独立公共库(selflnn_common_interface)。
-# 链接依赖库
+# C-002修复完成: 循环依赖 selflnn_evolution ↔ selflnn_cognition 已彻底打破。
+# 代码层面确认: evolution的3个.c文件零引用cognition的任何符号。
+# cognition通过回调模式调用evolution,不再编译期依赖。
 target_link_libraries(selflnn_evolution
     PUBLIC utils selflnn_core
-    PRIVATE selflnn_cognition
 )
 
 # 安装规则（如果需要）

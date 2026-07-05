@@ -29,7 +29,7 @@ elseif(WIN32)
     target_link_libraries(utils PUBLIC ws2_32 version)
 endif()
 
-# 为兼容性添加别名
+# L-006修复: 所有内部模块已统一使用utils，此别名保留仅为外部兼容，计划v2.0移除
 add_library(selflnn_utils ALIAS utils)
 
 # 安装规则

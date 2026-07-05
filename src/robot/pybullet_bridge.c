@@ -441,12 +441,16 @@ int pybullet_get_base_state(int connection_id, int robot_id,
 
     char buf[1024];
     if (conn->process_stdout && fgets(buf, (int)sizeof(buf), conn->process_stdout)) {
-        sscanf(buf, "{\"pos\":[%f,%f,%f],\"orn\":[%f,%f,%f,%f],\"lv\":[%f,%f,%f],\"av\":[%f,%f,%f]}",
+        /* FIX-SSCANF3: 检查sscanf返回值，13字段全部解析成功才信任数据 */
+        int scanned = sscanf(buf, "{\"pos\":[%f,%f,%f],\"orn\":[%f,%f,%f,%f],\"lv\":[%f,%f,%f],\"av\":[%f,%f,%f]}",
             &state->position[0], &state->position[1], &state->position[2],
             &state->orientation[0], &state->orientation[1],
             &state->orientation[2], &state->orientation[3],
             &state->linear_velocity[0], &state->linear_velocity[1], &state->linear_velocity[2],
             &state->angular_velocity[0], &state->angular_velocity[1], &state->angular_velocity[2]);
+        if (scanned != 13) {
+            log_warn("[PyBullet] 状态解析不完整: 期望13字段, 实际%d, buf='%s'", scanned, buf);
+        }
     }
     return 0;
 }

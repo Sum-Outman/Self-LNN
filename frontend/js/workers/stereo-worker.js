@@ -1,5 +1,5 @@
 ﻿/**
- *: 双目立体视觉 Web Worker
+ * 双目立体视觉 Web Worker
  * 在独立线程中执行Census变换、汉明距离计算、视差图计算
  * 通过postMessage与主线程通信，避免阻塞UI渲染
  */

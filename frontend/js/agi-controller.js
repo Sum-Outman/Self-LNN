@@ -378,16 +378,30 @@ class AGIController {
         }
     }
 
-    async _apiGet(endpoint) {
+    /* P0-C006修复: _apiGet支持查询参数，自动拼接到URL查询字符串 */
+    async _apiGet(endpoint, params) {
         try {
             if (!window.SelfLnnApi) {
                 throw new Error('API服务不可用');
+            }
+            /* 将params对象转换为查询字符串 */
+            var url = endpoint;
+            if (params && typeof params === 'object') {
+                var queryParts = [];
+                for (var key in params) {
+                    if (params.hasOwnProperty(key)) {
+                        queryParts.push(encodeURIComponent(key) + '=' + encodeURIComponent(params[key]));
+                    }
+                }
+                if (queryParts.length > 0) {
+                    url += (url.indexOf('?') >= 0 ? '&' : '?') + queryParts.join('&');
+                }
             }
             /* P2-001修复: 添加30秒超时 */
             var controller = new AbortController();
             var timeoutId = setTimeout(function() { controller.abort(); }, 30000);
             try {
-                const response = await window.SelfLnnApi.request(endpoint, {
+                const response = await window.SelfLnnApi.request(url, {
                     method: 'GET',
                     signal: controller.signal
                 });
@@ -402,7 +416,7 @@ class AGIController {
             } catch (innerErr) {
                 clearTimeout(timeoutId);
                 if (innerErr.name === 'AbortError') {
-                    throw new Error('请求超时(30s): ' + endpoint);
+                    throw new Error('请求超时(30s): ' + url);
                 }
                 throw innerErr;
             }

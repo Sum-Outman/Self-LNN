@@ -2421,8 +2421,9 @@ const char* graph_reasoner_get_entity_name(const GraphReasoner* reasoner,
 }
 
 const char* graph_reasoner_get_relation_name(const GraphReasoner* reasoner,
-                                              int relation_id) {
-    if (!reasoner) return NULL;
+                                              int relation_id,
+                                              char* out_buf, size_t buf_size) {
+    if (!reasoner || !out_buf || buf_size == 0) return NULL;
     if (relation_id < 0 || relation_id >= reasoner->relation_count) return NULL;
 
     int cfc_rel_id = reasoner->relation_to_cfc_id[relation_id];
@@ -2431,13 +2432,12 @@ const char* graph_reasoner_get_relation_name(const GraphReasoner* reasoner,
         int dim = reasoner->config.embedding_dim;
         int g = cfc_embed_get_relation_embedding(reasoner->embed_state, cfc_rel_id, rel_emb, dim);
         if (g > 0) {
-            static char rel_name[128];
             float magnitude = 0.0f;
             for (int d = 0; d < dim && d < CFC_EMBED_MAX_DIM; d++)
                 magnitude += rel_emb[d] * rel_emb[d];
             magnitude = sqrtf(magnitude / ((float)dim + 1e-6f));
-            snprintf(rel_name, sizeof(rel_name), "rel_%d_mag%.3f", relation_id, (double)magnitude);
-            return rel_name;
+            snprintf(out_buf, buf_size, "rel_%d_mag%.3f", relation_id, (double)magnitude);
+            return out_buf;
         }
     }
 

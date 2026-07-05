@@ -544,8 +544,10 @@ int lb_rebalance(LbBalancer* balancer) {
 
 int lb_failover(LbBalancer* balancer, uint32_t failed_node_id) {
     if (!balancer) return LB_ERROR_INVALID_PARAM;
+    /* FIX-008修复: 获取互斥锁保护并发访问tasks数组 */
+    mutex_lock(&balancer->lock);
     int idx = find_node_index(balancer, failed_node_id);
-    if (idx < 0) return LB_ERROR_NODE_NOT_FOUND;
+    if (idx < 0) { mutex_unlock(&balancer->lock); return LB_ERROR_NODE_NOT_FOUND; }
     balancer->stats.total_failovers++;
     int failed_count = 0;
     for (int i = 0; i < balancer->task_count; i++) {
@@ -560,6 +562,7 @@ int lb_failover(LbBalancer* balancer, uint32_t failed_node_id) {
             }
         }
     }
+    mutex_unlock(&balancer->lock);
     return failed_count;
 }
 

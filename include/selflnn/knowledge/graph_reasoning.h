@@ -588,8 +588,10 @@ const char* graph_reasoner_get_entity_name(const GraphReasoner* reasoner,
  * @param relation_id 关系ID
  * @return const char* 关系名称，失败返回NULL
  */
+/* P1-001修复: 改为调用者提供缓冲区，消除static缓冲区多线程不安全问题 */
 const char* graph_reasoner_get_relation_name(const GraphReasoner* reasoner,
-                                              int relation_id);
+                                              int relation_id,
+                                              char* out_buf, size_t buf_size);
 
 /**
  * @brief 获取实体数

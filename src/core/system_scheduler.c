@@ -337,7 +337,12 @@ int system_scheduler_run_once(SystemScheduler* scheduler, uint64_t timeout_ms) {
 
     /* LNN参数退化检测：检查各模块的LNN权重健康状态 */
     if (scheduler->config.auto_recover && scheduler->config.enable_load_monitoring) {
-        static int degradation_check_cycle = 0;
+        /* FIX-RACE5: TLS替代全局static避免多线程数据竞争 */
+#ifdef _WIN32
+        static __declspec(thread) int degradation_check_cycle = 0;
+#else
+        static _Thread_local int degradation_check_cycle = 0;
+#endif
         degradation_check_cycle++;
         if (degradation_check_cycle % 10 == 0) {
             for (size_t i = 0; i < scheduler->module_count; i++) {

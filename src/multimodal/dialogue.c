@@ -42,12 +42,9 @@
 #include <time.h>
 #include <ctype.h>
 
-/* dialogue_deep_train_policy来自dialogue_deep.c，
- * 提供基于TD学习的策略网络训练。此处extern声明使其在dialogue.c中可见，
- * 每次对话回复生成后自动调用进行增量策略优化。 */
-extern int dialogue_deep_train_policy(DialogueProcessor* dp,
-    const float* state_features, const float* next_state_features,
-    float reward, int num_states, float learning_rate);
+/* 【P1-003修复】dialogue_deep_train_policy 声明已移至 dialogue.h 头文件，
+ * 移除裸 extern 声明，改用正常头文件包含。
+ * 参见 include/selflnn/multimodal/dialogue.h 中的正式声明。 */
 
 #define DIALOGUE_MAGIC 0x4449414C4F475545ULL
 #define DIALOGUE_SAVE_VERSION 1
@@ -113,8 +110,8 @@ static pthread_mutex_t g_dialogue_weights_mutex = PTHREAD_MUTEX_INITIALIZER;
 /* 全局对话处理器引用，用于LNN驱动的意图分析 */
 static DialogueProcessor* g_dialogue_processor_global = NULL;
 
-/* 外部WebSocket推送服务器引用（由main.c管理生命周期） */
-extern WSPushServer* g_ws_push_server;
+/* FIX-EXTERN10: g_ws_push_server应在 websocket_push.h 中声明，统一引用 */
+#include "selflnn/backend/websocket_push.h"
 
 DialogueProcessor* dialogue_get_global_processor(void) {
     return g_dialogue_processor_global;

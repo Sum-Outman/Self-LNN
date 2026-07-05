@@ -2000,10 +2000,31 @@ int dynamics_differentiable_backward(DynamicsSystem* system,
         return -1;
     }
 
+    /* P0-005修复: 完整位置+速度双伴随反向传播
+     * 原代码使用system->velocity[d]（来自前向仿真最后一步的速度），
+     * 导致每步反向传播都使用相同的终端速度，产生错误梯度。
+     * 修复: 从轨迹位置差分估算每步的速度，确保每步JVP计算使用正确的速度值。
+     * 速度估算: v_step = (x_{step+1} - x_{step}) / dt
+     * 首步从零速度开始（前向仿真初始velocity=0） */
+    float* step_velocity = (float*)safe_malloc(state_dim * sizeof(float));
+    if (!step_velocity) {
+        safe_free((void**)&perturb_plus); safe_free((void**)&perturb_minus);
+        safe_free((void**)&dstate_plus); safe_free((void**)&dstate_minus);
+        safe_free((void**)&dvel_plus); safe_free((void**)&dvel_minus);
+        safe_free((void**)&adjoint_q); safe_free((void**)&adjoint_v);
+        safe_free((void**)&zero_input);
+        return -1;
+    }
+
     /* 反向积分：从终端到初始 */
     for (int step = num_steps; step > 0; step--) {
         const float* current_state = trajectory + (size_t)step * state_dim;
         const float* prev_state = trajectory + (size_t)(step - 1) * state_dim;
+
+        /* P0-005修复: 从位置差分估算每步速度，替代错误的system->velocity */
+        for (size_t d = 0; d < state_dim; d++) {
+            step_velocity[d] = (current_state[d] - prev_state[d]) / dt;
+        }
 
         /* 计算位置伴随向量范数用于有限差分扰动方向 */
         float adj_norm = 0.0f;
@@ -2018,50 +2039,36 @@ int dynamics_differentiable_backward(DynamicsSystem* system,
             perturb_minus[d] = current_state[d] - epsilon * unit_dir_q;
         }
 
-        compute_derivatives(system, perturb_plus,  system->velocity, zero_input, dstate_plus,  dvel_plus);
-        compute_derivatives(system, perturb_minus, system->velocity, zero_input, dstate_minus, dvel_minus);
+        compute_derivatives(system, perturb_plus,  step_velocity, zero_input, dstate_plus,  dvel_plus);
+        compute_derivatives(system, perturb_minus, step_velocity, zero_input, dstate_minus, dvel_minus);
 
         const float scale = 1.0f / (2.0f * epsilon + 1e-12f);
 
         for (size_t d = 0; d < state_dim; d++) {
-/* J@a_q的有限差分近似 - 实际使用而非丢弃。
-             * 之前此JVP被计算后完全未使用，伴随传播使用硬编码的线性弹簧模型。
-             * 现在混合使用：JVP提供非线性修正，线性模型提供稳定基线。
-             * J^T@a: 对于非线性系统，需要额外计算 J^T@a_v。
-             * 使用位置方向扰动计算J_vq@a_q: ∂(dv/dt)/∂q · a_q近似 */
             float jvp_q = (dvel_plus[d] - dvel_minus[d]) * scale * adj_norm;
 
-            /* 新增: 计算 J^T@a 用于非线性系统。
-             * 在a_v方向上扰动速度，计算反传所需的 J_qv^T@a_v 分量。 */
             float unit_dir_v = (adj_norm > 1e-12f) ? adjoint_v[d] / adj_norm : 0.0f;
             float jvp_transpose_v = 0.0f;
             if (fabsf(unit_dir_v) > 1e-8f && system->config.nonlinearity > 0.01f) {
-                float pert_v_plus  = system->velocity[d] + epsilon * unit_dir_v;
-                float pert_v_minus = system->velocity[d] - epsilon * unit_dir_v;
-                float sv_orig = system->velocity[d];
-                system->velocity[d] = pert_v_plus;
-                compute_derivatives(system, current_state, system->velocity, zero_input, dstate_plus, dvel_plus);
-                system->velocity[d] = pert_v_minus;
-                compute_derivatives(system, current_state, system->velocity, zero_input, dstate_minus, dvel_minus);
-                system->velocity[d] = sv_orig;
+                float pert_v_plus  = step_velocity[d] + epsilon * unit_dir_v;
+                float pert_v_minus = step_velocity[d] - epsilon * unit_dir_v;
+                float sv_orig = step_velocity[d];
+                step_velocity[d] = pert_v_plus;
+                compute_derivatives(system, current_state, step_velocity, zero_input, dstate_plus, dvel_plus);
+                step_velocity[d] = pert_v_minus;
+                compute_derivatives(system, current_state, step_velocity, zero_input, dstate_minus, dvel_minus);
+                step_velocity[d] = sv_orig;
                 jvp_transpose_v = (dstate_plus[d] - dstate_minus[d]) * scale * adj_norm;
             }
 
-/* 伴随系统传播 - 使用计算出的JVP而非硬编码k/c。
-             * 线性基线: da_q/dt = -a_v, da_v/dt = -JVP_q
-             * 混合: 非线性度越高，JVP权重越大 */
             float nl_weight = CLAMP(system->config.nonlinearity, 0.0f, 1.0f);
             float linear_k = (system->config.time_scale > 0.0f) ? system->config.time_scale : 1.0f;
             float linear_c = (system->config.damping > 0.0f) ? system->config.damping : 0.1f;
 
-            /* 混合JVP: 线性弹簧项(k*a_q) 与 有限差分JVP 按非线性度加权 */
             float effective_jvp_q = linear_k * adjoint_q[d] * (1.0f - nl_weight)
                                   + jvp_q * nl_weight;
             float effective_jvp_transpose = jvp_transpose_v * nl_weight;
 
-            /* 完整伴随系统: 
-             * da_q/dt = -a_v - d(dv/dt)/dq · a_v (J_vq^T@a_v)
-             * da_v/dt = -dV/dq · a_q - d(dv/dt)/dv · a_v = -J_vq@a_q - c*a_v */
             float da_q_dt = -adjoint_v[d] - effective_jvp_transpose;
             float da_v_dt = -effective_jvp_q - linear_c * adjoint_v[d];
 
@@ -2077,6 +2084,8 @@ int dynamics_differentiable_backward(DynamicsSystem* system,
             }
         }
     }
+
+    safe_free((void**)&step_velocity);
 
     safe_free((void**)&perturb_plus); safe_free((void**)&perturb_minus);
     safe_free((void**)&dstate_plus); safe_free((void**)&dstate_minus);

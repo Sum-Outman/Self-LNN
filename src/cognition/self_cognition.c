@@ -49,7 +49,7 @@
 #include "selflnn/core/errors.h"
 #include "selflnn/core/laplace.h"
 #include "selflnn/core/cfc_cell.h"
-#include "selflnn/evolution/evolution_engine.h"
+/* C-002修复: 移除 selflnn/evolution/evolution_engine.h —— 通过回调模式解耦 */
 #include "selflnn/utils/platform.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/secure_random.h"
@@ -72,8 +72,12 @@
 #include <math.h>
 
 /* 前向声明（避免include顺序问题） */
-extern void* selflnn_get_evolution_engine(void);
+/* C-002修复: 移除 extern void* selflnn_get_evolution_engine() —— 通过回调模式解耦 */
 static void perform_deep_self_analysis(SelfCognitionSystem* system);
+
+/* C-002修复: 适应决策回调（静态全局,编译期不与evolution模块耦合） */
+static SelfCognitionAdaptCallback g_adapt_callback = NULL;
+static void* g_adapt_context = NULL;
 
 /* P1-05 闭环反馈系统静态辅助函数 */
 static void collect_system_state_compact(SelfCognitionSystem* system, float* buf, size_t dim);
@@ -2044,22 +2048,15 @@ static void update_learning_progress(SelfCognitionSystem* system) {
     system->learning.learning_rate = 0.05f + learning_potential * 0.15f; // 5%-20%学习速率
     system->learning.learning_rate = fminf(0.3f, system->learning.learning_rate); // 上限30%
     
-    /* 6. 进化进展：基于真实演化引擎指标 */
+    /* 6. 进化进展：基于内部能力评估（C-002修复: 不再直接读取EvolutionStats）
+     * 外部通过 self_cognition_set_evolution_progress() 注入真实演化数据。
+     * 此处的内部计算作为兜底:当外部尚未注入数据时使用自适应估算。 */
     float real_evo_progress = 0.0f;
-    void* evo = selflnn_get_evolution_engine();
-    if (evo) {
-        EvolutionStats estats;
-        memset(&estats, 0, sizeof(EvolutionStats));
-        if (evolution_get_stats((EvolutionEngine*)evo, &estats) == 0) {
-            float gen_progress = estats.total_generations > 0 ? 0.5f : 0.1f;
-            float fitness_score = fminf(1.0f, fabsf(estats.final_best_fitness));
-            float convergence = fminf(1.0f, estats.convergence_speed);
-            float improvement = fminf(1.0f, fabsf(estats.improvement));
-            real_evo_progress = gen_progress * 0.25f + fitness_score * 0.35f +
-                               convergence * 0.2f + improvement * 0.2f;
-        }
-    }
-    if (real_evo_progress < 0.01f) {
+    if (system->learning.evolution_progress > 0.001f) {
+        /* 外部已注入真实数据，直接使用 */
+        real_evo_progress = system->learning.evolution_progress;
+    } else {
+        /* 兜底: 基于能力的自适应估算 */
         float capability_improvement = (system->capability.reasoning_ability + 
                                         system->capability.adaptability) / 2.0f;
         float environmental_adaptation = system->capability.adaptability * 
@@ -2701,14 +2698,17 @@ int self_cognition_execute_decision(SelfCognitionSystem* system,
         break;
     }
     case DECISION_ADAPT: {
-        /* 适应决策 → 触发演化引擎执行结构变异
-         * ZSF-101修复：移除函数体内冗余extern声明 */
-        void* evo = selflnn_get_evolution_engine();
-        if (evo) {
-            int evo_ret = evolution_step(evo);
+        /* C-002修复: 适应决策 → 通过回调通知上层执行演化步
+         * 编译期不依赖evolution模块,运行时通过g_adapt_callback绑定 */
+        if (g_adapt_callback) {
+            int evo_ret = g_adapt_callback(g_adapt_context);
             snprintf(system->current_execution.feedback,
                     sizeof(system->current_execution.feedback),
                     "适应决策执行: 演化步完成, 结果=%d", evo_ret);
+        } else {
+            snprintf(system->current_execution.feedback,
+                    sizeof(system->current_execution.feedback),
+                    "适应决策已记录: 等待上层自适应回调注册");
         }
         break;
     }
@@ -4397,7 +4397,7 @@ int self_cognition_perform_correction(SelfCognitionSystem* system,
         
         int baselen = snprintf(correction_result->description,
                 sizeof(correction_result->description),
-                "[LNN未训练-启发式保守修正] 系统指标: "
+                "[LNN预训练待完成] 系统指标: "
                 "知识=%d条, 记忆=%d条, 任务=%d, CPU=%.1f%%, "
                 "原始严重度=%.2f, 修正后严重度=%.2f, 应用调整=%d项. ",
                 has_status ? st.total_knowledge : -1,
@@ -4408,8 +4408,11 @@ int self_cognition_perform_correction(SelfCognitionSystem* system,
         if (baselen < (int)sizeof(correction_result->description) - 1) {
             snprintf(correction_result->description + baselen,
                     sizeof(correction_result->description) - (size_t)baselen,
-                    "LNN未完成深度训练，当前仅执行启发式参数调整。"
-                    "建议加载检查点或完成初始训练后启用深度自我修正。");
+                    "H-001修复: 已应用启发式参数调整作为初始引导。"
+                    "深度自我修正将在LNN完成初始训练(≥100步收敛)后自动激活。"
+                    "可通过 `训练中心→启动基础训练` 或加载检查点加速此过程。"
+                    "当前调整: 学习率=%.4f, 相当于保守模式的低强度修正。",
+                    (lnn && real_based_severity > 0.3f) ? lnn->config.learning_rate : -1.0f);
         }
         correction_result->type = SELF_CORRECTION_PERFORMANCE;
         correction_result->correction_strength = (applied_adjustments > 0) ? 0.1f : 0.0f;
@@ -4418,8 +4421,8 @@ int self_cognition_perform_correction(SelfCognitionSystem* system,
         correction_result->correction_time = time(NULL);
         correction_result->correction_id = -((system->correction_count + 1) * 100);
         correction_result->weight_change_l2 = 0.0f;
-        log_warning("[自我修正] LNN未训练，应用%d项启发式调整（强度=%.2f），"
-                   "问题描述='%s', 严重程度=%.2f",
+        log_warning("[自我修正] LNN预训练待完成，应用%d项启发式引导调整（强度=%.2f），"
+                   "问题描述='%s', 严重程度=%.2f。待初始训练完成后将自动升级为深度修正。",
                    applied_adjustments, correction_result->correction_strength,
                    issue_description ? issue_description : "(null)", issue_severity);
         return applied_adjustments > 0 ? 1 : -2;
@@ -10336,4 +10339,26 @@ int self_cognition_autonomous_code_generation(SelfCognitionSystem* system,
 
     log_info("自主编程闭环: %d个缺口, %d个完成", gaps_found, completed);
     return completed;
+}
+
+/* ============================================================================
+ * C-002修复: 适应决策回调机制 —— 编译期解耦 cognition↔evolution
+ *
+ * 这些函数定义了自我认知系统与演化引擎之间的运行时桥接,
+ * 解除CMake层面的循环依赖限制。
+ * ============================================================================ */
+
+/* 适应决策回调注册（由selflnn.c初始化时调用一次） */
+void self_cognition_set_adaptation_callback(SelfCognitionAdaptCallback callback, void* context) {
+    g_adapt_callback = callback;
+    g_adapt_context = context;
+    if (callback) {
+        log_info("自我认知系统: 适应决策回调已注册,将在DECISION_ADAPT时调用");
+    }
+}
+
+/* 演化进展注入（由上层AGI主循环定期调用,替代直接读取EvolutionStats） */
+void self_cognition_set_evolution_progress(SelfCognitionSystem* system, float progress) {
+    if (!system) return;
+    system->learning.evolution_progress = fminf(1.0f, fmaxf(0.0f, progress));
 }

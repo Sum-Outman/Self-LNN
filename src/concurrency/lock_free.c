@@ -781,8 +781,8 @@ int lock_free_queue_enqueue(LockFreeQueue* queue, const void* element,
     QueryPerformanceCounter(&qpc_start);
 #endif
     
-    /* 检查队列是否已满 */
-    size_t current_size = (size_t)queue->size;
+    /* 检查队列是否已满 —— FIX-011修复: 使用原子读取避免TOCTOU */
+    size_t current_size = (size_t)atomic_load_int((int*)&queue->size);
     if (current_size >= queue->capacity) {
         strncpy(result->error_message, "队列已满", sizeof(result->error_message) - 1);
         result->error_message[sizeof(result->error_message) - 1] = '\0';

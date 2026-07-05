@@ -25,7 +25,7 @@ target_include_directories(selflnn_training PUBLIC
 # 添加selflnn_memory链接
 # training.c直接引用memory_manager.h、调用memory_manager_retrieve等函数
 # 原配置缺少此依赖，作为独立静态库时符号不完整
-target_link_libraries(selflnn_training PRIVATE selflnn_core selflnn_learning selflnn_utils selflnn_concurrency selflnn_memory)
+target_link_libraries(selflnn_training PRIVATE selflnn_core selflnn_learning utils selflnn_concurrency selflnn_memory)
 
 # MSVC下使用/Z7避免PDB锁定问题
 if(MSVC)

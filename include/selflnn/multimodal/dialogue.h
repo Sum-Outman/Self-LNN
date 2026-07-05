@@ -921,6 +921,24 @@ int dialogue_policy_update(DialoguePolicy* policy, float reward,
                             const DPLAction* next_action);
 
 /**
+ * @brief 对话深度策略训练（TD学习）
+ *
+ * 基于时序差分(TD)学习的策略网络训练。每次对话回复生成后自动调用。
+ * 使用当前状态特征和下一状态特征进行增量策略优化。
+ *
+ * @param dp 对话处理器句柄
+ * @param state_features 当前状态特征向量
+ * @param next_state_features 下一状态特征向量
+ * @param reward 即时奖励值
+ * @param num_states 状态特征数量
+ * @param learning_rate 学习率
+ * @return int 成功返回0，失败返回-1
+ */
+int dialogue_deep_train_policy(DialogueProcessor* dp,
+    const float* state_features, const float* next_state_features,
+    float reward, int num_states, float learning_rate);
+
+/**
  * @brief 设置策略探索率
  *
  * @param policy 策略句柄

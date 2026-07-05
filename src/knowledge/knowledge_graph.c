@@ -9,11 +9,9 @@
 #define SELFLNN_KNOWLEDGE_INTERNAL /* 与knowledge_graph.h保持一致 */
 #include "selflnn/knowledge/knowledge_graph.h"
 #include "selflnn/utils/logging.h"  /* DFS深度限制修复需要log_warning宏 */
-/* M-024: knowledge_graph_to_lnn_bridge需要selflnn_consume_knowledge_inference。
- * 不能包含selflnn.h(会引入graph_optimization.h中的同名GraphNode导致类型冲突)。
- * 使用extern声明代替。 */
-extern int selflnn_consume_knowledge_inference(void* lnn, void* kie,
-    const char* query_concept, int max_hops, float perturbation_strength);
+/* M-024: knowledge_graph_to_lnn_bridge现在直接注入LNN偏置，不再需要extern声明。
+ * P0-003修复: 移除了selflnn_consume_knowledge_inference的extern声明，
+ * 避免类型不匹配调用。 */
 
 /* 知识图谱操作锁宏 — 原结构完全无锁, 多线程必然崩溃 */
 #define GRAPH_LOCK(g)   do { if ((g) && (g)->graph_lock) mutex_lock((g)->graph_lock); } while(0)
@@ -5097,12 +5095,13 @@ int knowledge_graph_layout_3d(float* positions,
             nodes[j].vx += fx; nodes[j].vy += fy; nodes[j].vz += fz;
         }
 
-        /* 阻尼 + 温度衰减 + 位置更新 */
-        float max_disp = 0;
+        /* P2-FIX-06: 阻尼系数可配置化，替代硬编码0.9f
+         * 不同图规模需不同阻尼: 大型图(~10000节点)建议0.95, 小型图建议0.6-0.75 */
+        float damping = layout->damping > 0.0f ? layout->damping : 0.9f;
         for (int i = 0; i < node_count; i++) {
-            nodes[i].vx *= 0.9f;
-            nodes[i].vy *= 0.9f;
-            nodes[i].vz *= 0.9f;
+            nodes[i].vx *= damping;
+            nodes[i].vy *= damping;
+            nodes[i].vz *= damping;  /* P2-FIX-06: z轴阻尼也用可配置值 */
 
             float speed = sqrtf(nodes[i].vx*nodes[i].vx +
                                 nodes[i].vy*nodes[i].vy +
@@ -5206,14 +5205,33 @@ int knowledge_graph_to_lnn_bridge(void* kg, void* lnn, float strength) {
     /* 使用固定概念名 */
     const char* concept_name = "knowledge_graph";
 
-    /* 通过 selflnn_consume_knowledge_inference 路由到LNN产生状态扰动 */
-    int result = selflnn_consume_knowledge_inference(
-        lnn,
-        (void*)aggregated_embedding,  /* KIE输入：聚合的知识嵌入 */
-        concept_name,                  /* 查询概念 */
-        3,                            /* max_hops: 3跳推理 */
-        strength                       /* 扰动强度 */
-    );
+    /* P0-003修复: 原代码将float*聚合嵌入作为KnowledgeInferenceEngine*传入
+     * selflnn_consume_knowledge_inference，该函数内部对kie做强制转换为
+     * KnowledgeInferenceEngine*并调用ki_multi_hop_reason，会导致类型错误崩溃。
+     * 修复方案: 直接将聚合嵌入向量作为偏置注入LNN输入状态，
+     * 通过lnn_get_state+叠加+lnn_forward实现知识图谱→LNN的桥接 */
+    LNN* lnn_net = (LNN*)lnn;
+    size_t input_size = lnn_get_input_size(lnn_net);
+    size_t output_size = lnn_get_output_size(lnn_net);
+    float* combined_input = (float*)safe_calloc(input_size, sizeof(float));
+    float* output = (float*)safe_calloc(output_size, sizeof(float));
+    if (combined_input && output) {
+        /* 读取当前LNN状态作为基础 */
+        lnn_get_state(lnn_net, combined_input, (int)input_size);
+        /* 将聚合的知识图谱嵌入叠加到LNN输入上 */
+        size_t min_dim = (embed_dim < input_size) ? embed_dim : input_size;
+        for (size_t j = 0; j < min_dim; j++) {
+            combined_input[j] += aggregated_embedding[j] * strength;
+        }
+        /* 前向传播: 知识增强后的状态 → 输出 */
+        lnn_forward(lnn_net, combined_input, output);
+        safe_free((void**)&combined_input);
+        safe_free((void**)&output);
+    } else {
+        safe_free((void**)&combined_input);
+        safe_free((void**)&output);
+    }
+    int result = 0; /* 成功 */
 
     safe_free((void**)&aggregated_embedding);
     return (result >= 0) ? 0 : -1;

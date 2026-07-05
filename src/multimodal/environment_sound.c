@@ -13,7 +13,8 @@
 #include "selflnn/utils/logging.h"
 #include "selflnn/utils/secure_random.h"
 #include "selflnn/utils/math_utils.h"
-#include "selflnn/core/cfc_cell.h"
+/* C-001修复: 移除冗余 selflnn/core/cfc_cell.h include。
+ * environment_sound.c有自建cfc_w/cfc_b内部数组,但不调用cfc_cell_create/forward/free等外部函数。 */
 #include "selflnn/core/errors.h"
 #include "selflnn/multimodal/environment_sound.h"
 

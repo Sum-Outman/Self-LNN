@@ -87,6 +87,8 @@ var voiceCommandCheckFeatureMap = function() {
                      '。请更新VOICE_FEATURE_MAP。');
     }
 };
+/* P1-F05修复: 自动执行映射表自检，在控制台输出缺失项警告 */
+try { voiceCommandCheckFeatureMap(); } catch(e) {}
 function voiceCommandTranslateFeature(chineseInput) {
     if (!chineseInput) return '';
     var trimmed = chineseInput.replace(/\s+/g, '');
@@ -97,45 +99,40 @@ function voiceCommandTranslateFeature(chineseInput) {
 
 class VoiceCommandSystem {
     constructor() {
+        /* M-007修复: 将通用属性初始化移到条件块外，确保属性集合一致 */
+        this.isProcessing = false;
+        this.onRecordingStart = null;
+        this.onRecordingStop = null;
+        this.onRecordingProgress = null;
+        this.onCommandResult = null;
+        this.onError = null;
+        this.commandEngine = null;
+        this.continuousMode = false;
+        this.continuousInterval = null;
+
         /* P2-005修复: 检查VoiceCaptureUtil依赖 */
         if (typeof window.VoiceCaptureUtil === 'undefined') {
             console.error('[VoiceCommandSystem] VoiceCaptureUtil模块未加载，语音指令系统不可用');
             this._capturer = null;
         } else {
             this._capturer = new window.VoiceCaptureUtil({ maxDuration: 15000 });
+            this._capturer.onStart = function() {
+                this.isProcessing = false;
+                if (this.onRecordingStart) this.onRecordingStart();
+            }.bind(this);
+            this._capturer.onStop = function() {
+                if (this.onRecordingStop) this.onRecordingStop();
+            }.bind(this);
+            this._capturer.onProgress = function(duration) {
+                if (this.onRecordingProgress) this.onRecordingProgress(duration);
+            }.bind(this);
+            this._capturer.onBlobReady = function(blob) {
+                this._processAudioBlob(blob);
+            }.bind(this);
+            this._capturer.onError = function(msg) {
+                if (this.onError) this.onError(msg);
+            }.bind(this);
         }
-        if (this._capturer) {
-        this._capturer.onStart = function() {
-            this.isProcessing = false;
-            if (this.onRecordingStart) this.onRecordingStart();
-        }.bind(this);
-        this._capturer.onStop = function() {
-            if (this.onRecordingStop) this.onRecordingStop();
-        }.bind(this);
-        this._capturer.onProgress = function(duration) {
-            if (this.onRecordingProgress) this.onRecordingProgress(duration);
-        }.bind(this);
-        this._capturer.onBlobReady = function(blob) {
-            this._processAudioBlob(blob);
-        }.bind(this);
-        this._capturer.onError = function(msg) {
-            if (this.onError) this.onError(msg);
-        }.bind(this);
-
-        this.isProcessing = false;
-
-        this.onRecordingStart = null;
-        this.onRecordingStop = null;
-        this.onRecordingProgress = null;
-        this.onCommandResult = null;
-        this.onError = null;
-
-        /* P2-006修复：不自行创建CommandEngine，改为检查外部注入
-         * main.js通过setCommandEngine()注入共享的CommandEngine实例 */
-        this.commandEngine = null;
-        this.continuousMode = false;
-        this.continuousInterval = null;
-        } /* P2-005: 关闭 if (this._capturer) 块 */
     }
 
     /* P2-006修复：添加setCommandEngine方法支持外部注入共享引擎 */

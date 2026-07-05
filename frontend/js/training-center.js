@@ -71,10 +71,20 @@
                 var lossEl = document.getElementById('train-loss');
                 if (lossEl) {
                     var lossVal = data.current_loss;
-                    var accInfo = (data.accuracy !== undefined && data.accuracy !== null) ? (' | 准确率:' + (data.accuracy * 100).toFixed(1) + '%') : '';
-                    var convInfo = (data.convergence_rate !== undefined && data.convergence_rate !== null) ? (' | 收敛速率:' + (data.convergence_rate * 100).toFixed(2) + '%/epoch') : '';
-                    var timeInfo = data.estimated_time ? (' | 预计:' + data.estimated_time) : '';
-                    lossEl.textContent = (typeof lossVal === 'number' ? lossVal.toFixed(4) : String(lossVal || '--')) + accInfo + convInfo + timeInfo;
+                    /* L-008修复: 将准确率和收敛率拆分到独立元素，避免textContent过长溢出 */
+                    lossEl.textContent = (typeof lossVal === 'number' ? lossVal.toFixed(4) : String(lossVal || '--'));
+                    var accEl = document.getElementById('train-accuracy');
+                    if (accEl && data.accuracy !== undefined && data.accuracy !== null) {
+                        accEl.textContent = (data.accuracy * 100).toFixed(1) + '%';
+                    }
+                    var convergeEl = document.getElementById('train-convergence');
+                    if (convergeEl && data.convergence_rate !== undefined && data.convergence_rate !== null) {
+                        convergeEl.textContent = (data.convergence_rate * 100).toFixed(2) + '%/epoch';
+                    }
+                    var timeEl = document.getElementById('train-estimated-time');
+                    if (timeEl && data.estimated_time) {
+                        timeEl.textContent = data.estimated_time;
+                    }
                 }
                 var progressEl = document.getElementById('train-progress-fill');
                 var progressText = document.getElementById('train-progress-text');
@@ -134,10 +144,15 @@
         }
         /* 检查WebSocket推送数据的时效性（超过10秒视为过期） */
         if (pushAvailable) {
-            var pushTime = window.trainingPushManager.lastUpdateTime || 0;
-            var now = Date.now();
-            if ((now - pushTime) > 10000) {
+            /* P1-F13修复: 添加lastUpdateTime类型检查，防止非数字值导致NaN误判 */
+            var pushTime = window.trainingPushManager.lastUpdateTime;
+            if (typeof pushTime !== 'number' || pushTime <= 0) {
                 pushAvailable = false;
+            } else {
+                var now = Date.now();
+                if ((now - pushTime) > 10000) {
+                    pushAvailable = false;
+                }
             }
         }
         /* BUG-12修复：对timestamps添加存在性检查，防止访问不存在的属性 */

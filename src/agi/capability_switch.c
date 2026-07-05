@@ -654,9 +654,9 @@ int capability_diagnose_all(char* json_buffer, size_t buffer_size)
                     "],\"total\":%d,\"enabled_count\":%d}",
                     CAP_COUNT, capability_get_enabled_count());
 
-    /* 诊断日志 */
-    log_info("[能力诊断] 12项能力: 启用=%d/12, 健康: 见JSON输出",
-             capability_get_enabled_count());
+    /* 诊断日志 - P0-H006修复: 使用动态CAP_COUNT替代硬编码12 */
+    log_info("[能力诊断] %d项能力: 启用=%d/%d, 健康: 见JSON输出",
+             CAP_COUNT, capability_get_enabled_count(), CAP_COUNT);
 
     return pos;
 }
@@ -681,7 +681,7 @@ int capability_health_check(void)
         if (health) healthy_count++;
     }
 
-    log_info("[能力健康] %d/12项能力底层子系统可用", healthy_count);
+    log_info("[能力健康] %d/%d项能力底层子系统可用", healthy_count, CAP_COUNT);
 
     /* 对不健康的输出警告 */
     for (int i = 0; i < CAP_COUNT; i++) {
@@ -728,12 +728,18 @@ static void capability_init_conflicts(void) {
     g_capability_conflicts[CAP_IMITATION_LEARNING][CAP_SELF_EVOLUTION] = 1;
 }
 
-/* 在首次检查冲突前初始化 */
-static int g_conflicts_initialized = 0;
+/* 在首次检查冲突前初始化 - P0-H007修复: 使用atomic_int防止多线程竞态条件
+ * stdatomic.h已在文件顶部引入 */
+static atomic_int g_conflicts_initialized = 0;
 static void capability_ensure_conflicts_init(void) {
-    if (!g_conflicts_initialized) {
+    int expected = 0;
+    if (atomic_compare_exchange_strong(&g_conflicts_initialized, &expected, 1)) {
         capability_init_conflicts();
-        g_conflicts_initialized = 1;
+    } else {
+        /* 其他线程正在初始化或已完成，自旋等待完成 */
+        while (!atomic_load(&g_conflicts_initialized)) {
+            /* 自旋等待初始化完成 */ 
+        }
     }
 }
 

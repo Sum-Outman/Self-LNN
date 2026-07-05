@@ -243,11 +243,18 @@ RosBridge* ros_bridge_create(const RosBridgeConfig* config) {
     /* 读取握手响应 */
     char response[4096];
     memset(response, 0, sizeof(response));
+    /* FIX-IO1: 检查recv/read返回值，失败时记录错误并设置错误状态 */
+    int recv_ret = 0;
 #ifdef _WIN32
-    recv(bridge->socket_fd, response, sizeof(response) - 1, 0);
+    recv_ret = recv(bridge->socket_fd, response, sizeof(response) - 1, 0);
 #else
-    read(bridge->socket_fd, response, sizeof(response) - 1);
+    recv_ret = (int)read(bridge->socket_fd, response, sizeof(response) - 1);
 #endif
+    if (recv_ret <= 0) {
+        log_error("[ROS桥接] WebSocket握手响应接收失败 (ret=%d, errno=%d)", recv_ret, errno);
+        bridge->state = ROS_STATE_ERROR;
+        return;
+    }
     
     if (strstr(response, "101 Switching Protocols")) {
         bridge->state = ROS_STATE_CONNECTED;

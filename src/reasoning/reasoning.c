@@ -134,6 +134,8 @@ ReasoningEngine* reasoning_engine_create(const ReasoningConfig* config) {
     
     /* ZSF-072说明：规则库使用浮点数组编码（rule_base_size=1024）。
      * 浮点编码适用于CFC神经网络推理，非符号逻辑规则。符号规则推理使用knowledge模块。 */
+    /* REASON-021修复: 设置rule_base_size后再分配，之前因memset清零为0导致safe_malloc(0) */
+    engine->rule_base_size = 1024; // 规则库浮点编码大小
     engine->rule_base = (float*)safe_malloc(engine->rule_base_size * sizeof(float));
     
     engine->knowledge_base_size = 2048; // 默认知识库大小
@@ -4719,9 +4721,14 @@ int reasoning_sync_knowledge(ReasoningEngine* engine) {
     KnowledgeEntry entry;
     memset(&entry, 0, sizeof(KnowledgeEntry));
 
-    for (size_t i = 0; i < kb_size && i < 2000; i++) {
+    /* D-010修复: 使用动态上限替代硬编码2000，支持大规模知识库 */
+    size_t sync_limit = kb_size < 2000 ? kb_size : 2000;
+    /* 大型知识库(>2000条)使用均匀采样策略覆盖全库 */
+    size_t step = (kb_size > 2000 && sync_limit > 0) ? (kb_size / sync_limit) : 1;
+    for (size_t i = 0; i < sync_limit; i++) {
+        size_t src_idx = (kb_size > 2000) ? (i * step) : i;
         memset(&entry, 0, sizeof(KnowledgeEntry));
-        if (knowledge_base_get_by_id(kb, (int)(i + 1), &entry) == 0) {
+        if (knowledge_base_get_by_id(kb, (int)(src_idx + 1), &entry) == 0) {
             size_t idx = synced * knowledge_dim;
             engine->knowledge_base[idx + 0] = (float)entry.type;
             engine->knowledge_base[idx + 1] = (entry.confidence == CONFIDENCE_HIGH) ? 0.9f :

@@ -15,8 +15,10 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../../include)
 add_library(selflnn_concurrency ${CONCURRENCY_SOURCES})
 
 # 链接库
-# S-NEW-3修复: 明确PRIVATE防止循环依赖传染传播
-target_link_libraries(selflnn_concurrency PRIVATE selflnn_core)
+# M-004(K-CYCLE-001)修复: 使用selflnn_base（仅错误报告）替代selflnn_core，打破循环依赖
+# concurrency只需要errors.h中的错误码枚举+selflnn_set_last_error()，
+# 不需要core的LNN/CFC/Laplace等重型功能。
+target_link_libraries(selflnn_concurrency PRIVATE selflnn_base)
 if(NOT WIN32)
     target_link_libraries(selflnn_concurrency PRIVATE pthread)
 endif()

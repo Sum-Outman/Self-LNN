@@ -24,6 +24,7 @@
 #define LM_MAX_VOCAB 65536
 #define LM_HASH_SIZE 65537
 #define LM_MAX_LINE 4096
+#define LM_MAX_CAPACITY 1048576  /* P1-002修复: 动态扩容上限，防止内存耗尽 */
 
 typedef struct {
     unsigned int key;
@@ -110,7 +111,19 @@ static int lm_insert_ngram(LmHashMap* map, const char* ngram, int* existing) {
             }
         }
     }
-    if (map->entry_count >= map->capacity) return -1;
+    if (map->entry_count >= map->capacity) {
+        /* P1-002修复: N-gram哈希表动态扩容，消除65536硬编码限制
+         * 原代码直接返回-1导致大规模语料训练时静默截断
+         * 扩容策略: 2倍增长，重新分配entries并重建链 */
+        size_t new_capacity = map->capacity * 2;
+        if (new_capacity > LM_MAX_CAPACITY) return -1;
+        LmHashEntry* new_entries = (LmHashEntry*)safe_calloc(new_capacity, sizeof(LmHashEntry));
+        if (!new_entries) return -1;
+        memcpy(new_entries, map->entries, map->entry_count * sizeof(LmHashEntry));
+        safe_free((void**)&map->entries);
+        map->entries = new_entries;
+        map->capacity = new_capacity;
+    }
     int idx = map->entry_count++;
     map->entries[idx].key = h;
     map->entries[idx].count = 1;

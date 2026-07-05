@@ -60,8 +60,13 @@ typedef enum {
     POWER_MODE_BALANCED = 1,      // 均衡模式
     POWER_MODE_POWER_SAVING = 2,  // 节能模式
     POWER_MODE_ULTRA_SAVING = 3,  // 超节能模式
-    POWER_MODE_CUSTOM = 4         // 自定义模式
+    POWER_MODE_CUSTOM = 4         // 自定义模式（使用custom_power_factor字段）
 } PowerMode;
+
+/* P1-014修复: 自定义功耗因子范围，用于POWER_MODE_CUSTOM */
+#define CUSTOM_POWER_FACTOR_MIN 0.1f
+#define CUSTOM_POWER_FACTOR_MAX 5.0f
+#define CUSTOM_POWER_FACTOR_DEFAULT 1.0f
 
 // GPU后端枚举
 typedef enum {

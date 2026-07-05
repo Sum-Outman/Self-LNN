@@ -21,6 +21,19 @@ extern "C" {
 
 typedef struct WSPushServer WSPushServer;
 
+/* C-002修复: WebSocket客户端消息回调类型
+ * 用于服务器接收客户端WebSocket文本/二进制消息后分发给上层处理
+ * 参数: client_index - 发送消息的客户端索引
+ *       data         - 消息内容（opcode=0x01为文本UTF-8，0x02为二进制）
+ *       data_len     - 消息内容字节长度
+ *       opcode       - WebSocket帧opcode（0x01文本或0x02二进制）
+ *       user_data    - 注册回调时传入的用户数据指针 */
+typedef void (*WSClientMessageHandler)(int client_index, const unsigned char* data,
+                                        size_t data_len, uint8_t opcode, void* user_data);
+
+/* C-002修复: 注册客户端消息回调（在ws_push_server_start之前调用） */
+void ws_push_set_message_handler(WSPushServer* server, WSClientMessageHandler handler, void* user_data);
+
 typedef enum {
     WS_MSG_TRAINING_PROGRESS = 0,
     WS_MSG_SYSTEM_STATUS = 1,

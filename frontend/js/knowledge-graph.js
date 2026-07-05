@@ -109,6 +109,20 @@
         graphState.backendOnline = ws.isConnected;
     }
 
+    /* M-009修复: 添加destroy清理方法，页面离开时移除WS事件监听器 */
+    function destroyKgWs() {
+        if (ws) {
+            ws.off('knowledge_update', fetchKnowledgeFromBackend);
+            ws.off('knowledge_added', fetchKnowledgeFromBackend);
+            ws.off('knowledge_deleted', fetchKnowledgeFromBackend);
+        }
+        graphState._kgWsRegistered = false;
+        graphState.backendOnline = false;
+    }
+
+    /* 暴露清理方法到全局，供页面卸载时调用 */
+    window._destroyKgWs = destroyKgWs;
+
     /* 统一使用全局连接横幅（与api-service.js共享global-connection-banner），
      * 避免创建两个fixed定位的banner导致重叠覆盖。 */
     /* BUG-5修复: 存储setTimeout返回值，防止多个超时同时运行 */
@@ -819,7 +833,12 @@
 
     function clearGraph() {
         if (confirm('确定要清空所有知识条目吗？')) {
-            window.SelfLnnApi.request('/knowledge/delete', { method: 'POST', body: JSON.stringify({ clear_all: true }) })
+            /* P0-C007修复: 添加Content-Type请求头，确保后端正确解析JSON body */
+            window.SelfLnnApi.request('/knowledge/delete', { 
+                method: 'POST', 
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ clear_all: true }) 
+            })
                 .then(function(response) {
                     if (!response.ok) throw new Error('HTTP ' + response.status);
                     return response.json();
@@ -974,6 +993,33 @@
         gl.vertexAttribPointer(gl3d.aSize, 1, gl.FLOAT, false, 0, 0); gl.enableVertexAttribArray(gl3d.aSize);
 
         gl.drawArrays(gl.POINTS, 0, nodes3d.length);
+
+        /* S-007修复: 绘制3D边线（节点间关系连线），使用gl.LINES而非仅POINTS */
+        if (graphState.edges.length > 0 && nodes3d.length > 0) {
+            var edgeVerts = [];
+            var nodeMap = {};
+            nodes3d.forEach(function(n) { nodeMap[n.id] = n; });
+            graphState.edges.forEach(function(e) {
+                var s = nodeMap[e.source], t = nodeMap[e.target];
+                if (s && t) {
+                    edgeVerts.push(s.x3, s.y3, s.z3);
+                    edgeVerts.push(t.x3, t.y3, t.z3);
+                }
+            });
+            if (edgeVerts.length > 0) {
+                var eArr = new Float32Array(edgeVerts);
+                var edgeColor = new Float32Array(edgeVerts.length); /* 灰色半透明边线 */
+                for (var ei = 0; ei < edgeVerts.length; ei++) edgeColor[ei] = 0.35;
+                if (!gl3d._cachedEb) gl3d._cachedEb = gl.createBuffer();
+                if (!gl3d._cachedEc) gl3d._cachedEc = gl.createBuffer();
+                gl.bindBuffer(gl.ARRAY_BUFFER, gl3d._cachedEb); gl.bufferData(gl.ARRAY_BUFFER, eArr, gl.DYNAMIC_DRAW);
+                gl.vertexAttribPointer(gl3d.aPos, 3, gl.FLOAT, false, 0, 0); gl.enableVertexAttribArray(gl3d.aPos);
+                gl.bindBuffer(gl.ARRAY_BUFFER, gl3d._cachedEc); gl.bufferData(gl.ARRAY_BUFFER, edgeColor, gl.DYNAMIC_DRAW);
+                gl.vertexAttribPointer(gl3d.aColor, 3, gl.FLOAT, false, 0, 0); gl.enableVertexAttribArray(gl3d.aColor);
+                gl.disableVertexAttribArray(gl3d.aSize);
+                gl.drawArrays(gl.LINES, 0, edgeVerts.length / 3);
+            }
+        }
     }
 
     function start3DView() {

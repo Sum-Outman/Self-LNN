@@ -114,9 +114,22 @@ ImitationLearner* imitation_learner_create(const ImitationLearningConfig* config
         return NULL;
     }
     
-    // 初始化GPU（如果启用）
+    /* P0-M001修复: 根据配置动态选择GPU后端，不再强制CPU */
     if (config->enable_gpu_acceleration) {
-        learner->gpu_context = gpu_context_create(GPU_BACKEND_CPU, 0);
+        GpuBackendType backend = GPU_BACKEND_CPU;
+        /* 优先使用配置指定的GPU后端 */
+        if (config->preferred_gpu_backend >= 0) {
+            backend = (GpuBackendType)config->preferred_gpu_backend;
+        } else {
+            /* 自动检测: 尝试CUDA > OpenCL > Vulkan > Metal > CPU */
+            backend = gpu_detect_backend();
+            if (backend == GPU_BACKEND_CPU) {
+                log_info("[模仿学习] 未检测到GPU, 回退到CPU计算");
+            } else {
+                log_info("[模仿学习] 自动检测到GPU后端: %d", (int)backend);
+            }
+        }
+        learner->gpu_context = gpu_context_create(backend, 0);
         if (learner->gpu_context) {
             learner->gpu_initialized = 1;
         } else {

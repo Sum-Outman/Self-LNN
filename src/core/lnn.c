@@ -206,9 +206,11 @@ LNN* lnn_create(const LNNConfig* config) {
     network->gradient_buffer = (float*)safe_calloc(grad_buffer_size, sizeof(float));
     
     // 检查内存分配
+    /* P0-003修复: 添加quaternion_pre_buf的NULL检查，防止分配失败后解引用崩溃 */
     if (!network->hidden_state || !network->cell_state || 
         !network->input_buffer || !network->output_buffer ||
-        !network->error_buffer || !network->gradient_buffer) {
+        !network->error_buffer || !network->gradient_buffer ||
+        !network->quaternion_pre_buf) {
         lnn_free(network);
         return NULL;
     }
@@ -431,6 +433,10 @@ void* lnn_get_user_data(LNN* network) {
     return network->user_data;
 }
 
+/* M-005说明: _lnn_forward_internal 等以_前缀命名的函数是跨编译单元的内部API，
+ * 被 extended_training.c 等模块调用。因跨模块依赖无法标记为static。
+ * 当前通过命名约定(_前缀)标识内部函数，后续应移入 lnn_internal.h 头文件统一管理。 */
+
 /**
  * @brief 前向传播内部实现（无锁，调用者需持有 LNN_LOCK）
  */
@@ -486,6 +492,13 @@ int _lnn_forward_internal(LNN* network, const float* input, float* output) {
                 cell->laplace_stability_score = lap_stab;
             }
         }
+    }
+
+    /* H-001修复: 在高并发场景下添加cfc_network空指针保护 */
+    if (!network->cfc_network) {
+        selflnn_set_last_error(SELFLNN_ERROR_NULL_POINTER, __func__, __FILE__, __LINE__,
+                              "CfC网络未初始化，无法执行前向传播");
+        return -1;
     }
 
     int result = cfc_forward(network->cfc_network,
@@ -1823,21 +1836,60 @@ LNN* lnn_load(const char* filepath) {
         return NULL;
     }
 
-    // 尝试加载扩展字段（v2格式）
+    /* P2-FIX-18: 尝试加载扩展字段（v2格式）—— 所有fread调用均进行返回值检查 */
     uint32_t ext_version = 0;
     if (fread(&ext_version, sizeof(uint32_t), 1, file) == 1 && ext_version == 2) {
-        (void)(fread(&network->enable_param_sharding, sizeof(int), 1, file) == 1);
-        (void)(fread(&network->num_local_shards, sizeof(size_t), 1, file) == 1);
-        (void)(fread(&network->enable_gradient_checkpointing, sizeof(int), 1, file) == 1);
-        (void)(fread(&network->enable_model_parallel, sizeof(int), 1, file) == 1);
-        (void)(fread(&network->enable_async_gradient_sync, sizeof(int), 1, file) == 1);
-        (void)(fread(&network->current_loss, sizeof(float), 1, file) == 1);
-        uint64_t fwd_bwd[2] = {0, 0};
-        if (fread(fwd_bwd, sizeof(uint64_t), 2, file) == 2) {
-            network->forward_count = (size_t)fwd_bwd[0];
-            network->backward_count = (size_t)fwd_bwd[1];
+        /* P2-FIX-18: enable_param_sharding */
+        if (fread(&network->enable_param_sharding, sizeof(int), 1, file) != 1) {
+            selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                                  "加载扩展字段 enable_param_sharding 失败");
+            lnn_free(network); fclose(file); return NULL;
         }
-        (void)(fread(&network->total_training_time, sizeof(double), 1, file) == 1);
+        /* P2-FIX-18: num_local_shards */
+        if (fread(&network->num_local_shards, sizeof(size_t), 1, file) != 1) {
+            selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                                  "加载扩展字段 num_local_shards 失败");
+            lnn_free(network); fclose(file); return NULL;
+        }
+        /* P2-FIX-18: enable_gradient_checkpointing */
+        if (fread(&network->enable_gradient_checkpointing, sizeof(int), 1, file) != 1) {
+            selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                                  "加载扩展字段 enable_gradient_checkpointing 失败");
+            lnn_free(network); fclose(file); return NULL;
+        }
+        /* P2-FIX-18: enable_model_parallel */
+        if (fread(&network->enable_model_parallel, sizeof(int), 1, file) != 1) {
+            selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                                  "加载扩展字段 enable_model_parallel 失败");
+            lnn_free(network); fclose(file); return NULL;
+        }
+        /* P2-FIX-18: enable_async_gradient_sync */
+        if (fread(&network->enable_async_gradient_sync, sizeof(int), 1, file) != 1) {
+            selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                                  "加载扩展字段 enable_async_gradient_sync 失败");
+            lnn_free(network); fclose(file); return NULL;
+        }
+        /* P2-FIX-18: current_loss */
+        if (fread(&network->current_loss, sizeof(float), 1, file) != 1) {
+            selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                                  "加载扩展字段 current_loss 失败");
+            lnn_free(network); fclose(file); return NULL;
+        }
+        /* P2-FIX-18: forward_count / backward_count */
+        uint64_t fwd_bwd[2] = {0, 0};
+        if (fread(fwd_bwd, sizeof(uint64_t), 2, file) != 2) {
+            selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                                  "加载扩展字段 forward_count/backward_count 失败");
+            lnn_free(network); fclose(file); return NULL;
+        }
+        network->forward_count = (size_t)fwd_bwd[0];
+        network->backward_count = (size_t)fwd_bwd[1];
+        /* P2-FIX-18: total_training_time */
+        if (fread(&network->total_training_time, sizeof(double), 1, file) != 1) {
+            selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                                  "加载扩展字段 total_training_time 失败");
+            lnn_free(network); fclose(file); return NULL;
+        }
     }
 
     fclose(file);
@@ -1978,21 +2030,60 @@ int lnn_load_from_file(LNN* network, const char* filepath) {
         return -1;
     }
 
-    /* 尝试加载扩展字段（v2格式），与lnn_save保持对称 */
+    /* P2-FIX-18: 尝试加载扩展字段（v2格式），与lnn_save保持对称 —— 所有fread调用均进行返回值检查 */
     uint32_t ext_version = 0;
     if (fread(&ext_version, sizeof(uint32_t), 1, file) == 1 && ext_version == 2) {
-        fread(&network->enable_param_sharding, sizeof(int), 1, file);
-        fread(&network->num_local_shards, sizeof(size_t), 1, file);
-        fread(&network->enable_gradient_checkpointing, sizeof(int), 1, file);
-        fread(&network->enable_model_parallel, sizeof(int), 1, file);
-        fread(&network->enable_async_gradient_sync, sizeof(int), 1, file);
-        fread(&network->current_loss, sizeof(float), 1, file);
-        uint64_t fwd_bwd[2] = {0, 0};
-        if (fread(fwd_bwd, sizeof(uint64_t), 2, file) == 2) {
-            network->forward_count = (size_t)fwd_bwd[0];
-            network->backward_count = (size_t)fwd_bwd[1];
+        /* P2-FIX-18: enable_param_sharding */
+        if (fread(&network->enable_param_sharding, sizeof(int), 1, file) != 1) {
+            selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                                  "加载扩展字段 enable_param_sharding 失败");
+            LNN_UNLOCK(network); fclose(file); return -1;
         }
-        fread(&network->total_training_time, sizeof(double), 1, file);
+        /* P2-FIX-18: num_local_shards */
+        if (fread(&network->num_local_shards, sizeof(size_t), 1, file) != 1) {
+            selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                                  "加载扩展字段 num_local_shards 失败");
+            LNN_UNLOCK(network); fclose(file); return -1;
+        }
+        /* P2-FIX-18: enable_gradient_checkpointing */
+        if (fread(&network->enable_gradient_checkpointing, sizeof(int), 1, file) != 1) {
+            selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                                  "加载扩展字段 enable_gradient_checkpointing 失败");
+            LNN_UNLOCK(network); fclose(file); return -1;
+        }
+        /* P2-FIX-18: enable_model_parallel */
+        if (fread(&network->enable_model_parallel, sizeof(int), 1, file) != 1) {
+            selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                                  "加载扩展字段 enable_model_parallel 失败");
+            LNN_UNLOCK(network); fclose(file); return -1;
+        }
+        /* P2-FIX-18: enable_async_gradient_sync */
+        if (fread(&network->enable_async_gradient_sync, sizeof(int), 1, file) != 1) {
+            selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                                  "加载扩展字段 enable_async_gradient_sync 失败");
+            LNN_UNLOCK(network); fclose(file); return -1;
+        }
+        /* P2-FIX-18: current_loss */
+        if (fread(&network->current_loss, sizeof(float), 1, file) != 1) {
+            selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                                  "加载扩展字段 current_loss 失败");
+            LNN_UNLOCK(network); fclose(file); return -1;
+        }
+        /* P2-FIX-18: forward_count / backward_count */
+        uint64_t fwd_bwd[2] = {0, 0};
+        if (fread(fwd_bwd, sizeof(uint64_t), 2, file) != 2) {
+            selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                                  "加载扩展字段 forward_count/backward_count 失败");
+            LNN_UNLOCK(network); fclose(file); return -1;
+        }
+        network->forward_count = (size_t)fwd_bwd[0];
+        network->backward_count = (size_t)fwd_bwd[1];
+        /* P2-FIX-18: total_training_time */
+        if (fread(&network->total_training_time, sizeof(double), 1, file) != 1) {
+            selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                                  "加载扩展字段 total_training_time 失败");
+            LNN_UNLOCK(network); fclose(file); return -1;
+        }
     }
 
     /* 更新网络状态以反映加载的隐藏状态 */
@@ -3671,6 +3762,15 @@ int lnn_safe_forward(LNN* net, const float* input, float* output, float* hidden_
         return SELFLNN_ERROR_OPERATION_FAILED;
     }
 
+    /* P0-004修复: 在调用内部前向传播前验证Cfc网络关键指针，
+     * 防止内部访问NULL导致的Segfault引发锁永不释放 */
+    if (net->cfc_network && !net->cfc_network->weight_matrix) {
+        selflnn_set_last_error(SELFLNN_ERROR_OPERATION_FAILED, __func__, __FILE__, __LINE__,
+                              "Cfc网络权重矩阵为空，无法执行前向传播");
+        LNN_UNLOCK(net);
+        return SELFLNN_ERROR_OPERATION_FAILED;
+    }
+
     int ret = _lnn_forward_internal(net, input, output);
     if (ret != 0) {
         selflnn_set_last_error(SELFLNN_ERROR_OPERATION_FAILED, __func__, __FILE__, __LINE__,
@@ -3680,6 +3780,7 @@ int lnn_safe_forward(LNN* net, const float* input, float* output, float* hidden_
         ret = _lnn_forward_internal(net, input, output);
     }
 
+    /* P0-004修复: 确保任何内部错误路径都在释放锁后返回 */
     if (ret == 0) {
         size_t sh = net->config.hidden_size;
         float max_out = 0.0f;

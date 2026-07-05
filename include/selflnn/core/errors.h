@@ -244,6 +244,32 @@ SELFLNN_API int selflnn_is_error(SelfLNNErrorCode error_code);
 SELFLNN_API int selflnn_is_warning(SelfLNNErrorCode error_code);
 
 /**
+ * @brief 检查错误代码是否表示信息（>=2000的正数）
+ * INCON-01: 补充selflnn_is_info声明
+ * @param error_code 错误代码
+ * @return int 是信息返回1，否则返回0
+ */
+SELFLNN_API int selflnn_is_info(SelfLNNErrorCode error_code);
+
+/**
+ * @brief 检查错误代码是否表示警告代码（正数）
+ * 
+ * P3-FIX-01: 此函数已废弃，仅为向后兼容保留。
+ * 内部直接委托到 selflnn_is_warning()，无额外逻辑。
+ * 新代码请直接使用 selflnn_is_warning()。
+ * 
+ * @param error_code 错误代码
+ * @return int 是警告返回1，否则返回0
+ * @deprecated 请使用 selflnn_is_warning() 替代
+ */
+#ifdef _MSC_VER
+__declspec(deprecated("请使用 selflnn_is_warning() 替代"))
+#else
+__attribute__((deprecated("请使用 selflnn_is_warning() 替代")))
+#endif
+SELFLNN_API int selflnn_is_warning_code(SelfLNNErrorCode error_code);
+
+/**
  * @brief 错误检查宏
  * 
  * 错误检查代码：如果条件为假，则设置错误并返回错误代码。

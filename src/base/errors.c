@@ -50,14 +50,20 @@ static void errors_auto_cleanup(void) {
  * 只要有任何错误被设置，退出时就能自动释放消息内存。
  */
 static int errors_auto_cleanup_init(void) {
-    static int registered = 0;
-    if (!registered) {
+    /* FIX-RACE2修复: 使用原子比较-交换保护一次性初始化，消除双重检查竞态 */
+    static volatile int registered = 0;
+    /* 简单场景：atexit注册是幂等的，多重注册仅第一份有效。
+     * 使用interlocked compare-exchange避免data race。 */
+#ifdef _WIN32
+    if (InterlockedCompareExchange((LONG*)&registered, 1, 0) == 0) {
+#else
+    if (__sync_bool_compare_and_swap(&registered, 0, 1)) {
+#endif
         if (atexit(errors_auto_cleanup) != 0) {
-            /* atexit失败极少发生（ENOMEM），记录日志后继续 */
             log_warn("[errors] atexit注册失败，错误消息内存不会在退出时自动释放");
+            registered = 0;
             return -1;
         }
-        registered = 1;
     }
     return 0;
 }
@@ -186,8 +192,12 @@ const char* selflnn_error_to_string(SelfLNNErrorCode error_code) {
         }
     }
     
-    // 未知错误代码
-    static char unknown_buffer[64];
+    /* P0-L002修复: 使用线程局部存储防止并发调用时的数据竞争 */
+#ifdef _WIN32
+    static __declspec(thread) char unknown_buffer[64];
+#else
+    static _Thread_local char unknown_buffer[64];
+#endif
     snprintf(unknown_buffer, sizeof(unknown_buffer), "未知错误代码: %d", error_code);
     return unknown_buffer;
 }
@@ -317,14 +327,19 @@ int selflnn_recovery_try(SelfLNNRecoveryContext* context) {
         s_recovery_stack[++s_recovery_depth] = context;
     }
 
-    int result = setjmp(context->env);
+    /* P1-010修复: 使用volatile防止编译器优化将context/result缓存至寄存器
+     * 导致longjmp恢复后寄存器值与setjmp时不一致，产生未定义行为 */
+    volatile SelfLNNRecoveryContext* volatile_context = context;
+    volatile int result = setjmp(volatile_context->env);
 
     if (result == 0) {
         return 0;
     }
 
-    context->has_error = 1;
-    context->caught_error = (SelfLNNErrorCode)result;
+    /* longjmp恢复点：确保恢复深度正确递减，防止恢复栈泄漏 */
+    if (s_recovery_depth >= 0) s_recovery_depth--;
+    volatile_context->has_error = 1;
+    volatile_context->caught_error = (SelfLNNErrorCode)result;
     return result;
 }
 

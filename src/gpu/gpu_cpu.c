@@ -4065,33 +4065,10 @@ float gpu_lr_scheduler_step(int current_step, const GpuLRConfig* config) {
     return lr;
 }
 
-#ifdef ENABLE_GPU
-int gpu_forward_dense(GpuContext* context,
-                      const float* input, const float* weights,
-                      const float* bias, float* output,
-                      size_t batch_size, size_t input_size, size_t output_size,
-                      GpuActivationType act_type, float alpha) {
-    CPU_CHECK_NULL(context);
-    CPU_CHECK_NULL(input);
-    CPU_CHECK_NULL(weights);
-    CPU_CHECK_NULL(output);
-    for (size_t b = 0; b < batch_size; b++) {
-        for (size_t o = 0; o < output_size; o++) {
-            float sum = 0.0f;
-            for (size_t i = 0; i < input_size; i++) {
-                sum += input[b * input_size + i] * weights[o * input_size + i];
-            }
-            if (bias) {
-                sum += bias[o];
-            }
-            output[b * output_size + o] = sum;
-        }
-    }
-    int ret = gpu_activation_forward(context, output, output,
-                                     batch_size * output_size, act_type, alpha);
-    return ret;
-}
-#endif /* ENABLE_GPU */
+/* C-003修复: 移除 #ifdef ENABLE_GPU 块中的 gpu_forward_dense 死代码版本。
+ * gpu_cpu.c仅在ENABLE_GPU禁用时编译，此#ifdef块永不可达。
+ * 统一使用文件末尾的 gpu_forward_dense (context, input, output, weights, bias, ...) 签名。
+ */
 
 /* ============================================================================
  * CPU后端：NPU神经处理单元（CPU真实推理实现）
@@ -4416,7 +4393,10 @@ int gpu_is_available(void) {
     return 1;
 }
 
-int gpu_hardware_get_cpu_info(GpuDeviceInfo* info) {
+/* FIX-ODR1修复: 将gpu_cpu.c中的重复定义改为static内部函数，
+ * 避免与gpu.c:712的同名函数产生ODR违规链接冲突。
+ * gpu.c版本是权威接口，gpu_cpu.c版本仅供内部SIMD调度使用。 */
+static int gpu_hardware_get_cpu_info(GpuDeviceInfo* info) {
     if (!info) return -1;
     memset(info, 0, sizeof(*info));
     info->type = GPU_DEVICE_TYPE_CPU;

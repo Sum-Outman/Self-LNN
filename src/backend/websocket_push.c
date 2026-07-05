@@ -64,6 +64,11 @@ typedef struct {
     uint8_t frame_buffer[WS_MAX_MESSAGE_SIZE + 16];
     long last_active;
     int closing;
+    /* L-006修复: 分片消息支持 —— 累积分片帧到完整消息 */
+    uint8_t fragment_buffer[WS_MAX_MESSAGE_SIZE]; /* 分片累积缓冲区 */
+    size_t fragment_len;                          /* 已累积的字节数 */
+    uint8_t fragment_opcode;                      /* 首帧的opcode（文本或二进制） */
+    int fragment_active;                          /* 1=正在累积分片 */
 } WSClientInternal;
 
 struct WSPushServer {
@@ -75,6 +80,9 @@ struct WSPushServer {
     long last_tick;
     void* mutex;
     void* accept_thread;
+    /* C-002修复: 客户端消息回调钩子 */
+    WSClientMessageHandler msg_handler;
+    void* msg_handler_user_data;
 /* epoll/kqueue文件描述符（Linux/macOS/BSD高性能I/O多路复用） */
 #ifdef __linux__
     int epoll_fd;
@@ -229,25 +237,29 @@ static int ws_build_frame(uint8_t opcode, const unsigned char* payload, size_t p
     return (int)(header + payload_len);
 }
 
-static int ws_parse_frame(const unsigned char* frame, size_t len,
-                          uint8_t* opcode, unsigned char** payload, size_t* payload_len)
+/* P0-004修复: ws_parse_frame_with_fin —— 正确处理fin_flag参数的分片帧解析
+ * 原代码存在两处错误:
+ * 1. 函数名误写为ws_parse_frame导致与包装器重复定义
+ * 2. 函数体内使用未声明的fin_flag参数
+ * 修复: 重命名为ws_parse_frame_with_fin并添加int* fin_flag参数 */
+static int ws_parse_frame_with_fin(const unsigned char* frame, size_t len,
+                          uint8_t* opcode, unsigned char** payload, size_t* payload_len,
+                          int* fin_flag)
 {
     if (len < 2) return -1;
-    /* K-201: 检查FIN位——仅处理非分片帧(0x80)
-     * P2-9修复：分片帧暂不支持但记录警告，而非直接丢弃为-1 */
+    /* L-006修复: 分片消息支持 —— 不再拒绝FIN=0的帧
+     * FIN=0 + opcode=0x01/0x02 → 首帧，记录opcode，开始累积分片
+     * FIN=0 + opcode=0x00 → 延续帧，追加到 fragment_buffer
+     * FIN=1 + opcode=0x00 → 尾帧，追加并完成消息组装
+     * FIN=1 + opcode=0x01/0x02 → 完整非分片帧（原有逻辑） */
     int fin = (frame[0] & 0x80) ? 1 : 0;
-    if (!fin) {
-        static int frag_warn_count = 0;
-        if (frag_warn_count < 5) { frag_warn_count++; }
-        return -1;  /* 分片消息当前不支持，丢弃此帧 */
-    }
+    *fin_flag = fin;
     *opcode = frame[0] & 0x0F;
     int masked = (frame[1] & 0x80) ? 1 : 0;
     uint8_t plen = frame[1] & 0x7F;
     size_t header = 2;
-    size_t ext_len = 0;
-    if (plen == 126) { ext_len = 2; header += 2; }
-    else if (plen == 127) { ext_len = 8; header += 8; }
+    if (plen == 126) { header += 2; }
+    else if (plen == 127) { header += 8; }
     if (header + (masked ? 4 : 0) > len) return -1;
     if (plen <= 125) *payload_len = plen;
     else if (plen == 126) {
@@ -259,9 +271,6 @@ static int ws_parse_frame(const unsigned char* frame, size_t len,
     if (header + *payload_len + (masked ? 4 : 0) > len) return -1;
     unsigned char* raw_payload = (unsigned char*)frame + header + (masked ? 4 : 0);
     if (masked) {
-        /* B-012修复: 分配独立缓冲区进行XOR解掩码，避免修改原始帧缓冲区。
-         * 若直接在raw_payload上原位XOR，多帧处理时后续帧解析会被破坏。
-         * 调用方需在帧处理完成后释放*payload指向的内存。 */
         unsigned char* unmasked = (unsigned char*)safe_malloc(*payload_len);
         if (!unmasked) return -1;
         unsigned char mask[4];
@@ -275,12 +284,50 @@ static int ws_parse_frame(const unsigned char* frame, size_t len,
     return 0;
 }
 
+/* L-006修复: 向后兼容包装器 —— ws_parse_frame_with_fin 的旧接口
+ * P0-004修复: 由于上面的函数已正确命名为ws_parse_frame_with_fin,
+ * 此包装器现在能正确调用目标函数 */
+static int ws_parse_frame(const unsigned char* frame, size_t len,
+                          uint8_t* opcode, unsigned char** payload, size_t* payload_len) {
+    int fin_flag;
+    return ws_parse_frame_with_fin(frame, len, opcode, payload, payload_len, &fin_flag);
+}
+
+/* L-006修复: 将payload追加到客户端的分片缓冲区 */
+static int ws_fragment_append(WSClientInternal* cli, const unsigned char* data, size_t len) {
+    if (cli->fragment_len + len > WS_MAX_MESSAGE_SIZE) {
+        cli->fragment_len = 0; cli->fragment_active = 0; return -1;
+    }
+    memcpy(cli->fragment_buffer + cli->fragment_len, data, len);
+    cli->fragment_len += len;
+    return 0;
+}
+
 static int ws_do_handshake(ws_socket_t sock)
 {
     char buf[4096];
     int n = (int)recv(sock, buf, sizeof(buf) - 1, 0);
     if (n <= 0) return -1;
     buf[n] = '\0';
+
+    /* C-003修复: 提取URI路径并校验，仅允许合法WebSocket端点 */
+    {
+        const char* req_end = strstr(buf, "\r\n");
+        if (!req_end) return -1;
+        const char* space1 = strchr(buf, ' ');
+        if (!space1) return -1;
+        const char* uri_start = space1 + 1;
+        const char* space2 = strchr(uri_start, ' ');
+        if (!space2) return -1;
+        size_t uri_len = (size_t)(space2 - uri_start);
+        /* 允许的WebSocket端点: "/ws" */
+        if (uri_len != 3 || memcmp(uri_start, "/ws", 3) != 0) {
+            const char* not_found = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+            send(sock, not_found, (int)strlen(not_found), 0);
+            return -1;
+        }
+    }
+
     if (strstr(buf, "Upgrade: websocket") == NULL && strstr(buf, "upgrade: websocket") == NULL) return -1;
     const char* key_marker = "Sec-WebSocket-Key:";
     const char* key_start = strstr(buf, key_marker);
@@ -358,6 +405,10 @@ static void ws_client_close(WSClientInternal* cli)
     cli->send_len = 0;
     cli->send_pos = 0;
     cli->closing = 0;
+    /* L-006修复: 关闭时清除分片累积状态 */
+    cli->fragment_len = 0;
+    cli->fragment_active = 0;
+    cli->fragment_opcode = 0;
 }
 
 /* R5-⑦修复: 实际锁机制使用platform.c的mutex_lock/mutex_unlock */
@@ -456,6 +507,14 @@ WSPushServer* ws_push_server_create(int port)
     srv->kqueue_fd = -1;
 #endif
     return srv;
+}
+
+/* C-002修复: 注册客户端消息回调处理器 */
+void ws_push_set_message_handler(WSPushServer* server, WSClientMessageHandler handler, void* user_data)
+{
+    if (!server) return;
+    server->msg_handler = handler;
+    server->msg_handler_user_data = user_data;
 }
 
 int ws_push_server_start(WSPushServer* srv)
@@ -708,14 +767,8 @@ int ws_push_get_next_available_client(WSPushServer* srv)
 }
 
 /* ZSFJJJ-C002修复: 实现 ws_client_process() — WebSocket客户端帧处理
- * 此函数在epoll/kqueue路径中被调用(原代码仅声明未实现),
- * 负责处理客户端WebSocket帧的接收和解析。
- * 逻辑与select回退路径(ws_push_server_poll内)保持一致:
- *   1. 接收数据
- *   2. 解析WebSocket帧(opcode: close/ping/pong/data)
- *   3. 更新last_active时间戳
- */
-static void ws_client_process(WSClientInternal* cli) {
+ * C-002修复: 增加server和client_slot参数以支持消息回调分发 */
+static void ws_client_process(WSPushServer* server, int client_slot, WSClientInternal* cli) {
     if (!cli || !cli->active || cli->sock == WS_INVALID) return;
 
     unsigned char buf[8192];
@@ -749,13 +802,15 @@ static void ws_client_process(WSClientInternal* cli) {
         uint8_t opcode;
         unsigned char* payload;
         size_t payload_len;
-        if (ws_parse_frame(ptr, remain, &opcode, &payload, &payload_len) != 0) break;
+        int fin_flag;
+        /* L-006修复: 使用ws_parse_frame_with_fin获取FIN标志，支持分片消息 */
+        if (ws_parse_frame_with_fin(ptr, remain, &opcode, &payload, &payload_len, &fin_flag) != 0) break;
         if (frame_size > remain) {
-            /* P0-9修复：帧不完整时释放ws_parse_frame分配的掩码解码后payload内存 */
             if (masked) safe_free((void**)&payload);
             break;
         }
 
+        /* 控制帧(opcode>=0x08)不允许分片，直接处理 */
         if (opcode == 0x08) {
             if (masked) safe_free((void**)&payload);
             ws_client_close(cli);
@@ -764,6 +819,53 @@ static void ws_client_process(WSClientInternal* cli) {
             ws_send_pong(cli->sock, payload, payload_len);
         }
         /* opcode 0x0A (pong) 无需处理 */
+        /* 数据帧(0x01/0x02)和延续帧(0x00)的分片逻辑 */
+        else if (opcode == 0x01 || opcode == 0x02) {
+            if (!fin_flag) {
+                /* 分片首帧：记录opcode，开始累积 */
+                if (!cli->fragment_active) {
+                    cli->fragment_active = 1;
+                    cli->fragment_opcode = opcode;
+                    cli->fragment_len = 0;
+                }
+                if (ws_fragment_append(cli, payload, payload_len) == 0) {
+                    /* 成功累积到缓冲区 */
+                } else {
+                    /* 分片溢出，重置状态 */
+                    cli->fragment_len = 0; cli->fragment_active = 0;
+                }
+            } else {
+                /* FIN=1 + opcode=0x01/0x02 = 完整非分片帧，或分片首帧也是最后一帧 */
+                /* C-002修复: 通过回调分发完整消息到上层处理 */
+                if (server && server->msg_handler) {
+                    server->msg_handler(client_slot, payload, payload_len, opcode,
+                                       server->msg_handler_user_data);
+                }
+            }
+        } else if (opcode == 0x00) {
+            /* 延续帧 */
+            if (cli->fragment_active) {
+                if (ws_fragment_append(cli, payload, payload_len) == 0) {
+                    if (fin_flag) {
+                        /* 尾帧：分片消息组装完成 */
+                        /* C-002修复: 通过回调分发组装后的完整消息 */
+                        if (server && server->msg_handler) {
+                            server->msg_handler(client_slot,
+                                               cli->fragment_buffer, cli->fragment_len,
+                                               cli->fragment_opcode,
+                                               server->msg_handler_user_data);
+                        }
+                        cli->fragment_active = 0;
+                        cli->fragment_len = 0;
+                    }
+                    /* 中间延续帧：已累积，继续等待后续帧 */
+                } else {
+                    /* 溢出 */
+                    cli->fragment_len = 0; cli->fragment_active = 0;
+                }
+            }
+            /* 未激活分片状态时的孤立延续帧：忽略 */
+        }
 
         if (masked) safe_free((void**)&payload);
         remain -= frame_size;
@@ -819,7 +921,7 @@ int ws_push_server_poll(WSPushServer* srv, int timeout_ms)
                 for (int j = 0; j < WS_MAX_CLIENTS; j++) {
                     if (srv->clients[j].active && srv->clients[j].sock == fd) {
                         int sock_before = srv->clients[j].sock;
-                        ws_client_process(&srv->clients[j]);
+                        ws_client_process(srv, j, &srv->clients[j]);
                         /* P0-8修复：客户端被关闭后从epoll中删除FD，防止FD重用导致数据错乱 */
                         if (!srv->clients[j].active || srv->clients[j].sock == WS_INVALID) {
                             epoll_ctl(srv->epoll_fd, EPOLL_CTL_DEL, sock_before, NULL);
@@ -871,7 +973,14 @@ int ws_push_server_poll(WSPushServer* srv, int timeout_ms)
             } else {
                 for (int j = 0; j < WS_MAX_CLIENTS; j++) {
                     if (srv->clients[j].active && srv->clients[j].sock == fd) {
-                        ws_client_process(&srv->clients[j]);
+                        int sock_before = srv->clients[j].sock;
+                        ws_client_process(srv, j, &srv->clients[j]);
+                        /* C-002修复：客户端被关闭后从kqueue中删除FD，防止FD重用导致数据错乱 */
+                        if (!srv->clients[j].active || srv->clients[j].sock == WS_INVALID) {
+                            struct kevent ev;
+                            EV_SET(&ev, sock_before, EVFILT_READ, EV_DELETE, 0, 0, NULL);
+                            kevent(srv->kqueue_fd, &ev, 1, NULL, 0, NULL);
+                        }
                         break;
                     }
                 }
@@ -960,7 +1069,9 @@ int ws_push_server_poll(WSPushServer* srv, int timeout_ms)
                 uint8_t opcode;
                 unsigned char* payload;
                 size_t payload_len;
-                if (ws_parse_frame(ptr, remain, &opcode, &payload, &payload_len) != 0) break;
+                int fin_flag_select;
+                /* L-006修复: select路径也使用ws_parse_frame_with_fin支持分片 */
+                if (ws_parse_frame_with_fin(ptr, remain, &opcode, &payload, &payload_len, &fin_flag_select) != 0) break;
                 if (frame_size > remain) {
                     if (masked) safe_free((void**)&payload);
                     break;
@@ -972,6 +1083,25 @@ int ws_push_server_poll(WSPushServer* srv, int timeout_ms)
                 }
                 else if (opcode == 0x09) { ws_send_pong(cli->sock, payload, payload_len); }
                 else if (opcode == 0x0A) { }
+                /* L-006修复: select路径数据帧分片处理 */
+                else if ((opcode == 0x01 || opcode == 0x02) && !fin_flag_select) {
+                    /* 分片首帧: 开始累积 */
+                    if (!cli->fragment_active) {
+                        cli->fragment_active = 1;
+                        cli->fragment_opcode = opcode;
+                        cli->fragment_len = 0;
+                    }
+                    ws_fragment_append(cli, payload, payload_len);
+                } else if (opcode == 0x00) {
+                    /* 延续帧: 追加并检测尾帧 */
+                    if (cli->fragment_active) {
+                        ws_fragment_append(cli, payload, payload_len);
+                        if (fin_flag_select) {
+                            cli->fragment_active = 0;
+                            cli->fragment_len = 0;
+                        }
+                    }
+                }
                 /* B-012修复: 若帧是掩码帧，释放ws_parse_frame中分配的独立缓冲区 */
                 if (masked) safe_free((void**)&payload);
                 remain -= frame_size;

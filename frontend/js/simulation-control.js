@@ -399,7 +399,8 @@
                 window.showNotification('启动失败: ' + (data.error || ''), 'danger');
             }
         } catch(e) { console.error('[仿真] 启动失败:', e.message); window.showNotification('连接失败: ' + e.message, 'danger'); }
-        _simStarting = false;
+        /* P0-C005修复: finally块确保_simStarting在所有路径都被重置 */
+        finally { _simStarting = false; }
     }
 
     async function stopSimulation() {
@@ -425,28 +426,30 @@
     async function pollSimulation() {
         try {
             var resp = await window.SelfLnnApi.simulationStatus();
-            /* FIX-F2-CRIT-1: SelfLnnApi包装响应为{success,data},需取.data层 */
+            /* W7修复: 后端返回 {"simulation":{...},"sensors":{...}}，需访问 data.simulation 层 */
             var data = (resp && resp.data) ? resp.data : resp;
-            if (data) {
+            var sim = (data && data.simulation) ? data.simulation : data;
+            if (sim) {
 /* 仿真停止时自动清除轮询，防止资源泄漏 */
-                if (data.running === false) {
+                if (sim.status === 'stopped' || sim.status === 'failed') {
                     if (simPolling) { clearInterval(simPolling); simPolling = null; }
                     if (window.g_dataEngine && typeof window.g_dataEngine.unregisterModule === 'function') {
                         window.g_dataEngine.unregisterModule('simulation_status');
                     }
                 }
                 var statusEl = document.getElementById('sim-status');
-                if (statusEl) statusEl.textContent = data.running ? '运行中' : '已停止';
+                if (statusEl) statusEl.textContent = (sim.status === 'running') ? '运行中' : '已停止';
                 var stepEl = document.getElementById('sim-steps');
-                if (stepEl) stepEl.textContent = data.step || data.steps || '--';
+                if (stepEl) stepEl.textContent = sim.steps || '--';
                 var timeEl = document.getElementById('sim-time');
-                if (timeEl) timeEl.textContent = (typeof data.sim_time === 'number' && !isNaN(data.sim_time) && isFinite(data.sim_time) ? data.sim_time.toFixed(2) + 's' : '--');
+                if (timeEl) timeEl.textContent = (typeof sim.time === 'number' && !isNaN(sim.time) && isFinite(sim.time) ? sim.time.toFixed(2) + 's' : '--');
                 var fpsEl = document.getElementById('sim-fps');
-                if (fpsEl) fpsEl.textContent = data.fps || '--';
-                if (data.robots && data.robots.length > 0) {
+                if (fpsEl) fpsEl.textContent = sim.frame_rate || '--';
+                /* 机器人列表从sensors层获取 */
+                if (data.sensors && data.sensors.robots && data.sensors.robots.length > 0) {
                     var robotList = document.getElementById('sim-robot-list');
                     if (robotList) {
-                        robotList.innerHTML = data.robots.map(function(r, i) {
+                        robotList.innerHTML = data.sensors.robots.map(function(r, i) {
                             return '<tr><td>' + window.escapeHtml(r.name || ('机器人' + (i + 1))) + '</td>' +
                                 '<td>' + window.escapeHtml(r.status || '活跃') + '</td>' +
                                 '<td>' + (r.position ? 'x=' + safeCoord(r.position.x) + ',y=' + safeCoord(r.position.y) + ',z=' + safeCoord(r.position.z) : '--') + '</td></tr>';

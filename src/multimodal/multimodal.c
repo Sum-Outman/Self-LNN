@@ -96,7 +96,9 @@ MultimodalProcessor* multimodal_processor_create(const MultimodalConfig* config)
     memset(processor, 0, sizeof(MultimodalProcessor));
     memcpy(&processor->config, config, sizeof(MultimodalConfig));
 
-    /* 视觉特征提取使用纯C算法（无独立神经网络，统一到共享LNN） */
+    /* L-003修复: 通过memset已将所有字段归零，
+     * 音频/文本/传感器特征缓存为0表示未分配（延迟按需创建）。
+     * 视觉特征缓存需提前分配用于实时处理。 */
     {
         /* 初始化视觉特征缓存：256维输出，与LNN输入对齐 */
         processor->vision_features_cache = (float*)safe_calloc(MMC_VISION_CFC_OUTPUT_DIM, sizeof(float));
@@ -1060,6 +1062,7 @@ static const MmSynonymEntry mm_synonym_table[] = {
     {"执行",  {"运行", "实施", "操作", "完成"}, 4},
     {NULL, {NULL}, 0}
 };
+#define MM_SYNONYM_TABLE_MAX 23  /* P2-FIX-04: 同义词表条目数(22+1哨兵)用于边界保护 */
 
 /* ============================================================================
  * 内部辅助: UTF-8字符字节长度判断
@@ -1694,7 +1697,8 @@ static float mm_word2vec_similarity(const char* word1, const char* word2,
         }
         
         /* 共现数据不足时的次回退: 检查同义词表 */
-        for (int s = 0; mm_synonym_table[s].word != NULL; s++) {
+        /* P2-FIX-04: 添加数组边界保护，防止mm_synonym_table未以NULL结尾时越界 */
+        for (int s = 0; s < MM_SYNONYM_TABLE_MAX && mm_synonym_table[s].word != NULL; s++) {
             if (strcmp(mm_synonym_table[s].word, word1) == 0) {
                 for (int n = 0; n < mm_synonym_table[s].synonym_count; n++) {
                     if (strcmp(mm_synonym_table[s].synonyms[n], word2) == 0) {
@@ -1768,7 +1772,7 @@ static int mm_semantic_query_expansion(const char* query,
         if (strlen(query_terms[ti]) < 2) continue;
         
         /* 查同义词表 */
-        for (int s = 0; mm_synonym_table[s].word != NULL; s++) {
+        for (int s = 0; s < MM_SYNONYM_TABLE_MAX && mm_synonym_table[s].word != NULL; s++) {
             if (strcmp(mm_synonym_table[s].word, query_terms[ti]) == 0) {
                 strncpy(expansions[exp_idx].term, query_terms[ti], MM_MAX_TERM_LEN - 1);
                 expansions[exp_idx].term[MM_MAX_TERM_LEN - 1] = '\0';

@@ -48,8 +48,7 @@
 #endif
 
 /* L-005修复：知识演化用的安全PRNG，替代time(NULL)种子 */
-static XorshiftPrng micro_prng;
-static int micro_prng_initialized = 0;
+/* FIX-RACE4: 文件级PRNG状态已移至函数内TLS，消除跨线程竞态 */
 
 /* json_escape_into前向声明 (定义在文件末尾) */
 static void json_escape_into(char* dst, size_t dst_size, const char* src);
@@ -72,50 +71,217 @@ typedef struct {
  * @param text 待检查文本
  * @param query 查询文本
  * @return 匹配分数：0=无匹配，1=单词匹配，2=子串匹配，3=完全匹配
+ *
+ * P2-FIX-13: 中文文本使用UTF-8感知的unigram+bigram分词策略，
+ *            替代仅对ASCII分隔符有效的strtok模式。
+ *            英文路径保持不变（P2-045线程安全分词）。
  */
 static int text_match_score(const char* text, const char* query) {
     if (!text || !query || text[0] == '\0' || query[0] == '\0') {
         return 0;
     }
-    
+
     // 完全匹配
     if (strcmp(text, query) == 0) {
         return 3;
     }
-    
+
     // 子串匹配
     if (strstr(text, query) != NULL) {
         return 2;
     }
-    
-    /* P2-045: 线程安全分词 - 不使用strtok，手动跳过分隔符提取单词 */
-    char query_copy[1024];
-    snprintf(query_copy, sizeof(query_copy), "%s", query);
-    const char* delimiters = " \t\n\r.,;:!?";
-    const char* p = query_copy;
-    while (*p) {
-        /* 跳过前导分隔符 */
-        while (*p && strchr(delimiters, *p)) p++;
-        if (!*p) break;
 
-        /* 找到单词结束位置 */
-        const char* token_start = p;
-        while (*p && !strchr(delimiters, *p)) p++;
+    /* P2-FIX-13: UTF-8中文检测 — 扫描query中是否包含3字节CJK范围字符
+     * UTF-8编码中，CJK统一表意文字（U+4E00–U+9FFF）首字节范围为0xE4–0xE9，
+     * 这里放宽到0xE0–0xEF，同时覆盖扩展A/B区和全角符号等。 */
+    int has_cjk = 0;
+    {
+        const char* scan = query;
+        while (*scan) {
+            unsigned char c = (unsigned char)*scan;
+            /* 0xE0–0xEF为UTF-8三字节序列首字节（CJK主范围） */
+            if (c >= 0xE0 && c <= 0xEF) {
+                has_cjk = 1;
+                break;
+            }
+            scan++;
+        }
+    }
 
-        /* 在文本中搜索该单词 */
-        size_t token_len = (size_t)(p - token_start);
-        if (token_len > 0) {
-            /* 使用memmem等效搜索：用临时null结尾 + strstr */
-            char token_buf[256];
-            size_t copy_len = token_len < sizeof(token_buf) - 1 ? token_len : sizeof(token_buf) - 1;
-            memcpy(token_buf, token_start, copy_len);
-            token_buf[copy_len] = '\0';
-            if (strstr(text, token_buf) != NULL) {
-                return 1;
+    if (has_cjk) {
+        /* ================================================================
+         * P2-FIX-13: 中文unigram+bigram分词路径
+         *
+         * 策略：遍历query，收集连续的UTF-8多字节字符序列，
+         * 对每个序列产出单字(unigram)和双字(bigram)词条，
+         * 逐一在text中进行strstr匹配。跳过标点和空白。
+         * ================================================================ */
+        int qlen = (int)strlen(query);
+        int i = 0;
+
+        while (i < qlen) {
+            unsigned char c = (unsigned char)query[i];
+
+            /* 跳过空白和ASCII标点 */
+            if (c <= 0x20 || c == ',' || c == '.' || c == '!' || c == '?' ||
+                c == ';' || c == ':' || c == '"' || c == '\'' ||
+                c == '(' || c == ')' || c == '[' || c == ']' ||
+                c == '{' || c == '}' || c == '/' || c == '\\' ||
+                c == '|' || c == '@' || c == '#' || c == '$' ||
+                c == '%' || c == '^' || c == '&' || c == '*' ||
+                c == '+' || c == '=' || c == '<' || c == '>' ||
+                c == '~' || c == '`') {
+                i++;
+                continue;
+            }
+
+            if (c >= 0x80) {
+                /* ---- UTF-8多字节字符（中文等） ---- */
+                /* 计算当前字符的UTF-8字节长度 */
+                int char_len = 1;
+                if ((c & 0xE0) == 0xC0)      char_len = 2;
+                else if ((c & 0xF0) == 0xE0) char_len = 3;
+                else if ((c & 0xF8) == 0xF0) char_len = 4;
+                else                         char_len = 1; /* 续字节/非法，跳过 */
+
+                if (i + char_len > qlen) { i++; continue; }
+
+                /* 收集连续的多字节字符序列（最多16个字符） */
+                int seq_start = i;
+                int char_count = 0;
+                while (i < qlen && char_count < 16) {
+                    unsigned char nc = (unsigned char)query[i];
+                    if (nc >= 0x80) {
+                        int cl = 1;
+                        if ((nc & 0xE0) == 0xC0)      cl = 2;
+                        else if ((nc & 0xF0) == 0xE0) cl = 3;
+                        else if ((nc & 0xF8) == 0xF0) cl = 4;
+                        if (i + cl > qlen) break;
+                        char_count++;
+                        i += cl;
+                    } else if (nc == ' ' || nc == '\t' || nc == '\n') {
+                        break; /* 空白终止中文连续序列 */
+                    } else {
+                        break; /* 非多字节字符终止 */
+                    }
+                }
+                int seq_end = i;
+
+                /* ---- 产出单字（unigram）并匹配 ---- */
+                {
+                    int pos = seq_start;
+                    while (pos < seq_end) {
+                        unsigned char fc = (unsigned char)query[pos];
+                        int cl = 1;
+                        if ((fc & 0xE0) == 0xC0)      cl = 2;
+                        else if ((fc & 0xF0) == 0xE0) cl = 3;
+                        else if ((fc & 0xF8) == 0xF0) cl = 4;
+                        if (pos + cl > seq_end) break;
+
+                        /* 临时null结尾 + strstr搜索 */
+                        char unigram_buf[8];
+                        int copy_len = (cl < 7) ? cl : 7;
+                        memcpy(unigram_buf, query + pos, (size_t)copy_len);
+                        unigram_buf[copy_len] = '\0';
+                        if (strstr(text, unigram_buf) != NULL) {
+                            return 1; /* unigram命中，返回单词匹配 */
+                        }
+                        pos += cl;
+                    }
+                }
+
+                /* ---- 产出双字（bigram）并匹配 ---- */
+                if (char_count >= 2) {
+                    int pos = seq_start;
+                    while (pos < seq_end) {
+                        unsigned char fc = (unsigned char)query[pos];
+                        int c1 = 1;
+                        if ((fc & 0xE0) == 0xC0)      c1 = 2;
+                        else if ((fc & 0xF0) == 0xE0) c1 = 3;
+                        else if ((fc & 0xF8) == 0xF0) c1 = 4;
+                        if (pos + c1 >= seq_end) break;
+
+                        unsigned char sc = (unsigned char)query[pos + c1];
+                        int c2 = 1;
+                        if ((sc & 0xE0) == 0xC0)      c2 = 2;
+                        else if ((sc & 0xF0) == 0xE0) c2 = 3;
+                        else if ((sc & 0xF8) == 0xF0) c2 = 4;
+                        if (pos + c1 + c2 > seq_end) break;
+
+                        int bigram_len = c1 + c2;
+                        char bigram_buf[12];
+                        int copy_len = (bigram_len < 11) ? bigram_len : 11;
+                        memcpy(bigram_buf, query + pos, (size_t)copy_len);
+                        bigram_buf[copy_len] = '\0';
+                        if (strstr(text, bigram_buf) != NULL) {
+                            return 1; /* bigram命中，返回单词匹配 */
+                        }
+                        pos += c1;
+                    }
+                }
+
+                /* 继续处理query剩余部分 */
+            } else {
+                /* ---- ASCII字母/数字（中英文混合场景） ---- */
+                int word_start = i;
+                while (i < qlen) {
+                    unsigned char nc = (unsigned char)query[i];
+                    if ((nc >= 'a' && nc <= 'z') || (nc >= 'A' && nc <= 'Z') ||
+                        (nc >= '0' && nc <= '9') || nc == '_' || nc == '-') {
+                        i++;
+                    } else {
+                        break;
+                    }
+                }
+                int word_len = i - word_start;
+                if (word_len > 0 && word_len < 250) {
+                    char word_buf[256];
+                    int copy_len = (word_len < 255) ? word_len : 255;
+                    memcpy(word_buf, query + word_start, (size_t)copy_len);
+                    word_buf[copy_len] = '\0';
+                    if (strstr(text, word_buf) != NULL) {
+                        return 1;
+                    }
+                }
+            }
+        }
+
+        return 0;
+    }
+
+    /* ================================================================
+     * P2-045: 原有ASCII英文分词路径（线程安全，不使用strtok）
+     * 仅当query不含中文字符时执行此路径。
+     * ================================================================ */
+    {
+        char query_copy[1024];
+        snprintf(query_copy, sizeof(query_copy), "%s", query);
+        const char* delimiters = " \t\n\r.,;:!?";
+        const char* p = query_copy;
+        while (*p) {
+            /* 跳过前导分隔符 */
+            while (*p && strchr(delimiters, *p)) p++;
+            if (!*p) break;
+
+            /* 找到单词结束位置 */
+            const char* token_start = p;
+            while (*p && !strchr(delimiters, *p)) p++;
+
+            /* 在文本中搜索该单词 */
+            size_t token_len = (size_t)(p - token_start);
+            if (token_len > 0) {
+                /* 使用memmem等效搜索：用临时null结尾 + strstr */
+                char token_buf[256];
+                size_t copy_len = token_len < sizeof(token_buf) - 1 ? token_len : sizeof(token_buf) - 1;
+                memcpy(token_buf, token_start, copy_len);
+                token_buf[copy_len] = '\0';
+                if (strstr(text, token_buf) != NULL) {
+                    return 1;
+                }
             }
         }
     }
-    
+
     return 0;
 }
 
@@ -904,6 +1070,18 @@ int knowledge_base_remove(KnowledgeBase* kb, int entry_id) {
     /* 查找条目 */
     for (size_t i = 0; i < kb->size; i++) {
         if (kb->entries[i].id == entry_id) {
+            /* KB-001修复: 从倒排索引中移除该条目的索引项 */
+            KnowledgeEntry* e = &kb->entries[i].entry;
+            if (e->subject && kb->subject_index) {
+                inverted_index_remove(kb->subject_index, e->subject, entry_id);
+            }
+            if (e->predicate && kb->predicate_index) {
+                inverted_index_remove(kb->predicate_index, e->predicate, entry_id);
+            }
+            if (e->object && kb->object_index) {
+                inverted_index_remove(kb->object_index, e->object, entry_id);
+            }
+
             /* 释放条目内存 */
             free_knowledge_entry(&kb->entries[i].entry);
             
@@ -990,6 +1168,17 @@ int knowledge_base_update(KnowledgeBase* kb, int entry_id, const KnowledgeEntry*
     /* 查找条目 */
     for (size_t i = 0; i < kb->size; i++) {
         if (kb->entries[i].id == entry_id) {
+            /* KB-002修复: 更新倒排索引以反映新条目内容 */
+            KnowledgeEntry* old_e = &kb->entries[i].entry;
+
+            /* 移除旧条目的倒排索引项 */
+            if (old_e->subject && kb->subject_index)
+                inverted_index_remove(kb->subject_index, old_e->subject, entry_id);
+            if (old_e->predicate && kb->predicate_index)
+                inverted_index_remove(kb->predicate_index, old_e->predicate, entry_id);
+            if (old_e->object && kb->object_index)
+                inverted_index_remove(kb->object_index, old_e->object, entry_id);
+
             /* 释放旧条目内存 */
             free_knowledge_entry(&kb->entries[i].entry);
             
@@ -1958,21 +2147,24 @@ int knowledge_base_search_tfidf(KnowledgeBase* kb,
                                 float* scores, float min_score) {
     if (!kb || !query_text || !results || max_results == 0) return -1;
 
+    /* KB-003修复: 添加读锁保护 */
+    KB_RLOCK(kb);
+
     /* 构建IDF表 */
     TfIdfTerm idf_table[TFIDF_MAX_TERMS];
     int idf_count = 0;
-    if (tfidf_build_idf(kb, idf_table, &idf_count) != 0) return -1;
-    if (idf_count == 0) return 0;
+    if (tfidf_build_idf(kb, idf_table, &idf_count) != 0) { KB_RUNLOCK(kb); return -1; }
+    if (idf_count == 0) { KB_RUNLOCK(kb); return 0; }
 
     /* 计算查询的TF */
     TfIdfDocTerm query_terms[TFIDF_MAX_TERMS];
     int query_term_count = 0;
     tfidf_compute_tf(query_text, query_terms, &query_term_count);
-    if (query_term_count == 0) return 0;
+    if (query_term_count == 0) { KB_RUNLOCK(kb); return 0; }
 
     /* 对每个文档计算TF-IDF分数 */
     TfIdfRankResult* rankings = (TfIdfRankResult*)safe_calloc(kb->size, sizeof(TfIdfRankResult));
-    if (!rankings) return -1;
+    if (!rankings) { KB_RUNLOCK(kb); return -1; }
     int rank_count = 0;
 
     for (size_t i = 0; i < kb->size && rank_count < (int)kb->size; i++) {
@@ -2036,6 +2228,7 @@ int knowledge_base_search_tfidf(KnowledgeBase* kb,
     }
 
     safe_free((void**)&rankings);
+    KB_RUNLOCK(kb);  /* KB-003修复: 释放读锁 */
     return out_count;
 }
 
@@ -2050,11 +2243,14 @@ int knowledge_base_search_similar(KnowledgeBase* kb,
         return 0;
     }
 
+    /* KB-003修复: 添加读锁保护，防止并发修改导致的数据损坏 */
+    KB_RLOCK(kb);
+
     /* 若CfC嵌入引擎可用，使用语义搜索代替字符串匹配以提升召回率 */
     if (kb->cfc_embed && subject) {
         int cfc_found = knowledge_base_cfc_semantic_search(kb, subject, similarity_threshold,
                                                            results, max_results);
-        if (cfc_found > 0) return cfc_found;
+        if (cfc_found > 0) { KB_RUNLOCK(kb); return cfc_found; }
     }
     
     size_t match_count = 0;
@@ -2075,6 +2271,7 @@ int knowledge_base_search_similar(KnowledgeBase* kb,
         }
     }
     
+    KB_RUNLOCK(kb);  /* KB-003修复: 释放读锁 */
     return (int)match_count;
 }
 
@@ -3858,7 +4055,14 @@ EvolutionResult* knowledge_self_evolve(KnowledgeBase* kb, const void* config, co
                         entry->weight += mutation_strength * (1.5f - current_fitness);
                         if (entry->weight > 1.0f) entry->weight = 1.0f;
                     } else {
-                        /* L-005修复：使用安全随机数替代 time(NULL) */
+                        /* FIX-RACE4修复: TLS替代文件级static PRNG状态消除竞态 */
+#ifdef _WIN32
+                        static __declspec(thread) int micro_prng_initialized = 0;
+                        static __declspec(thread) XorShiftPrng micro_prng;
+#else
+                        static _Thread_local int micro_prng_initialized = 0;
+                        static _Thread_local XorShiftPrng micro_prng;
+#endif
                         if (micro_prng_initialized == 0) {
                             xorshift_prng_seed_secure(&micro_prng);
                             micro_prng_initialized = 1;
@@ -6071,9 +6275,9 @@ int knowledge_base_import_seed_json(KnowledgeBase* kb, const char* filepath) {
 
     char* raw = (char*)safe_malloc((size_t)fsize + 1);
     if (!raw) { fclose(fp); return -1; }
-    /* P2修复: 检查fread返回值 */
+    /* P2-FIX-26: 完整检查fread返回值，防止部分读取 */
     size_t read_len = fread(raw, 1, (size_t)fsize, fp);
-    if (read_len == 0 && (size_t)fsize > 0) {
+    if (read_len != (size_t)fsize) {
         fclose(fp);
         safe_free((void**)&raw);
         return -1;

@@ -608,10 +608,11 @@ int pbft_submit_request(PbftSystem* system, uint32_t client_id,
         PbftLogEntry* entry = log_create_entry(system, seq);
         if (entry) {
             entry->view_number = system->current_view;
+            /* FIX-009修复: 补充op_type字段 */
+            entry->op_type = operation_type;
             entry->client_id = client_id;
             entry->request_id = request_id;
             entry->request_timestamp = system->pending_timestamp;
-            entry->op_type = operation_type;
             copy_digest(entry->request_digest, pp.request_digest);
             /* 拷贝负载到per-entry字段 (避免并发提交覆盖全局pending_payload) */
             if (payload && payload_size > 0) {
@@ -678,7 +679,16 @@ int pbft_submit_request_async(PbftSystem* system, uint32_t client_id,
             entry->client_id = client_id;
             entry->request_id = request_id;
             entry->request_timestamp = system->pending_timestamp;
+            entry->op_type = operation_type;
             copy_digest(entry->request_digest, pp.request_digest);
+            /* L-008修复: 异步路径也拷贝payload到日志条目，与同步提交路径行为一致 */
+            if (payload && payload_size > 0) {
+                entry->payload = (uint8_t*)safe_malloc(payload_size);
+                if (entry->payload) {
+                    memcpy(entry->payload, payload, payload_size);
+                    entry->payload_size = payload_size;
+                }
+            }
         }
         system->last_prepared_seq = seq;
         pbft_broadcast(system, &pp, sizeof(pp));

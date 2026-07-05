@@ -273,8 +273,11 @@ class DeviceManager {
     }
 
     _updateAllVuMeters() {
-        for (const id of Object.keys(this._vuAnalysers)) {
-            this._updateVuLevel(id);
+        /* L-011修复: 使用for...in替代Object.keys减少临时数组分配 */
+        for (var id in this._vuAnalysers) {
+            if (this._vuAnalysers.hasOwnProperty(id)) {
+                this._updateVuLevel(id);
+            }
         }
     }
 
@@ -1137,7 +1140,13 @@ class DeviceManager {
         var container;
         if (containerId) {
             container = document.getElementById(containerId);
-        } else {
+            /* INCON-05: 添加空值检查和回退逻辑 */
+            if (!container) {
+                console.warn('[DeviceManager] 指定容器不存在: ' + containerId + '，使用回退模式');
+                containerId = null;
+            }
+        }
+        if (!containerId) {
             /* 默认尝试找到设备管理工作台面板 */
             container = document.getElementById('device-control');
             if (!container) {
@@ -1152,7 +1161,8 @@ class DeviceManager {
                 /* 添加关闭按钮 */
                 var closeBtn = document.createElement('div');
                 closeBtn.style.cssText = 'text-align:right;padding:8px 16px 0 16px;';
-                closeBtn.innerHTML = '<button style="background:none;border:none;color:#fff;font-size:20px;cursor:pointer;opacity:0.6;" onclick="document.getElementById(\'device-panel-overlay\').remove();">✕</button>';
+                /* INCON-05: 内联onclick改为带空值检查的写法 */
+                closeBtn.innerHTML = '<button style="background:none;border:none;color:#fff;font-size:20px;cursor:pointer;opacity:0.6;" onclick="var el=document.getElementById(\'device-panel-overlay\');if(el)el.remove();">✕</button>';
                 panel.insertBefore(closeBtn, panel.firstChild);
                 overlay.appendChild(panel);
                 document.body.appendChild(overlay);

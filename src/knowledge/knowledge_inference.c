@@ -16,9 +16,9 @@
 
 /* M-018修复: 知识推理引擎→LNN桥接外部声明
  * 推理结果需要反馈到LNN连续动态系统产生状态扰动，
- * 完成"符号推理→连续状态→决策"的闭环通道。 */
-extern int selflnn_consume_knowledge_inference(void* lnn_instance, void* kie,
-    const char* query_concept, int max_hops, float perturbation_strength);
+ * 完成"符号推理→连续状态→决策"的闭环通道。
+ * FIX-EXTERN6: selflnn_consume_knowledge_inference已在selflnn.h声明，移除冗余extern */
+
 
 static MutexHandle g_temp_reasoner_mutex = NULL;
 
@@ -118,9 +118,12 @@ static int concept_from_kb(KnowledgeInferenceEngine* kie, const char* concept_na
         string_copy_safe(e->predicate, results[i].predicate ? results[i].predicate : "", sizeof(e->predicate));
         string_copy_safe(e->object, results[i].object ? results[i].object : "", sizeof(e->object));
         e->confidence = results[i].weight;
-        e->fact.subject = e->subject;
-        e->fact.predicate = e->predicate;
-        e->fact.object = e->object;
+        /* P0-006修复: 使用string_duplicate分配独立堆内存，而不是直接指向栈/结构体内部数组
+         * 原代码 e->fact.subject = e->subject 将指针指向GraphAdjEntry内部字符数组，
+         * 导致fact_free时对栈地址调用safe_free()造成内存破坏 */
+        e->fact.subject = string_duplicate(e->subject);
+        e->fact.predicate = string_duplicate(e->predicate);
+        e->fact.object = string_duplicate(e->object);
         e->fact.confidence = results[i].weight;
         e->fact.source_id = (int)results[i].source;
     }

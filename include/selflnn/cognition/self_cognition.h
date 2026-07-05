@@ -1690,6 +1690,42 @@ int self_cognition_get_deep_stats(SelfCognitionSystem* system,
                                   float* avg_reflection_score,
                                   float* avg_correction_depth);
 
+/* ---- C-002修复: 适应决策回调机制（解耦cognition↔evolution循环依赖） ---- */
+
+/**
+ * @brief 适应决策回调函数类型
+ *
+ * 当自我认知系统做出DECISION_ADAPT决策时，通过此回调通知上层执行演化操作。
+ * 回调由selflnn.c在初始化阶段注册,实现编译期解耦而运行时灵活绑定。
+ *
+ * @param context 回调上下文（通常是EvolutionEngine指针）
+ * @return int 0成功, 负值失败
+ */
+typedef int (*SelfCognitionAdaptCallback)(void* context);
+
+/**
+ * @brief 设置适应决策回调
+ *
+ * 注册DECISION_ADAPT决策的执行回调。应在系统初始化时调用一次。
+ * 设置后,self_cognition_execute_decision在遇到DECISION_ADAPT时将调用此回调。
+ * 若未设置回调,系统将记录警告日志并正常返回(不中断)。
+ *
+ * @param callback 回调函数指针
+ * @param context 回调上下文(EvolutionEngine句柄)
+ */
+void self_cognition_set_adaptation_callback(SelfCognitionAdaptCallback callback, void* context);
+
+/**
+ * @brief 设置演化进展（从外部注入,取代直接读取EvolutionStats）
+ *
+ * 上层(如selflnn.c的AGI主循环)从演化引擎读取统计信息后,
+ * 通过此setter注入到自我认知系统,实现运行时数据传递而编译期解耦。
+ *
+ * @param system 自我认知系统句柄
+ * @param progress 演化进展评分(0.0-1.0)
+ */
+void self_cognition_set_evolution_progress(SelfCognitionSystem* system, float progress);
+
 #ifdef __cplusplus
 }
 #endif

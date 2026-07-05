@@ -29,15 +29,17 @@
         editorCode = el ? el.value : '';
     }
 
-    var _pwMaxOutputLines = 2000; /* 输出行数上限，防止内存泄漏 */
+    var _pwMaxOutputLines = 2000; /* 输出行数上限，可配置 */
     function appendOutput(text) {
         var el = document.getElementById('pw-output');
         if (el) {
             el.value += text + '\n';
-            /* 超过上限时截断前一半 */
+            /* P2-FIX-12: 超过上限时截断前一半，并插入截断提示 */
             var lines = el.value.split('\n');
             if (lines.length > _pwMaxOutputLines) {
-                el.value = lines.slice(lines.length - _pwMaxOutputLines / 2).join('\n');
+                var keepLines = Math.floor(_pwMaxOutputLines / 2);
+                el.value = '[... 前' + (lines.length - keepLines) + '行已截断 ...]\n' +
+                    lines.slice(lines.length - keepLines).join('\n');
             }
             el.scrollTop = el.scrollHeight;
         }
@@ -70,7 +72,13 @@
         if (data.optimization_suggestions && data.optimization_suggestions.length > 0) {
             suggestions = '<div class="pw-section-title">优化建议</div><ul class="pw-suggestion-list">';
             for (var i = 0; i < data.optimization_suggestions.length; i++) {
-                suggestions += '<li>' + data.optimization_suggestions[i] + '</li>';
+                /* P1-F04修复: 使用escapeHtml转义后端数据，防止XSS注入 */
+                var escaped = (typeof window.escapeHtml === 'function') ?
+                    window.escapeHtml(String(data.optimization_suggestions[i])) :
+                    String(data.optimization_suggestions[i]).replace(/[<>&"']/g, function(c) {
+                        return {'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c];
+                    });
+                suggestions += '<li>' + escaped + '</li>';
             }
             suggestions += '</ul>';
         }
