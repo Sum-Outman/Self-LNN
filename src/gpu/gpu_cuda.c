@@ -52,8 +52,9 @@
 
 #ifdef _WIN32
 #include <windows.h>
-/* ZS-013修复: 优先尝试CUDA 12.x，然后回退到11.x/10.x */
-#define CUDA_RUNTIME_LIBRARY_NAME "cudart64_13.dll"  /* CUDA 13.x */
+/* ZS-013修复 + P0-R6修复: 优先尝试CUDA 12.x（当前最新稳定版），回退11.x/10.x。
+ * CUDA 13.x尚未发布，不可作为首选库名。 */
+#define CUDA_RUNTIME_LIBRARY_NAME "cudart64_12.dll"  /* CUDA 12.x */
 #define LIBRARY_HANDLE HMODULE
 #define LOAD_LIBRARY(name) LoadLibraryA(name)
 #define GET_PROC_ADDRESS(handle, name) GetProcAddress(handle, name)
@@ -2227,9 +2228,8 @@ static int load_cuda_library(void) {
             NULL
         };
         static const char* cuda_lib_versions[] = {
-            "cudart64_13.dll",   /* CUDA 13.x */
-            "cudart64_130.dll",  /* CUDA 13.0 alt */
-            "cudart64_120.dll",  /* CUDA 12.x */
+            "cudart64_12.dll",   /* CUDA 12.x (P0-R6: 移除此处CUDA13.x不存在版本) */
+            "cudart64_120.dll",  /* CUDA 12.0 alt */
             "cudart64_110.dll",  /* CUDA 11.x */
             NULL
         };
@@ -2241,11 +2241,10 @@ static int load_cuda_library(void) {
             }
         }
         if (!g_cuda_library_handle) {
-        // 回退到仅文件名搜索
+        // 回退到仅文件名搜索 (P0-R6: 移除CUDA13.x不存在版本)
         const char* cuda_library_names[] = {
-            "cudart64_13.dll",   // CUDA 13.x
-            "cudart64_130.dll",  // CUDA 13.0 alt
-            "cudart64_120.dll",  // CUDA 12.x
+            "cudart64_12.dll",   // CUDA 12.x
+            "cudart64_120.dll",  // CUDA 12.0 alt
             "cudart64_110.dll",  // CUDA 11.x
             "cudart64_102.dll",  // CUDA 10.2
             "cudart64_101.dll",  // CUDA 10.1
@@ -4769,9 +4768,11 @@ int cuda_batch_norm_forward(GpuContext* ctx, const float* input, float* output,
         }
 
         /* S-004修复: size_t到int截断保护 */
+        /* C-004修复: 原代码错误引用了反向传播变量(d_grad_output/d_grad_input/d_mean/d_var)，
+         * 前向传播应使用d_output/d_batch_mean/d_batch_var/d_input */
     if (batch_size > (size_t)INT_MAX || features > (size_t)INT_MAX) {
-        cudaFree(d_input); cudaFree(d_grad_output); cudaFree(d_grad_input);
-        cudaFree(d_gamma); cudaFree(d_mean); cudaFree(d_var);
+        cudaFree(d_input); cudaFree(d_output);
+        cudaFree(d_gamma); cudaFree(d_batch_mean); cudaFree(d_batch_var);
         return -1;
     }
     int bs_int = (int)batch_size, f_int = (int)features;
@@ -4914,7 +4915,9 @@ int cuda_batch_norm_backward(GpuContext* ctx, const float* input, const float* g
         /* 默认gamma=1 */
         float* ones = (float*)malloc(feature_bytes);
         if (!ones) { /* C-012修复: NULL检查 */
-            cuda_backend_kernel_free(kernel);
+            /* C-004修复: kernel未在此函数中声明，直接释放已分配GPU内存 */
+            cudaFree(d_input); cudaFree(d_grad_output); cudaFree(d_grad_input);
+            cudaFree(d_gamma); cudaFree(d_mean); cudaFree(d_var);
             return -1;
         }
         for (size_t i = 0; i < features; i++) ones[i] = 1.0f;
@@ -4928,11 +4931,13 @@ int cuda_batch_norm_backward(GpuContext* ctx, const float* input, const float* g
     float* host_mean = (float*)calloc(features, sizeof(float));
     float* host_var = (float*)calloc(features, sizeof(float));
     if (!h_input || !host_mean || !host_var) { /* C-012修复: NULL检查 */
-        if (h_input) free(h_input);
-        if (host_mean) free(host_mean);
-        if (host_var) free(host_var);
-        cuda_backend_kernel_free(kernel);
-        return -1;
+            if (h_input) free(h_input);
+            if (host_mean) free(host_mean);
+            if (host_var) free(host_var);
+            /* C-004修复: kernel未声明，直接释放GPU分配 */
+            cudaFree(d_input); cudaFree(d_grad_output); cudaFree(d_grad_input);
+            cudaFree(d_gamma); cudaFree(d_mean); cudaFree(d_var);
+            return -1;
     }
     memcpy(h_input, input, total_bytes);
 
@@ -5310,7 +5315,8 @@ int cuda_cross_entropy_loss_gradient(GpuContext* ctx, const float* logits,
         if (!h_logits || !h_targets_local) { /* C-012修复: NULL检查 */
             if (h_logits) free(h_logits);
             if (h_targets_local) free(h_targets_local);
-            cuda_backend_kernel_free(kernel);
+            /* C-004修复: kernel未声明，直接释放GPU分配 */
+            cudaFree(d_logits); cudaFree(d_targets); cudaFree(d_loss);
             return -1;
         }
         cudaMemcpy(h_logits, d_logits, logits_bytes, cudaMemcpyDeviceToHost);

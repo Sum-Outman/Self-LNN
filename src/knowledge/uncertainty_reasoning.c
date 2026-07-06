@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file uncertainty_reasoning.c
  * @brief 不确定性推理引擎完整实现
  *
@@ -1928,6 +1928,7 @@ static void mln_fc_lock_init(void) {
 #define MLN_FC_UNLOCK() LeaveCriticalSection(&g_mln_fc_lock)
 #else
 #include <pthread.h>
+#include "selflnn/utils/logging.h"  /* DEEP-005: log宏 */
 static pthread_mutex_t g_mln_fc_lock = PTHREAD_MUTEX_INITIALIZER;
 #define MLN_FC_LOCK() pthread_mutex_lock(&g_mln_fc_lock)
 #define MLN_FC_UNLOCK() pthread_mutex_unlock(&g_mln_fc_lock)

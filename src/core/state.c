@@ -8,6 +8,9 @@
 #include "selflnn/core/state.h"
 #include "selflnn/utils/math_utils.h"
 #include "selflnn/utils/memory_utils.h"
+#ifdef _WIN32
+#include <windows.h>  /* DEEP-005: InterlockedExchange需要 */
+#endif
 #include "selflnn/utils/platform.h"
 
 #include <stdlib.h>

@@ -284,7 +284,7 @@ int optimizer_step(Optimizer* optimizer, float* parameters, float* gradients,
                 optimizer->velocity_buffer[i] = b2 * optimizer->velocity_buffer[i] +
                                                 (1.0f - b2) * gradients[i] * gradients[i];
 
-                /* ZSFJJJ-H003修复: 防止Adam偏差校正分母趋零，已有完整保护 */
+                /* ZSFJJJ-H003修复: 防止Adam偏差校正分母趋零，已有完整保护
                  * 长期训练(t>10000)后beta1_power下溢为0(float精度~1e-7),
                  * 导致1.0-0=1.0, 偏差校正失去意义。
                  * 使用min epsilon确保分母始终>=1e-8, 避免除零和校正失效。 */
@@ -439,7 +439,8 @@ int optimizer_step(Optimizer* optimizer, float* parameters, float* gradients,
             /* RAdam整流因子计算 */
             float rho_inf = 2.0f / (1.0f - b2) - 1.0f;
             float beta2_t = *optimizer->beta2_power;
-            float rho_t = rho_inf - 2.0f * (float)step * beta2_t / (1.0f - beta2_t + 1e-12f);
+            /* P2-R5修复: 使用double中间变量避免(float)step在大步数(>16.7M)时精度丢失 */
+            float rho_t = rho_inf - 2.0f * ((double)step * (double)beta2_t) / (1.0 - (double)beta2_t + 1e-12);
 
             /* FIX-002: LookAhead慢权重初始化（首次调用时快照当前参数为慢权重） */
             int k = optimizer->config.lookahead_k > 0 ? optimizer->config.lookahead_k : 5;
@@ -627,12 +628,14 @@ int optimizer_update_multi_group(Optimizer* optimizer, OptimizerParamGroup* grou
         case OPTIMIZER_RMSPROP:
         {
             float decay_rate = optimizer->config.beta2 > 0.0f ? optimizer->config.beta2 : 0.9f;
+            float wd = optimizer->config.weight_decay;  /* DEEP-005修复: wd未声明，使用optimizer配置 */
             idx = 0;
             for (int g = 0; g < num_groups; g++) {
                 float* params = groups[g].parameters;
                 const float* grads = groups[g].gradients;
                 size_t n = groups[g].num_params;
-                float grp_wd = groups[g].weight_decay > 0.0f ? groups[g].weight_decay : wd;
+                /* DEEP-005修复: groups[g]无weight_decay字段，使用optimizer全局配置 */
+                float grp_wd = wd; 
                 for (size_t i = 0; i < n; i++, idx++) {
                     /* P-FIX-013: 添加RMSProp multi_group分支的权重衰减（与单参数组版本对齐） */
                     params[i] *= (1.0f - lr * grp_wd);

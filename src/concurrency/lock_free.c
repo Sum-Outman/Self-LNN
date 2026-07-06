@@ -19,6 +19,7 @@
  */
 
 #include "selflnn/concurrency/lock_free.h"
+#include "selflnn/core/common.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/platform.h"
@@ -41,8 +42,20 @@
  * 对齐指针的读写在所有x86/ARM64 Windows上本身是原子的。 */
 #define atomic_load(ptr) (*(ptr))
 #define atomic_store(ptr, val) do { *(ptr) = (val); } while(0)
+
+/* P0-R5修复: 原宏中*(expected)被求值两次（一次作为比较值，一次作为返回值比较），
+ * 对于带副作用的expected表达式会导致错误。改用辅助函数确保单次求值。 */
+static __forceinline int _atomic_cas_ptr_win(void* volatile* ptr, void** expected, void* desired) {
+    void* exp_val = *expected;  /* 单次求值expected指向的值 */
+    void* old_val = InterlockedCompareExchangePointer(ptr, desired, exp_val);
+    if (old_val == exp_val) {
+        return 1;  /* CAS成功 */
+    }
+    *expected = old_val;  /* CAS失败时更新expected为当前值 */
+    return 0;
+}
 #define atomic_compare_exchange_strong(ptr, expected, desired) \
-    (InterlockedCompareExchangePointer((void* volatile*)(ptr), (desired), *(expected)) == *(expected))
+    _atomic_cas_ptr_win((void* volatile*)(ptr), (void**)(expected), (void*)(desired))
 #define atomic_fetch_add(ptr, val) InterlockedExchangeAdd((volatile LONG*)(ptr), (val))
 #define atomic_fetch_sub(ptr, val) InterlockedExchangeAdd((volatile LONG*)(ptr), -(val))
 #define atomic_thread_fence(memory_order) MemoryBarrier()
@@ -782,7 +795,7 @@ int lock_free_queue_enqueue(LockFreeQueue* queue, const void* element,
 #endif
     
     /* 检查队列是否已满 —— FIX-011修复: 使用原子读取避免TOCTOU */
-    size_t current_size = (size_t)atomic_load_int((int*)&queue->size);
+    size_t current_size = (size_t)SELFLNN_ATOMIC_LOAD_INT(&queue->size);
     if (current_size >= queue->capacity) {
         strncpy(result->error_message, "队列已满", sizeof(result->error_message) - 1);
         result->error_message[sizeof(result->error_message) - 1] = '\0';

@@ -6952,8 +6952,9 @@ response = requests.get(
             if (data.entries && Array.isArray(data.entries) && data.entries.length > 0) {
                 var list = document.getElementById('knowledge-entries-list');
                 if (list) {
+                    /* C-003修复: 知识条目使用escapeHtml防止XSS */
                     list.innerHTML = data.entries.map(function(e) {
-                        return '<div class="knowledge-entry"><div class="entry-icon"></div><div class="entry-content"><h4>' + (e.title || '') + '</h4><p>' + (e.content || e.description || '') + '</p><div class="entry-meta"><span class="meta-item"><span>' + (e.category || '') + '</span></span><span class="meta-item"><span>置信度: ' + (e.confidence != null ? e.confidence : '未连接') + '</span></span></div></div><div class="entry-actions"><button class="btn btn-sm btn-info" onclick="viewKnowledgeDetail(' + (e.id || 0) + ')">查看</button><button class="btn btn-sm btn-danger" onclick="deleteKnowledgeEntry(' + (e.id || 0) + ')">删除</button></div></div>';
+                        return '<div class="knowledge-entry"><div class="entry-icon"></div><div class="entry-content"><h4>' + window.escapeHtml(e.title || '') + '</h4><p>' + window.escapeHtml(e.content || e.description || '') + '</p><div class="entry-meta"><span class="meta-item"><span>' + window.escapeHtml(e.category || '') + '</span></span><span class="meta-item"><span>置信度: ' + (e.confidence != null ? window.escapeHtml(String(e.confidence)) : '未连接') + '</span></span></div></div><div class="entry-actions"><button class="btn btn-sm btn-info" onclick="viewKnowledgeDetail(' + (e.id || 0) + ')">查看</button><button class="btn btn-sm btn-danger" onclick="deleteKnowledgeEntry(' + (e.id || 0) + ')">删除</button></div></div>';
                     }).join('');
                 }
             }
@@ -7067,7 +7068,8 @@ response = requests.get(
             const icons = { success: '\u2705', error: '\u274C', info: '\u2139\uFE0F', warning: '\u26A0\uFE0F' };
             const toast = document.createElement('div');
             toast.className = 'toast ' + type;
-            toast.innerHTML = '<span class="toast-icon">' + (icons[type] || '') + '</span><span class="toast-message">' + message + '</span><button class="toast-close" onclick="var el=this.parentElement;el.classList.add(\'toast-fade-out\');setTimeout(function() {if(el&&el.parentNode)el.parentNode.removeChild(el);},300)">&times;</button>';
+            /* C-003修复: Toast消息使用escapeHtml转义防止XSS */
+            toast.innerHTML = '<span class="toast-icon">' + (icons[type] || '') + '</span><span class="toast-message">' + window.escapeHtml(message) + '</span><button class="toast-close" onclick="var el=this.parentElement;el.classList.add(\'toast-fade-out\');setTimeout(function() {if(el&&el.parentNode)el.parentNode.removeChild(el);},300)">&times;</button>';
             container.appendChild(toast);
             setTimeout(function() {
                 toast.classList.add('toast-fade-out');
@@ -7148,8 +7150,9 @@ response = requests.get(
             if (data.entries && Array.isArray(data.entries) && data.entries.length > 0) {
                 const list = document.getElementById('memory-entries-list');
                 if (list) {
+                    /* C-003修复: 记忆条目使用escapeHtml防止XSS */
                     list.innerHTML = data.entries.map(function(e, i) {
-                        return '<div class="memory-entry"><div class="entry-icon"></div><div class="entry-content"><h4>' + (e.title || '') + '</h4><p>' + (e.description || '') + '</p><div class="entry-meta"><span class="meta-item"><span>' + (e.type || '') + '</span></span><span class="meta-item"><span>' + (e.time || '') + '</span></span><span class="meta-item"><span>关联强度: ' + (e.strength != null ? e.strength : '未连接') + '</span></span></div></div><div class="entry-actions"><button class="btn btn-sm btn-info" onclick="viewMemoryDetails(' + (e.id || i) + ')">查看</button><button class="btn btn-sm btn-warning" onclick="editMemoryEntry(' + (e.id || i) + ')">编辑</button><button class="btn btn-sm btn-danger" onclick="deleteMemoryEntry(' + (e.id || i) + ')">删除</button></div></div>';
+                        return '<div class="memory-entry"><div class="entry-icon"></div><div class="entry-content"><h4>' + window.escapeHtml(e.title || '') + '</h4><p>' + window.escapeHtml(e.description || '') + '</p><div class="entry-meta"><span class="meta-item"><span>' + window.escapeHtml(e.type || '') + '</span></span><span class="meta-item"><span>' + window.escapeHtml(e.time || '') + '</span></span><span class="meta-item"><span>关联强度: ' + (e.strength != null ? window.escapeHtml(String(e.strength)) : '未连接') + '</span></span></div></div><div class="entry-actions"><button class="btn btn-sm btn-info" onclick="viewMemoryDetails(' + (e.id || i) + ')">查看</button><button class="btn btn-sm btn-warning" onclick="editMemoryEntry(' + (e.id || i) + ')">编辑</button><button class="btn btn-sm btn-danger" onclick="deleteMemoryEntry(' + (e.id || i) + ')">删除</button></div></div>';
                     }).join('');
                 }
             }
@@ -8065,7 +8068,9 @@ response = requests.get(
                     setTextEl('auto-relation-count', d.relation_count||0);
                     setTextEl('auto-import-count', d.import_count||0);
                     setTextEl('auto-file-count', d.watched_files||0);
-                }).catch(function(){});
+                }).catch(function(){
+                    console.warn('[SELF-LNN] 自主学习状态刷新失败，后端可能未连接');
+                });
             };
             /** 模仿学习 **/
             window.submitImitationDemo = function() {
@@ -8096,8 +8101,10 @@ response = requests.get(
                     setTextEl('im-demo-count', d.demonstration_count||0);
                     setTextEl('im-loss', d.training_loss!=null ? d.training_loss.toFixed(4) : '-');
                     setTextEl('im-accuracy', d.accuracy!=null ? (d.accuracy*100).toFixed(1)+'%' : '-');
-                    });
-                }).catch(function(){});
+                }).catch(function(){
+                    /* H-002修复: 空catch改为输出警告日志便于排查 */
+                    console.warn('[SELF-LNN] 模仿学习状态刷新失败，后端可能未连接');
+                });
             };
             window.predictImitationAction = function() {
                 var inp = document.getElementById('im-predict-input').value;
@@ -8115,6 +8122,110 @@ response = requests.get(
             function setTextEl(id, val) { var el = document.getElementById(id); if (el) el.textContent = val; }
             function fmtPct(v) { return v != null ? (v*100).toFixed(1)+'%' : '--'; }
             function fmtNum(v) { return v != null ? v.toFixed(2) : '--'; }
+
+            /* C-002修复: 双目视觉操作函数实现 */
+            window.initStereoVision = function() {
+                if (window.SelfLnnApi && typeof window.SelfLnnApi.request === 'function') {
+                    nm('正在初始化双目视觉系统...', 'info');
+                    window.SelfLnnApi.request('/stereo/perception', {
+                        method: 'POST',
+                        body: JSON.stringify({ action: 'init' })
+                    }, 1).then(function(r) {
+                        return r.json();
+                    }).then(function(d) {
+                        if (d.success || d.status === 'ok') {
+                            nm('双目视觉系统已初始化', 'success');
+                        } else {
+                            nm('初始化失败: ' + (d.error || '未知错误'), 'danger');
+                        }
+                    }).catch(function(e) {
+                        nm('双目视觉初始化失败: ' + (e.message || '后端未连接'), 'danger');
+                    });
+                } else {
+                    nm('API服务未就绪，无法初始化双目视觉', 'warning');
+                }
+            };
+
+            window.captureStereoFrame = function() {
+                if (window.SelfLnnApi && typeof window.SelfLnnApi.request === 'function') {
+                    nm('正在采集双目视觉帧...', 'info');
+                    window.SelfLnnApi.request('/stereo/perception', {
+                        method: 'POST',
+                        body: JSON.stringify({ action: 'capture_frame' })
+                    }, 1).then(function(r) {
+                        return r.json();
+                    }).then(function(d) {
+                        var pcEl = document.getElementById('stereo-point-count');
+                        var statusEl = document.getElementById('stereo-recon-status');
+                        if (d.point_count) { if (pcEl) pcEl.textContent = d.point_count; }
+                        if (statusEl) statusEl.textContent = d.status || '已采集';
+                        nm('双目帧采集完成，点数: ' + (d.point_count || '未知'), 'success');
+                    }).catch(function(e) {
+                        nm('双目帧采集失败: ' + (e.message || '后端未连接'), 'danger');
+                    });
+                } else {
+                    nm('API服务未就绪，无法采集双目帧', 'warning');
+                }
+            };
+
+            window.toggleStereoStream = function() {
+                var self = this;
+                if (!self._stereoStreaming) {
+                    self._stereoStreaming = true;
+                    nm('双目视觉连续采集已启动', 'info');
+                    var streamLoop = function() {
+                        if (!self._stereoStreaming) return;
+                        window.captureStereoFrame();
+                        self._stereoStreamTimer = setTimeout(streamLoop, 2000);
+                    };
+                    streamLoop();
+                } else {
+                    self._stereoStreaming = false;
+                    if (self._stereoStreamTimer) { clearTimeout(self._stereoStreamTimer); self._stereoStreamTimer = null; }
+                    nm('双目视觉连续采集已停止', 'info');
+                }
+            };
+
+            /* C-002修复: 全部机器人紧急停止函数实现 */
+            window.emergencyStopAllRobots = function() {
+                if (!window.safeConfirm || !window.safeConfirm('确定要对全部机器人执行紧急停止？此操作不可撤销！')) {
+                    return;
+                }
+                if (window.SelfLnnApi && typeof window.SelfLnnApi.robotEmergencyStop === 'function') {
+                    nm('正在向所有机器人发送紧急停止指令...', 'warning');
+                    window.SelfLnnApi.robotEmergencyStop({ all: true }).then(function(r) {
+                        var d = r.data || r;
+                        if (d.success) {
+                            nm('全部机器人已紧急停止', 'success');
+                        } else {
+                            nm('紧急停止失败: ' + (d.error || '未知错误'), 'danger');
+                        }
+                    }).catch(function(e) {
+                        nm('紧急停止请求失败: ' + (e.message || '后端未连接'), 'danger');
+                    });
+                } else {
+                    nm('机器人紧急停止API不可用', 'danger');
+                }
+            };
+
+            /* C-002修复: 扫描机器人函数实现 */
+            window.scanRobots = function() {
+                if (window.SelfLnnApi && typeof window.SelfLnnApi.robotsList === 'function') {
+                    nm('正在扫描机器人设备...', 'info');
+                    window.SelfLnnApi.robotsList().then(function(r) {
+                        var d = r.data || r;
+                        if (d.robots && d.robots.length > 0) {
+                            nm('发现 ' + d.robots.length + ' 台机器人', 'success');
+                        } else {
+                            nm('未发现可用的机器人设备', 'info');
+                        }
+                    }).catch(function(e) {
+                        nm('机器人扫描失败: ' + (e.message || '后端未连接'), 'danger');
+                    });
+                } else {
+                    nm('机器人扫描功能不可用，请检查后端连接', 'warning');
+                }
+            };
         })();
     </script>
     <script>window.__PAGE_READY = true;</script>

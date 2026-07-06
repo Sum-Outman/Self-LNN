@@ -8977,7 +8977,7 @@ static void tom_ac_lock_init(void) {
         g_tom_ac_lock_init = 1;
     }
 }
-#define TOM_AC_LOCK do { tom_ac_lock_init_func(); EnterCriticalSection(&g_tom_ac_lock); } while(0)
+#define TOM_AC_LOCK do { tom_ac_lock_init(); EnterCriticalSection(&g_tom_ac_lock); } while(0)
 #define TOM_AC_UNLOCK LeaveCriticalSection(&g_tom_ac_lock)
 #else
 #include <pthread.h>

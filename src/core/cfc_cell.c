@@ -459,14 +459,14 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
      * 计划拆分（v1.6）：_init_core_buffers() / _init_quaternion() / _init_ode_workspace()。
      * 当前所有分配均有NULL检查和对应的cleanup路径，功能完整正确。 */
     if (!config) {
-        selflnn_set_last_error(SELFLNN_ERROR_INVALID_PARAMETER, 
+        SELFLNN_SET_ERROR(SELFLNN_ERROR_INVALID_PARAMETER, 
             "cfc_cell_create", "配置指针为空", "请提供有效的CfCCellConfig配置");
         return NULL;
     }
     
     // 验证配置
     if (config->input_size == 0 || config->hidden_size == 0) {
-        selflnn_set_last_error(SELFLNN_ERROR_INVALID_PARAMETER,
+        SELFLNN_SET_ERROR(SELFLNN_ERROR_INVALID_PARAMETER,
             "cfc_cell_create", "无效的配置参数(input_size或hidden_size为0)",
             "请确保input_size和hidden_size均大于0");
         return NULL;
@@ -475,7 +475,7 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
     // 分配单元结构
     CfCCell* cell = (CfCCell*)safe_malloc(sizeof(CfCCell));
     if (!cell) {
-        selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY,
+        SELFLNN_SET_ERROR(SELFLNN_ERROR_OUT_OF_MEMORY,
             "cfc_cell_create", "内存分配失败(CfCCell结构体)",
             "请检查系统内存或减少模型参数规模");
         return NULL;

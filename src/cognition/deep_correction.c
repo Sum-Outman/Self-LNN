@@ -50,7 +50,7 @@
 #include <stdio.h>
 #include <time.h>
 #include <math.h>
-#include <pthread.h>  /* P1修复: pthread_once_t 需要此头文件 */
+/* DEEP-005修复: MSVC无pthread.h，使用volatile static flag替代pthread_once */
 
 struct DCCorrectionSystem {
     DCErrorRecord errors[DC_MAX_ERRORS];
@@ -102,14 +102,22 @@ static int g_learned_causes_count = 0;
  * P1修复：懒初始化竞态条件消除
  * 使用原子CAS确保互斥锁只被初始化一次，避免多线程并发初始化导致竞态 */
 static MutexHandle g_causes_mutex = NULL;
-static pthread_once_t g_causes_mutex_once = PTHREAD_ONCE_INIT;
+/* DEEP-005修复: volatile static flag替代pthread_once_t */
+static volatile int g_causes_mutex_once_done = 0;
 
 static void dc_init_causes_mutex(void) {
     g_causes_mutex = mutex_create();
 }
 
+static void dc_ensure_mutex_once(void) {
+    if (!g_causes_mutex_once_done) {
+        dc_init_causes_mutex();
+        g_causes_mutex_once_done = 1;
+    }
+}
+
 static float dc_get_cause_prior(DCErrorType type, const char* cause_name, float preset_prior) {
-    pthread_once(&g_causes_mutex_once, dc_init_causes_mutex);
+    dc_ensure_mutex_once();
     mutex_lock(g_causes_mutex);
     for (int i = 0; i < g_learned_causes_count; i++) {
         if (g_learned_causes[i].error_type == type &&
@@ -128,7 +136,7 @@ static float dc_get_cause_prior(DCErrorType type, const char* cause_name, float 
 }
 
 static void dc_update_cause_prior(DCErrorType type, const char* cause_name, int was_successful) {
-    pthread_once(&g_causes_mutex_once, dc_init_causes_mutex);
+    dc_ensure_mutex_once();
     mutex_lock(g_causes_mutex);
     for (int i = 0; i < g_learned_causes_count; i++) {
         if (g_learned_causes[i].error_type == type &&

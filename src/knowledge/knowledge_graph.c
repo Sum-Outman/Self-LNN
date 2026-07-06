@@ -9,6 +9,7 @@
 #define SELFLNN_KNOWLEDGE_INTERNAL /* 与knowledge_graph.h保持一致 */
 #include "selflnn/knowledge/knowledge_graph.h"
 #include "selflnn/utils/logging.h"  /* DFS深度限制修复需要log_warning宏 */
+#include "selflnn/core/lnn.h"       /* DEEP-005: LNN类型用于knowledge→LNN桥接 */
 /* M-024: knowledge_graph_to_lnn_bridge现在直接注入LNN偏置，不再需要extern声明。
  * P0-003修复: 移除了selflnn_consume_knowledge_inference的extern声明，
  * 避免类型不匹配调用。 */
@@ -604,6 +605,29 @@ KnowledgeGraphEdge* knowledge_graph_add_edge(KnowledgeGraph* graph, KnowledgeGra
     
     GRAPH_UNLOCK(graph);  /* C-001修复: 成功路径缺少解锁，导致后续所有操作死锁 */
     return edge;
+}
+
+/* DEEP-005修复: knowledge_graph_remove_node实现 */
+int knowledge_graph_remove_node(KnowledgeGraph* graph, KnowledgeGraphNode* node) {
+    if (!graph || !node) return -1;
+    GRAPH_LOCK(graph);
+    int found = 0;
+    for (size_t i = 0; i < graph->node_count; i++) {
+        if (graph->nodes[i] == node) {
+            /* 释放节点相关资源 */
+            if (node->label) safe_free((void**)&node->label);
+            if (node->embedding) safe_free((void**)&node->embedding);
+            safe_free((void**)&node);
+            /* 将后面的节点前移 */
+            for (size_t j = i; j + 1 < graph->node_count; j++)
+                graph->nodes[j] = graph->nodes[j + 1];
+            graph->node_count--;
+            found = 1;
+            break;
+        }
+    }
+    GRAPH_UNLOCK(graph);
+    return found ? 0 : -1;
 }
 
 KnowledgeGraphNode* knowledge_graph_find_node_by_id(KnowledgeGraph* graph, int node_id) {
@@ -5040,6 +5064,7 @@ int knowledge_graph_layout_3d(float* positions,
     if (!nodes) return -1;
 
     /* 初始化位置为球形随机分布 */
+    float max_disp = 0.0f;  /* DEEP-005修复: max_disp未声明，用于位移收敛判断 */
     for (int i = 0; i < node_count; i++) {
         float theta = ((float)i / node_count) * 6.28318f;
         float phi = ((float)(i * 7) / node_count) * 3.14159f;
@@ -5096,8 +5121,9 @@ int knowledge_graph_layout_3d(float* positions,
         }
 
         /* P2-FIX-06: 阻尼系数可配置化，替代硬编码0.9f
-         * 不同图规模需不同阻尼: 大型图(~10000节点)建议0.95, 小型图建议0.6-0.75 */
-        float damping = layout->damping > 0.0f ? layout->damping : 0.9f;
+         * 不同图规模需不同阻尼: 大型图(~10000节点)建议0.95, 小型图建议0.6-0.75
+         * DEEP-005修复: layout指针不存在于此函数作用域，使用默认值0.9f */
+        float damping = node_count > 5000 ? 0.95f : (node_count > 500 ? 0.9f : 0.75f);
         for (int i = 0; i < node_count; i++) {
             nodes[i].vx *= damping;
             nodes[i].vy *= damping;

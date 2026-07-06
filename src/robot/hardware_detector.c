@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file hardware_detector.c
  * @brief 硬件检测器实现 —— 统一硬件检测入口
  *
@@ -18,6 +18,8 @@
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
+
+#include "selflnn/utils/memory_utils.h"  /* DEEP-005: safe_malloc宏定义 */
 
 #ifdef _WIN32
 #include <windows.h>

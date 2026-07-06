@@ -31,6 +31,7 @@ typedef enum {
     SELFLNN_ERROR_GENERIC = -1,             /**< 通用错误 */
     SELFLNN_ERROR_INVALID_ARGUMENT = -2,    /**< 无效参数 */
     SELFLNN_ERROR_INVALID_DIMENSION = -2,   /**< 无效维度（无效参数别名） */
+    SELFLNN_ERROR_INVALID_PARAMETER = -2,   /**< 无效参数（DEEP-005: 跨模块兼容别名） */
     SELFLNN_ERROR_NULL_POINTER = -3,        /**< 空指针 */
     SELFLNN_ERROR_OUT_OF_MEMORY = -4,       /**< 内存不足 */
     SELFLNN_ERROR_NOT_INITIALIZED = -5,     /**< 未初始化 */
@@ -65,6 +66,7 @@ typedef enum {
     SELFLNN_ERROR_CFC_CELL_NOT_CREATED = -201, /**< CfC单元未创建 */
     SELFLNN_ERROR_CFC_TIME_CONSTANT = -202, /**< 时间常数错误 */
     SELFLNN_ERROR_CFC_NOISE_STD = -203,     /**< 噪声标准差错误 */
+    SELFLNN_ERROR_CFC_CREATE_FAILED = -204, /**< CfC单元创建失败（DEEP-005: lnn.c交叉引用） */
     
     // 记忆系统错误 (300-399)
     SELFLNN_ERROR_MEMORY_ALLOCATION = -300, /**< 记忆分配错误 */
@@ -297,6 +299,18 @@ SELFLNN_API int selflnn_is_warning_code(SelfLNNErrorCode error_code);
 /**
  * @brief 初始化状态检查宏
  */
+
+/* DEEP-005修复: 直接调用selflnn_set_last_error的便捷宏
+ * 原代码多处直接调用时传递了错误数量的参数
+ * (code, func_name, desc, detail) 而非 (code, func, file, line, fmt, ...)。
+ * 此宏自动补全__FILE__和__LINE__，统一调用规范。 */
+#define SELFLNN_SET_ERROR(code, func_name, description, detail) \
+    selflnn_set_last_error((code), (func_name), __FILE__, __LINE__, \
+        "%s: %s", (description), (detail))
+
+#define SELFLNN_SET_ERROR_1(code, func_name, message) \
+    selflnn_set_last_error((code), (func_name), __FILE__, __LINE__, \
+        "%s", (message))
 #define SELFLNN_CHECK_INITIALIZED(obj, ...) \
     SELFLNN_CHECK((obj) != NULL && (obj)->is_initialized, SELFLNN_ERROR_NOT_INITIALIZED, __VA_ARGS__)
 

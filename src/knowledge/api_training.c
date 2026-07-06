@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file api_training.c
  * @brief API训练实现
  * 
@@ -764,6 +764,8 @@ int training_session_set_network(TrainingSession* session, LNN* network) {
 #include <winsock2.h>
 #else
 #include <sys/socket.h>
+
+#include "selflnn/utils/memory_utils.h"  /* DEEP-005: safe_malloc宏定义 */
 #endif
 
 /* ---------- HTTP请求/响应常量 ---------- */

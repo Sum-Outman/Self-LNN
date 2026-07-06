@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file swarm_control.c
  * @brief 多机器人集群控制实现
  *
@@ -20,6 +20,8 @@
 #include <string.h>
 #include <stdio.h>
 
+#include "selflnn/utils/memory_utils.h"  /* DEEP-005: safe_malloc宏定义 */
+
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -36,6 +38,7 @@ typedef SOCKET swarm_socket_t;
 #include <netdb.h>
 #include <fcntl.h>
 #include <errno.h>
+
 typedef int swarm_socket_t;
 #define SWARM_INVALID_SOCKET (-1)
 #define swarm_socket_close close

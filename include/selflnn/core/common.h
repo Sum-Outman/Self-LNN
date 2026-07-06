@@ -193,13 +193,58 @@ typedef enum {
     #define SELFLNN_MEMORY_BARRIER() ((void)0)
 #endif
 
-// 编译器优化提示
+// 编译器优化提示 + GCC built-in兼容
 #ifdef __GNUC__
-    #define SELFLNN_LIKELY(x) __builtin_expect(!!(x), 1)
+    #define SELFLNN_LIKELY(x)   __builtin_expect(!!(x), 1)
     #define SELFLNN_UNLIKELY(x) __builtin_expect(!!(x), 0)
-#else
-    #define SELFLNN_LIKELY(x) (x)
+    #define selftnn_popcountll(x) __builtin_popcountll(x)
+#elif defined(_MSC_VER)
+    #define SELFLNN_LIKELY(x)   (x)
     #define SELFLNN_UNLIKELY(x) (x)
+    #include <intrin.h>
+    #define selftnn_popcountll(x) __popcnt64((unsigned __int64)(x))
+#else
+    #define SELFLNN_LIKELY(x)   (x)
+    #define SELFLNN_UNLIKELY(x) (x)
+    static inline int selftnn_popcountll(unsigned long long x) {
+        int c = 0; while (x) { c++; x &= x - 1; } return c;
+    }
+#endif
+/* DEEP-005: GCC __builtin_popcountll → MSVC __popcnt64 兼容层 */
+
+/* C-004修复: MSVC/GCC跨平台原子操作宏
+ * GCC使用__sync_*内置函数，MSVC使用Interlocked* API。
+ * rcu.c 和 lock_free.c 中大量使用这些原子操作，
+ * 在MSVC上缺少等价实现导致编译失败。 */
+#ifdef _MSC_VER
+    #include <intrin.h>
+    /* 原子测试并设置：返回旧值并设置新值 */
+    #define SELFLNN_ATOMIC_TEST_AND_SET(ptr, new_val) \
+        InterlockedExchange((LONG volatile*)(ptr), (LONG)(new_val))
+    /* 原子释放：写入0并释放屏障 */
+    #define SELFLNN_ATOMIC_RELEASE(ptr) \
+        do { InterlockedExchange((LONG volatile*)(ptr), 0); } while(0)
+    /* 原子加法并返回新值 */
+    #define SELFLNN_ATOMIC_ADD_AND_FETCH(ptr, val) \
+        (InterlockedExchangeAdd((LONG volatile*)(ptr), (LONG)(val)) + (LONG)(val))
+    /* 原子加载int：使用InterlockedCompareExchange作为读屏障 */
+    #define SELFLNN_ATOMIC_LOAD_INT(ptr) \
+        InterlockedCompareExchange((LONG volatile*)(ptr), 0, 0)
+    /* 原子加载指针：使用volatile读取+编译器屏障 */
+    #define SELFLNN_ATOMIC_LOAD_PTR(ptr) \
+        (*(volatile void* volatile*)(ptr))
+#else
+    /* GCC/Clang: 使用内置原子操作 */
+    #define SELFLNN_ATOMIC_TEST_AND_SET(ptr, new_val) \
+        __sync_lock_test_and_set((ptr), (new_val))
+    #define SELFLNN_ATOMIC_RELEASE(ptr) \
+        __sync_lock_release((ptr))
+    #define SELFLNN_ATOMIC_ADD_AND_FETCH(ptr, val) \
+        __sync_add_and_fetch((ptr), (val))
+    #define SELFLNN_ATOMIC_LOAD_INT(ptr) \
+        ({ __sync_synchronize(); int _v = *(volatile int*)(ptr); __sync_synchronize(); _v; })
+    #define SELFLNN_ATOMIC_LOAD_PTR(ptr) \
+        ({ __sync_synchronize(); void* _v = *(volatile void**)(ptr); __sync_synchronize(); _v; })
 #endif
 
 // 函数属性

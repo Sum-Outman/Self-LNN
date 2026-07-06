@@ -1,8 +1,10 @@
-#include "selflnn/robot/humanoid_sensor_fusion.h"
+﻿#include "selflnn/robot/humanoid_sensor_fusion.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include <stdio.h>
+
+#include "selflnn/utils/memory_utils.h"  /* DEEP-005: safe_malloc宏定义 */
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846

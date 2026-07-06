@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file ontology_engineering.c
  * @brief 本体工程系统实现
  *
@@ -1413,6 +1413,7 @@ ontology_export_truncated:
     log_warn("[Ontology] XML导出缓冲区溢出(%zu字节)，结果已截断", buf_size);
     buf[buf_size - 1] = '\0';
     return buf;
+}
 
 /* ============================================================================
  * KB-11: 自动本体学习+跨领域对齐
@@ -1434,22 +1435,17 @@ typedef struct {
 } OntoClass;
 
 /* ========== 线程安全：本体类计数器锁 ========== */
+/* DEEP-005修复: 跨平台原子锁，使用common.h中的SELFLNN_ATOMIC_*宏 */
 #ifdef _WIN32
-static CRITICAL_SECTION g_onto_cc_lock;
-static int g_onto_cc_lock_init = 0;
-static void onto_cc_lock_init(void) {
-    if (!g_onto_cc_lock_init) {
-        InitializeCriticalSection(&g_onto_cc_lock);
-        g_onto_cc_lock_init = 1;
-    }
-}
-#define ONTO_CC_LOCK() do { onto_cc_lock_init(); EnterCriticalSection(&g_onto_cc_lock); } while(0)
-#define ONTO_CC_UNLOCK() LeaveCriticalSection(&g_onto_cc_lock)
+static volatile long g_onto_cc_lock_flag = 0;
+#define ONTO_CC_LOCK()   do { while (InterlockedCompareExchange(&g_onto_cc_lock_flag, 1, 0) != 0) {} } while(0)
+#define ONTO_CC_UNLOCK() InterlockedExchange(&g_onto_cc_lock_flag, 0)
 #else
 #include <pthread.h>
-static pthread_mutex_t g_onto_cc_lock = PTHREAD_MUTEX_INITIALIZER;
-#define ONTO_CC_LOCK() pthread_mutex_lock(&g_onto_cc_lock)
-#define ONTO_CC_UNLOCK() pthread_mutex_unlock(&g_onto_cc_lock)
+#include "selflnn/utils/logging.h"  /* DEEP-005: log宏 */
+static pthread_mutex_t g_onto_lock = PTHREAD_MUTEX_INITIALIZER;
+#define ONTO_CC_LOCK()   pthread_mutex_lock(&g_onto_lock)
+#define ONTO_CC_UNLOCK() pthread_mutex_unlock(&g_onto_lock)
 #endif
 
 /* M-029修复：动态增长替代静态128类限制 */

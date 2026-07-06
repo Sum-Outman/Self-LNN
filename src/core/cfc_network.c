@@ -153,7 +153,7 @@ CfCNetwork* cfc_create(const CfCNetworkConfig* config) {
     if (!param_block) {
         /* P0-002修复: 错误路径全面清理并返回NULL而非-1
          * 原return -1导致返回类型为CfCNetwork*时产生无效指针 */
-        for (size_t l = 0; l < network->num_layers; l++) {
+        for (size_t l = 0; l < network->config.num_layers; l++) {
             if (network->layers && network->layers[l]) {
                 cfc_cell_free(network->layers[l]);
             }
@@ -506,7 +506,13 @@ int cfc_forward(CfCNetwork* network, const float* input,
             output[i] = sum + network->b_out_params[i];
         }
     } else {
-        memcpy(output, current_hidden, output_size * sizeof(float));
+        /* P0-R3修复: 添加越界保护。当output_size>hidden_size且无投影矩阵时，
+         * 先复制隐藏状态，剩余输出位置零，防止越界读取current_hidden */
+        size_t copy_size = (output_size < hidden_size) ? output_size : hidden_size;
+        memcpy(output, current_hidden, copy_size * sizeof(float));
+        if (output_size > hidden_size) {
+            memset(output + hidden_size, 0, (output_size - hidden_size) * sizeof(float));
+        }
     }
     
     // 更新统计信息
@@ -532,7 +538,7 @@ int cfc_forward(CfCNetwork* network, const float* input,
  */
 static int cfc_ensure_cell_momentum(CfCCell* cell) {
     if (!cell) {
-        selflnn_set_last_error(SELFLNN_ERROR_INVALID_PARAMETER,
+        SELFLNN_SET_ERROR(SELFLNN_ERROR_INVALID_PARAMETER,
             "cfc_ensure_cell_momentum", "CfCCell指针为空", "内部错误：动量缓冲区要求有效cell");
         return -1;
     }
@@ -553,7 +559,7 @@ static int cfc_ensure_cell_momentum(CfCCell* cell) {
 
     cell->cell_momentum_buffer = (float*)safe_calloc(total * 2, sizeof(float));
     if (!cell->cell_momentum_buffer) {
-        selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY,
+        SELFLNN_SET_ERROR(SELFLNN_ERROR_OUT_OF_MEMORY,
             "cfc_ensure_cell_momentum", "动量缓冲区内存分配失败",
             "请减少hidden_size或检查系统内存");
         return -1;
@@ -1879,14 +1885,14 @@ static float power_iteration_max_eigenvalue(const float* J, size_t n, int max_it
 int cfc_detect_stiffness(CfCNetwork* network, const float* input,
                          const float* state, float* stiffness_ratio) {
     if (!network || !input || !state || !stiffness_ratio) {
-        selflnn_set_last_error(SELFLNN_ERROR_INVALID_PARAMETER,
+        SELFLNN_SET_ERROR(SELFLNN_ERROR_INVALID_PARAMETER,
             "cfc_detect_stiffness", "无效的输入参数",
             "network/input/state/stiffness_ratio均不能为空");
         return -1;
     }
     size_t n = network->config.hidden_size;
     if (n == 0) {
-        selflnn_set_last_error(SELFLNN_ERROR_INVALID_PARAMETER,
+        SELFLNN_SET_ERROR(SELFLNN_ERROR_INVALID_PARAMETER,
             "cfc_detect_stiffness", "隐藏层大小为0",
             "网络配置无效，hidden_size必须大于0");
         return -1;

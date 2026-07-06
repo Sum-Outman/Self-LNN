@@ -28,6 +28,9 @@
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/logging.h"
 #include "selflnn/utils/platform.h"
+#ifdef _WIN32
+#include <direct.h>   /* DEEP-005: _mkdir声明 */
+#endif
 #include "selflnn/utils/string_utils.h"
 #include "selflnn/memory/memory_manager.h"
 #include "selflnn/knowledge/knowledge_graph.h"
@@ -1987,36 +1990,31 @@ static int initialize_subsystems(const SystemConfig* config)
             /* H-1修复：恢复GPU后端自动检测，不再强制锁定为CPU
              * GPU初始化失败时自动安全回退到CPU，不影响系统运行 */
             GpuBackend configured_backend = g_system_state.config.gpu_backend;
-            if (configured_backend == GPU_BACKEND_CPU || configured_backend == GPU_BACKEND_AUTO) {
+            /* DEEP-005修复: GPU_BACKEND_AUTO不存在，GPU_BACKEND_CPU即自动检测模式
+             * (gpu.h L274: "backend传入GPU_BACKEND_CPU触发自动检测模式").
+             * gpu_get_available_backends需2参数、gpu_context_create需2参数。 */
+            if (configured_backend == GPU_BACKEND_CPU) {
                 /* 自动检测最佳可用GPU后端 */
-                int available_backends = gpu_get_available_backends();
+                GpuBackendAvailability avail_infos[10];
+                int available_backends = (int)gpu_get_available_backends(avail_infos, 10);
                 if (available_backends > 0) {
                     log_info("检测到 %d 个可用GPU后端，将自动选择最优方案", available_backends);
-                    /* gpu_context_create 内部会执行安全检测和自动回退 */
-                    void* gpu_ctx = gpu_context_create(configured_backend);
+                    void* gpu_ctx = gpu_context_create(GPU_BACKEND_CPU, 0);
                     if (!gpu_ctx) {
                         log_warn("GPU后端初始化失败，自动回退到CPU计算模式");
                         g_system_state.config.gpu_backend = GPU_BACKEND_CPU;
                     }
                 } else {
-                    log_info("未检测到可用GPU硬件，使用CPU计算模式（支持27+种内核算子+SIMD+线程池）");
+                    log_info("未检测到可用GPU硬件，使用CPU计算模式");
                     g_system_state.config.gpu_backend = GPU_BACKEND_CPU;
                 }
             } else {
                 /* 用户指定了特定GPU后端，尝试初始化 */
                 log_info("尝试初始化用户指定的GPU后端...");
-                void* gpu_ctx = gpu_context_create(configured_backend);
+                void* gpu_ctx = gpu_context_create(configured_backend, 0);
                 if (!gpu_ctx) {
-                    log_warn("指定的GPU后端不可用，回退到自动检测");
-                    int available_backends = gpu_get_available_backends();
-                    if (available_backends > 0) {
-                        void* auto_ctx = gpu_context_create(GPU_BACKEND_AUTO);
-                        if (!auto_ctx) {
-                            g_system_state.config.gpu_backend = GPU_BACKEND_CPU;
-                        }
-                    } else {
-                        g_system_state.config.gpu_backend = GPU_BACKEND_CPU;
-                    }
+                    log_warn("指定的GPU后端不可用，回退到CPU计算模式");
+                    g_system_state.config.gpu_backend = GPU_BACKEND_CPU;
                 }
             }
         }
@@ -2773,20 +2771,20 @@ cleanup:
      * 注意: shutdown_subsystems()的NULL守卫使得全量清理也是安全的，
      *   但按位掩码清理能产生更精确的日志和避免顺序依赖问题 */
     log_warning("[SELF-LNN] 子系统初始化回滚，掩码=0x%016llX (共%d位已初始化)",
-                (unsigned long long)subsystem_init_mask, __builtin_popcountll(subsystem_init_mask));
+                (unsigned long long)subsystem_init_mask,                 selftnn_popcountll(subsystem_init_mask));
     
     /* 逆序清理（按依赖关系：先创建的子系统通常被后创建的依赖） */
     /* 安全审计/内容过滤器（最后创建的最先销毁） */
     if (SUBSYS_IS_INIT(SUBSYS_IDX_SECURITY_MONITOR)) {
-        security_monitor_free((SecurityMonitor*)g_system_state.security_monitor);
-        g_system_state.security_monitor = NULL;
+        safety_monitor_free((SafetyMonitor*)g_system_state.safety_monitor);
+        g_system_state.safety_monitor = NULL;
     }
     if (SUBSYS_IS_INIT(SUBSYS_IDX_AUDIT_LOGGER)) {
         audit_logger_free((AuditLogger*)g_system_state.audit_logger);
         g_system_state.audit_logger = NULL;
     }
     if (SUBSYS_IS_INIT(SUBSYS_IDX_CONTENT_FILTER)) {
-        content_filter_free((ContentFilter*)g_system_state.content_filter);
+        content_filter_destroy((ContentFilter*)g_system_state.content_filter);
         g_system_state.content_filter = NULL;
     }
     /* 然后调用统一的shutdown_subsystems做全量清理（带NULL守卫） */

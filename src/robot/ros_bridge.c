@@ -15,6 +15,7 @@
 #include "selflnn/utils/logging.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/secure_random.h"
+#include "selflnn/utils/string_utils.h"  /* DEEP-005: safe_strdup宏 */
 
 #ifdef _WIN32
 static void* memmem(const void* haystack, size_t haystack_len,

@@ -1,10 +1,12 @@
-#include "selflnn/multimodal/unified_signal_processor_advanced.h"
+﻿#include "selflnn/multimodal/unified_signal_processor_advanced.h"
 #include "selflnn/utils/secure_random.h"
 #include "selflnn/utils/platform.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include <float.h>
+
+#include "selflnn/utils/memory_utils.h"  /* DEEP-005: safe_malloc宏定义 */
 
 #define ADAPTIVE_LOCK(r)   mutex_lock((r)->lock)
 #define ADAPTIVE_UNLOCK(r) mutex_unlock((r)->lock)

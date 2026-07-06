@@ -3,6 +3,7 @@
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/platform.h"
+#include "selflnn/utils/logging.h"  /* DEEP-005: log_warn宏 */
 #include "selflnn/core/port_config.h"
 
 #include <stdlib.h>

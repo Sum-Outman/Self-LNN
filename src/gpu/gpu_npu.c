@@ -11,7 +11,7 @@
 #include "selflnn/gpu/gpu.h"
 #include "selflnn/gpu/gpu_npu.h"
 #include "selflnn/core/common.h"
-#include "selflnn/utils/logging.h"
+#include "selflnn/utils/logging.h"   /* C-004修复: LOG_WARN需要此头文件 */
 #include "selflnn/utils/memory_utils.h"
 #include "gpu_internal.h"
 #include "npu_common.h"  /* H-016去重: 使用npu_common公共NPU接口 */
@@ -291,7 +291,7 @@ static int npu_try_load_sdk(void) {
     /* [H-016去重] 使用npu_common_load_library替代NPU_DLOPEN宏 */
     g_npu_sdk.handle = (NpuLibHandle)npu_common_load_library(lib_name);
     if (!g_npu_sdk.handle) {
-        LOG_WARN("无法加载NPU SDK库: %s", lib_name);
+        log_warn("无法加载NPU SDK库: %s", lib_name);
         return 0;
     }
 

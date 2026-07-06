@@ -2282,7 +2282,14 @@ SELFLNN_API int distributed_checkpoint_leader_sync(DistributedContext* ctx, cons
         for (int i = 1; i < ctx->num_nodes; i++) {
             if (ctx->nodes[i].connected && ctx->nodes[i].is_alive) {
                 /* 发送检查点路径 */
-                uint16_t path_len = (uint16_t)strnlen(filepath, 511);
+                uint16_t path_len;
+                {
+                    /* DEEP-005: MSVC strnlen兼容 */
+                    const char* p = filepath;
+                    size_t n = 0;
+                    while (n < 511 && p[n]) n++;
+                    path_len = (uint16_t)n;
+                }
                 distributed_send_to_node(ctx, i, MSG_CHECKPOINT_SAVE, 0,
                                          filepath, path_len + 1);
             }

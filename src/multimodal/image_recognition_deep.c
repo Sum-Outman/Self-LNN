@@ -1979,6 +1979,16 @@ int ird_load_pretrained_weights(IRDDeepManager* manager, const char* path) {
         /* P1-003修复: 添加静态断言验证架构常量与文件格式的一致性
          * 当架构参数变更时，此处编译会失败，提醒开发者同步更新skip_size
          * 注意: 256=IRDFineCfg默认hidden, 32=默认patch_dim, 64=默认coarse_dim */
+        /* DEEP-005修复: IRD_FINE_*宏未在任何头文件中定义，补充默认值 */
+        #ifndef IRD_FINE_HIDDEN
+        #define IRD_FINE_HIDDEN 256
+        #endif
+        #ifndef IRD_FINE_PATCH
+        #define IRD_FINE_PATCH 32
+        #endif
+        #ifndef IRD_FINE_COARSE
+        #define IRD_FINE_COARSE 64
+        #endif
         #if IRD_FINE_HIDDEN != 256 || IRD_FINE_PATCH != 32 || IRD_FINE_COARSE != 64
         #error "IRDFine架构常量已变更，请同步更新下面的skip_size计算"
         #endif

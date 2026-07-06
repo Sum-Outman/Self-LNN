@@ -1387,11 +1387,10 @@ int thread_pool_resize(ThreadPool* pool, size_t new_num_threads) {
         pthread_cond_broadcast(&pool->task_cond);
 #endif
         
-        /* FIX-010修复: 释放旧队列数组和锁数组，防止缩减后内存泄漏 */
+        /* FIX-010修复: 释放缩减后多余线程对应队列中的残留任务，防止内存泄漏 */
         for (size_t i = new_num_threads; i < old_num_threads; i++) {
             if (pool->thread_queues) {
-                ThreadPoolTask* q = pool->thread_queues[i % old_num_threads];
-                while (q) { ThreadPoolTask* n = q->next; safe_free((void**)&q); q = n; }
+                task_queue_clear(pool, &pool->thread_queues[i % old_num_threads]);
             }
         }
         

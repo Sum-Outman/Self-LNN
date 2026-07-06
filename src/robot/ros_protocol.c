@@ -19,6 +19,8 @@
 #include <stdio.h>
 #include <time.h>
 
+#include "selflnn/utils/memory_utils.h"  /* DEEP-005: safe_malloc宏定义 */
+
 #if defined(_WIN32)
 #include <winsock2.h>
 #include <ws2tcpip.h>

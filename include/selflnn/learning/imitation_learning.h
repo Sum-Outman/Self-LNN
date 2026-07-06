@@ -98,6 +98,9 @@ typedef struct {
     int verbose;                          /**< 详细输出 */
     int save_checkpoints;                 /**< 是否保存检查点 */
     char checkpoint_dir[256];             /**< 检查点保存目录 */
+    
+    /* DEEP-005修复: preferred_gpu_backend（imitation_learning.c交叉引用） */
+    int preferred_gpu_backend;            /**< 偏好的GPU后端（GpuBackend枚举值，-1=自动检测） */
 } ImitationLearningConfig;
 
 /**

@@ -5983,7 +5983,8 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
                             distributed_failure_rebuild_topology(trainer, failed_nodes, num_failed);
                             trainer->failure_recovery_attempts++;
                             /* TR-001修复: 恢复成功则重置计数器，避免3次后永久失去容错 */
-                            if (trainer->distributed_topology && trainer->distributed_topology->active) {
+                            /* DEEP-005修复: distributed_topology不存在，使用failure_recovery_enabled */
+                            if (trainer->failure_recovery_enabled) {
                                 trainer->failure_recovery_attempts = 0;
                             }
                             if (trainer->config.verbose) {

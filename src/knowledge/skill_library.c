@@ -65,8 +65,8 @@ static void generate_embedding_impl(const SkillRecord* record, float* embedding,
 /* 直接使用lnn_forward进行文本语义编码
      * 替代缺失的selflnn_shared_lnn_encode_text函数。文本→bigram特征→LNN前向。 */
     {
-        extern void* selflnn_get_shared_lnn(void);
-        void* shared_lnn = selflnn_get_shared_lnn();
+        /* DEEP-005修复: extern声明与SELFLNN_API LNN*类型冲突，移除extern */
+        LNN* shared_lnn = selflnn_get_shared_lnn();
         if (shared_lnn) {
             char text_buf[2048];
             int text_len = snprintf(text_buf, sizeof(text_buf), "%s %s", record->name, record->description);

@@ -196,6 +196,9 @@ int knowledge_base_add(KnowledgeBase* kb, const KnowledgeEntry* entry);
  */
 int knowledge_base_remove(KnowledgeBase* kb, int entry_id);
 
+/* DEEP-005: compat_link_stubs — 按键名删除知识条目 */
+int knowledge_base_remove_by_key(KnowledgeBase* kb, const char* key);
+
 /**
  * @brief 更新知识条目
  * 

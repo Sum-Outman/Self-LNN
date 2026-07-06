@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file memory_utils.c
  * @brief 内存工具库实现
  * 
@@ -11,6 +11,16 @@
 #undef safe_malloc
 #undef safe_calloc
 #undef safe_aligned_malloc
+
+/* DEEP-005修复: 前向声明使用实际函数名 _safe_malloc/_safe_calloc, safe_free为实际函数 */
+void* _safe_malloc(size_t size, const char* file, int line);
+void* _safe_calloc(size_t count, size_t size, const char* file, int line);
+void safe_free(void** ptr);
+
+/* DEEP-005修复: undef后重新定义宏，使文件内部调用也正确展开 */
+#define safe_malloc(size)       _safe_malloc(size, __FILE__, __LINE__)
+#define safe_calloc(count, sz)  _safe_calloc(count, sz, __FILE__, __LINE__)
+#define safe_aligned_malloc(sz, align) _safe_aligned_malloc(sz, align, __FILE__, __LINE__)
 
 #include <stdlib.h>
 #include <string.h>
@@ -1234,3 +1244,6 @@ int memory_unlock(void* ptr, size_t size) {
     
     return 0;
 }
+/* DEEP-005: safe_malloc wrapper for linker resolution (需先undef宏) */
+#undef safe_malloc
+void* safe_malloc(size_t size) { return _safe_malloc(size, __FILE__, __LINE__); }

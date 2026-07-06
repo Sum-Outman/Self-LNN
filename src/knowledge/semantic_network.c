@@ -287,6 +287,11 @@ void semantic_network_free(SemanticNetwork* network) {
     safe_free((void**)&network);
 }
 
+/* DEEP-005修复: semantic_network_destroy作为semantic_network_free的别名 */
+void semantic_network_destroy(SemanticNetwork* network) {
+    semantic_network_free(network);
+}
+
 /**
  * @brief 添加概念到语义网络（内部无锁版本，调用者需持有锁）
  */

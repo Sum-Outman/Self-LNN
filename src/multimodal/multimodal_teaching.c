@@ -1,4 +1,4 @@
-#include "selflnn/multimodal/multimodal_teaching.h"
+﻿#include "selflnn/multimodal/multimodal_teaching.h"
 #include "selflnn/core/tensor.h"
 #include "selflnn/core/cfc.h"
 #include "selflnn/core/lnn.h"
@@ -7,6 +7,8 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include "selflnn/utils/secure_random.h"
+
+#include "selflnn/utils/memory_utils.h"  /* DEEP-005: safe_malloc宏定义 */
 
 #define MT_MAX_SEQUENCES 256
 #define MT_MAX_FRAMES_PER_SEQUENCE 4096

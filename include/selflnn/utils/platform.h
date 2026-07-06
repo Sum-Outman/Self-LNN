@@ -30,7 +30,14 @@
  * 在非MSVC环境中，如果strnlen不可用，回退到手动实现。
  */
 #if defined(_MSC_VER)
-#define selflnn_strnlen(s, maxlen) _strnlen((s), (maxlen))
+/* DEEP-005: MSVC无_strnlen, 使用内联实现 */
+#ifndef selflnn_strnlen
+static __inline size_t selflnn_strnlen(const char* s, size_t maxlen) {
+    size_t n = 0;
+    while (n < maxlen && s[n]) n++;
+    return n;
+}
+#endif
 #else
 /* POSIX系统通常提供strnlen，但为安全起见提供回退实现 */
 #include <string.h>

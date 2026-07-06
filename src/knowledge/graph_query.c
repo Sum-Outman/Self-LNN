@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file graph_query.c
  * @brief 知识图谱查询引擎实现
  *
@@ -16,6 +16,7 @@
 #include <math.h>
 #include <ctype.h>
 #include <time.h>
+#include "selflnn/utils/logging.h"  /* DEEP-005: log宏 */
 
 /* 多跳推理最大跳数限制 */
 #define MAX_HOPS_DEFAULT 10

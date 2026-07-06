@@ -1,4 +1,4 @@
-#include "selflnn/training/model_parallel.h"
+﻿#include "selflnn/training/model_parallel.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/platform.h"
 #include "selflnn/gpu/gpu.h"
@@ -26,6 +26,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <time.h>
+#include "selflnn/utils/logging.h"  /* DEEP-005: log宏 */
 #define SOCKET int
 #define INVALID_SOCKET (-1)
 #define SOCKET_ERROR (-1)

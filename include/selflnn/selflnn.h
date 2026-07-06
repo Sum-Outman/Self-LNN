@@ -238,7 +238,12 @@ typedef struct KnowledgeGraph       KnowledgeGraph;
 typedef struct GraphReasoner        GraphReasoner;
 typedef struct GpuContext           GpuContext;
 typedef struct DialogueProcessor    DialogueProcessor;
+/* C-004修复: 避免DialogueMemory重复typedef。
+ * dialogue_memory.h 已通过 #include "selflnn/multimodal/dialogue_memory.h" (L79) 完整定义，
+ * 此处仅在不包含该头文件时提供前向声明。 */
+#if !defined(SELFLNN_DIALOGUE_MEMORY_H)
 typedef struct DialogueMemory       DialogueMemory;
+#endif
 typedef struct PlanningSystem       PlanningSystem;
 typedef struct OnlineLearner        OnlineLearner;
 typedef struct MultiAgentSystem     MultiAgentSystem;
@@ -299,6 +304,7 @@ typedef struct {
     int websocket_port;
     int distributed_port;
     int mixed_precision_mode;  /* M-035: 混合精度模式 (0=关闭, 1=auto, 2=FP16, 3=BF16) */
+    float custom_power_factor; /* DEEP-005: 自定义功耗因子，POWER_MODE_CUSTOM时使用，默认1.0 */
 } SystemConfig;
 
 typedef struct {

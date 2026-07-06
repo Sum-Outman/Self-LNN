@@ -301,11 +301,11 @@ int dynamics_update(DynamicsSystem* system, const float* input,
             break;
         case SOLVER_BDF2: {
             int bdf2_delegate_ok = 0;  /* F-016: 委托求解器成功标志 */
-            /* 尝试委托ode_solvers.c的BDF2实现 */
-            float* y = (float*)safe_malloc(2 * state_size * sizeof(float));
-            size_t ws_sz = ode_bdf2_workspace_size(2 * state_size);
-            float* bdf_ws = (float*)safe_malloc(ws_sz > 0 ? ws_sz : 4096);
-            if (y && bdf_ws) {
+            /* P0-R2修复: 使用预分配workspace替代每步safe_malloc，消除高频堆分配性能瓶颈 */
+            size_t ws_needed = 2 * state_size + ode_bdf2_workspace_size(2 * state_size);
+            if (ws_needed <= 15 * state_size + sizeof(float)) {
+                float* y = system->workspace;                    /* y[0..2*state_size-1] */
+                float* bdf_ws = system->workspace + 2 * state_size; /* BDF2求解器工作区 */
                 for (size_t i = 0; i < state_size; i++) {
                     y[i] = system->state[i];
                     y[state_size + i] = system->velocity[i];
@@ -331,7 +331,6 @@ int dynamics_update(DynamicsSystem* system, const float* input,
                 if (!system->bdf2_initialized) system->bdf2_initialized = 1;
                 bdf2_delegate_ok = 1;  /* F-016: 标记委托求解器成功 */
             }
-            safe_free((void**)&y); safe_free((void**)&bdf_ws);
             /* F-016修复: 原代码在safe_free后将y和bdf_ws置NULL，条件恒真导致委托求解器永远不被使用。
              * 改为使用标志位判断委托求解器是否成功，失败时才回退到内部求解器。 */
             if (!bdf2_delegate_ok) {
@@ -344,10 +343,11 @@ int dynamics_update(DynamicsSystem* system, const float* input,
             break;
         }
         case SOLVER_DP54: {
-            /* 委托ode_solvers.c的DP54实现 */
-            float* y = (float*)safe_malloc(2 * state_size * sizeof(float));
-            float* ws = (float*)safe_malloc(ode_dp54_workspace_size(2 * state_size));
-            if (y && ws) {
+            /* P0-R2修复: 使用预分配workspace，消除DP54每步堆分配 */
+            size_t ws_needed = 2 * state_size + ode_dp54_workspace_size(2 * state_size);
+            if (ws_needed <= 15 * state_size + sizeof(float)) {
+                float* y = system->workspace;
+                float* ws = system->workspace + 2 * state_size;
                 for (size_t i = 0; i < state_size; i++) {
                     y[i] = system->state[i];
                     y[state_size + i] = system->velocity[i];
@@ -374,18 +374,17 @@ int dynamics_update(DynamicsSystem* system, const float* input,
                     system->state[i] = y[i];
                     system->velocity[i] = y[state_size + i];
                 }
+            } else {
+                actual_dt = dynamics_internal_solve_dp54(system, input, dt);
             }
-            int dp54_alloc_ok = (y != NULL && ws != NULL);
-            safe_free((void**)&y); safe_free((void**)&ws);
-            if (!dp54_alloc_ok) actual_dt = dynamics_internal_solve_dp54(system, input, dt);
             break;
         }
         case SOLVER_ROSENBROCK: {
-            /* 委托ode_solvers.c的Rosenbrock实现 */
-            float* y = (float*)safe_malloc(2 * state_size * sizeof(float));
-            size_t ws_sz = ode_rosenbrock_workspace_size(2 * state_size);
-            float* ws = (float*)safe_malloc(ws_sz > 0 ? ws_sz : 4096);
-            if (y && ws) {
+            /* P0-R2修复: 使用预分配workspace，消除Rosenbrock每步堆分配 */
+            size_t ws_needed = 2 * state_size + ode_rosenbrock_workspace_size(2 * state_size);
+            if (ws_needed <= 15 * state_size + sizeof(float)) {
+                float* y = system->workspace;
+                float* ws = system->workspace + 2 * state_size;
                 for (size_t i = 0; i < state_size; i++) {
                     y[i] = system->state[i];
                     y[state_size + i] = system->velocity[i];
@@ -408,18 +407,18 @@ int dynamics_update(DynamicsSystem* system, const float* input,
                     system->state[i] = y[i];
                     system->velocity[i] = y[state_size + i];
                 }
+            } else {
+                dynamics_internal_solve_rosenbrock(system, input, dt);
             }
-            int rb_alloc_ok = (y != NULL && ws != NULL);
-            safe_free((void**)&y); safe_free((void**)&ws);
-            if (!rb_alloc_ok) dynamics_internal_solve_rosenbrock(system, input, dt);
             break;
         }
         case SOLVER_FOREST_RUTH: {
-            /* 委托ode_solvers.c的Forest-Ruth辛积分器 */
-            float* q = (float*)safe_malloc(state_size * sizeof(float));
-            float* p = (float*)safe_malloc(state_size * sizeof(float));
-            float* ws = (float*)safe_malloc(ode_forest_ruth_workspace_size(state_size));
-            if (q && p && ws) {
+            /* P0-R2修复: 使用预分配workspace，消除Forest-Ruth每步堆分配 */
+            size_t ws_needed = 2 * state_size + ode_forest_ruth_workspace_size(state_size);
+            if (ws_needed <= 15 * state_size + sizeof(float)) {
+                float* q = system->workspace;
+                float* p = system->workspace + state_size;
+                float* ws = system->workspace + 2 * state_size;
                 memcpy(q, system->state, state_size * sizeof(float));
                 memcpy(p, system->velocity, state_size * sizeof(float));
                 SymplecticConfig sym_cfg;
@@ -432,10 +431,9 @@ int dynamics_update(DynamicsSystem* system, const float* input,
                 (void)steps;
                 memcpy(system->state, q, state_size * sizeof(float));
                 memcpy(system->velocity, p, state_size * sizeof(float));
+            } else {
+                dynamics_internal_solve_forest_ruth(system, input, dt);
             }
-            int fr_alloc_ok = (q != NULL && p != NULL && ws != NULL);
-            safe_free((void**)&q); safe_free((void**)&p); safe_free((void**)&ws);
-            if (!fr_alloc_ok) dynamics_internal_solve_forest_ruth(system, input, dt);
             break;
         }
         default:

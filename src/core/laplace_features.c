@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file laplace_features.c
  * @brief 拉普拉斯特征提取 —— 空间/结构特征层（Spatial/Structural Feature Layer）
  *
@@ -41,6 +41,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+
+#include "selflnn/utils/memory_utils.h"  /* DEEP-005: safe_malloc宏定义 */
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846

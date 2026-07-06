@@ -11,6 +11,7 @@
 
 #include <stddef.h>
 #include <stdio.h>
+#include <stdint.h>   /* DEEP-004修复: uint32_t需要stdint.h，cfc_cell.c作为首个包含者缺少此依赖 */
 
 #include "selflnn/core/ode_solvers.h"
 

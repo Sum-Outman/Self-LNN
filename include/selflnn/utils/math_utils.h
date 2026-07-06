@@ -16,6 +16,13 @@
 extern "C" {
 #endif
 
+/* C-004修复: MSVC C4030警告(第一个形参表比第二个长)由Matrix匿名结构体引起。
+ * 这是MSVC特有行为，不影响功能正确性。在MSVC上抑制此警告。 */
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable:4030)
+#endif
+
 /**
  * @brief 激活函数类型
  */
@@ -687,6 +694,11 @@ void selflnn_sha256_hash(const uint8_t* input, size_t input_len, uint8_t output[
 
 #ifdef __cplusplus
 }
+#endif
+
+/* C-004修复: 恢复MSVC C4030警告（仅在math_utils.h范围内禁用） */
+#ifdef _MSC_VER
+#pragma warning(pop)
 #endif
 
 #endif /* SELFLNN_MATH_UTILS_H */

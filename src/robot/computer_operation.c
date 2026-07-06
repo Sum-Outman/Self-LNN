@@ -61,6 +61,8 @@ const char CO_OCR_CHARSET[CO_OCR_NUM_CLASSES] = {
 #ifdef __linux__
 #include <stdlib.h>
 
+#include "selflnn/utils/memory_utils.h"  /* DEEP-005: safe_malloc宏定义 */
+
 /* 检测当前是否运行在Wayland环境下 */
 static int co_linux_is_wayland(void) {
     /* 检查 WAYLAND_DISPLAY 环境变量 */

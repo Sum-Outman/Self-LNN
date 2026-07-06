@@ -10,7 +10,18 @@
 #include "selflnn/learning/multi_agent.h" /* 多智能体系统启停控制 */
 #include <string.h>
 #include <stdio.h>
-#include <stdatomic.h>  /* P2修复: atomic_int替代volatile，确保原子性 */
+/* DEEP-005修复: MSVC不支持C11 <stdatomic.h>, 使用volatile替代 */
+/* #include <stdatomic.h> */
+
+/* DEEP-005: MSVC C11 atomic兼容层 — 使用Interlocked API */
+#ifdef _MSC_VER
+#include <intrin.h>
+typedef volatile long atomic_int;
+#define atomic_compare_exchange_strong(ptr, expected, desired) \
+    (InterlockedCompareExchange((long volatile*)(ptr), (long)(desired), *(long*)(expected)) == *(long*)(expected))
+#define atomic_store(ptr, val)  InterlockedExchange((long volatile*)(ptr), (long)(val))
+#define atomic_load(ptr)        InterlockedCompareExchange((long volatile*)(ptr), 0, 0)
+#endif
 
 /* P2-007修复: 跨平台互斥锁保护全局能力状态 */
 #ifdef _WIN32

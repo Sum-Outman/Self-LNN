@@ -301,6 +301,9 @@ int gpu_is_cpu_backend(void);
 /* GPU可用性快速检测 */
 int gpu_is_available(void);
 
+/* DEEP-005: compat_link_stubs — 按名称设置GPU后端 */
+int gpu_set_backend_by_name(const char* gpu_backend, const char* name, int device_id);
+
 /**
  * @brief 清理GPU系统
  */

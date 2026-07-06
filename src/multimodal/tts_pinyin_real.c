@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file tts_pinyin_real.c
  * @brief 真实汉字→拼音映射（7174个汉字精确映射 + Unicode启发式扩展）
  * 
@@ -13,6 +13,8 @@
 #include <stdio.h>
 #include <math.h>
 #include <stdlib.h>
+
+#include "selflnn/utils/memory_utils.h"  /* DEEP-005: safe_malloc宏定义 */
 
 #define RP_TABLE_SIZE (sizeof(rp_table)/sizeof(rp_table[0]))
 

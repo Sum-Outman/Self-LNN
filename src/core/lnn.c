@@ -97,7 +97,7 @@ static inline void lnn_clip_gradients(float* grads, size_t count, float max_norm
  */
 LNN* lnn_create(const LNNConfig* config) {
     if (!config) {
-        selflnn_set_last_error(SELFLNN_ERROR_INVALID_PARAMETER,
+        SELFLNN_SET_ERROR(SELFLNN_ERROR_INVALID_PARAMETER,
             "lnn_create", "配置指针为空", "请提供有效的LNNConfig配置");
         return NULL;
     }
@@ -119,7 +119,7 @@ LNN* lnn_create(const LNNConfig* config) {
     
     // 验证配置参数
     if (config->input_size == 0 || config->hidden_size == 0 || config->output_size == 0) {
-        selflnn_set_last_error(SELFLNN_ERROR_INVALID_PARAMETER,
+        SELFLNN_SET_ERROR(SELFLNN_ERROR_INVALID_PARAMETER,
             "lnn_create", "无效的配置参数(input_size/hidden_size/output_size为0)",
             "所有维度参数必须大于0");
         return NULL;
@@ -128,7 +128,7 @@ LNN* lnn_create(const LNNConfig* config) {
     // 分配内存
     LNN* network = (LNN*)safe_malloc(sizeof(LNN));
     if (!network) {
-        selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY,
+        SELFLNN_SET_ERROR(SELFLNN_ERROR_OUT_OF_MEMORY,
             "lnn_create", "内存分配失败(LNN结构体)",
             "请检查系统内存或减少模型参数规模");
         return NULL;
@@ -458,7 +458,17 @@ int _lnn_forward_internal(LNN* network, const float* input, float* output) {
             float d = network->input_buffer[i] - mean;
             var += d * d;
         }
-        var = var / (float)n + 1e-8f;
+        var = var / (float)n;
+        /* P1-R1修复: 添加最小方差保护，防止全零输入导致inv_std=10000过度放大。
+         * 对于维度>=64的输入，方差<1e-6表示输入几乎恒定，应跳过归一化。 */
+        if (var < 1e-6f) {
+            if (n >= 64) {
+                /* 大维度输入全恒定，跳过归一化直接继续 */
+                goto after_layer_norm;
+            }
+            var = 1e-6f;
+        }
+        var += 1e-8f;
         float inv_std = 1.0f / sqrtf(var);
         for (size_t i = 0; i < n; i++) {
             float z = (network->input_buffer[i] - mean) * inv_std;
@@ -467,6 +477,7 @@ int _lnn_forward_internal(LNN* network, const float* input, float* output) {
             network->input_buffer[i] = z;
         }
     }
+    after_layer_norm:
 
     /* 拉普拉斯频域预处理：在CfC前向传播之前对输入进行稳定性滤波，
      * 避免后处理覆盖CfC的输出投影矩阵计算结果 */

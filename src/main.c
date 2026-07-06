@@ -5,6 +5,7 @@
 
 /* M-001修复: 引入CMake生成的统一版本头文件，替换硬编码VERSION_MAJOR/MINOR/PATCH */
 #include "selflnn/version.h"
+#include "selflnn/utils/memory_utils.h"  /* DEEP-005: safe_malloc/safe_free宏 */
 #include "selflnn/backend/backend.h"
 #include "selflnn/backend/websocket_push.h"
 #include "selflnn/cognition/self_cognition.h"
@@ -50,6 +51,7 @@
 #include "selflnn/utils/secure_random.h"
 #include "selflnn/selflnn.h"
 #include "selflnn/evolution/evolution_engine.h"
+#include "selflnn/core/extended_training.h"  /* DEEP-005: lnn_self_supervised_pretrain声明 */
 #include "selflnn/evolution/neural_architecture_search.h"             /* NAS周期触发 */
 #include "selflnn/safety/safety_monitor.h"
 #include "selflnn/safety/audit_logger.h"
@@ -92,6 +94,11 @@
 #endif
 
 /* 静态函数前向声明 */
+/* DEEP-005: compat_link_stubs 外部声明 — 匹配修正后的签名 */
+extern int teaching_get_pending_demonstrations(void* ts);
+extern int teaching_consume_and_train_imitation(void* ts, void* il_learner, int max_demos);
+extern int multisystem_get_device_count(void* engine, size_t* device_count);
+
 static int is_subsystem_healthy_int(const char* name, void* handle, int (*is_init)(void*));
 static size_t ullnn_input_dimension_estimate(void* lnn_ptr);
 
@@ -224,11 +231,11 @@ static void slam_camera_frame_callback(const uint8_t* rgb_data, int width, int h
     safe_free((void**)&float_frame);
 }
 static DistributedContext* g_distributed = NULL;           /* 分布式上下文(selflnn管理) */
-static LbBalancer* g_load_balancer = NULL;                /* 负载均衡(selflnn管理) */
+static LoadBalancer* g_load_balancer = NULL;             /* 负载均衡(selflnn管理) */
 static AuditLogger* g_audit_logger = NULL;                /* 审计日志(selflnn管理) */
 static ContentFilter* g_content_filter = NULL;            /* 内容过滤(selflnn管理) */
 static SelfProgrammingEngine* g_prog_engine = NULL;       /* 自我编程引擎(selflnn管理) */
-static SecBehaviorMonitor* g_sec_behavior = NULL;         /* 深度安全行为监控 */
+static SecurityMonitorDeep* g_sec_behavior = NULL;        /* 深度安全行为监控 */
 static AGISystem* g_agi_system = NULL; /* AGI认知系统 */
 static TaskScheduler* g_task_scheduler = NULL; /* 任务调度器 */
 
@@ -2007,8 +2014,8 @@ static void agi_background_loop_iteration(void) {
         static int lb_check_counter = 0;
         lb_check_counter++;
         if (lb_check_counter % 15 == 0 && g_load_balancer) {
-            lb_check_health(g_load_balancer);
-            lb_rebalance(g_load_balancer);
+            lb_check_health((LbBalancer*)g_load_balancer);
+            lb_rebalance((LbBalancer*)g_load_balancer);
         }
     }
 
@@ -2348,6 +2355,20 @@ static void print_system_info(int port, int ws_port)
     printf("  GPU支持:       CUDA / ROCm / OpenCL / Metal / Vulkan\n");
     printf("\n");
 }
+
+/* DEEP-005修复: MSVC不支持嵌套函数，ws_poll_thread移出为静态函数 */
+#ifdef _WIN32
+static DWORD WINAPI ws_poll_thread_func(LPVOID arg) {
+    (void)arg;
+    while (g_agi_running) {
+        if (g_ws_push_server) {
+            ws_push_server_poll(g_ws_push_server, 100);
+        }
+        Sleep(100);
+    }
+    return 0;
+}
+#endif
 
 /* DC-1清理: 旧的Mini HTTP服务器代码已移除，由 backend_server 模块完整替代 */
 
@@ -3134,16 +3155,7 @@ main_loop_restart:
      * 独立线程以100ms高频轮询，确保消息实时处理、心跳及时发送。 */
 #ifdef _WIN32
     {
-        static DWORD WINAPI ws_poll_thread_func(LPVOID arg) {
-            (void)arg;
-            while (g_agi_running) {
-                if (g_ws_push_server) {
-                    ws_push_server_poll(g_ws_push_server, 100);
-                }
-                Sleep(100);
-            }
-            return 0;
-        }
+        /* DEEP-005修复: ws_poll_thread_func已外置为静态函数 */
         HANDLE ws_thread = CreateThread(NULL, 0, ws_poll_thread_func, NULL, 0, NULL);
         if (ws_thread) CloseHandle(ws_thread);
     }

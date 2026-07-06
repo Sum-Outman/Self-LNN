@@ -1,4 +1,5 @@
 #include "selflnn/concurrency/rcu.h"
+#include "selflnn/core/common.h"
 #include "selflnn/utils/memory_utils.h"
 #include <stdlib.h>
 #include <string.h>
@@ -123,7 +124,7 @@ static int rcu_allocate_thread_id(RcuDomain* domain) {
             domain->thread_in_read_section[i] = 0;
             domain->thread_reader_count[i] = 0;
             /* P2修复: 使用原子存储替代plain volatile写入 */
-            __sync_lock_test_and_set(&domain->reader_epochs[i], 0);
+            SELFLNN_ATOMIC_TEST_AND_SET(&domain->reader_epochs[i], 0);
             atomic_increment(&domain->registered_thread_count);
             return i;
         }
@@ -136,7 +137,7 @@ static void rcu_release_thread_id(RcuDomain* domain, int thread_id) {
     domain->thread_active[thread_id] = 0;
     domain->thread_in_read_section[thread_id] = 0;
     /* P2修复: 原子释放清除epoch */
-    __sync_lock_release(&domain->reader_epochs[thread_id]);
+    SELFLNN_ATOMIC_RELEASE(&domain->reader_epochs[thread_id]);
     atomic_decrement(&domain->registered_thread_count);
 }
 
@@ -172,8 +173,8 @@ static int rcu_wait_for_epoch(RcuDomain* domain, long old_epoch) {
         int all_done = 1;
         for (int i = 0; i < MAX_RCU_THREADS; i++) {
             if (domain->thread_active[i]) {
-                /* P2修复: 使用atomic_load替代plain volatile读取 */
-                long rep = __sync_add_and_fetch(&domain->reader_epochs[i], 0);
+                /* P2修复: 使用原子加载替代plain volatile读取 */
+                long rep = SELFLNN_ATOMIC_ADD_AND_FETCH(&domain->reader_epochs[i], 0);
                 /* 读者在旧epoch中：尚未退出 */
                 if (rep != 0 && rep == old_epoch) {
                     all_done = 0;
@@ -379,7 +380,7 @@ void rcu_read_lock(RcuDomain* domain) {
     if (g_tls_rcu_thread_id >= 0 && g_tls_rcu_thread_id < MAX_RCU_THREADS) {
         domain->thread_in_read_section[g_tls_rcu_thread_id] = 1;
         /* P2修复: 原子存储确保epoch对写者可见 */
-        __sync_lock_test_and_set(&domain->reader_epochs[g_tls_rcu_thread_id], domain->global_epoch);
+        SELFLNN_ATOMIC_TEST_AND_SET(&domain->reader_epochs[g_tls_rcu_thread_id], domain->global_epoch);
     }
     atomic_increment(&domain->active_readers);
     atomic_thread_fence();
@@ -392,7 +393,7 @@ void rcu_read_unlock(RcuDomain* domain) {
     if (g_tls_rcu_thread_id >= 0 && g_tls_rcu_thread_id < MAX_RCU_THREADS) {
         domain->thread_in_read_section[g_tls_rcu_thread_id] = 0;
         /* P2修复: 原子存储清除epoch，并用release语义确保写者可见 */
-        __sync_lock_release(&domain->reader_epochs[g_tls_rcu_thread_id]);
+        SELFLNN_ATOMIC_RELEASE(&domain->reader_epochs[g_tls_rcu_thread_id]);
     }
     atomic_decrement(&domain->active_readers);
     atomic_thread_fence();
@@ -433,7 +434,7 @@ void rcu_synchronize(RcuDomain* domain) {
     if (!domain || !domain->is_initialized) return;
 
     /* FIX-012修复: 使用原子读取registered_thread_count */
-    int registered = atomic_load(&domain->registered_thread_count);
+    int registered = (int)(intptr_t)SELFLNN_ATOMIC_LOAD_PTR(&domain->registered_thread_count);
     if (registered <= 0) {
         rcu_process_callbacks(domain);
         /* L-010: 无注册线程时也处理epoch回调 */

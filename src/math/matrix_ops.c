@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file matrix_ops.c
  * @brief 矩阵运算接口实现 —— 原始浮点数组API
  *
@@ -15,6 +15,8 @@
 #include <math.h>
 #include <time.h>
 #include <stdlib.h>
+
+#include "selflnn/utils/memory_utils.h"  /* DEEP-005: safe_malloc宏定义 */
 
 /* K-013修复：运行时CPU特性检测 */
 #ifdef _WIN32

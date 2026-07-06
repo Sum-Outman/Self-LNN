@@ -3465,9 +3465,10 @@ function addTaskToQueue() {
     if (taskQueue) {
         const newTask = document.createElement('div');
         newTask.className = 'queue-item';
+        /* C-003修复: 任务描述使用escapeHtml防止XSS */
         newTask.innerHTML = `
-            <span class="task-name">${typeNames[taskType]}: ${taskDescription}</span>
-            <span class="task-priority ${taskPriority}">${priorityNames[taskPriority]}</span>
+            <span class="task-name">${window.escapeHtml(typeNames[taskType])}: ${window.escapeHtml(taskDescription)}</span>
+            <span class="task-priority ${window.escapeHtml(taskPriority)}">${window.escapeHtml(priorityNames[taskPriority])}</span>
             <span class="task-eta">时间: 未指定</span>
         `;
         taskQueue.appendChild(newTask);
@@ -7620,10 +7621,10 @@ async function searchMemories() {
                     if (pageInfo) pageInfo.textContent = '第 0 页，共 0 页';
                 } else {
                     container.innerHTML = entries.map(function(e) {
-                        var time = e.created_at || e.time || '';
+                        var time = window.escapeHtml(e.created_at || e.time || '');
                         return '<div class="memory-entry">' +
-                            '<div class="memory-entry-type">' + (e.type || 'unknown') + '</div>' +
-                            '<div class="memory-entry-content">' + (e.content || '') + '</div>' +
+                            '<div class="memory-entry-type">' + window.escapeHtml(e.type || 'unknown') + '</div>' +
+                            '<div class="memory-entry-content">' + window.escapeHtml(e.content || '') + '</div>' +
                             '<div class="memory-entry-time">' + time + '</div>' +
                             '</div>';
                     }).join('');
@@ -8343,9 +8344,9 @@ async function refreshDevices() {
             return;
         }
         container.innerHTML = devices.map(function(d) {
-            var name = d.name||'未知设备', type = d.type||'-';
+            var name = window.escapeHtml(d.name||'未知设备'), type = window.escapeHtml(d.type||'-');
             var sc = d.online ? 'active' : 'inactive', st = d.online ? '在线' : '离线';
-            var bat = d.battery != null ? d.battery+'%' : '-', conn = d.connection||'-';
+            var bat = d.battery != null ? (d.battery+'%') : '-', conn = window.escapeHtml(d.connection||'-');
             return '<div class="card" style="margin:0"><div class="card-header"><h3>' + name + '</h3></div>' +
             '<div class="card-content">' +
             '<div class="metric"><span class="metric-label">类型</span><span class="metric-value">' + type + '</span></div>' +

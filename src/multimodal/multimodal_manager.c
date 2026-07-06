@@ -360,12 +360,13 @@ int multimodal_manager_process(MultimodalManager* manager,
     /* H-018集成: 在触觉数据到达时进行CfC触觉深度处理 */
     /* MM-001修复: 触觉处理优先使用专用haptic_data参数而非传感器数据 */
     if (manager->haptic_cfc_proc && haptic_data) {
+        const float* hd = (const float*)haptic_data; /* DEEP-005: void*→float*显式转换 */
         HapticReading hr;
         memset(&hr, 0, sizeof(HapticReading));
-        if (haptic_data[0] > 0.0f || haptic_data[1] > 0.0f) {
+        if (hd[0] > 0.0f || hd[1] > 0.0f) {
             size_t press_copy = 16;
             for (size_t i = 0; i < press_copy; i++)
-                hr.pressure[i] = (i < 64) ? haptic_data[i] : 0.0f;
+                hr.pressure[i] = (i < 64) ? hd[i] : 0.0f;
             hr.sensor_count = 16;
         }
         float cfc_features[64];

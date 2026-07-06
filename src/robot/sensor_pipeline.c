@@ -1,9 +1,11 @@
-#include "selflnn/robot/sensor_pipeline.h"
+﻿#include "selflnn/robot/sensor_pipeline.h"
 #include "selflnn/utils/platform.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
+
+#include "selflnn/utils/memory_utils.h"  /* DEEP-005: safe_malloc宏定义 */
 
 #if defined(_WIN32)
 #include <winsock2.h>

@@ -1,4 +1,4 @@
-#include "selflnn/training/training_monitor.h"
+﻿#include "selflnn/training/training_monitor.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/knowledge/knowledge.h"          /* KG持久化: 训练指标→知识库 */
 #include <stdlib.h>
@@ -14,6 +14,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include "selflnn/utils/logging.h"  /* DEEP-005: log宏 */
 #endif
 
 /* ============================================================================

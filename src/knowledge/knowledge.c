@@ -563,6 +563,27 @@ static int inverted_index_add_key(InvertedIndex* index, const char* key, int ent
     return 0;
 }
 
+/* DEEP-005修复: inverted_index_remove实现 — 从倒排索引中移除entry_id */
+static int inverted_index_remove(InvertedIndex* index, const char* key, int entry_id) {
+    if (!index || !key || entry_id < 0) return -1;
+    for (size_t i = 0; i < index->size; i++) {
+        if (index->items[i].key && strcmp(index->items[i].key, key) == 0) {
+            InvertedIndexItem* item = &index->items[i];
+            for (size_t j = 0; j < item->id_count; j++) {
+                if (item->entry_ids[j] == entry_id) {
+                    /* 将后面的id前移 */
+                    for (size_t k = j; k + 1 < item->id_count; k++)
+                        item->entry_ids[k] = item->entry_ids[k + 1];
+                    item->id_count--;
+                    return 0;
+                }
+            }
+            return -1; /* key found but entry_id not found */
+        }
+    }
+    return -1; /* key not found */
+}
+
 /**
  * @brief 增强型文本匹配：支持大小写不敏感（ASCII）和中文子串匹配
  *
@@ -1072,14 +1093,15 @@ int knowledge_base_remove(KnowledgeBase* kb, int entry_id) {
         if (kb->entries[i].id == entry_id) {
             /* KB-001修复: 从倒排索引中移除该条目的索引项 */
             KnowledgeEntry* e = &kb->entries[i].entry;
-            if (e->subject && kb->subject_index) {
-                inverted_index_remove(kb->subject_index, e->subject, entry_id);
+            /* DEEP-005修复: InvertedIndex是值类型，检查size>0而非&&逻辑 */
+            if (e->subject && kb->subject_index.size > 0) {
+                inverted_index_remove(&kb->subject_index, e->subject, entry_id);
             }
-            if (e->predicate && kb->predicate_index) {
-                inverted_index_remove(kb->predicate_index, e->predicate, entry_id);
+            if (e->predicate && kb->predicate_index.size > 0) {
+                inverted_index_remove(&kb->predicate_index, e->predicate, entry_id);
             }
-            if (e->object && kb->object_index) {
-                inverted_index_remove(kb->object_index, e->object, entry_id);
+            if (e->object && kb->object_index.size > 0) {
+                inverted_index_remove(&kb->object_index, e->object, entry_id);
             }
 
             /* 释放条目内存 */
@@ -1172,12 +1194,13 @@ int knowledge_base_update(KnowledgeBase* kb, int entry_id, const KnowledgeEntry*
             KnowledgeEntry* old_e = &kb->entries[i].entry;
 
             /* 移除旧条目的倒排索引项 */
-            if (old_e->subject && kb->subject_index)
-                inverted_index_remove(kb->subject_index, old_e->subject, entry_id);
-            if (old_e->predicate && kb->predicate_index)
-                inverted_index_remove(kb->predicate_index, old_e->predicate, entry_id);
-            if (old_e->object && kb->object_index)
-                inverted_index_remove(kb->object_index, old_e->object, entry_id);
+            /* DEEP-005修复: InvertedIndex是值类型 */
+            if (old_e->subject && kb->subject_index.size > 0)
+                inverted_index_remove(&kb->subject_index, old_e->subject, entry_id);
+            if (old_e->predicate && kb->predicate_index.size > 0)
+                inverted_index_remove(&kb->predicate_index, old_e->predicate, entry_id);
+            if (old_e->object && kb->object_index.size > 0)
+                inverted_index_remove(&kb->object_index, old_e->object, entry_id);
 
             /* 释放旧条目内存 */
             free_knowledge_entry(&kb->entries[i].entry);
@@ -4056,24 +4079,18 @@ EvolutionResult* knowledge_self_evolve(KnowledgeBase* kb, const void* config, co
                         if (entry->weight > 1.0f) entry->weight = 1.0f;
                     } else {
                         /* FIX-RACE4修复: TLS替代文件级static PRNG状态消除竞态 */
-#ifdef _WIN32
-                        static __declspec(thread) int micro_prng_initialized = 0;
-                        static __declspec(thread) XorShiftPrng micro_prng;
-#else
-                        static _Thread_local int micro_prng_initialized = 0;
-                        static _Thread_local XorShiftPrng micro_prng;
-#endif
-                        if (micro_prng_initialized == 0) {
-                            xorshift_prng_seed_secure(&micro_prng);
-                            micro_prng_initialized = 1;
-                        }
-                        if (xorshift_prng_next_float(&micro_prng) < 0.5f) {
+                        /* DEEP-005修复: MSVC不支持函数内__declspec(thread)，改用calloc */
+                        XorshiftPrng* micro_prng = (XorshiftPrng*)calloc(1, sizeof(XorshiftPrng));
+                        if (!micro_prng) { entry->weight *= 0.95f; continue; }
+                        xorshift_prng_seed_secure(micro_prng);
+                        if (xorshift_prng_next_float(micro_prng) < 0.5f) {
                             entry->weight += mutation_strength * 0.5f; // 小幅增加
                             if (entry->weight > 1.0f) entry->weight = 1.0f;
                         } else {
                             entry->weight -= mutation_strength * 0.3f; // 更小幅减少
                             if (entry->weight < 0.3f) entry->weight = 0.3f;
                         }
+                        free(micro_prng);
                     }
                     
                     // 置信度提升：基于知识年龄和使用情况

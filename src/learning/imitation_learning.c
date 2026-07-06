@@ -116,13 +116,12 @@ ImitationLearner* imitation_learner_create(const ImitationLearningConfig* config
     
     /* P0-M001修复: 根据配置动态选择GPU后端，不再强制CPU */
     if (config->enable_gpu_acceleration) {
-        GpuBackendType backend = GPU_BACKEND_CPU;
-        /* 优先使用配置指定的GPU后端 */
+        /* DEEP-005修复: GpuBackendType→GpuBackend, gpu_detect_backend→gpu_auto_select */
+        GpuBackend backend = GPU_BACKEND_CPU;
         if (config->preferred_gpu_backend >= 0) {
-            backend = (GpuBackendType)config->preferred_gpu_backend;
+            backend = (GpuBackend)config->preferred_gpu_backend;
         } else {
-            /* 自动检测: 尝试CUDA > OpenCL > Vulkan > Metal > CPU */
-            backend = gpu_detect_backend();
+            backend = gpu_auto_select();
             if (backend == GPU_BACKEND_CPU) {
                 log_info("[模仿学习] 未检测到GPU, 回退到CPU计算");
             } else {

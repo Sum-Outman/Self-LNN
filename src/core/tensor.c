@@ -114,8 +114,12 @@ static void compute_strides(size_t* strides, const int* shape, int ndim, TensorS
             stride *= (size_t)shape[i];
         }
     } else {
-        // 对于稀疏和压缩格式，步幅不适用，设置为0
-        memset(strides, 0, sizeof(size_t) * ndim);
+        /* P1-R8修复: 非DENSE格式（稀疏/CSR/CSC等）的步幅设为SIZE_MAX哨兵值，
+         * 替代原来的全零设置。全零会导致通过步幅计算偏移时始终返回0，
+         * 造成所有索引指向第0个元素。SIZE_MAX哨兵值在误用时更容易被检测到。 */
+        for (int i = 0; i < ndim; i++) {
+            strides[i] = (size_t)-1;  /* SIZE_MAX哨兵值 */
+        }
     }
 }
 

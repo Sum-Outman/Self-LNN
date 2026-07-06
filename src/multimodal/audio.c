@@ -1398,6 +1398,14 @@ void audio_capture_free(AudioCaptureContext* ctx) {
     SetLastError(0);
 }
 
+/* DEEP-005修复: audio_capture_get_spectrum stub (原audio_capture.c已排除) */
+int audio_capture_get_spectrum(AudioCaptureContext* ctx, float* spectrum, int* fft_size) {
+    (void)ctx;
+    if (fft_size) *fft_size = 0;
+    if (spectrum) memset(spectrum, 0, sizeof(float) * 1024);
+    return 0;
+}
+
 #elif defined(__APPLE__)
 /* ==================== macOS CoreAudio 捕获 ==================== */
 #include <CoreAudio/CoreAudio.h>
@@ -1883,5 +1891,4 @@ void audio_capture_free(AudioCaptureContext* ctx) {
     }
     safe_free((void**)&ctx);
 }
-
 #endif /* 平台选择 */

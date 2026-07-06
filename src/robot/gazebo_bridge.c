@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file gazebo_bridge.c
  * @brief SELF-LNN 与 Gazebo 的桥接实现 — F-003修复: 使用真实gz CLI命令
  *
@@ -13,6 +13,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+
+#include "selflnn/utils/memory_utils.h"  /* DEEP-005: safe_malloc宏定义 */
 
 #ifdef _WIN32
 #include <windows.h>

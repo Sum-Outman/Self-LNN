@@ -153,6 +153,8 @@ int safety_circuit_breaker_report_success(SafetyMonitor* monitor, int subsystem_
 int safety_circuit_breaker_check_allowed(SafetyMonitor* monitor, int subsystem_id);
 void safety_circuit_breaker_reset(SafetyMonitor* monitor);
 int safety_circuit_breaker_get_state(const SafetyMonitor* monitor);
+int safety_circuit_breaker_open(SafetyMonitor* monitor);     /* DEEP-005: 缺失声明 */
+int safety_circuit_breaker_close(SafetyMonitor* monitor);    /* DEEP-005: 缺失声明 */
 
 /**
  * @brief 关联紧急停止系统（安全事件自动触发紧急停止）

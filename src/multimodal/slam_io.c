@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file slam_io.c
  * @brief SLAM输入输出模块
  *
@@ -10,6 +10,9 @@
  */
 
 #include "selflnn/multimodal/slam_internal.h"
+
+#include "selflnn/utils/memory_utils.h"  /* DEEP-005: safe_malloc宏定义 */
+#include "selflnn/utils/string_utils.h" /* DEEP-005: safe_strdup宏 */
 
 /* ==================== TUM轨迹导出 ==================== */
 

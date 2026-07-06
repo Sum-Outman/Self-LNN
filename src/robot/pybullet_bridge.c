@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file pybullet_bridge.c
  * @brief SELF-LNN 与 PyBullet 的桥接实现
  *
@@ -15,7 +15,10 @@
 #include <string.h>
 #include <stdio.h>
 
+#include "selflnn/utils/memory_utils.h"  /* DEEP-005: safe_malloc宏定义 */
+
 #ifdef _WIN32
+#include <io.h>        /* DEEP-005: _access声明 */
 #include <windows.h>
 #define usleep(us) Sleep(((us) + 999) / 1000)
 #else
@@ -73,6 +76,10 @@ int pybullet_is_available(void) {
 
     /* 检查Python是否可执行 */
 #ifdef _WIN32
+    /* DEEP-005修复: MSVC上F_OK需要io.h，且可能不存在。手动定义。 */
+    #ifndef F_OK
+    #define F_OK 0
+    #endif
     int python_ok = (access("C:\\Python39\\python.exe", F_OK) == 0) ||
                     (access("C:\\Python310\\python.exe", F_OK) == 0) ||
                     (access("C:\\Python311\\python.exe", F_OK) == 0) ||

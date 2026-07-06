@@ -10,6 +10,7 @@
 #define SELFLNN_WEBSOCKET_PUSH_H
 
 #include <stddef.h>
+#include <stdint.h>  /* DEEP-005: uint8_t需要 */
 
 #ifdef __cplusplus
 extern "C" {
@@ -20,6 +21,9 @@ extern "C" {
 #define WS_SEND_BUFFER_SIZE 524288
 
 typedef struct WSPushServer WSPushServer;
+
+/* DEEP-005修复: 全局WS推送服务器句柄跨编译单元声明 */
+extern WSPushServer* g_ws_push_server;
 
 /* C-002修复: WebSocket客户端消息回调类型
  * 用于服务器接收客户端WebSocket文本/二进制消息后分发给上层处理

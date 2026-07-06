@@ -13,6 +13,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "selflnn/core/common.h"  /* DEEP-005: SELFLNN_API宏依赖 */
 
 #ifdef __cplusplus
 extern "C" {

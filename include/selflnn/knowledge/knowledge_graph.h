@@ -11,6 +11,7 @@
 
 #include "selflnn/knowledge/knowledge.h"
 #include "selflnn/core/common.h"
+#include "selflnn/utils/platform.h"  /* DEEP-005: MutexHandle依赖 */
 #include <stddef.h>
 
 #ifdef __cplusplus
@@ -189,6 +190,14 @@ SELFLNN_API void knowledge_graph_free(KnowledgeGraph* graph);
 KnowledgeGraphNode* knowledge_graph_add_node(KnowledgeGraph* graph, KnowledgeGraphNodeType type,
                                    const char* label, const float* embedding,
                                    size_t embedding_size, float confidence);
+
+/**
+ * @brief 移除知识图谱节点
+ * @param graph 知识图谱句柄
+ * @param node 待移除的节点
+ * @return 0成功，-1失败
+ */
+int knowledge_graph_remove_node(KnowledgeGraph* graph, KnowledgeGraphNode* node);
 
 /**
  * @brief 添加边到知识图谱

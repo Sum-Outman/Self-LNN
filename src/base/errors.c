@@ -330,7 +330,8 @@ int selflnn_recovery_try(SelfLNNRecoveryContext* context) {
     /* P1-010修复: 使用volatile防止编译器优化将context/result缓存至寄存器
      * 导致longjmp恢复后寄存器值与setjmp时不一致，产生未定义行为 */
     volatile SelfLNNRecoveryContext* volatile_context = context;
-    volatile int result = setjmp(volatile_context->env);
+    /* C-004修复: setjmp需要jmp_buf参数，通过volatile指针访问需显式去除volatile限定符 */
+    volatile int result = setjmp(((SelfLNNRecoveryContext*)(uintptr_t)volatile_context)->env);
 
     if (result == 0) {
         return 0;

@@ -13,6 +13,7 @@
 #include "selflnn/gpu/gpu.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/platform.h"
+#include "selflnn/utils/logging.h"   /* C-004修复: log_debug需要此头文件 */
 #include "selflnn/core/errors.h"
 #include "gpu_internal.h"
 

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file backend.c
  * @brief 后端服务器实现
  * 
@@ -13,20 +13,29 @@
 
 /* 前向声明：JSON安全函数 */
 static char* json_escape_str(const char* src);
+static int json_get_int_safe(const char* str, int default_val, int* error);
+static float json_get_float_safe(const char* str, float default_val, int* error);
 /* API处理器前向声明见文件尾部 init_handler_table 前 */
 
 /* ====================================================================
- * JSON 安全解析辅助函数
+ * JSON 安全解析辅助函数（前向声明见文件顶部，实现在includes之后）
  * 替代 atoi/atof，提供输入验证和错误回报
  * ==================================================================== */
 
-/**
- * @brief 安全字符串转整数（替代 atoi）
- * @param str 输入字符串
- * @param default_val 解析失败时的默认值
- * @param error 输出参数：0=成功，非0=解析失败
- * @return 解析后的整数值
- */
+#define ROS_ROBOT_CONNECTION_CONNECTED 1
+#define ROS_ROBOT_CONNECTION_ACTIVE 2
+#define HP_SEARCH_BAYESIAN 0
+#define HP_SEARCH_GRID 1
+#define HP_SEARCH_RANDOM 2
+
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdint.h>
+#include <limits.h>  /* DEEP-005: INT_MIN/INT_MAX需要 */
+#include <math.h>
+
+/* DEEP-005修复: JSON安全解析函数移至此处以确保strtol/strtod可见 */
 static int json_get_int_safe(const char* str, int default_val, int* error) {
     if (!str || !str[0]) {
         if (error) *error = 1;
@@ -44,39 +53,20 @@ static int json_get_int_safe(const char* str, int default_val, int* error) {
     return (int)val;
 }
 
-/**
- * @brief 安全字符串转浮点数（替代 atof）
- * @param str 输入字符串
- * @param default_val 解析失败时的默认值
- * @param error 输出参数：0=成功，非0=解析失败
- * @return 解析后的浮点数值
- */
 static float json_get_float_safe(const char* str, float default_val, int* error) {
     if (!str || !str[0]) {
         if (error) *error = 1;
         return default_val;
     }
     char* endptr = NULL;
-    float val = strtof(str, &endptr);
+    double val = strtod(str, &endptr);
     if (endptr == str || *endptr != '\0') {
         if (error) *error = 1;
         return default_val;
     }
     if (error) *error = 0;
-    return val;
+    return (float)val;
 }
-
-#define ROS_ROBOT_CONNECTION_CONNECTED 1
-#define ROS_ROBOT_CONNECTION_ACTIVE 2
-#define HP_SEARCH_BAYESIAN 0
-#define HP_SEARCH_GRID 1
-#define HP_SEARCH_RANDOM 2
-
-#include <stdlib.h>
-#include <stdio.h>
-#include <string.h>
-#include <stdint.h>
-#include <math.h>
 
 #include "selflnn/backend/backend.h"
 #include "selflnn/backend/websocket_push.h"
@@ -166,7 +156,8 @@ static uint64_t platform_get_time_ms(void) {
     return perf_timestamp_ns() / 1000000ULL;
 }
 
-/* JSON字符串转义：将C字符串中的 \ " \n \r \t 等转义为JSON安全形式 */
+/* DEEP-005: 前向声明 — 定义在文件尾部 */
+static int backend_cors_load_config(const char* config_path);/* JSON字符串转义：将C字符串中的 \ " \n \r \t 等转义为JSON安全形式 */
 static void json_escape_into(char* dst, size_t dst_size, const char* src) {
     size_t di = 0;
     if (!dst || dst_size == 0 || !src) {
@@ -1010,7 +1001,7 @@ static void rate_limit_bucket_init(RateLimitBucket* bucket, const char* ip, floa
     bucket->tokens = max_tokens;
     bucket->max_tokens = max_tokens;
     bucket->refill_rate = refill_rate;
-    bucket->last_refill_time = platform_get_time_ms;
+    bucket->last_refill_time = platform_get_time_ms();
     bucket->first_request_time = bucket->last_refill_time;
 }
 
@@ -1018,7 +1009,7 @@ static void rate_limit_bucket_init(RateLimitBucket* bucket, const char* ip, floa
  * @brief 补充令牌（基于时间差）
  */
 static void rate_limit_bucket_refill(RateLimitBucket* bucket) {
-    uint64_t now = platform_get_time_ms;
+    uint64_t now = platform_get_time_ms();
     uint64_t elapsed = now - bucket->last_refill_time;
     if (elapsed > 0) {
         float tokens_to_add = (float)elapsed / 1000.0f * bucket->refill_rate;
@@ -1226,7 +1217,7 @@ static void circuit_breaker_init(CircuitBreaker* cb, const char* name) {
 static void circuit_breaker_record_success(CircuitBreaker* cb) {
     if (!cb || !cb->enabled) return;
     cb->total_requests++;
-    cb->last_success_ms = platform_get_time_ms;
+    cb->last_success_ms = platform_get_time_ms();
     
     if (cb->state == CB_STATE_HALF_OPEN) {
         /* 半开状态下成功，回到CLOSED状态 */
@@ -1248,7 +1239,7 @@ static void circuit_breaker_record_failure(CircuitBreaker* cb) {
     if (!cb || !cb->enabled) return;
     cb->total_requests++;
     cb->total_failures++;
-    cb->last_failure_ms = platform_get_time_ms;
+    cb->last_failure_ms = platform_get_time_ms();
     cb->consecutive_failures++;
     
     if (cb->state == CB_STATE_CLOSED) {
@@ -1272,7 +1263,7 @@ static void circuit_breaker_record_failure(CircuitBreaker* cb) {
 static int circuit_breaker_is_available(CircuitBreaker* cb) {
     if (!cb || !cb->enabled) return 1;
     
-    uint64_t now_ms = platform_get_time_ms;
+    uint64_t now_ms = platform_get_time_ms();
     
     switch (cb->state) {
         case CB_STATE_CLOSED:
@@ -2017,7 +2008,7 @@ static void ip_access_list_init(IpAccessList* list, const char (*entries)[16][64
  * @brief 清理过期限流桶
  */
 static void rate_limit_cleanup_buckets(RateLimitBucket* buckets, int* bucket_count) {
-    uint64_t now = platform_get_time_ms;
+    uint64_t now = platform_get_time_ms();
     int new_count = 0;
     for (int i = 0; i < *bucket_count; i++) {
         uint64_t idle = now - buckets[i].last_refill_time;
@@ -7198,7 +7189,8 @@ static int handle_api_kg_endpoint(BackendServer* server,
                     if (tv) { ntype = atoi(tv + 1); }
                 }
                 if (label[0]) {
-                    KnowledgeGraphNode* n = knowledge_graph_add_node(kg, label, ntype, 0.5f);
+                    KnowledgeGraphNode* n = knowledge_graph_add_node(kg, ntype, label, NULL, 0, 0.5f);
+                    /* DEEP-005修复: 参数顺序对齐API (graph, type, label, embedding, embedding_size, confidence) */
                     if (n) added_nodes++;
                 }
                 ptr = obj_end + 1;
@@ -7251,8 +7243,9 @@ static int handle_api_kg_endpoint(BackendServer* server,
                     if (knowledge_graph_find_nodes_by_label(kg, src, sr, 4) > 0) sn = sr[0];
                     if (knowledge_graph_find_nodes_by_label(kg, tgt, tr, 4) > 0) tn = tr[0];
                     if (sn && tn) {
-                        if (knowledge_graph_add_edge(kg, sn, tn, etype, 0.5f) == 0)
-                            added_edges++;
+                        KnowledgeGraphEdge* e = knowledge_graph_add_edge(kg, etype, sn, tn, "", 0.5f, 0.5f);
+                        /* DEEP-005修复: 参数对齐API (graph, type, src, tgt, label, weight, confidence) */
+                        if (e) added_edges++;
                     }
                 }
                 ptr = obj_end + 1;
@@ -7872,9 +7865,9 @@ static int handle_api_post_training(BackendServer* server,
     }
 
     /* 执行训练 */
-    uint64_t start_time_ms = platform_get_time_ms;
+    uint64_t start_time_ms = platform_get_time_ms();
     int train_result = trainer_train(server->trainer, inputs, targets, num_samples, NULL, NULL);
-    uint64_t end_time_ms = platform_get_time_ms;
+    uint64_t end_time_ms = platform_get_time_ms();
     uint64_t duration_ms = end_time_ms - start_time_ms;
 
     /* 获取训练历史 */
@@ -9346,8 +9339,15 @@ static int handle_api_post_dialogue_history_save(BackendServer* server,
         parse_json_string(request_data, "text", text, sizeof(text));
 
         if (role[0] && text[0]) {
-            DialogueRole d_role = (strcmp(role, "assistant") == 0) ? DIALOGUE_ROLE_ASSISTANT : DIALOGUE_ROLE_USER;
-            dialogue_context_add_message(server->active_dialogue_context, d_role, text);
+            /* DEEP-005修复: API是dialogue_context_add_message(ctx, &msg), role为int 0=user/1=system */
+            DialogueMessage msg;
+            msg.text = text;
+            msg.length = strlen(text);
+            msg.role = (strcmp(role, "assistant") == 0) ? 1 : 0;
+            msg.timestamp = time(NULL);
+            msg.confidence = 1.0f;
+            msg.text_allocated = 0;
+            dialogue_context_add_message(server->active_dialogue_context, &msg);
             saved = 1;
         }
     }
@@ -10523,7 +10523,7 @@ static int agi_task_register(BackendServer* server, const char* type,
     strncpy(task->status, "running", sizeof(task->status) - 1);
     task->progress = 0.0f;
     task->confidence = 0.0f;
-    task->created_ms = platform_get_time_ms;
+    task->created_ms = platform_get_time_ms();
     task->updated_ms = task->created_ms;
     if (server->agi_task_count < AGI_TASK_MAX) server->agi_task_count++;
     return task->task_id;
@@ -10540,7 +10540,7 @@ static int agi_task_update(BackendServer* server, int task_id,
             if (progress >= 0.0f) task->progress = progress;
             if (confidence >= 0.0f) task->confidence = confidence;
             if (result) strncpy(task->result, result, sizeof(task->result) - 1);
-            task->updated_ms = platform_get_time_ms;
+            task->updated_ms = platform_get_time_ms();
             return 0;
         }
     }
@@ -10562,7 +10562,7 @@ static AgiTaskEntry* agi_task_find_by_id(BackendServer* server, int task_id) {
  */
 static void agi_task_cleanup(BackendServer* server) {
     if (!server) return;
-    uint64_t now_ms = platform_get_time_ms;
+    uint64_t now_ms = platform_get_time_ms();
     for (int i = 0; i < AGI_TASK_MAX; i++) {
         AgiTaskEntry* t = &server->agi_tasks[i];
         if (t->task_id > 0 && (strcmp(t->status, "completed") == 0 ||
@@ -12375,10 +12375,11 @@ static int handle_api_post_robot_coordinate(BackendServer* server,
     parse_json_string(request_data, "z", coord_z, sizeof(coord_z));
     parse_json_string(request_data, "robot_id", robot_id_str, sizeof(robot_id_str));
     if (strlen(robot_id_str) > 0) { int _err = 0; robot_id = json_get_int_safe(robot_id_str, 0, &_err); }
-    { int _err_x = 0, _err_y = 0, _err_z = 0;
+    /* DEEP-005修复: 移除多余的{}块作用域，fx/fy/fz需在外部可见 */
+    int _err_x = 0, _err_y = 0, _err_z = 0;
     float fx = strlen(coord_x) > 0 ? json_get_float_safe(coord_x, 0.0f, &_err_x) : 0.0f;
     float fy = strlen(coord_y) > 0 ? json_get_float_safe(coord_y, 0.0f, &_err_y) : 0.0f;
-    float fz = strlen(coord_z) > 0 ? json_get_float_safe(coord_z, 0.0f, &_err_z) : 0.0f; }
+    float fz = strlen(coord_z) > 0 ? json_get_float_safe(coord_z, 0.0f, &_err_z) : 0.0f;
 
     /* V-005修复: 通过ROS控制器发送真实坐标命令 */
     int send_ok = 0;
@@ -15823,7 +15824,7 @@ static int handle_api_get_api_stats(BackendServer* server,
                 "\"error_count\":%d,"
                 "\"rate_limit_remaining\":%d,"
                 "\"api_key_enabled\":%s,"
-                "\"uptime_seconds\":%ld"
+                "\"uptime_seconds\":%lld"
                 "}}",
                 server->total_requests,
                 server->api_key_count,
@@ -16226,9 +16227,9 @@ static int handle_api_post_training_start(BackendServer* server,
         }
         trainer_set_current_training_phase(server->trainer, phase);
     }
-    uint64_t start_ms = platform_get_time_ms;
+    uint64_t start_ms = platform_get_time_ms();
     int train_result = trainer_train(server->trainer, inputs, targets, samples, NULL, NULL);
-    uint64_t end_ms = platform_get_time_ms;
+    uint64_t end_ms = platform_get_time_ms();
     float final_loss = 0.0f, final_accuracy = 0.0f;
     TrainingHistory* hist = trainer_get_history(server->trainer);
     if (hist && hist->size > 0) {
@@ -16356,9 +16357,10 @@ static int handle_api_get_training_status(BackendServer* server,
     if (server->ws_push_server && has_data) {
         float lr = 0.001f;
         if (server->trainer) {
-            TrainingConfig tcfg;
-            if (trainer_get_config(server->trainer, &tcfg) == 0) {
-                lr = tcfg.learning_rate;
+            /* DEEP-005修复: trainer_get_config返回TrainingConfig*指针，非int */
+            TrainingConfig* tcfg = trainer_get_config(server->trainer);
+            if (tcfg) {
+                lr = tcfg->learning_rate;
             }
         }
         char metrics_buf[512];
@@ -18103,8 +18105,8 @@ static int handle_api_post_robot_firmware(BackendServer* server,
      * 检查硬件连接状态，提供更明确的状态反馈 */
     int has_hardware = 0;
     if (server) {
-        /* 检查硬件接口是否已初始化 */
-        has_hardware = (server->hardware_interface_available > 0) ? 1 : 0;
+        /* DEEP-005修复: hardware_interface_available不存在，用ros_controller判断硬件可用性 */
+        has_hardware = (server->ros_controller != NULL) ? 1 : 0;
     }
     int firmware_result = -1;
     const char* firmware_status;
@@ -19647,23 +19649,8 @@ static int handle_api_post_gpu_benchmark(BackendServer* server,
     response->status_code = 200;
     return 0;
 }
-#else
-static int handle_api_post_gpu_benchmark(BackendServer* server,
-                                   ApiRequestType request_type,
-                                   const char* request_data,
-                                   size_t request_length,
-                                   ApiResponse* response) {
-    (void)server; (void)request_type; (void)request_data; (void)request_length;
-    char* json_data = (char*)safe_malloc(256);
-    if (!json_data) return -1;
-    snprintf(json_data, 256,
-        "{\"success\":false,\"benchmark\":{"
-        "\"error\":\"GPU未启用\",\"message\":\"请在编译时启用ENABLE_GPU\"}}");
-    response->data = json_data;
-    response->data_length = strlen(json_data);
-    response->status_code = 200;
-    return 0;
-}
+/* C-001修复: ENABLE_GPU已全局启用(CMake add_definitions)，删除#else存根分支。
+ * GPU不可用时由gpu_benchmark_run内部检测并返回适当错误，无需预处理器fallback。 */
 #endif
 static int handle_api_get_dataset_list(BackendServer* server,
                                    ApiRequestType request_type,
@@ -22137,6 +22124,19 @@ static int handle_api_post_system_restart(BackendServer* server,
     return 0;
 }
 
+/* DEEP-005修复: RequestLog前置声明(定义在文件末尾27225+) */
+typedef struct {
+    char ip[64];
+    char path[256];
+    int status;
+    size_t req_size;
+    size_t resp_size;
+    int latency_ms;
+    long timestamp;
+} RequestLog;
+extern RequestLog req_logs[1024];
+extern int req_log_count;
+
 static int handle_api_get_system_logs_export(BackendServer* server,
         ApiRequestType rt, const char* data, size_t len, ApiResponse* resp) {
     (void)rt; (void)data; (void)len; (void)server;
@@ -23040,7 +23040,7 @@ static int handle_api_post_multi_system_heartbeat(BackendServer* server,
         snprintf(j, 1024,
             "{\"multi_system_heartbeat\":{"
             "\"status\":\"ok\","
-            "\"timestamp\":%ld,"
+            "\"timestamp\":%lld,"
             "\"total_robots\":%d,"
             "\"alive_robots\":%d,"
             "\"server_alive\":true,"
@@ -24172,8 +24172,9 @@ static int handle_api_post_sensor_start(BackendServer* server,
         ApiRequestType rt, const char* data, size_t len, ApiResponse* resp) {
     (void)rt;
     char body[2048] = {0};
-    int body_len = http_read_body(server, body, sizeof(body));
-    (void)body_len;
+    /* DEEP-005修复: http_read_body不存在，直接使用data参数 */
+    int body_len = (data && len > 0) ? (int)(len < 2047 ? len : 2047) : 0;
+    if (body_len > 0) memcpy(body, data, body_len);
 
     /* 解析传感器类型 */
     char sensor_type[64] = {0};
@@ -24216,8 +24217,8 @@ static int handle_api_not_implemented(BackendServer* server,
         ApiRequestType rt, const char* data, size_t len, ApiResponse* resp) {
     (void)server; (void)data; (void)len;
     /* M-003修复: 添加WARNING级别日志，便于追踪未实现的API调用 */
-    log_warning("[核心] 未实现的API端点被调用: 请求类型=%d, 客户端IP=%s", rt,
-        server && server->client_ip ? server->client_ip : "未知");
+    log_warning("[核心] 未实现的API端点被调用: 请求类型=%d, 客户端IP=%s", rt, "未知");
+    /* DEEP-005修复: server->client_ip不存在于BackendServer,使用fallback */
     char* j = (char*)safe_malloc(256);
     if (j) {
         snprintf(j, 256,
@@ -24626,7 +24627,7 @@ static int handle_api_post_task_create(BackendServer* server,
             }
             snprintf(entry->status, sizeof(entry->status), "pending");
             snprintf(entry->type, sizeof(entry->type), "%s", task_type);
-            entry->created_ms = platform_get_time_ms;
+            entry->created_ms = platform_get_time_ms();
             entry->updated_ms = entry->created_ms;
             entry->progress = 0.0f;
             server->agi_task_count++;
@@ -27239,6 +27240,7 @@ int backend_multimodal_dialogue_api(const float* input_data, int input_dim,
  * BACK-09: 请求日志完善（时间/IP/大小/响应时间）
  * ============================================================================ */
 
+/* DEEP-005修复: RequestLog已在文件前部声明，此处仅定义实例 */
 RequestLog req_logs[1024];
 int req_log_count = 0;
 
