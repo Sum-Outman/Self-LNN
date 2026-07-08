@@ -509,6 +509,9 @@ SELFLNN_API UnifiedLNNState* selflnn_get_unified_lnn_state(void);
 SELFLNN_API UnifiedState*    selflnn_get_unified_state(void);
 SELFLNN_API void selflnn_enforce_single_lnn(void);
 SELFLNN_API int selflnn_is_single_lnn_enforced(void);
+/* P0修复: LNN线程安全访问锁，供后端API使用 */
+SELFLNN_API void selflnn_lock_lnn(void);
+SELFLNN_API void selflnn_unlock_lnn(void);
 SELFLNN_API int selflnn_register_module(int module_id, void* instance, int uses_shared_lnn);
 SELFLNN_API int selflnn_module_uses_shared_lnn(int module_id);
 

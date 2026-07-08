@@ -2288,11 +2288,11 @@ static void cpu_kernel_worker(void* arg) {
 
     struct GpuKernel k_copy;
     memcpy(&k_copy, item->kernel, sizeof(k_copy));
-    k_copy.arg_values = (void**)malloc((size_t)k_copy.arg_capacity * sizeof(void*));
-    k_copy.arg_sizes  = (size_t*)malloc((size_t)k_copy.arg_capacity * sizeof(size_t));
+    k_copy.arg_values = (void**)safe_malloc((size_t)k_copy.arg_capacity * sizeof(void*));
+    k_copy.arg_sizes  = (size_t*)safe_malloc((size_t)k_copy.arg_capacity * sizeof(size_t));
     if (!k_copy.arg_values || !k_copy.arg_sizes) {
-        free(k_copy.arg_values);
-        free(k_copy.arg_sizes);
+        safe_free((void**)&k_copy.arg_values);
+        safe_free((void**)&k_copy.arg_sizes);
         return;
     }
     for (int i = 0; i < k_copy.arg_capacity; i++) {
@@ -2304,8 +2304,8 @@ static void cpu_kernel_worker(void* arg) {
 
     cpu_kernel_dispatch(&k_copy, (size_t)count);
 
-    free(k_copy.arg_values);
-    free(k_copy.arg_sizes);
+    safe_free((void**)&k_copy.arg_values);
+    safe_free((void**)&k_copy.arg_sizes);
 }
 
 /* ============================================================================
@@ -2369,8 +2369,8 @@ int gpu_kernel_set_arg(GpuKernel* kernel, int arg_index, size_t arg_size, const 
     if (arg_index >= k->arg_capacity) {
         int new_cap = k->arg_capacity == 0 ? 16 : k->arg_capacity * 2;
         while (new_cap <= arg_index) new_cap *= 2;
-        void** new_values = (void**)realloc(k->arg_values, (size_t)new_cap * sizeof(void*));
-        size_t* new_sizes = (size_t*)realloc(k->arg_sizes, (size_t)new_cap * sizeof(size_t));
+        void** new_values = (void**)safe_realloc(k->arg_values, (size_t)new_cap * sizeof(void*));
+        size_t* new_sizes = (size_t*)safe_realloc(k->arg_sizes, (size_t)new_cap * sizeof(size_t));
         if (!new_values || !new_sizes) return -1;
         for (int i = k->arg_count; i < new_cap; i++) {
             new_values[i] = NULL;
@@ -2414,7 +2414,7 @@ int gpu_kernel_execute(GpuKernel* kernel, size_t global_work_size, size_t local_
         size_t chunk = (total + num_threads - 1) / num_threads;
         if (chunk < 64) chunk = 64;
 
-        CpuKernelWorkItem* items = (CpuKernelWorkItem*)malloc(num_threads * sizeof(CpuKernelWorkItem));
+        CpuKernelWorkItem* items = (CpuKernelWorkItem*)safe_malloc(num_threads * sizeof(CpuKernelWorkItem));
         if (items) {
             for (size_t t = 0; t < num_threads; t++) {
                 items[t].start_idx = (int)(t * chunk);
@@ -2425,7 +2425,7 @@ int gpu_kernel_execute(GpuKernel* kernel, size_t global_work_size, size_t local_
                 }
             }
             thread_pool_wait_all(pool, 0);
-            free(items);
+            safe_free((void**)&items);
             return 0;
         }
     }

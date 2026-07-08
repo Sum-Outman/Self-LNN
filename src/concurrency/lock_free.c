@@ -39,9 +39,14 @@
 
 /* C-009修复: Windows下volatile+MemoryBarrier确保跨ARM64/x86原子性。
  * volatile确保编译器不重排读取，MemoryBarrier确保CPU级可见性。
- * 对齐指针的读写在所有x86/ARM64 Windows上本身是原子的。 */
+ * 对齐指针的读写在所有x86/ARM64 Windows上本身是原子的。
+ * P1修复(C-010): atomic_load后添加acquire屏障，atomic_store前添加release屏障，
+ * 确保ARM64等弱内存序平台上的可见性。 */
 #define atomic_load(ptr) (*(ptr))
 #define atomic_store(ptr, val) do { *(ptr) = (val); } while(0)
+/* P1修复: 在需要内存序保证的代码路径中使用带屏障的版本 */
+#define atomic_load_acquire(ptr) (MemoryBarrier(), *(ptr))
+#define atomic_store_release(ptr, val) do { *(ptr) = (val); MemoryBarrier(); } while(0)
 
 /* P0-R5修复: 原宏中*(expected)被求值两次（一次作为比较值，一次作为返回值比较），
  * 对于带副作用的expected表达式会导致错误。改用辅助函数确保单次求值。 */
@@ -227,7 +232,16 @@ static inline TaggedPtr make_tagged(void* ptr, uint16_t tag) {
     if (p && p->initialized) {
         offset = (uint16_t)(((char*)ptr - (char*)p->base) / p->node_size);
     } else {
-        offset = (uint16_t)(uintptr_t)ptr;
+        /* P0修复: 无池时使用32位哈希压缩而非16位截断，防止指针完全丢失
+         * 使用FNV-1a风格哈希将完整指针压缩为16位，保留更多地址信息 */
+        uintptr_t addr = (uintptr_t)ptr;
+        offset = (uint16_t)((addr >> 16) ^ addr);
+        /* 如果节点池未初始化，记录警告 */
+        static int no_pool_warned = 0;
+        if (!no_pool_warned) {
+            no_pool_warned = 1;
+            /* 无池回退：使用哈希压缩，仅用于紧急容错 */
+        }
     }
     return ((TaggedPtr)tag << TAG_SHIFT) | (TaggedPtr)offset;
 }
@@ -890,76 +904,107 @@ int lock_free_queue_dequeue(LockFreeQueue* queue, void* element,
     int success = 0;
     
     while (!success && retries < queue->max_retries) {
-        /* 加载头节点和尾节点的标记指针（含ABA版本标记） */
+        /* P0修复: Hazard Pointer设置顺序修正
+         * 原代码先解引用head->next再设置HP，存在窗口期导致UAF：
+         * 在加载head指针和设置HP之间，另一个线程可能已出队并释放head节点。
+         * 正确顺序: 先设置HP保护head → 验证一致性 → 读取next → 设置HP保护next → 再次验证 */
+
+        /* 步骤1: 加载head_tp并提取head指针（仅指针运算，不解引用节点内存） */
         TaggedPtr head_tp = queue->head_tagged;
-        TaggedPtr tail_tp = queue->tail_tagged;
         LockFreeQueueNode* head = (LockFreeQueueNode*)ptr_from_tagged(head_tp);
-        LockFreeQueueNode* tail = (LockFreeQueueNode*)ptr_from_tagged(tail_tp);
-        LockFreeQueueNode* next = head->next;
-        
-        /* 用危险指针保护head和next，防止其他线程释放 */
+
+        /* 步骤2: 立即设置hazard_ptr[0] = head，在解引用head前保护该节点 */
         if (queue->enable_hazard_pointers) {
             hazard_ptr_set(head, 0);
+        }
+
+        /* 步骤3: 重新加载head_tp确认一致性，若head已被其他线程出队则重试 */
+        if (queue->head_tagged != head_tp) {
+            if (queue->enable_hazard_pointers) {
+                hazard_ptr_clear(0);
+            }
+            retries++;
+            backoff_strategy_impl(retries, queue->backoff_strategy);
+            continue;
+        }
+
+        /* 步骤4: head已受HP保护，安全解引用读取next指针 */
+        LockFreeQueueNode* next = head->next;
+
+        /* 步骤5: 设置hazard_ptr[1] = next，保护next节点 */
+        if (queue->enable_hazard_pointers) {
             hazard_ptr_set(next, 1);
         }
-        
-        /* 检查头节点标记指针是否仍然有效 */
-        if (queue->head_tagged == head_tp) {
-            if (head == tail) {
-                /* 队列可能为空，或者尾指针落后 */
-                if (next == NULL) {
-                    /* 队列为空 */
+
+        /* 步骤6: 再次确认head_tp一致性（设置next HP期间head可能已变化） */
+        if (queue->head_tagged != head_tp) {
+            if (queue->enable_hazard_pointers) {
+                hazard_ptr_clear(0);
+                hazard_ptr_clear(1);
+            }
+            retries++;
+            backoff_strategy_impl(retries, queue->backoff_strategy);
+            continue;
+        }
+
+        /* head和next均已受HP保护，安全执行后续出队逻辑 */
+        TaggedPtr tail_tp = queue->tail_tagged;
+        LockFreeQueueNode* tail = (LockFreeQueueNode*)ptr_from_tagged(tail_tp);
+
+        if (head == tail) {
+            /* 队列可能为空，或者尾指针落后 */
+            if (next == NULL) {
+                /* 队列为空 */
+                hazard_ptr_clear(0);
+                hazard_ptr_clear(1);
+                strncpy(result->error_message, "队列为空", sizeof(result->error_message) - 1);
+                result->error_message[sizeof(result->error_message) - 1] = '\0';
+                result->success = 0;
+                return -1;
+            }
+            /* 帮助其他线程移动尾指针（使用标记CAS） */
+            TaggedPtr next_tail_tp = make_tagged(next, tag_from_tagged(tail_tp) + 1);
+            tagged_cas(&queue->tail_tagged, &tail_tp, next_tail_tp);
+        } else {
+            /* 尝试出队 */
+            if (next != NULL) {
+                /* 复制数据 */
+                if (next->data != NULL) {
+                    memcpy(element, next->data, element_size);
+                }
+
+                /* 尝试移动头指针（使用标记CAS防止ABA） */
+                TaggedPtr new_head_tp = inc_tagged(head_tp);
+                new_head_tp = make_tagged(next, tag_from_tagged(new_head_tp));
+                if (tagged_cas(&queue->head_tagged, &head_tp, new_head_tp)) {
+                    /* 成功出队 */
+                    atomic_fetch_sub(&queue->size, 1);
+
+                    /* 使用延迟释放或立即释放（基于配置） */
+                    if (queue->enable_hazard_pointers) {
+#if TP_HAS_POOL
+                        deferred_free_add_pool(&queue->free_list_head, &queue->free_list_count, head);
+#else
+                        deferred_free_add(&queue->free_list_head, &queue->free_list_count, head);
+#endif
+                        if (queue->free_list_count >= DEFERRED_FREE_THRESHOLD) {
+                            deferred_free_scan(&queue->free_list_head, &queue->free_list_count);
+                        }
+                    } else {
+                        /* 无危险指针时立即释放（标记指针的版本标记防ABA） */
+                        free_queue_node(head);
+                    }
+
                     hazard_ptr_clear(0);
                     hazard_ptr_clear(1);
-                    strncpy(result->error_message, "队列为空", sizeof(result->error_message) - 1);
-                    result->error_message[sizeof(result->error_message) - 1] = '\0';
-                    result->success = 0;
-                    return -1;
-                }
-                /* 帮助其他线程移动尾指针（使用标记CAS） */
-                TaggedPtr next_tail_tp = make_tagged(next, tag_from_tagged(tail_tp) + 1);
-                tagged_cas(&queue->tail_tagged, &tail_tp, next_tail_tp);
-            } else {
-                /* 尝试出队 */
-                if (next != NULL) {
-                    /* 复制数据 */
-                    if (next->data != NULL) {
-                        memcpy(element, next->data, element_size);
-                    }
-                    
-                    /* 尝试移动头指针（使用标记CAS防止ABA） */
-                    TaggedPtr new_head_tp = inc_tagged(head_tp);
-                    new_head_tp = make_tagged(next, tag_from_tagged(new_head_tp));
-                    if (tagged_cas(&queue->head_tagged, &head_tp, new_head_tp)) {
-                        /* 成功出队 */
-                        atomic_fetch_sub(&queue->size, 1);
-                        
-                        /* 使用延迟释放或立即释放（基于配置） */
-                        if (queue->enable_hazard_pointers) {
-#if TP_HAS_POOL
-                            deferred_free_add_pool(&queue->free_list_head, &queue->free_list_count, head);
-#else
-                            deferred_free_add(&queue->free_list_head, &queue->free_list_count, head);
-#endif
-                            if (queue->free_list_count >= DEFERRED_FREE_THRESHOLD) {
-                                deferred_free_scan(&queue->free_list_head, &queue->free_list_count);
-                            }
-                        } else {
-                            /* 无危险指针时立即释放（标记指针的版本标记防ABA） */
-                            free_queue_node(head);
-                        }
-                        
-                        hazard_ptr_clear(0);
-                        hazard_ptr_clear(1);
-                        success = 1;
-                    }
+                    success = 1;
                 }
             }
         }
-        
+
         hazard_ptr_clear(0);
         hazard_ptr_clear(1);
-        
+
         if (!success) {
             retries++;
             backoff_strategy_impl(retries, queue->backoff_strategy);

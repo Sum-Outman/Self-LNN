@@ -47,7 +47,10 @@ void safe_free(void** ptr);
 struct NASSystem {
     NASConfig config;                      /**< 配置 */
     NASSearchState state;                  /**< 状态 */
-    
+
+    /* P1修复11: 互斥锁——保护population/evaluations/state/best_architecture等共享状态的并发访问 */
+    MutexHandle lock;                      /**< NAS系统互斥锁 */
+
     /* 种群 */
     ArchitectureDescription** population;  /**< 种群数组 */
     ArchitectureEvaluation** evaluations;  /**< 评估结果数组 */
@@ -205,7 +208,16 @@ NASSystem* nas_system_create(const NASConfig* config,
     
     // 初始化随机数种子
     system->random_seed = (unsigned int)time(NULL);
-    
+
+    /* P1修复11: 创建互斥锁用于线程安全 */
+    system->lock = mutex_create();
+    if (!system->lock) {
+        selflnn_set_last_error(SELFLNN_ERROR_INITIALIZATION_FAILED, __func__, __FILE__, __LINE__,
+                              "创建NAS系统：互斥锁创建失败");
+        safe_free((void**)&system);
+        return NULL;
+    }
+
     system->is_initialized = 0;
     
     // 初始化搜索空间
@@ -295,7 +307,13 @@ void nas_system_free(NASSystem* system) {
     if (system->best_evaluation) {
         free_architecture_evaluation(system->best_evaluation);
     }
-    
+
+    /* P1修复11: 销毁互斥锁 */
+    if (system->lock) {
+        mutex_destroy(system->lock);
+        system->lock = NULL;
+    }
+
     // 释放系统
     safe_free((void**)&system);
 }
@@ -330,23 +348,27 @@ int nas_search_generation(NASSystem* system) {
                               "NAS系统未初始化");
         return -1;
     }
-    
+
+    /* P1修复11: 加锁保护population/evaluations/state/best_architecture等共享状态 */
+    mutex_lock(system->lock);
     system->state.is_searching = 1;
-    
+
     // 如果是第一代，生成初始种群
     if (system->state.current_generation == 0) {
         for (size_t i = 0; i < system->population_capacity; i++) {
             if (!system->population[i]) {
                 system->population[i] = create_architecture_description();
                 if (!system->population[i]) {
+                    mutex_unlock(system->lock);
                     return -1;
                 }
-                
+
                 // 生成随机架构
                 if (generate_random_architecture_internal(system, system->population[i]) < 0) {
+                    mutex_unlock(system->lock);
                     return -1;
                 }
-                
+
                 system->state.architectures_generated++;
             }
         }
@@ -467,17 +489,19 @@ int nas_search_generation(NASSystem* system) {
     // 进化到下一代（如果不是最后一代）
     if (system->state.current_generation < system->config.max_generations - 1) {
         if (evolve_population(system) < 0) {
+            mutex_unlock(system->lock);
             return -1;
         }
     } else {
         system->state.search_complete = 1;
         system->state.is_searching = 0;
     }
-    
+
     system->state.current_generation++;
-    system->state.search_progress = (float)system->state.current_generation / 
+    system->state.search_progress = (float)system->state.current_generation /
                                    (float)system->config.max_generations;
-    
+
+    mutex_unlock(system->lock);
     return evaluated_count;
 }
 
@@ -604,20 +628,24 @@ int nas_evaluate_architecture(NASSystem* system,
  */
 int nas_get_best_architecture(NASSystem* system,
                              ArchitectureDescription* architecture) {
-    
+
     if (!system || !architecture) {
         selflnn_set_last_error(SELFLNN_ERROR_NULL_POINTER, __func__, __FILE__, __LINE__,
                               "参数为空");
         return -1;
     }
-    
+
+    /* P1修复11: 加锁保护best_architecture的并发读取 */
+    mutex_lock(system->lock);
     if (!system->best_architecture) {
+        mutex_unlock(system->lock);
         selflnn_set_last_error(SELFLNN_ERROR_MODEL_NOT_FOUND, __func__, __FILE__, __LINE__,
                               "未找到最佳架构");
         return -1;
     }
-    
+
     memcpy(architecture, system->best_architecture, sizeof(ArchitectureDescription));
+    mutex_unlock(system->lock);
     return 0;
 }
 
@@ -625,18 +653,20 @@ int nas_get_best_architecture(NASSystem* system,
  * @brief 获取搜索状态
  */
 int nas_get_search_state(NASSystem* system, NASSearchState* state) {
-    
+
     if (!system || !state) {
         selflnn_set_last_error(SELFLNN_ERROR_NULL_POINTER, __func__, __FILE__, __LINE__,
                               "参数为空");
         return -1;
     }
-    
+
+    /* P1修复11: 加锁保护state的并发读取 */
+    mutex_lock(system->lock);
     memcpy(state, &system->state, sizeof(NASSearchState));
-    
     // 复制最佳架构指针
     state->best_architecture = system->best_architecture;
-    
+    mutex_unlock(system->lock);
+
     return 0;
 }
 
@@ -644,13 +674,15 @@ int nas_get_search_state(NASSystem* system, NASSearchState* state) {
  * @brief 重置NAS系统
  */
 int nas_reset(NASSystem* system) {
-    
+
     if (!system) {
         selflnn_set_last_error(SELFLNN_ERROR_NULL_POINTER, __func__, __FILE__, __LINE__,
                               "系统句柄为空");
         return -1;
     }
-    
+
+    /* P1修复11: 加锁保护重置操作的并发执行 */
+    mutex_lock(system->lock);
     // 释放种群
     if (system->population) {
         for (size_t i = 0; i < system->population_capacity; i++) {
@@ -664,7 +696,7 @@ int nas_reset(NASSystem* system) {
             }
         }
     }
-    
+
     // 重置状态
     system->state.current_generation = 0;
     system->state.architectures_evaluated = 0;
@@ -679,10 +711,10 @@ int nas_reset(NASSystem* system) {
     system->state.best_architecture = NULL;
     system->state.is_searching = 0;
     system->state.search_complete = 0;
-    
+
     // 重置历史
     system->history_size = 0;
-    
+
     // 释放最佳架构
     if (system->best_architecture) {
         free_architecture_description(system->best_architecture);
@@ -692,7 +724,8 @@ int nas_reset(NASSystem* system) {
         free_architecture_evaluation(system->best_evaluation);
         system->best_evaluation = NULL;
     }
-    
+
+    mutex_unlock(system->lock);
     return 0;
 }
 
@@ -1214,8 +1247,10 @@ static int generate_random_architecture_internal(NASSystem* system,
     int max_layers = system->config.max_layers;
     if (min_layers < 1) min_layers = 1;
     if (max_layers < min_layers) max_layers = min_layers + 5;
-    
-    arch->layer_count = min_layers + rng_next() % (max_layers - min_layers + 1);
+    /* P2修复14: 对max_layers设置硬上限128，防止配置错误导致超大架构内存耗尽 */
+    if (max_layers > 128) max_layers = 128;
+
+    arch->layer_count = min_layers + (int)(rng_next() % (uint64_t)(max_layers - min_layers + 1));
     
     // 分配数组
     arch->layer_types = (int*)safe_malloc(arch->layer_count * sizeof(int));
@@ -1353,7 +1388,26 @@ static int mutate_architecture_internal(NASSystem* system,
     
     // 复制父架构
     memcpy(child, parent, sizeof(ArchitectureDescription));
-    
+
+    /* P2修复12: memcpy复制了connections和metrics的指针，需深拷贝避免双重释放。
+     * 先置NULL防止后续分配失败时误释放父体内存，再按需深拷贝 */
+    child->connections = NULL;
+    child->metrics = NULL;
+
+    if (parent->connections && parent->layer_count > 0) {
+        size_t conn_size = (size_t)parent->layer_count * (size_t)parent->layer_count;
+        child->connections = (int*)safe_malloc(conn_size * sizeof(int));
+        if (child->connections) {
+            memcpy(child->connections, parent->connections, conn_size * sizeof(int));
+        }
+    }
+    if (parent->metrics && parent->metrics_count > 0) {
+        child->metrics = (float*)safe_malloc(parent->metrics_count * sizeof(float));
+        if (child->metrics) {
+            memcpy(child->metrics, parent->metrics, parent->metrics_count * sizeof(float));
+        }
+    }
+
     // 分配新内存（避免共享指针）
     child->layer_types = (int*)safe_malloc(parent->layer_count * sizeof(int));
     child->layer_widths = (int*)safe_malloc(parent->layer_count * sizeof(int));
@@ -1361,7 +1415,7 @@ static int mutate_architecture_internal(NASSystem* system,
     child->operations = (int*)safe_malloc(parent->layer_count * sizeof(int));
     child->activations = (int*)safe_malloc(parent->layer_count * sizeof(int));
     
-    if (!child->layer_types || !child->layer_widths || !child->kernel_sizes || 
+    if (!child->layer_types || !child->layer_widths || !child->kernel_sizes ||
         !child->operations || !child->activations) {
         /* Z9-004: 浅拷贝后分配失败——清理已分配内存并重置child指针防止双重释放 */
         safe_free((void**)&child->layer_types);
@@ -1369,6 +1423,9 @@ static int mutate_architecture_internal(NASSystem* system,
         safe_free((void**)&child->kernel_sizes);
         safe_free((void**)&child->operations);
         safe_free((void**)&child->activations);
+        /* P2修复12: 同时释放深拷贝的connections和metrics，避免泄漏 */
+        safe_free((void**)&child->connections);
+        safe_free((void**)&child->metrics);
         /* 将child的指针重新置零，避免调用方误认为child可用 */
         memset(child, 0, sizeof(ArchitectureDescription));
         return -1;
@@ -1455,7 +1512,15 @@ static int crossover_architectures_internal(NASSystem* system,
                                            ArchitectureDescription* child) {
     
     if (!system || !parent1 || !parent2 || !child) return -1;
-    
+
+    /* P2修复13: 显式置NULL未分配的指针字段，防止free_architecture_description
+     * 释放垃圾指针导致未定义行为。genome在下方条件分配时会覆盖此NULL值 */
+    child->connections = NULL;
+    child->genome = NULL;
+    child->genome_size = 0;
+    child->metrics = NULL;
+    child->metrics_count = 0;
+
     // 确定子架构层数（取平均值）
     int child_layer_count = (parent1->layer_count + parent2->layer_count) / 2;
     if (child_layer_count < 1) child_layer_count = 1;
@@ -1570,6 +1635,9 @@ static float evaluate_architecture_fitness(NASSystem* system,
     int max_width = 0;
     int input_dim = 64;   /* NAS评估统一使用64维输入 */
     int output_dim = 10;  /* NAS评估统一使用10类输出 */
+    /* R-P2-19修复: output[10]/out_plus[10]/out_minus[10]缓冲区固定为10，
+       添加安全检查确保output_dim不超过10，防止lnn_forward写入越界 */
+    if (output_dim > 10) output_dim = 10;
     int hidden_dim = 64;
     
     for (int i = 0; i < arch->layer_count; i++) {
@@ -1717,6 +1785,10 @@ static float evaluate_architecture_fitness(NASSystem* system,
                   + grad_health * 30.0f
                   + inference_efficiency * 15.0f
                   + (1.0f - complexity_penalty) * 15.0f;
+    
+    /* P2修复: NaN与任何数比较均返回false，会绕过下方的边界裁剪。
+     * 先检查NaN/Inf，将其归零，再进行正常的边界裁剪。 */
+    if (isnan(fitness) || isinf(fitness)) fitness = 0.0f;
     
     if (fitness < 0.0f) fitness = 0.0f;
     if (fitness > 100.0f) fitness = 100.0f;
@@ -2520,7 +2592,8 @@ static int enas_controller_sample_layer_type(CfcENASSearch* searcher,
     if (!searcher || !searcher->controller) return LAYER_TYPE_CFC;
 
     /* 使用完整隐藏状态向量作为控制器输入 */
-    float output[7]; /* 7种层类型：卷积、全连接、池化、归一化、注意力、CfC、CfC细胞 */
+    /* P0修复: 控制器LNN output_size=8, 缓冲区必须匹配, 否则栈溢出 */
+    float output[8]; /* 8种层类型：卷积、全连接、池化、归一化、注意力、CfC、CfC细胞、保留 */
 
     int ret = lnn_forward(searcher->controller, hidden_state, output);
     if (ret != 0) return LAYER_TYPE_CFC;
@@ -4158,16 +4231,23 @@ static float nas_benchmark_architecture(const ArchitectureDescription* arch,
     float total_loss = 0.0f;
     int trained = 0;
 
+    /* P0修复: 动态获取LNN输出大小，避免output_dim > 32时栈溢出 */
+    size_t net_output_size = lnn_get_output_size(net);
+    float* output = (float*)safe_malloc(net_output_size * sizeof(float));
+    if (!output) {
+        lnn_free(net);
+        return -1.0f;
+    }
+
     if (training_data && training_labels) {
         /* 训练评估 */
         for (size_t i = 0; i < num_samples && i < 64; i++) {
             const float* input = training_data + i * input_dim;
-            float output[32];
             lnn_forward(net, input, output);
 
             const float* label = training_labels + i * output_dim;
             float loss = 0.0f;
-            for (size_t j = 0; j < output_dim && j < 32; j++) {
+            for (size_t j = 0; j < output_dim && j < net_output_size; j++) {
                 float diff = output[j] - label[j];
                 loss += diff * diff;
             }
@@ -4196,6 +4276,7 @@ static float nas_benchmark_architecture(const ArchitectureDescription* arch,
     fitness = accuracy_score * 0.5f + efficiency_score * 0.3f + complexity_score * 0.2f;
 
     lnn_free(net);
+    safe_free((void**)&output);
     return fitness;
 }
 

@@ -359,9 +359,15 @@ void logging_log_json(LogLevel level, const char* file, int line,
     
     // 构建基本JSON结构
     time_t now = time(NULL);
-    struct tm* tm_info = localtime(&now);
+    /* P0修复: 使用线程安全的localtime_s/localtime_r替代localtime */
+    struct tm tm_buf;
+#ifdef _WIN32
+    localtime_s(&tm_buf, &now);
+#else
+    localtime_r(&now, &tm_buf);
+#endif
     char timestamp[64];
-    strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S", tm_info);
+    strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S", &tm_buf);
     
     // 开始构建JSON
     char* ptr = json_buffer;
@@ -664,10 +670,16 @@ static const char* get_filename(const char* path)
 static void format_timestamp(char* buffer, size_t size)
 {
     time_t now = time(NULL);
-    struct tm* tm_info = localtime(&now);
+    /* P0修复: 使用线程安全的localtime_s/localtime_r替代localtime */
+    struct tm tm_buf;
+#ifdef _WIN32
+    localtime_s(&tm_buf, &now);
+#else
+    localtime_r(&now, &tm_buf);
+#endif
     
     // 格式: YYYY-MM-DD HH:MM:SS
-    strftime(buffer, size, "%Y-%m-%d %H:%M:%S", tm_info);
+    strftime(buffer, size, "%Y-%m-%d %H:%M:%S", &tm_buf);
 }
 
 // 全局日志函数（简化接口）
@@ -845,7 +857,14 @@ static void check_auto_rotation(void) {
 
     if (g_log_state.log_file) {
         time_t now2 = time(NULL);
-        fprintf(g_log_state.log_file, "--- 日志轮转: %s", ctime(&now2));
+        /* P0修复: 使用线程安全的ctime_s/ctime_r替代ctime */
+        char ctime_buf[26];
+#ifdef _WIN32
+        ctime_s(ctime_buf, sizeof(ctime_buf), &now2);
+#else
+        ctime_r(&now2, ctime_buf);
+#endif
+        fprintf(g_log_state.log_file, "--- 日志轮转: %s", ctime_buf);
         fflush(g_log_state.log_file);
     }
 }
@@ -872,9 +891,15 @@ int logging_rotate_file(const char* new_path)
     
     // 获取当前时间戳用于备份文件名
     time_t now = time(NULL);
-    struct tm* tm_ptr = localtime(&now);
+    /* P0修复: 使用线程安全的localtime_s/localtime_r替代localtime */
+    struct tm tm_buf;
+#ifdef _WIN32
+    localtime_s(&tm_buf, &now);
+#else
+    localtime_r(&now, &tm_buf);
+#endif
     char timestamp[32];
-    strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", tm_ptr);
+    strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", &tm_buf);
     
     // 如果当前有打开的文件，进行轮转
     if (g_log_state.log_file)

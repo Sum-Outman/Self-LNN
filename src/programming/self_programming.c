@@ -16,6 +16,7 @@
 #include "selflnn/programming/c_interpreter.h" /* C解释器集成 */
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/string_utils.h"
+#include "selflnn/utils/logging.h"  /* P2修复: 添加日志头文件，使log_error宏可用 */
 #include "selflnn/core/errors.h"
 
 #ifdef _WIN32
@@ -50,6 +51,7 @@
 #include <linux/seccomp.h>
 #include <linux/audit.h>
 #include <sys/prctl.h>
+#include <sys/resource.h>  /* P1修复: setrlimit资源限制所需 */
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <sys/types.h>
@@ -57,6 +59,29 @@
 #include <fcntl.h>
 #include <signal.h>
 #endif
+
+/* P-P2-18修复: 生成更随机的uid
+ * 原实现仅用time(NULL)^指针，同一秒内多次调用会生成相同uid，可预测且易冲突。
+ * 现加入进程ID与全局自增计数器，保证进程内每次调用唯一、跨进程不可预测。 */
+static unsigned int g_sandbox_counter = 0;
+static unsigned int self_prog_gen_uid(const void* ptr) {
+    unsigned int pid_part = 0;
+#ifdef _WIN32
+    pid_part = (unsigned int)GetCurrentProcessId();
+#else
+    pid_part = (unsigned int)getpid();
+#endif
+    return (unsigned int)time(NULL)
+         ^ (unsigned int)(size_t)ptr
+         ^ pid_part
+         ^ (++g_sandbox_counter);
+}
+
+/* P-P2-18修复: 跨平台检查文件是否存在 (返回0=存在, -1=不存在) */
+static int self_prog_file_exists(const char* path) {
+    if (!path) return -1;
+    return (access(path, F_OK) == 0) ? 0 : -1;
+}
 
 /**
  * @brief 自我编程引擎内部结构体
@@ -182,13 +207,19 @@ static ASTNode* create_ast_node(ASTNodeType type) {
  */
 static void parser_init(ParserState* state, const char* source) {
     if (!state || !source) return;
-    
+
     state->source = source;
     state->position = 0;
     state->length = strlen(source);
     state->current_char = (state->length > 0) ? source[0] : '\0';
     state->line = 1;
     state->column = 1;
+    /* P1修复8: 初始化token缓存，防止safe_free遇到垃圾指针值 */
+    state->token_available = 0;
+    state->current_token.type = TOKEN_END;
+    state->current_token.value = NULL;
+    state->current_token.line = 0;
+    state->current_token.column = 0;
 }
 
 /**
@@ -410,6 +441,16 @@ static Token parser_peek_token(ParserState* state) {
         return empty;
     }
     if (!state->token_available) {
+        /* P1修复8: 释放上一个current_token的value堆内存，防止内存泄漏。
+         * parser_get_next_token每次为token.value分配堆内存，
+         * 当peek调用此函数覆盖current_token时，旧current_token.value指针
+         * 丢失导致泄漏。此处在覆盖前释放旧value。
+         * 安全性保证: token_available=0说明上一次token已被consume消费，
+         * 调用方已使用完毕（如string_duplicate_nullable复制了value），
+         * 不再持有旧token引用，释放不会导致use-after-free。 */
+        if (state->current_token.value) {
+            safe_free((void**)&state->current_token.value);
+        }
         state->current_token = parser_get_next_token(state);
         state->token_available = 1;
     }
@@ -2374,17 +2415,27 @@ CompilationResult verify_code_compilation(SelfProgrammingEngine* engine,
         snprintf(temp_path, sizeof(temp_path), ".");
     }
     snprintf(temp_dir, sizeof(temp_dir), "%s", temp_path);
-    unsigned int uid = (unsigned int)time(NULL) ^ (unsigned int)(size_t)source_code;
-    snprintf(source_file, sizeof(source_file), "%s\\selflnn_verify_%u.c", temp_dir, uid);
-    snprintf(output_file, sizeof(output_file), "%s\\selflnn_verify_%u.exe", temp_dir, uid);
 #else
     snprintf(temp_dir, sizeof(temp_dir), "/tmp");
-    unsigned int uid = (unsigned int)time(NULL) ^ (unsigned int)(size_t)source_code;
-    snprintf(source_file, sizeof(source_file), "/tmp/selflnn_verify_%u.c", uid);
-    snprintf(output_file, sizeof(output_file), "/tmp/selflnn_verify_%u", uid);
 #endif
-    
-    FILE* f = fopen(source_file, "w");
+    /* P-P2-18修复: uid含进程ID与自增计数器，避免time(NULL)可预测；
+     * 写入前确认文件不存在再创建，防止覆盖已有文件/符号链接攻击 */
+    unsigned int uid = 0;
+    FILE* f = NULL;
+    for (int tries = 0; tries < 16; tries++) {
+        uid = self_prog_gen_uid(source_code);
+#ifdef _WIN32
+        snprintf(source_file, sizeof(source_file), "%s\\selflnn_verify_%u.c", temp_dir, uid);
+        snprintf(output_file, sizeof(output_file), "%s\\selflnn_verify_%u.exe", temp_dir, uid);
+#else
+        snprintf(source_file, sizeof(source_file), "/tmp/selflnn_verify_%u.c", uid);
+        snprintf(output_file, sizeof(output_file), "/tmp/selflnn_verify_%u", uid);
+#endif
+        if (self_prog_file_exists(source_file) != 0) {  /* 文件不存在，可安全创建 */
+            f = fopen(source_file, "w");
+            break;
+        }
+    }
     if (!f) {
         safe_free((void**)&compiler_path);
         result.success = 0;
@@ -2534,13 +2585,21 @@ int execute_code_sandboxed(SelfProgrammingEngine* engine,
     }
     snprintf(temp_dir, sizeof(temp_dir), "%s", temp_path);
     
-    unsigned int uid = (unsigned int)time(NULL) ^ ((unsigned int)(size_t)code << 8);
+    unsigned int uid = 0;
     char source_file[MAX_PATH];
     char exe_file[MAX_PATH];
-    snprintf(source_file, sizeof(source_file), "%s\\selflnn_sandbox_%u.c", temp_dir, uid);
-    snprintf(exe_file, sizeof(exe_file), "%s\\selflnn_sandbox_%u.exe", temp_dir, uid);
-    
-    FILE* f = fopen(source_file, "w");
+    FILE* f = NULL;
+    /* P-P2-18修复: uid含进程ID与自增计数器，避免time(NULL)可预测；
+     * 写入前确认文件不存在再创建，防止覆盖已有文件/符号链接攻击 */
+    for (int tries = 0; tries < 16; tries++) {
+        uid = self_prog_gen_uid(code);
+        snprintf(source_file, sizeof(source_file), "%s\\selflnn_sandbox_%u.c", temp_dir, uid);
+        snprintf(exe_file, sizeof(exe_file), "%s\\selflnn_sandbox_%u.exe", temp_dir, uid);
+        if (self_prog_file_exists(source_file) != 0) {  /* 文件不存在，可安全创建 */
+            f = fopen(source_file, "w");
+            break;
+        }
+    }
     if (!f) return -1;
     fprintf(f, "%s", code);
     fclose(f);
@@ -2568,12 +2627,22 @@ int execute_code_sandboxed(SelfProgrammingEngine* engine,
     char compile_cmd[8192];
     int is_msvc = (strstr(compiler, "cl.exe") != NULL);
     if (is_msvc) {
+        /* P1修复10: 移除/NODEFAULTLIB，允许标准库链接。
+         * 原实现剥离C运行时库和标准库(/NODEFAULTLIB)，
+         * 导致大多数生成的C代码无法链接或运行时崩溃。
+         * 移除/NODEFAULTLIB，保留默认库链接，
+         * 通过Job Object限制运行时行为（CPU时间/内存/进程数）。 */
         snprintf(compile_cmd, sizeof(compile_cmd),
-                 "\"%s\" \"%s\" /Fe\"%s\" /nologo /link /NODEFAULTLIB /ENTRY:main 2>&1",
+                 "\"%s\" \"%s\" /Fe\"%s\" /nologo 2>&1",
                  compiler, source_file, exe_file);
     } else {
+        /* P1修复10: 移除-nostartfiles -nostdlib，允许标准库链接。
+         * 原实现剥离C运行时启动文件和标准库，
+         * 导致生成的可执行文件缺少_crt入口和标准库符号，无法链接。
+         * 保留-static静态链接确保可执行文件独立性，
+         * 通过fork+seccomp沙箱限制运行时行为。 */
         snprintf(compile_cmd, sizeof(compile_cmd),
-                 "\"%s\" \"%s\" -o \"%s\" -static -nostartfiles -nostdlib 2>&1",
+                 "\"%s\" \"%s\" -o \"%s\" -static 2>&1",
                  compiler, source_file, exe_file);
     }
 
@@ -2639,11 +2708,36 @@ int execute_code_sandboxed(SelfProgrammingEngine* engine,
             JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE |
             JOB_OBJECT_LIMIT_ACTIVE_PROCESS |
             JOB_OBJECT_LIMIT_PROCESS_TIME |
-            JOB_OBJECT_LIMIT_JOB_TIME;
+            JOB_OBJECT_LIMIT_JOB_TIME |
+            JOB_OBJECT_LIMIT_PROCESS_MEMORY;  /* P1修复9: 添加进程内存限制 */
         job_info.BasicLimitInformation.ActiveProcessLimit = 1;
         job_info.BasicLimitInformation.PerProcessUserTimeLimit.QuadPart = 10000000LL;
         job_info.BasicLimitInformation.PerJobUserTimeLimit.QuadPart = 30000000LL;
+        /* P1修复9: 设置进程内存限制256MB，防止沙箱进程耗尽系统内存 */
+        job_info.ProcessMemoryLimit = 256 * 1024 * 1024;  /* 256MB */
         SetInformationJobObject(job, JobObjectExtendedLimitInformation, &job_info, sizeof(job_info));
+
+        /* P1-2修复: 通过Job Object安全限制约束沙箱进程的令牌权限。
+         * 原实现仅限制CPU时间和进程数，未限制文件系统/网络/注册表的越权访问。
+         * 此处设置JOB_OBJECT_SECURITY_NO_ADMIN阻止沙箱进程以管理员令牌运行，
+         * 防止其绕过权限获取对系统文件/注册表/网络资源的越权访问；
+         * 设置JOB_OBJECT_SECURITY_RESTRICTED_TOKEN强制进程以受限令牌运行，
+         * 剥离Administrators组SID及大部分特权，进一步收窄可访问资源范围。
+         * 该方案基于kernel32的SetInformationJobObject，无需advapi32链接，
+         * 亦不依赖SE_TCB_NAME特权，可真实落地。 */
+        JOBOBJECT_SECURITY_LIMIT_INFORMATION sec_limits;
+        memset(&sec_limits, 0, sizeof(sec_limits));
+        sec_limits.SecurityLimitFlags =
+            JOB_OBJECT_SECURITY_NO_ADMIN |
+            JOB_OBJECT_SECURITY_RESTRICTED_TOKEN;
+        if (!SetInformationJobObject(job, JobObjectSecurityLimitInformation,
+                                     &sec_limits, sizeof(sec_limits))) {
+            /* 设置受限令牌标志在部分环境下可能失败（如父进程已带管理员令牌），
+               回退为仅阻止管理员令牌，确保至少存在一道安全限制 */
+            sec_limits.SecurityLimitFlags = JOB_OBJECT_SECURITY_NO_ADMIN;
+            SetInformationJobObject(job, JobObjectSecurityLimitInformation,
+                                     &sec_limits, sizeof(sec_limits));
+        }
     }
     
     if (output && output_size > 0) {
@@ -2672,12 +2766,26 @@ int execute_code_sandboxed(SelfProgrammingEngine* engine,
         
         if (CreateProcessA(NULL, cmd_line, NULL, NULL, TRUE,
                            CREATE_SUSPENDED | CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
-            if (job) AssignProcessToJobObject(job, pi.hProcess);
+            if (job) {
+                /* P2修复: 检查AssignProcessToJobObject返回值，失败时终止子进程并返回错误，
+                 * 防止子进程游离于job之外无法被统一管控和资源回收 */
+                if (!AssignProcessToJobObject(job, pi.hProcess)) {
+                    log_error("AssignProcessToJobObject失败");
+                    TerminateProcess(pi.hProcess, 1);
+                    CloseHandle(pi.hProcess);
+                    CloseHandle(pi.hThread);
+                    CloseHandle(hStdout);
+                    CloseHandle(job);
+                    remove(temp_out_file);
+                    remove(exe_file);
+                    return -1;
+                }
+            }
             ResumeThread(pi.hThread);
-            
+
             WaitForSingleObject(pi.hProcess, 3000);
             TerminateProcess(pi.hProcess, 1);
-            
+
             DWORD exit_code = 0;
             GetExitCodeProcess(pi.hProcess, &exit_code);
             
@@ -2693,7 +2801,12 @@ int execute_code_sandboxed(SelfProgrammingEngine* engine,
             }
             remove(temp_out_file);
         } else {
+            /* P1修复2: CreateProcessA失败时原仅关闭hStdout后落入函数末尾return 0，
+             * 误报执行成功。现清理资源并返回失败，使调用方能正确感知沙箱启动失败。 */
             CloseHandle(hStdout);
+            if (job) CloseHandle(job);
+            remove(exe_file);
+            return -1;
         }
     } else {
         char cmd_line[8192];
@@ -2701,13 +2814,31 @@ int execute_code_sandboxed(SelfProgrammingEngine* engine,
         
         if (CreateProcessA(NULL, cmd_line, NULL, NULL, TRUE,
                            CREATE_SUSPENDED | CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
-            if (job) AssignProcessToJobObject(job, pi.hProcess);
+            if (job) {
+                /* P2修复: 检查AssignProcessToJobObject返回值，失败时终止子进程并返回错误，
+                 * 防止子进程游离于job之外无法被统一管控和资源回收 */
+                if (!AssignProcessToJobObject(job, pi.hProcess)) {
+                    log_error("AssignProcessToJobObject失败");
+                    TerminateProcess(pi.hProcess, 1);
+                    CloseHandle(pi.hProcess);
+                    CloseHandle(pi.hThread);
+                    CloseHandle(job);
+                    remove(exe_file);
+                    return -1;
+                }
+            }
             ResumeThread(pi.hThread);
             WaitForSingleObject(pi.hProcess, 3000);
             TerminateProcess(pi.hProcess, 1);
-            
+
             CloseHandle(pi.hProcess);
             CloseHandle(pi.hThread);
+        } else {
+            /* P1修复2: 无输出分支CreateProcessA失败原无else，落入函数末尾return 0
+             * 误报成功。现清理资源并返回失败。 */
+            if (job) CloseHandle(job);
+            remove(exe_file);
+            return -1;
         }
     }
     
@@ -2716,14 +2847,25 @@ int execute_code_sandboxed(SelfProgrammingEngine* engine,
     return 0;
 #else
     // Linux/macOS: fork + seccomp(namespace) + timeout
-    unsigned int uid = (unsigned int)time(NULL) ^ ((unsigned int)(size_t)code << 8);
+    unsigned int uid = 0;
     char source_file[256];
     char exe_file[256];
-    snprintf(source_file, sizeof(source_file), "/tmp/selflnn_sandbox_%u.c", uid);
-    snprintf(exe_file, sizeof(exe_file), "/tmp/selflnn_sandbox_%u", uid);
-    
-    FILE* f = fopen(source_file, "w");
+    char out_file[256];  /* P-P2-18修复: 沙箱输出文件名加uid后缀，避免固定文件名竞争 */
+    FILE* f = NULL;
+    /* P-P2-18修复: uid含进程ID与自增计数器，避免time(NULL)可预测；
+     * 写入前确认文件不存在再创建，防止覆盖已有文件/符号链接攻击 */
+    for (int tries = 0; tries < 16; tries++) {
+        uid = self_prog_gen_uid(code);
+        snprintf(source_file, sizeof(source_file), "/tmp/selflnn_sandbox_%u.c", uid);
+        snprintf(exe_file, sizeof(exe_file), "/tmp/selflnn_sandbox_%u", uid);
+        if (self_prog_file_exists(source_file) != 0) {  /* 文件不存在，可安全创建 */
+            f = fopen(source_file, "w");
+            break;
+        }
+    }
     if (!f) return -1;
+    /* 输出重定向文件名同样带uid，子进程与父进程共享此变量(fork复制) */
+    snprintf(out_file, sizeof(out_file), "/tmp/selflnn_sandbox_output_%u", uid);
     fprintf(f, "%s", code);
     fclose(f);
     
@@ -2768,6 +2910,25 @@ int execute_code_sandboxed(SelfProgrammingEngine* engine,
     
     pid_t pid = fork();
     if (pid == 0) {
+        /* P0修复1: 先完成所有文件操作和fd重定向，再应用seccomp过滤器。
+         * 原实现在seccomp应用后才执行open("/dev/null")/dup2()/execl()，
+         * 而白名单不含open/dup2/execve，子进程被SECCOMP_RET_KILL杀死，
+         * 但父进程waitpid后仍返回0(成功)，导致误判。
+         * 现将重定向移至seccomp之前——此时子进程尚未execve用户代码，
+         * open/dup2不经过过滤器，安全可控；seccomp仅约束execve后的运行时。 */
+        int null_fd = open("/dev/null", O_WRONLY);
+        if (null_fd >= 0) {
+            dup2(null_fd, STDIN_FILENO);
+            close(null_fd);
+        }
+        if (output && output_size > 0) {
+            int out_fd = open(out_file, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+            if (out_fd >= 0) {
+                dup2(out_fd, STDOUT_FILENO);
+                dup2(out_fd, STDERR_FILENO);
+                close(out_fd);
+            }
+        }
 #ifdef __linux__
         struct sock_filter filter[] = {
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)),
@@ -2790,6 +2951,48 @@ int execute_code_sandboxed(SelfProgrammingEngine* engine,
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_munmap, 0, 1),
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+            /* P0修复7: 添加C运行时必需的系统调用到白名单。
+             * 原白名单仅允许9个系统调用，编译出的可执行文件启动时
+             * 需要arch_prctl/mprotect/set_tid_address/rt_sigaction/close等系统调用，
+             * 子进程在execl()后、main()执行前即被SECCOMP_RET_KILL终止。 */
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_close, 0, 1),
+            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_mprotect, 0, 1),
+            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_arch_prctl, 0, 1),
+            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_rt_sigaction, 0, 1),
+            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_set_tid_address, 0, 1),
+            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+            /* P0修复1: 补充子进程execve及动态链接器加载共享库所需的关键syscall。
+             * 原白名单缺execve→execl()被SECCOMP_RET_KILL杀; 缺openat→glibc
+             * 加载libc.so等共享库时被杀，子进程无法进入main()。
+             * dup2/dup3为重定向及运行时可能调用(重定向已在seccomp前完成，
+             * 此处加入为防御性白名单，确保execve后运行时不被误杀)。 */
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_execve, 0, 1),
+            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_openat, 0, 1),
+            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_open, 0, 1),
+            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_dup2, 0, 1),
+            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_dup3, 0, 1),
+            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+            /* P1修复: 补充现代glibc运行时必需的系统调用。
+             * getrandom: glibc stack canary初始化(__stack_chk_guard)需要；
+             * newfstatat: glibc 2.33+的fstat实现(替代SYS_fstat, x86_64 syscall号262)；
+             * lseek: 文件偏移操作，部分glibc动态链接器加载时调用；
+             * rt_sigprocmask: 信号屏蔽操作，glibc运行时信号管理需要。 */
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_getrandom, 0, 1),
+            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_newfstatat, 0, 1),
+            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_lseek, 0, 1),
+            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_rt_sigprocmask, 0, 1),
+            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL),
         };
         struct sock_fprog prog = {
@@ -2798,20 +3001,24 @@ int execute_code_sandboxed(SelfProgrammingEngine* engine,
         };
         prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
         prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog);
+        /* P1修复: 添加setrlimit资源限制，防止子进程耗尽系统资源。
+         * Windows沙箱使用Job Object限制内存/CPU，Linux端缺少等价限制，
+         * 恶意/失控的自动生成代码可能导致内存耗尽、磁盘写满或CPU死循环。 */
+        struct rlimit rl;
+        /* 内存限制256MB — 防止子进程通过无限分配耗尽系统内存 */
+        rl.rlim_cur = rl.rlim_max = 256 * 1024 * 1024;
+        setrlimit(RLIMIT_AS, &rl);
+        /* 文件大小限制10MB — 防止子进程写入超大文件填满磁盘 */
+        rl.rlim_cur = rl.rlim_max = 10 * 1024 * 1024;
+        setrlimit(RLIMIT_FSIZE, &rl);
+        /* CPU时间限制2秒 — 防止子进程死循环永久占用CPU */
+        rl.rlim_cur = rl.rlim_max = 2;
+        setrlimit(RLIMIT_CPU, &rl);
+        /* 父进程崩溃时自动杀死子进程，避免孤儿进程残留 */
+        prctl(PR_SET_PDEATHSIG, SIGKILL);
 #endif
-        int null_fd = open("/dev/null", O_WRONLY);
-        if (null_fd >= 0) {
-            dup2(null_fd, STDIN_FILENO);
-            close(null_fd);
-        }
-        if (output && output_size > 0) {
-            int out_fd = open("/tmp/selflnn_sandbox_output", O_WRONLY | O_CREAT | O_TRUNC, 0600);
-            if (out_fd >= 0) {
-                dup2(out_fd, STDOUT_FILENO);
-                dup2(out_fd, STDERR_FILENO);
-                close(out_fd);
-            }
-        }
+        /* 重定向已在seccomp应用前完成(见上方)，此处直接execve用户代码。
+         * execve已在白名单中放行，子进程映像替换后继续受seccomp约束。 */
         execl(exe_file, exe_file, NULL);
         _exit(1);
     }
@@ -2834,13 +3041,13 @@ int execute_code_sandboxed(SelfProgrammingEngine* engine,
         }
         
         if (output && output_size > 0) {
-            FILE* out_f = fopen("/tmp/selflnn_sandbox_output", "r");
+            FILE* out_f = fopen(out_file, "r");
             if (out_f) {
                 size_t read_count = fread(output, 1, output_size - 1, out_f);
                 output[read_count] = '\0';
                 fclose(out_f);
             }
-            remove("/tmp/selflnn_sandbox_output");
+            remove(out_file);
         }
     }
     

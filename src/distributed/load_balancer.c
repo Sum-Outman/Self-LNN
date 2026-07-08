@@ -140,8 +140,16 @@ int lb_add_node(LbBalancer* balancer, uint32_t node_id, LbNodeType type,
                 const char* name, const char* address, uint16_t port,
                 const LbNodeCapability* capability) {
     if (!balancer || !name) return LB_ERROR_INVALID_PARAM;
-    if (find_node_index(balancer, node_id) >= 0) return LB_ERROR_INVALID_PARAM;
-    if (balancer->node_count >= (int)balancer->config.max_nodes) return LB_ERROR_MAX_NODES;
+    /* P1-01修复: 加锁保护共享状态（节点表）的并发访问 */
+    mutex_lock(balancer->lock);
+    if (find_node_index(balancer, node_id) >= 0) {
+        mutex_unlock(balancer->lock);
+        return LB_ERROR_INVALID_PARAM;
+    }
+    if (balancer->node_count >= (int)balancer->config.max_nodes) {
+        mutex_unlock(balancer->lock);
+        return LB_ERROR_MAX_NODES;
+    }
     int idx = balancer->node_count++;
     LbNode* node = &balancer->nodes[idx];
     memset(node, 0, sizeof(LbNode));
@@ -157,25 +165,37 @@ int lb_add_node(LbBalancer* balancer, uint32_t node_id, LbNodeType type,
     node->last_heartbeat_ms = get_time_ms();
     node->is_local = 1;
     if (capability) memcpy(&node->capability, capability, sizeof(LbNodeCapability));
+    mutex_unlock(balancer->lock);
     return LB_ERROR_NONE;
 }
 
 int lb_remove_node(LbBalancer* balancer, uint32_t node_id) {
     if (!balancer) return LB_ERROR_INVALID_PARAM;
+    /* P1-01修复: 加锁保护共享状态（节点表）的并发访问 */
+    mutex_lock(balancer->lock);
     int idx = find_node_index(balancer, node_id);
-    if (idx < 0) return LB_ERROR_NODE_NOT_FOUND;
+    if (idx < 0) {
+        mutex_unlock(balancer->lock);
+        return LB_ERROR_NODE_NOT_FOUND;
+    }
     for (int i = idx; i < balancer->node_count - 1; i++) {
         balancer->nodes[i] = balancer->nodes[i + 1];
     }
     balancer->node_count--;
+    mutex_unlock(balancer->lock);
     return LB_ERROR_NONE;
 }
 
 int lb_update_node_metrics(LbBalancer* balancer, uint32_t node_id,
                            const LbNodeMetrics* metrics) {
     if (!balancer || !metrics) return LB_ERROR_INVALID_PARAM;
+    /* P1-01修复: 加锁保护共享状态（节点指标/负载）的并发访问 */
+    mutex_lock(balancer->lock);
     int idx = find_node_index(balancer, node_id);
-    if (idx < 0) return LB_ERROR_NODE_NOT_FOUND;
+    if (idx < 0) {
+        mutex_unlock(balancer->lock);
+        return LB_ERROR_NODE_NOT_FOUND;
+    }
     LbNode* node = &balancer->nodes[idx];
     memcpy(&node->metric_history[node->metric_history_index], &node->metrics, sizeof(LbNodeMetrics));
     node->metric_history_index = (node->metric_history_index + 1) % LB_METRIC_HISTORY;
@@ -209,31 +229,47 @@ int lb_update_node_metrics(LbBalancer* balancer, uint32_t node_id,
                        + io_weight   * io_util;
     if (node->current_load > 1.0) node->current_load = 1.0;
     if (node->current_load < 0.0) node->current_load = 0.0;
+    mutex_unlock(balancer->lock);
     return LB_ERROR_NONE;
 }
 
 int lb_set_node_weight(LbBalancer* balancer, uint32_t node_id, double weight) {
     if (!balancer) return LB_ERROR_INVALID_PARAM;
+    /* P1-01修复: 加锁保护共享状态（节点权重）的并发访问 */
+    mutex_lock(balancer->lock);
     int idx = find_node_index(balancer, node_id);
-    if (idx < 0) return LB_ERROR_NODE_NOT_FOUND;
+    if (idx < 0) {
+        mutex_unlock(balancer->lock);
+        return LB_ERROR_NODE_NOT_FOUND;
+    }
     balancer->nodes[idx].weight = weight > 0.0 ? weight : 0.1;
+    mutex_unlock(balancer->lock);
     return LB_ERROR_NONE;
 }
 
 int lb_get_node(const LbBalancer* balancer, uint32_t node_id, LbNode* node) {
     if (!balancer || !node) return LB_ERROR_INVALID_PARAM;
+    /* P1-01修复: 加锁保护共享状态（节点表）的并发读取 */
+    mutex_lock(((LbBalancer*)balancer)->lock);
     int idx = find_node_index((LbBalancer*)balancer, node_id);
-    if (idx < 0) return LB_ERROR_NODE_NOT_FOUND;
+    if (idx < 0) {
+        mutex_unlock(((LbBalancer*)balancer)->lock);
+        return LB_ERROR_NODE_NOT_FOUND;
+    }
     memcpy(node, &balancer->nodes[idx], sizeof(LbNode));
+    mutex_unlock(((LbBalancer*)balancer)->lock);
     return LB_ERROR_NONE;
 }
 
 int lb_get_online_count(const LbBalancer* balancer) {
     if (!balancer) return 0;
+    /* P1-01修复: 加锁保护共享状态（节点表）的并发读取 */
+    mutex_lock(((LbBalancer*)balancer)->lock);
     int count = 0;
     for (int i = 0; i < balancer->node_count; i++) {
         if (balancer->nodes[i].status == LB_NODE_ONLINE) count++;
     }
+    mutex_unlock(((LbBalancer*)balancer)->lock);
     return count;
 }
 
@@ -544,10 +580,12 @@ int lb_rebalance(LbBalancer* balancer) {
 
 int lb_failover(LbBalancer* balancer, uint32_t failed_node_id) {
     if (!balancer) return LB_ERROR_INVALID_PARAM;
-    /* FIX-008修复: 获取互斥锁保护并发访问tasks数组 */
-    mutex_lock(&balancer->lock);
+    /* FIX-008修复: 获取互斥锁保护并发访问tasks数组
+     * P0修复: balancer->lock是MutexHandle(void*)类型，应直接传递，
+     * 原代码&balancer->lock传递的是指向指针的指针，导致锁操作无效。 */
+    mutex_lock(balancer->lock);
     int idx = find_node_index(balancer, failed_node_id);
-    if (idx < 0) { mutex_unlock(&balancer->lock); return LB_ERROR_NODE_NOT_FOUND; }
+    if (idx < 0) { mutex_unlock(balancer->lock); return LB_ERROR_NODE_NOT_FOUND; }
     balancer->stats.total_failovers++;
     int failed_count = 0;
     for (int i = 0; i < balancer->task_count; i++) {
@@ -562,7 +600,7 @@ int lb_failover(LbBalancer* balancer, uint32_t failed_node_id) {
             }
         }
     }
-    mutex_unlock(&balancer->lock);
+    mutex_unlock(balancer->lock);
     return failed_count;
 }
 

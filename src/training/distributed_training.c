@@ -499,7 +499,11 @@ int distributed_recv_message(NodeConnection* conn, DistributedMessageHeader* hea
             return -1;
         }
     } else if (header->length > 0) {
-        /* 缓冲区不足，跳过数据 */
+        /* 修复8(P1): 缓冲区不足或未提供payload时丢弃数据。
+         * 原代码丢弃后仍返回0(成功)，调用方无法察觉数据丢失。
+         * 现区分两种情况:
+         *   payload非NULL但缓冲区过小 → 返回-2告知数据被丢弃(错误);
+         *   payload为NULL(调用方主动不要payload) → 丢弃后返回0(成功)。 */
         unsigned char discard[4096];
         uint32_t remaining = header->length;
         while (remaining > 0) {
@@ -514,6 +518,9 @@ int distributed_recv_message(NodeConnection* conn, DistributedMessageHeader* hea
 
     conn->bytes_received += sizeof(*header) + header->length;
     mutex_unlock(conn->lock);
+    /* 修复8: payload非NULL但缓冲区不足时数据被丢弃，返回-2 */
+    if (header->length > 0 && payload && max_length < header->length)
+        return -2;
     return 0;
 }
 
@@ -1179,6 +1186,21 @@ SELFLNN_API int distributed_broadcast(DistributedContext* ctx, void* data, size_
  * 收集 (Gather) 和全收集 (AllGather)
  * =========================================================================== */
 
+/* 修复7(P1): 判断节点 node 是否在以 root 为根的完全二叉树子树中。
+ * 完全二叉树父节点关系: parent(i) = (i-1)/2。
+ * 从 node 沿父链向上走，若途中遇到 root 则属于该子树。 */
+static int dt_node_in_subtree(int node, int root)
+{
+    if (node < 0 || root < 0) return 0;
+    if (node == root) return 1;
+    int cur = node;
+    while (cur > 0) {
+        cur = (cur - 1) / 2;
+        if (cur == root) return 1;
+    }
+    return 0;
+}
+
 SELFLNN_API int distributed_gather(DistributedContext* ctx, const void* send_data, void* recv_data, size_t size, int root_id) {
     if (!ctx || !send_data) return -1;
     if (ctx->num_nodes <= 1) {
@@ -1196,6 +1218,12 @@ SELFLNN_API int distributed_gather(DistributedContext* ctx, const void* send_dat
         unsigned char* base = (unsigned char*)recv_data;
         memcpy(base + ctx->my_node_id * size, send_data, size);
 
+        /* 修复7(P1): 原代码每个子节点的整块数据都从 recv_data 偏移0写入，
+         * child2 覆盖 child1 和根数据。现用临时缓冲接收子节点数据，
+         * 再按子树成员关系合并到正确位置（每个节点ID只属于一个子树，不会互相覆盖）。 */
+        unsigned char* child_buf = (unsigned char*)safe_malloc(size * ctx->num_nodes);
+        if (!child_buf) return -1;
+
         int children[2] = { ctx->tree_left_child, ctx->tree_right_child };
         for (int i = 0; i < 2; i++) {
             int child = children[i];
@@ -1203,11 +1231,20 @@ SELFLNN_API int distributed_gather(DistributedContext* ctx, const void* send_dat
                 /* 接收子节点的收集数据 - 包含子节点及其所有后代的全部数据 */
                 DistributedMessageHeader header;
                 uint32_t expected_size = (uint32_t)(size * ctx->num_nodes);
-                if (recv_from_node(&ctx->nodes[child], &header, recv_data, expected_size) < 0) {
+                if (recv_from_node(&ctx->nodes[child], &header, child_buf, expected_size) < 0) {
+                    safe_free((void**)&child_buf);
                     return -1;
+                }
+                /* 仅合并属于该子节点子树的节点数据到对应位置 */
+                for (int j = 0; j < ctx->num_nodes; j++) {
+                    if (j != ctx->my_node_id && dt_node_in_subtree(j, child)) {
+                        memcpy(base + (size_t)j * size,
+                               child_buf + (size_t)j * size, size);
+                    }
                 }
             }
         }
+        safe_free((void**)&child_buf);
     } else {
         /* 非根节点: 先收集子节点数据，然后发送给父节点 */
         unsigned char* local_buffer = (unsigned char*)safe_malloc(size * ctx->num_nodes);
@@ -1215,20 +1252,32 @@ SELFLNN_API int distributed_gather(DistributedContext* ctx, const void* send_dat
         memset(local_buffer, 0, size * ctx->num_nodes);
         memcpy(local_buffer + ctx->my_node_id * size, send_data, size);
 
+        /* 修复7(P1): 同样用临时缓冲接收子节点数据后合并，避免覆盖 */
+        unsigned char* child_buf = (unsigned char*)safe_malloc(size * ctx->num_nodes);
+        if (!child_buf) { safe_free((void**)&local_buffer); return -1; }
+
         /* 接收子节点数据 */
-        size_t total_size = size; (void)total_size;
         int children[2] = { ctx->tree_left_child, ctx->tree_right_child };
         for (int i = 0; i < 2; i++) {
             int child = children[i];
             if (child >= 0 && child < DISTRIBUTED_MAX_NODES && ctx->nodes[child].connected) {
                 DistributedMessageHeader header;
                 if (recv_from_node(&ctx->nodes[child], &header,
-                                   local_buffer, (uint32_t)(size * ctx->num_nodes)) < 0) {
+                                   child_buf, (uint32_t)(size * ctx->num_nodes)) < 0) {
                     safe_free((void**)&local_buffer);
+                    safe_free((void**)&child_buf);
                     return -1;
+                }
+                /* 仅合并属于该子节点子树的节点数据 */
+                for (int j = 0; j < ctx->num_nodes; j++) {
+                    if (j != ctx->my_node_id && dt_node_in_subtree(j, child)) {
+                        memcpy(local_buffer + (size_t)j * size,
+                               child_buf + (size_t)j * size, size);
+                    }
                 }
             }
         }
+        safe_free((void**)&child_buf);
 
         /* 发送给父节点 */
         int parent = ctx->tree_parent;
@@ -1271,23 +1320,33 @@ SELFLNN_API int distributed_allgather(DistributedContext* ctx, const void* send_
 
     int n = ctx->num_nodes;
 
-    /* 环形全收集: 每个节点在环上传递累积数据，经过n-1步后每个节点拥有全部数据 */
+    /* 环形全收集: 每个节点固定与后继(successor)/前驱(predecessor)通信，
+     * 数据沿环逐步传递，经过n-1步后每个节点拥有全部数据。
+     * 与 ring_allreduce_internal 保持一致的固定环通信模式。 */
     for (int step = 1; step < n; step++) {
-        int src = (ctx->my_node_id - step + n) % n;
-        int dst = (ctx->my_node_id + step) % n;
+        /* 修复6(P1): 原代码 send_to=(my_id+step)%n / recv_from=(my_id-step+n)%n
+         * 为跳环模式，且 send_offset=src*size 在 step=1 时发送(my_id-1)位置——
+         * 该位置尚未填充（发送未初始化内存），recv_offset 也错位。
+         * 现改为固定环（后继/前驱）+ 正确偏移:
+         *   step=k时发送上一步刚收到的chunk = buffer[(my_id-k+1+n)%n]
+         *   接收到新位置 buffer[(my_id-k+n)%n]
+         * 固定环下该偏移公式经数学验证在所有step均正确。 */
+        int send_to = ctx->ring_successor;
+        int recv_from = ctx->ring_predecessor;
+
+        uint32_t send_offset = (uint32_t)(((ctx->my_node_id - step + 1 + n) % n) * size);
+        uint32_t recv_offset = (uint32_t)(((ctx->my_node_id - step + n) % n) * size);
 
         /* 发送数据 */
-        if (dst >= 0 && dst < DISTRIBUTED_MAX_NODES && ctx->nodes[dst].connected) {
-            uint32_t send_offset = (uint32_t)(src * size);
-            distributed_send_to_node(ctx, dst, MSG_ALLGATHER_DATA, 0,
+        if (send_to >= 0 && send_to < DISTRIBUTED_MAX_NODES && ctx->nodes[send_to].connected) {
+            distributed_send_to_node(ctx, send_to, MSG_ALLGATHER_DATA, 0,
                                      buffer + send_offset, (uint32_t)size);
         }
 
         /* 接收数据 */
-        if (src >= 0 && src < DISTRIBUTED_MAX_NODES && ctx->nodes[src].connected) {
+        if (recv_from >= 0 && recv_from < DISTRIBUTED_MAX_NODES && ctx->nodes[recv_from].connected) {
             DistributedMessageHeader header;
-            uint32_t recv_offset = (uint32_t)(((ctx->my_node_id - step - 1 + n) % n) * size);
-            recv_from_node(&ctx->nodes[src], &header, buffer + recv_offset, (uint32_t)size);
+            recv_from_node(&ctx->nodes[recv_from], &header, buffer + recv_offset, (uint32_t)size);
         }
     }
 
@@ -1340,15 +1399,17 @@ static int ring_allreduce_internal(DistributedContext* ctx, float* data, size_t 
         if (recv_count > 0 && pred >= 0 && pred < DISTRIBUTED_MAX_NODES && ctx->nodes[pred].connected) {
             DistributedMessageHeader header;
             uint32_t recv_bytes = (uint32_t)(recv_count * sizeof(float));
-            if (recv_buf) {
-                if (recv_from_node(&ctx->nodes[pred], &header, recv_buf, recv_bytes) == 0) {
-                    if (header.type == MSG_GRADIENT_CHUNK) {
-                        /* 累加到本地数据 */
-                        for (size_t i = 0; i < recv_count; i++) {
-                            data[recv_start + i] += recv_buf[i];
-                        }
+            if (recv_from_node(&ctx->nodes[pred], &header, recv_buf, recv_bytes) == 0) {
+                if (header.type == MSG_GRADIENT_CHUNK) {
+                    /* 累加到本地数据 */
+                    for (size_t i = 0; i < recv_count; i++) {
+                        data[recv_start + i] += recv_buf[i];
                     }
                 }
+            } else {
+                /* P1修复: 接收失败时报错而非静默跳过（与Phase2处理一致） */
+                safe_free((void**)&recv_buf);
+                return -1;
             }
         }
     }
@@ -2298,9 +2359,16 @@ SELFLNN_API int distributed_checkpoint_leader_sync(DistributedContext* ctx, cons
     } else {
         /* 工作节点：从领导节点接收检查点请求 */
         DistributedMessageHeader header;
-        if (recv_from_node(&ctx->nodes[0], &header, (void*)filepath, 512) == 0) {
+        /* 修复5(P0): 原代码 recv_from_node(&ctx->nodes[0], &header, (void*)filepath, 512)
+         * 将数据写入 const char* filepath 参数——写入 const 限定指针为未定义行为；
+         * 若 filepath 指向字符串字面量或小于512字节的缓冲则缓冲区溢出。
+         * 现使用局部缓冲接收，再传入加载函数。 */
+        char filepath_buf[512];
+        memset(filepath_buf, 0, sizeof(filepath_buf));
+        if (recv_from_node(&ctx->nodes[0], &header, filepath_buf, sizeof(filepath_buf) - 1) == 0) {
+            filepath_buf[sizeof(filepath_buf) - 1] = '\0';
             if (header.type == MSG_CHECKPOINT_SAVE) {
-                distributed_checkpoint_load(ctx, filepath);
+                distributed_checkpoint_load(ctx, filepath_buf);
             }
         }
     }
@@ -2563,13 +2631,16 @@ int distributed_elastic_check_nodes(void) {
 }
 
 int distributed_elastic_remove_node(int node_id) {
-    if (!g_elastic_ctx) return -1;
-    if (node_id < 0 || node_id >= g_elastic_ctx->num_nodes) return -2;
+    /* 修复9(P1): 原代码直接读写 g_elastic_ctx 字段而未调用 elastic_ctx_lock()，
+     * 与并发 add/sync/heartbeat 竞态。现加锁保护。 */
+    DistributedContext* ctx = elastic_ctx_lock();
+    if (!ctx) { elastic_ctx_unlock(); return -1; }
+    if (node_id < 0 || node_id >= ctx->num_nodes) { elastic_ctx_unlock(); return -2; }
 
     /* 移除节点：断开连接并清理状态 */
-    NodeConnection* node = &g_elastic_ctx->nodes[node_id];
+    NodeConnection* node = &ctx->nodes[node_id];
     if (node->connected) {
-        distributed_disconnect_node(g_elastic_ctx, node_id);
+        distributed_disconnect_node(ctx, node_id);
     }
     node->connected = 0;
     node->is_alive = 0;
@@ -2578,12 +2649,13 @@ int distributed_elastic_remove_node(int node_id) {
     log_info("弹性伸缩: 移除节点 node_id=%d", node_id);
 
     /* 如果移除的是领导节点，触发重选举 */
-    if (g_elastic_ctx->is_leader && node_id == g_elastic_ctx->my_node_id) {
+    if (ctx->is_leader && node_id == ctx->my_node_id) {
         /* 当前领导被移除，需要自动降级 */
         (void)node_id;
     }
-    distributed_elect_leader(g_elastic_ctx);
+    distributed_elect_leader(ctx);
 
+    elastic_ctx_unlock();
     return 0;
 }
 
@@ -2621,21 +2693,21 @@ int trainer_send_gradients_to_workers(void* trainer_ptr, const float* gradients,
     DistributedContext* ctx = g_elastic_ctx;
     if (!ctx || ctx->num_nodes <= 1) return 0;
 
-    /* 分批发送梯度到各工作节点 */
-    size_t chunk_size = count / ctx->num_nodes;
-    if (chunk_size < 1) chunk_size = 1;
+    /* 修复10(P1): 原代码 chunk_size = count/num_nodes，余数 count%num_nodes
+     * 从不发送，梯度部分丢失。现将余数分摊给前 extra 个节点（各得 chunk_size+1），
+     * 按累积偏移分配，保证全部 count 个梯度被覆盖。 */
+    size_t base_chunk = count / ctx->num_nodes;
+    size_t extra = count % ctx->num_nodes;
 
-    for (int i = 1; i < ctx->num_nodes; i++) {
-        if (!ctx->nodes[i].connected) continue;
-
-        size_t offset = (size_t)i * chunk_size;
-        size_t actual_count = (offset + chunk_size <= count) ? chunk_size : (count > offset ? count - offset : 0);
-
-        if (actual_count > 0) {
+    size_t offset = 0;
+    for (int i = 0; i < ctx->num_nodes; i++) {
+        size_t node_size = base_chunk + ((size_t)i < extra ? 1 : 0);
+        if (i != ctx->my_node_id && ctx->nodes[i].connected && node_size > 0) {
             distributed_send_to_node(ctx, i, MSG_GRADIENT_CHUNK, 0,
                                      gradients + offset,
-                                     (uint32_t)(actual_count * sizeof(float)));
+                                     (uint32_t)(node_size * sizeof(float)));
         }
+        offset += node_size;
     }
 
     return 0;
@@ -2647,21 +2719,21 @@ int trainer_receive_gradients_from_workers(void* trainer_ptr, float* all_gradien
     DistributedContext* ctx = g_elastic_ctx;
     if (!ctx || ctx->num_nodes <= 1) return 0;
 
-    size_t chunk_size = count / ctx->num_nodes;
-    if (chunk_size < 1) chunk_size = 1;
+    /* 修复10(P1): 与发送端一致的分块策略，余数分摊给前 extra 个节点，
+     * 避免梯度余数丢失。按累积偏移接收。 */
+    size_t base_chunk = count / ctx->num_nodes;
+    size_t extra = count % ctx->num_nodes;
 
-    for (int i = 1; i < ctx->num_nodes; i++) {
-        if (!ctx->nodes[i].connected) continue;
-
-        size_t offset = (size_t)i * chunk_size;
-        size_t actual_count = (offset + chunk_size <= count) ? chunk_size : (count > offset ? count - offset : 0);
-
-        if (actual_count > 0) {
+    size_t offset = 0;
+    for (int i = 0; i < ctx->num_nodes; i++) {
+        size_t node_size = base_chunk + ((size_t)i < extra ? 1 : 0);
+        if (i != ctx->my_node_id && ctx->nodes[i].connected && node_size > 0) {
             DistributedMessageHeader header;
             recv_from_node(&ctx->nodes[i], &header,
                            all_gradients + offset,
-                           (uint32_t)(actual_count * sizeof(float)));
+                           (uint32_t)(node_size * sizeof(float)));
         }
+        offset += node_size;
     }
 
     return 0;

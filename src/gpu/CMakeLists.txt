@@ -1,7 +1,7 @@
 # GPU计算抽象层
 
-# 头文件目录
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../../include)
+# BLD-021修复: 使用target_include_directories替代include_directories
+# include_directories为全局影响，target_include_directories按需作用当前目标，更精确
 
 if(ENABLE_GPU AND NOT MINGW)
     # 完整GPU后端源文件 + CPU后端（含完整SSE/AVX SIMD降级路径）
@@ -35,6 +35,11 @@ endif()
 
 # 创建库
 add_library(selflnn_gpu ${GPU_SOURCES})
+
+# BLD-021修复: 目标级别include目录，替代全局include_directories
+target_include_directories(selflnn_gpu PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../include
+)
 
 # 链接库
 target_link_libraries(selflnn_gpu PRIVATE utils selflnn_concurrency)

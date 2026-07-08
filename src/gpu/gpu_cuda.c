@@ -1152,12 +1152,12 @@ static const char* PTX_MATMUL_KERNEL =
 "    .reg .b32   %r<20>;\n"
 "    .reg .b64   %rd<12>;\n"
 "\n"
-"    ld.param.u64    %rd1, [matmul_embedded_param_0];\n"
-"    ld.param.u64    %rd2, [matmul_embedded_param_1];\n"
-"    ld.param.u64    %rd3, [matmul_embedded_param_2];\n"
-"    ld.param.u32    %r1, [matmul_embedded_param_3];\n"
-"    ld.param.u32    %r2, [matmul_embedded_param_4];\n"
-"    ld.param.u32    %r3, [matmul_embedded_param_5];\n"
+"    ld.param.u64    %rd1, [matmul_train_param_0];\n"
+"    ld.param.u64    %rd2, [matmul_train_param_1];\n"
+"    ld.param.u64    %rd3, [matmul_train_param_2];\n"
+"    ld.param.u32    %r1, [matmul_train_param_3];\n"
+"    ld.param.u32    %r2, [matmul_train_param_4];\n"
+"    ld.param.u32    %r3, [matmul_train_param_5];\n"
 "\n"
 "    mov.u32     %r4, %ctaid.y;\n"
 "    mov.u32     %r5, %ntid.y;\n"
@@ -1231,7 +1231,7 @@ static const char* PTX_CONV2D_KERNEL =
 ")\n"
 "{\n"
 "    .reg .f32   %f<12>;\n"
-"    .reg .b32   %r<30>;\n"
+"    .reg .b32   %r<32>;\n"
 "    .reg .b64   %rd<12>;\n"
 "\n"
 "    ld.param.u64    %rd1, [conv2d_embedded_param_0];\n"
@@ -1288,10 +1288,10 @@ static const char* PTX_CONV2D_KERNEL =
 "    mul.wide.u32 %rd4, %r18, 4;\n"
 "\n"
 "    mul.lo.u32  %r19, %r29, %r7;\n"
-"    add.u32     %r20, %r19, %r22;\n"
-"    mul.lo.u32  %r21, %r20, %r5;\n"
-"    add.u32     %r22, %r21, %r23;\n"
-"    mul.wide.u32 %rd5, %r22, 4;\n"
+"    add.u32     %r30, %r19, %r22;\n"
+"    mul.lo.u32  %r21, %r30, %r5;\n"
+"    add.u32     %r31, %r21, %r23;\n"
+"    mul.wide.u32 %rd5, %r31, 4;\n"
 "\n"
 "    add.u64     %rd6, %rd1, %rd4;\n"
 "    add.u64     %rd7, %rd2, %rd5;\n"
@@ -4275,8 +4275,11 @@ int cuda_forward_dense(GpuContext* ctx, const float* input, const float* weights
     err = cudaMalloc((void**)&d_output, output_bytes);
     if (err != cudaSuccess) { set_cuda_error_string("cuda_forward_dense: cudaMalloc(output) 失败"); cudaFree(d_input); cudaFree(d_weights); cudaFree(d_temp); return -1; }
 
-    cudaMemcpy(d_input, input, input_bytes, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_weights, weights, weight_bytes, cudaMemcpyHostToDevice);
+    /* P1修复: 检查H2D拷贝返回值，GPU设备丢失时不应静默继续 */
+    err = cudaMemcpy(d_input, input, input_bytes, cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) { set_cuda_error_string("cuda_forward_dense: d_input H2D拷贝失败 (错误码:%d)", err); cudaFree(d_input); cudaFree(d_weights); cudaFree(d_temp); cudaFree(d_output); return -1; }
+    err = cudaMemcpy(d_weights, weights, weight_bytes, cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) { set_cuda_error_string("cuda_forward_dense: d_weights H2D拷贝失败 (错误码:%d)", err); cudaFree(d_input); cudaFree(d_weights); cudaFree(d_temp); cudaFree(d_output); return -1; }
 
     /* 第1步：矩阵乘法 output = input * weights^T
      * 使用 matmul_train: C = A * B^T
@@ -4328,7 +4331,9 @@ int cuda_forward_dense(GpuContext* ctx, const float* input, const float* weights
             cudaFree(d_input); cudaFree(d_weights); cudaFree(d_temp); cudaFree(d_output);
             return -1;
         }
-        cudaMemcpy(d_bias, bias, bias_bytes, cudaMemcpyHostToDevice);
+        /* P1修复: 检查d_bias的H2D拷贝返回值 */
+        err = cudaMemcpy(d_bias, bias, bias_bytes, cudaMemcpyHostToDevice);
+        if (err != cudaSuccess) { set_cuda_error_string("cuda_forward_dense: d_bias H2D拷贝失败 (错误码:%d)", err); cudaFree(d_bias); cudaFree(d_input); cudaFree(d_weights); cudaFree(d_temp); cudaFree(d_output); return -1; }
 
         /* 为每行加偏置：展开偏置到完整batch尺寸 */
         float* d_bias_expanded = NULL;
@@ -4340,7 +4345,9 @@ int cuda_forward_dense(GpuContext* ctx, const float* input, const float* weights
             return -1;
         }
         for (size_t b = 0; b < batch_size; b++) {
-            cudaMemcpy(d_bias_expanded + b * output_size, d_bias, bias_bytes, cudaMemcpyDeviceToDevice);
+            /* P1修复: 检查D2D拷贝返回值，设备丢失时及时清理并返回 */
+            err = cudaMemcpy(d_bias_expanded + b * output_size, d_bias, bias_bytes, cudaMemcpyDeviceToDevice);
+            if (err != cudaSuccess) { set_cuda_error_string("cuda_forward_dense: d_bias展开D2D拷贝失败 (错误码:%d)", err); cudaFree(d_bias_expanded); cudaFree(d_bias); cudaFree(d_input); cudaFree(d_weights); cudaFree(d_temp); cudaFree(d_output); return -1; }
         }
 
         GpuKernel* add_kernel = cuda_backend_kernel_create(ctx, "vector_add", "vector_add");
@@ -4385,18 +4392,29 @@ int cuda_forward_dense(GpuContext* ctx, const float* input, const float* weights
                 cuda_backend_kernel_execute(act_kernel, (size_t)n, 256);
                 cuda_backend_kernel_free(act_kernel);
             } else {
-                cudaMemcpy(d_output, d_temp, output_bytes, cudaMemcpyDeviceToDevice);
+                /* P1修复: 激活内核创建失败的回退路径，检查D2D拷贝返回值 */
+                err = cudaMemcpy(d_output, d_temp, output_bytes, cudaMemcpyDeviceToDevice);
+                if (err != cudaSuccess) { set_cuda_error_string("cuda_forward_dense: 激活回退D2D拷贝失败 (错误码:%d)", err); cudaFree(d_input); cudaFree(d_weights); cudaFree(d_temp); cudaFree(d_output); return -1; }
             }
         } else {
-            cudaMemcpy(d_output, d_temp, output_bytes, cudaMemcpyDeviceToDevice);
+            /* P1修复: 无激活函数的恒等拷贝，检查D2D拷贝返回值 */
+            err = cudaMemcpy(d_output, d_temp, output_bytes, cudaMemcpyDeviceToDevice);
+            if (err != cudaSuccess) { set_cuda_error_string("cuda_forward_dense: 恒等D2D拷贝失败 (错误码:%d)", err); cudaFree(d_input); cudaFree(d_weights); cudaFree(d_temp); cudaFree(d_output); return -1; }
         }
     }
 
     /* 拷贝结果回主机 */
     if (cudaDeviceSynchronize) cudaDeviceSynchronize();
-    if (cudaSetDevice) cudaSetDevice(0);
+    /* P-AUDIT修复(G-7): 原硬编码cudaSetDevice(0),多GPU环境会切换到错误设备。
+     * 改为使用上下文中的设备ID。 */
+    if (cudaSetDevice) cudaSetDevice(ctx->device_index);
+    /* P-AUDIT修复(G-8): 检查cudaMemcpy返回值,拷贝失败时返回错误而非静默继续 */
     cudaError_t copy_err = cudaMemcpy(output, d_output, output_bytes, cudaMemcpyDeviceToHost);
-    (void)copy_err;
+    if (copy_err != cudaSuccess) {
+        set_cuda_error_string("cuda_forward_dense: 结果回拷失败");
+        cudaFree(d_input); cudaFree(d_weights); cudaFree(d_temp); cudaFree(d_output);
+        return -1;
+    }
 
     cudaFree(d_input);
     cudaFree(d_weights);
@@ -4445,9 +4463,13 @@ int cuda_matmul_train(GpuContext* ctx, const float* A, const float* B, float* C,
     err = cudaMalloc((void**)&d_C, c_bytes);
     if (err != cudaSuccess) { set_cuda_error_string("cuda_matmul_train: cudaMalloc(C) 失败"); cudaFree(d_A); cudaFree(d_B); return -1; }
 
-    cudaMemcpy(d_A, A, a_bytes, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_B, B, b_bytes, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_C, C, c_bytes, cudaMemcpyHostToDevice);
+    /* P1修复: 检查H2D拷贝返回值，GPU设备丢失时不应静默继续 */
+    err = cudaMemcpy(d_A, A, a_bytes, cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) { set_cuda_error_string("cuda_matmul_train: d_A H2D拷贝失败 (错误码:%d)", err); cudaFree(d_A); cudaFree(d_B); cudaFree(d_C); return -1; }
+    err = cudaMemcpy(d_B, B, b_bytes, cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) { set_cuda_error_string("cuda_matmul_train: d_B H2D拷贝失败 (错误码:%d)", err); cudaFree(d_A); cudaFree(d_B); cudaFree(d_C); return -1; }
+    err = cudaMemcpy(d_C, C, c_bytes, cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) { set_cuda_error_string("cuda_matmul_train: d_C H2D拷贝失败 (错误码:%d)", err); cudaFree(d_A); cudaFree(d_B); cudaFree(d_C); return -1; }
 
     GpuKernel* kernel = cuda_backend_kernel_create(ctx, "matmul_train", "matmul_train");
     if (!kernel) {
@@ -4479,7 +4501,9 @@ int cuda_matmul_train(GpuContext* ctx, const float* A, const float* B, float* C,
     }
     cuda_backend_kernel_free(kernel);
 
-    cudaMemcpy(C, d_C, c_bytes, cudaMemcpyDeviceToHost);
+    /* P1修复: 检查D2H结果回拷返回值 */
+    err = cudaMemcpy(C, d_C, c_bytes, cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) { set_cuda_error_string("cuda_matmul_train: 结果回拷D2H失败 (错误码:%d)", err); cudaFree(d_A); cudaFree(d_B); cudaFree(d_C); return -1; }
 
     cudaFree(d_A);
     cudaFree(d_B);
@@ -4736,9 +4760,13 @@ int cuda_batch_norm_forward(GpuContext* ctx, const float* input, float* output,
     err = cudaMalloc((void**)&d_beta, feature_bytes);
     if (err != cudaSuccess) { cudaFree(d_input); cudaFree(d_output); cudaFree(d_gamma); return -1; }
 
-    cudaMemcpy(d_input, input, total_bytes, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_gamma, gamma, feature_bytes, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_beta, beta, feature_bytes, cudaMemcpyHostToDevice);
+    /* P1修复: 检查H2D拷贝返回值，GPU设备丢失时不应静默继续 */
+    err = cudaMemcpy(d_input, input, total_bytes, cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) { set_cuda_error_string("cuda_batch_norm_forward: d_input H2D拷贝失败 (错误码:%d)", err); cudaFree(d_input); cudaFree(d_output); cudaFree(d_gamma); cudaFree(d_beta); return -1; }
+    err = cudaMemcpy(d_gamma, gamma, feature_bytes, cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) { set_cuda_error_string("cuda_batch_norm_forward: d_gamma H2D拷贝失败 (错误码:%d)", err); cudaFree(d_input); cudaFree(d_output); cudaFree(d_gamma); cudaFree(d_beta); return -1; }
+    err = cudaMemcpy(d_beta, beta, feature_bytes, cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) { set_cuda_error_string("cuda_batch_norm_forward: d_beta H2D拷贝失败 (错误码:%d)", err); cudaFree(d_input); cudaFree(d_output); cudaFree(d_gamma); cudaFree(d_beta); return -1; }
 
     if (is_training) {
         if (!batch_mean || !batch_var || !running_mean || !running_var) {
@@ -4756,8 +4784,11 @@ int cuda_batch_norm_forward(GpuContext* ctx, const float* input, float* output,
         err = cudaMalloc((void**)&d_batch_var, feature_bytes);
         if (err != cudaSuccess) { cudaFree(d_input); cudaFree(d_output); cudaFree(d_gamma); cudaFree(d_beta); cudaFree(d_running_mean); cudaFree(d_running_var); cudaFree(d_batch_mean); return -1; }
 
-        cudaMemcpy(d_running_mean, running_mean, feature_bytes, cudaMemcpyHostToDevice);
-        cudaMemcpy(d_running_var, running_var, feature_bytes, cudaMemcpyHostToDevice);
+        /* P1修复: 检查训练模式下running_mean/var的H2D拷贝返回值 */
+        err = cudaMemcpy(d_running_mean, running_mean, feature_bytes, cudaMemcpyHostToDevice);
+        if (err != cudaSuccess) { set_cuda_error_string("cuda_batch_norm_forward: d_running_mean H2D拷贝失败 (错误码:%d)", err); cudaFree(d_input); cudaFree(d_output); cudaFree(d_gamma); cudaFree(d_beta); cudaFree(d_running_mean); cudaFree(d_running_var); cudaFree(d_batch_mean); cudaFree(d_batch_var); return -1; }
+        err = cudaMemcpy(d_running_var, running_var, feature_bytes, cudaMemcpyHostToDevice);
+        if (err != cudaSuccess) { set_cuda_error_string("cuda_batch_norm_forward: d_running_var H2D拷贝失败 (错误码:%d)", err); cudaFree(d_input); cudaFree(d_output); cudaFree(d_gamma); cudaFree(d_beta); cudaFree(d_running_mean); cudaFree(d_running_var); cudaFree(d_batch_mean); cudaFree(d_batch_var); return -1; }
 
         GpuKernel* kernel = cuda_backend_kernel_create(ctx, "batch_norm_forward_train", "batch_norm_forward_train");
         if (!kernel) {
@@ -4820,8 +4851,11 @@ int cuda_batch_norm_forward(GpuContext* ctx, const float* input, float* output,
         err = cudaMalloc((void**)&d_running_var, feature_bytes);
         if (err != cudaSuccess) { cudaFree(d_input); cudaFree(d_output); cudaFree(d_gamma); cudaFree(d_beta); cudaFree(d_running_mean); return -1; }
 
-        cudaMemcpy(d_running_mean, running_mean, feature_bytes, cudaMemcpyHostToDevice);
-        cudaMemcpy(d_running_var, running_var, feature_bytes, cudaMemcpyHostToDevice);
+        /* P1修复: 检查推理模式下running_mean/var的H2D拷贝返回值 */
+        err = cudaMemcpy(d_running_mean, running_mean, feature_bytes, cudaMemcpyHostToDevice);
+        if (err != cudaSuccess) { set_cuda_error_string("cuda_batch_norm_forward: 推理模式d_running_mean H2D拷贝失败 (错误码:%d)", err); cudaFree(d_input); cudaFree(d_output); cudaFree(d_gamma); cudaFree(d_beta); cudaFree(d_running_mean); cudaFree(d_running_var); return -1; }
+        err = cudaMemcpy(d_running_var, running_var, feature_bytes, cudaMemcpyHostToDevice);
+        if (err != cudaSuccess) { set_cuda_error_string("cuda_batch_norm_forward: 推理模式d_running_var H2D拷贝失败 (错误码:%d)", err); cudaFree(d_input); cudaFree(d_output); cudaFree(d_gamma); cudaFree(d_beta); cudaFree(d_running_mean); cudaFree(d_running_var); return -1; }
 
         GpuKernel* kernel = cuda_backend_kernel_create(ctx, "batch_norm", "batch_norm");
         if (!kernel) {
@@ -4996,8 +5030,11 @@ int cuda_batch_norm_backward(GpuContext* ctx, const float* input, const float* g
         if (!h_grad_output || !h_input_local) { /* C-012修复: NULL检查 */
             if (h_grad_output) free(h_grad_output);
             if (h_input_local) free(h_input_local);
-            cuda_backend_kernel_free(kernel);
-            free(h_input); free(host_mean); free(host_var);
+            /* P0修复: kernel已在第4995行释放，h_input已在第4962行释放，
+               此处不再重复释放，避免 double-free */
+            free(host_mean); free(host_var);
+            cudaFree(d_input); cudaFree(d_grad_output); cudaFree(d_grad_input);
+            cudaFree(d_gamma); cudaFree(d_mean); cudaFree(d_var);
             return -1;
         }
         cudaMemcpy(h_grad_output, d_grad_output, total_bytes, cudaMemcpyDeviceToHost);

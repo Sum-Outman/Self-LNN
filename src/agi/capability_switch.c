@@ -27,8 +27,33 @@ typedef volatile long atomic_int;
 #ifdef _WIN32
 #include <windows.h>
 static CRITICAL_SECTION g_cap_lock;
-static int g_cap_lock_initialized = 0;
-#define CAP_LOCK()   do { if (!g_cap_lock_initialized) { InitializeCriticalSection(&g_cap_lock); g_cap_lock_initialized = 1; } EnterCriticalSection(&g_cap_lock); } while(0)
+/* P2-1修复: 使用InterlockedCompareExchange原子状态机替代非原子的手工双检锁，
+ * 消除多线程下CRITICAL_SECTION惰性初始化的竞态条件。
+ * 原实现中g_cap_lock_initialized为普通int，多线程可能同时进入
+ * 初始化分支导致重复InitializeCriticalSection或读取到部分写入值，
+ * 进而引发死锁或访问未初始化的临界区。
+ * 此处用0->1(初始化中)->2(就绪)三态机确保仅一个线程执行初始化，
+ * 仅依赖kernel32的InterlockedCompareExchange/InterlockedExchange，无需高版本_WIN32_WINNT。 */
+static volatile LONG g_cap_lock_state = 0; /* 0=未初始化, 1=初始化中, 2=已就绪 */
+static void cap_ensure_lock_init(void)
+{
+    for (;;) {
+        LONG prev = InterlockedCompareExchange(&g_cap_lock_state, 1, 0);
+        if (prev == 0) {
+            /* 本线程赢得初始化权，负责创建临界区 */
+            InitializeCriticalSection(&g_cap_lock);
+            InterlockedExchange(&g_cap_lock_state, 2); /* 标记已就绪 */
+            return;
+        }
+        if (prev == 2) {
+            /* 已由其他线程完成初始化 */
+            return;
+        }
+        /* prev == 1：其他线程正在初始化，让出CPU后重试 */
+        SwitchToThread();
+    }
+}
+#define CAP_LOCK()   do { cap_ensure_lock_init(); EnterCriticalSection(&g_cap_lock); } while(0)
 #define CAP_UNLOCK() LeaveCriticalSection(&g_cap_lock)
 #else
 #include <pthread.h>
@@ -635,19 +660,37 @@ int capability_diagnose_all(char* json_buffer, size_t buffer_size)
 
     ensure_callbacks_registered();
 
+    /* P2-1修复: 加锁保护全局能力状态读取。采用快照模式——
+     * 锁内复制状态数组与回调指针，锁外调用健康检测回调，
+     * 避免回调内部反向调用能力API导致非递归锁死锁，
+     * 同时避免调用capability_get_enabled_count(已加锁)造成重入死锁。 */
+    int snap_enabled[CAP_COUNT];
+    int snap_forced[CAP_COUNT];
+    CapabilityCheckFunc snap_check_funcs[CAP_COUNT];
+    int enabled_count = 0;
+
+    CAP_LOCK();
+    for (int i = 0; i < CAP_COUNT; i++) {
+        snap_enabled[i] = g_capability_states[i];
+        snap_forced[i] = g_capability_forced_on[i];
+        snap_check_funcs[i] = g_check_funcs[i];
+        if (snap_enabled[i]) enabled_count++;
+    }
+    CAP_UNLOCK();
+
     int pos = 0;
     pos += snprintf(json_buffer + pos, buffer_size - pos,
                     "{\"capabilities\":[");
 
     int first = 1;
     for (int i = 0; i < CAP_COUNT; i++) {
-        int enabled = g_capability_states[i];
-        int forced = g_capability_forced_on[i];
+        int enabled = snap_enabled[i];
+        int forced = snap_forced[i];
 
-        /* 执行运行时健康检测 */
+        /* 执行运行时健康检测(锁外调用回调，避免死锁) */
         int subsystem_healthy = enabled;
-        if (g_check_funcs[i]) {
-            subsystem_healthy = g_check_funcs[i]();
+        if (snap_check_funcs[i]) {
+            subsystem_healthy = snap_check_funcs[i]();
         }
 
         if (buffer_size - pos < 256) break;
@@ -663,11 +706,11 @@ int capability_diagnose_all(char* json_buffer, size_t buffer_size)
 
     pos += snprintf(json_buffer + pos, buffer_size - pos,
                     "],\"total\":%d,\"enabled_count\":%d}",
-                    CAP_COUNT, capability_get_enabled_count());
+                    CAP_COUNT, enabled_count);
 
     /* 诊断日志 - P0-H006修复: 使用动态CAP_COUNT替代硬编码12 */
     log_info("[能力诊断] %d项能力: 启用=%d/%d, 健康: 见JSON输出",
-             CAP_COUNT, capability_get_enabled_count(), CAP_COUNT);
+             CAP_COUNT, enabled_count, CAP_COUNT);
 
     return pos;
 }
@@ -676,14 +719,26 @@ int capability_health_check(void)
 {
     ensure_callbacks_registered();
 
+    /* P2-1修复: 加锁保护全局能力状态读取。采用快照模式——
+     * 锁内复制enabled状态与回调指针，锁外调用健康检测回调，
+     * 避免回调内部反向调用能力API导致非递归锁死锁。 */
+    int snap_enabled[CAP_COUNT];
+    CapabilityCheckFunc snap_check_funcs[CAP_COUNT];
+    CAP_LOCK();
+    for (int i = 0; i < CAP_COUNT; i++) {
+        snap_enabled[i] = g_capability_states[i];
+        snap_check_funcs[i] = g_check_funcs[i];
+    }
+    CAP_UNLOCK();
+
     int healthy_count = 0;
     int details[CAP_COUNT] = {0};
 
     for (int i = 0; i < CAP_COUNT; i++) {
         int health = 0;
-        if (g_capability_states[i]) {
-            if (g_check_funcs[i]) {
-                health = g_check_funcs[i]();
+        if (snap_enabled[i]) {
+            if (snap_check_funcs[i]) {
+                health = snap_check_funcs[i]();  /* 锁外调用回调，避免死锁 */
             } else {
                 health = 1;
             }
@@ -696,7 +751,7 @@ int capability_health_check(void)
 
     /* 对不健康的输出警告 */
     for (int i = 0; i < CAP_COUNT; i++) {
-        if (g_capability_states[i] && !details[i]) {
+        if (snap_enabled[i] && !details[i]) {
             log_warning("[能力健康] %s: 开关已启用但底层子系统不可用",
                        g_capability_names[i]);
         }
@@ -776,7 +831,10 @@ int capability_check_conflict(CapabilityType type_a, CapabilityType type_b)
     return g_capability_conflicts[type_a][type_b];
 }
 
-int capability_enable_safe(CapabilityType type)
+/* P2-1修复: 内部函数，由公共函数持有CAP_LOCK后调用，避免递归调用导致的重入死锁。
+ * capability_enable_safe会递归调用自身启用前置依赖，若公共入口直接加锁，
+ * 在Linux/macOS的非递归pthread_mutex下会死锁，故抽取此不加锁内部实现。 */
+static int capability_enable_safe_locked(CapabilityType type)
 {
     if (type < 0 || type >= CAP_COUNT) return -1;
 
@@ -788,8 +846,8 @@ int capability_enable_safe(CapabilityType type)
                            g_capability_names[type],
                            g_capability_names[dep],
                            g_capability_names[dep]);
-                /* 递归启用前置依赖 */
-                if (capability_enable_safe((CapabilityType)dep) != 0) {
+                /* 递归启用前置依赖(调用内部不加锁版本，避免重入死锁) */
+                if (capability_enable_safe_locked((CapabilityType)dep) != 0) {
                     log_error("[能力开关] 无法启用依赖 %s", g_capability_names[dep]);
                     return -1;
                 }
@@ -815,13 +873,37 @@ int capability_enable_safe(CapabilityType type)
     return 0;
 }
 
+int capability_enable_safe(CapabilityType type)
+{
+    if (type < 0 || type >= CAP_COUNT) return -1;
+
+    /* P2-1修复: 确保冲突矩阵在使用前完成初始化(线程安全，内部用atomic保护)。
+     * 原实现未调用此初始化，若capability_check_conflict从未被调用过，
+     * 冲突矩阵可能全为0导致冲突检查失效。 */
+    capability_ensure_conflicts_init();
+
+    /* P2-1修复: 加锁保护依赖检查/冲突检查/状态写入的原子性。
+     * capability_enable_safe_locked内部递归调用自身(不加锁)，
+     * 因此整个递归链路在同一把锁下进行，状态读写不会被并发打断。 */
+    CAP_LOCK();
+    int ret = capability_enable_safe_locked(type);
+    CAP_UNLOCK();
+    return ret;
+}
+
 int capability_disable_safe(CapabilityType type)
 {
     if (type < 0 || type >= CAP_COUNT) return -1;
 
+    /* P2-1修复: 加锁保护依赖检查/强制锁定检查/状态写入的原子性，
+     * 防止与capability_enable_safe等并发操作产生竞态。错误路径先解锁再返回，
+     * 与capability_set_enabled的错误处理模式保持一致。 */
+    CAP_LOCK();
+
     /* 检查是否有其他能力依赖它 */
     for (int i = 0; i < CAP_COUNT; i++) {
         if (g_capability_deps[type][i] && g_capability_states[i]) {
+            CAP_UNLOCK();
             log_error("[能力开关] %s 正在被 %s 依赖，无法禁用",
                      g_capability_names[type], g_capability_names[i]);
             return -1;
@@ -830,6 +912,7 @@ int capability_disable_safe(CapabilityType type)
 
     /* 检查强制锁定 */
     if (g_capability_forced_on[type]) {
+        CAP_UNLOCK();
         log_warning("[能力开关] %s 已被强制锁定，无法禁用", g_capability_names[type]);
         return -1;
     }
@@ -838,6 +921,7 @@ int capability_disable_safe(CapabilityType type)
     if (g_set_funcs[type]) {
         g_set_funcs[type](0);
     }
+    CAP_UNLOCK();
     log_info("[能力开关] 安全禁用 %s", g_capability_names[type]);
     return 0;
 }

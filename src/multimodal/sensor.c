@@ -195,15 +195,28 @@ int sensor_process_data(SensorProcessor* processor,
     if (!processor || !values || !features || max_features == 0) return -1;
     if (num_values == 0) return -1;
 
+    /* P0修复: 传感器数据NaN/Inf验证，防止无效数据污染整个处理链。
+     * 创建本地清理副本，将NaN/Inf替换为0，确保后续校准补偿、异常值检测、
+     * EMA去噪、环形缓冲区、统计特征输出全部基于有效数据。仅替换v不够彻底——
+     * sensor_is_outlier会遍历整个values数组计算median/MAD，NaN会破坏其统计
+     * 基准，故必须在源头清理全部输入样本。 */
+    float* clean_values = (float*)safe_malloc(num_values * sizeof(float));
+    if (!clean_values) return -1;
+    for (size_t i = 0; i < num_values; i++) {
+        float v = values[i];
+        if (isnan(v) || isinf(v)) v = 0.0f;   /* 无效值用0替代，阻断污染传播 */
+        clean_values[i] = v;
+    }
+
     float dt = (timestamp > 0 && processor->last_timestamp > 0)
                ? (float)(timestamp - processor->last_timestamp) / 1000.0f : 0.01f;
     size_t feature_idx = 0;
     float alpha = 0.3f;
 
     for (size_t i = 0; i < num_values && feature_idx + 5 < max_features; i++) {
-        float v = values[i];
-        /* 异常值检测 */
-        if (num_values >= 5 && sensor_is_outlier(values, num_values, i, processor->outlier_threshold)) {
+        float v = clean_values[i];
+        /* 异常值检测 — 基于清理后的副本，避免NaN破坏median/MAD统计基准 */
+        if (num_values >= 5 && sensor_is_outlier(clean_values, num_values, i, processor->outlier_threshold)) {
             processor->outlier_consecutive_count++;
             if (processor->outlier_consecutive_count > 3) processor->outlier_consecutive_count = 0;
             else continue;
@@ -229,9 +242,11 @@ int sensor_process_data(SensorProcessor* processor,
                 features[feature_idx++] = (v - prev_val) / (dt > 0.001f ? dt : 0.01f);
                 if (ringbuf_count(processor) >= 3 && feature_idx < max_features) {
                     float prev2_val = ringbuf_peek(processor, 2);
-                    float d1 = (v - prev_val) / dt;
-                    float d2 = (prev_val - prev2_val) / dt;
-                    features[feature_idx++] = (d1 - d2) / dt;
+                    /* P1修复: 统一使用安全dt值，防止时间戳相等时dt=0导致除零 */
+                    float safe_dt = (dt > 0.001f) ? dt : 0.01f;
+                    float d1 = (v - prev_val) / safe_dt;
+                    float d2 = (prev_val - prev2_val) / safe_dt;
+                    features[feature_idx++] = (d1 - d2) / safe_dt;
                 }
             }
             if (feature_idx < max_features) features[feature_idx++] = v * v;
@@ -249,6 +264,9 @@ int sensor_process_data(SensorProcessor* processor,
         mean /= (float)feature_idx;
         for (size_t i = 0; i < (size_t)feature_idx; i++) { float d = features[i] - mean; var += d * d; }
         var = var / (float)feature_idx + 1e-8f;
+        /* P0修复: 显式除零保护 — 方差极小时钳制到最小值，确保inv_std始终有限。
+         * 与T-003的epsilon形成纵深防御: 即使后续重构移除epsilon，此检查仍阻止除零 */
+        if (var < 1e-10f) var = 1e-10f;
         float inv_std = 1.0f / sqrtf(var);
         for (size_t i = 0; i < (size_t)feature_idx; i++) {
             features[i] = (features[i] - mean) * inv_std;
@@ -257,6 +275,8 @@ int sensor_process_data(SensorProcessor* processor,
         }
     }
     processor->last_timestamp = timestamp;
+    /* P0修复: 释放本地清理副本，避免内存泄漏 */
+    safe_free((void**)&clean_values);
     return (int)feature_idx;
 }
 
@@ -336,31 +356,34 @@ static int sensor_deep_process(const float* raw_data, size_t num_values,
     static size_t cached_state_dim = 0;
     static size_t cached_obs_dim = 0;
 
-    /* P1-7: 双重检查锁定 — 线程安全的惰性初始化 */
+    /* P0修复: use-after-free竞态 — 原代码仅在初始化阶段加锁，释放锁后
+     * 线程A仍在调用sensor_deep_preprocess_frame(sdp,...)，此时线程B若
+     * 触发重建会free掉旧sdp，导致线程A访问已释放内存。
+     * 修复方案：将锁范围扩大到覆盖整个预处理调用，确保使用sdp期间
+     * 不会有其他线程释放重建。 */
+    MutexHandle mtx = deep_preprocessor_get_mutex();
+    if (mtx) mutex_lock(mtx);
+
     int need_init = (!initialized || cached_state_dim != output_dim || cached_obs_dim != num_values);
     if (need_init) {
-        MutexHandle mtx = deep_preprocessor_get_mutex();
-        if (mtx) mutex_lock(mtx);
-        /* 二次检查（在锁内） */
-        need_init = (!initialized || cached_state_dim != output_dim || cached_obs_dim != num_values);
-        if (need_init) {
-            if (sdp) {
-                sensor_deep_preprocessor_free(sdp);
-                sdp = NULL;
-            }
-            sdp = sensor_deep_preprocessor_create(output_dim, num_values);
-            if (!sdp) {
-                if (mtx) mutex_unlock(mtx);
-                return -1;
-            }
-            cached_state_dim = output_dim;
-            cached_obs_dim = num_values;
-            initialized = 1;
+        if (sdp) {
+            sensor_deep_preprocessor_free(sdp);
+            sdp = NULL;
         }
-        if (mtx) mutex_unlock(mtx);
+        sdp = sensor_deep_preprocessor_create(output_dim, num_values);
+        if (!sdp) {
+            if (mtx) mutex_unlock(mtx);
+            return -1;
+        }
+        cached_state_dim = output_dim;
+        cached_obs_dim = num_values;
+        initialized = 1;
     }
 
-    return sensor_deep_preprocess_frame(sdp, raw_data, gyro, acc, dt, output);
+    int result = sensor_deep_preprocess_frame(sdp, raw_data, gyro, acc, dt, output);
+
+    if (mtx) mutex_unlock(mtx);
+    return result;
 }
 
 /**
@@ -380,28 +403,29 @@ static int sensor_deep_quality(const float** modality_data,
     static SensorDeepPreprocessor* q_sdp = NULL;
     static int q_initialized = 0;
 
-    /* P1-7: 双重检查锁定 — 线程安全的惰性初始化 */
+    /* P0修复: 与sensor_deep_process相同的use-after-free竞态修复 —
+     * 将锁范围扩大到覆盖sensor_deep_quality_assess调用 */
+    MutexHandle mtx = deep_preprocessor_get_mutex();
+    if (mtx) mutex_lock(mtx);
+
     if (!q_initialized) {
-        MutexHandle mtx = deep_preprocessor_get_mutex();
-        if (mtx) mutex_lock(mtx);
-        /* 二次检查（在锁内） */
-        if (!q_initialized) {
-            size_t max_dim = 0;
-            for (int i = 0; i < 4 && modality_dims; i++) {
-                if (modality_dims[i] > max_dim) max_dim = modality_dims[i];
-            }
-            if (max_dim == 0) max_dim = 16;
-            q_sdp = sensor_deep_preprocessor_create(max_dim, max_dim);
-            if (!q_sdp) {
-                if (mtx) mutex_unlock(mtx);
-                return -1;
-            }
-            q_initialized = 1;
+        size_t max_dim = 0;
+        for (int i = 0; i < 4 && modality_dims; i++) {
+            if (modality_dims[i] > max_dim) max_dim = modality_dims[i];
         }
-        if (mtx) mutex_unlock(mtx);
+        if (max_dim == 0) max_dim = 16;
+        q_sdp = sensor_deep_preprocessor_create(max_dim, max_dim);
+        if (!q_sdp) {
+            if (mtx) mutex_unlock(mtx);
+            return -1;
+        }
+        q_initialized = 1;
     }
 
-    return sensor_deep_quality_assess(q_sdp, modality_data, modality_dims, quality_scores);
+    int result = sensor_deep_quality_assess(q_sdp, modality_data, modality_dims, quality_scores);
+
+    if (mtx) mutex_unlock(mtx);
+    return result;
 }
 
 /**
@@ -585,7 +609,8 @@ int sensor_calibrate_noise(SensorProcessor* processor,
         ch_bufs[c] = calib_buf_create(samples_needed);
         if (!ch_bufs[c]) {
             for (int i = 0; i < c; i++) calib_buf_free(ch_bufs[i]);
-            free(ch_bufs);
+            /* P-AUDIT修复(M-2): ch_bufs由safe_calloc分配,必须用safe_free释放 */
+            safe_free((void**)&ch_bufs);
             return -1;
         }
     }
@@ -616,7 +641,8 @@ int sensor_calibrate_noise(SensorProcessor* processor,
 
     for (int c = 0; c < channels; c++)
         calib_buf_free(ch_bufs[c]);
-    free(ch_bufs);
+    /* P-AUDIT修复(M-3): ch_bufs由safe_calloc分配,必须用safe_free释放 */
+    safe_free((void**)&ch_bufs);
 
     return 0;
 }
@@ -1281,6 +1307,8 @@ int particle_filter_update(ParticleFilter* pf, const float* observation) {
     if (!pf || !observation) return -1;
     int np = pf->current_particles, n = pf->config.state_dim, m = pf->config.obs_dim;
     float obs_noise = pf->config.observation_noise_std, total_weight = 0.0f;
+    /* P1修复: 观测噪声标准差为零时钳制到最小值，防止除零产生Inf/NaN */
+    if (obs_noise < 1e-10f) obs_noise = 1e-6f;
     for (int p = 0; p < np; p++) {
         float log_l = 0.0f;
         for (int j = 0; j < m && j < n; j++) {
@@ -1297,6 +1325,8 @@ int particle_filter_update(ParticleFilter* pf, const float* observation) {
 int particle_filter_resample(ParticleFilter* pf) {
     if (!pf) return -1;
     int np = pf->current_particles, n = pf->config.state_dim;
+    /* P2修复: 粒子数为零时直接返回，防止重采样除零 */
+    if (np <= 0) return -1;
     /* 系统重采样 */
     float* cdf = pf->workspace;
     cdf[0] = pf->weights[0];
@@ -1472,8 +1502,10 @@ void info_filter_reset(InfoFilter* inf, const float* init_state, const float* in
     if (init_covariance) {
         for (int i = 0; i < n; i++) for (int j = 0; j < n; j++)
             inf->information_matrix[i * n + j] = init_covariance[i * n + j];
-        mat_inv_gj(inf->information_matrix, inf->workspace, n);
-        for (int i = 0; i < n * n; i++) inf->information_matrix[i] = inf->workspace[i];
+        /* P2修复: 检查矩阵求逆返回值，奇异时保持原信息矩阵不变，避免写入无效数据 */
+        if (mat_inv_gj(inf->information_matrix, inf->workspace, n) == 0) {
+            for (int i = 0; i < n * n; i++) inf->information_matrix[i] = inf->workspace[i];
+        }
     }
 }
 

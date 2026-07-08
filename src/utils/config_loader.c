@@ -32,6 +32,15 @@ static pthread_rwlock_t g_config_rwlock = PTHREAD_RWLOCK_INITIALIZER;
 
 #define CONFIG_DEFAULT_PATH "config/system_config.json"
 
+/* P0修复: double→int安全转换，钳制到INT32范围防止转换溢出导致的未定义行为。
+ * C标准规定浮点转整数若超出目标类型范围属未定义行为(UB)，恶意/异常JSON
+ * 配置(如1e30)可能触发UB，故统一在此钳制。 */
+static int json_to_int_clamped(double val) {
+    if (val > 2147483647.0) val = 2147483647.0;
+    if (val < -2147483648.0) val = -2147483648.0;
+    return (int)val;
+}
+
 int selflnn_config_load_from_file(const char* filepath, SystemConfig* config) {
     if (!config) return -1;
 
@@ -48,7 +57,17 @@ int selflnn_config_load_from_file(const char* filepath, SystemConfig* config) {
 
     char* json_str = (char*)safe_malloc((size_t)fsize + 1);
     if (!json_str) { fclose(fp); CONFIG_WRUNLOCK(); return -1; }
-    fread(json_str, 1, (size_t)fsize, fp);
+    /* P0修复: 检查fread返回值，确保配置文件数据完整读取。
+     * 此前直接忽略返回值，若读取不完整(磁盘错误/管道截断)会导致JSON解析
+     * 在残缺数据上产生误导性错误。 */
+    size_t bytes_read = fread(json_str, 1, (size_t)fsize, fp);
+    if (bytes_read != (size_t)fsize) {
+        log_error("[配置] 文件读取不完整: 实际%zu/%ld字节", bytes_read, fsize);
+        safe_free((void**)&json_str);
+        fclose(fp);
+        CONFIG_WRUNLOCK();
+        return -1;
+    }
     json_str[fsize] = '\0';
     fclose(fp);
 
@@ -65,19 +84,20 @@ int selflnn_config_load_from_file(const char* filepath, SystemConfig* config) {
     const char* str_val;
 
     v = json_get(root, "state_dimension");
-    if (v && v->type == JSON_NUMBER) config->state_dimension = (int)v->data.number_val;
+    /* P0修复: 使用json_to_int_clamped钳制double→int范围，防止溢出UB */
+    if (v && v->type == JSON_NUMBER) config->state_dimension = json_to_int_clamped(v->data.number_val);
     if (config->state_dimension <= 0) config->state_dimension = 128;
 
     v = json_get(root, "multimodal_channels");
-    if (v && v->type == JSON_NUMBER) config->multimodal_channels = (int)v->data.number_val;
+    if (v && v->type == JSON_NUMBER) config->multimodal_channels = json_to_int_clamped(v->data.number_val);
     if (config->multimodal_channels <= 0) config->multimodal_channels = 9;
 
     v = json_get(root, "memory_capacity");
-    if (v && v->type == JSON_NUMBER) config->memory_capacity = (int)v->data.number_val;
+    if (v && v->type == JSON_NUMBER) config->memory_capacity = json_to_int_clamped(v->data.number_val);
     if (config->memory_capacity <= 0) config->memory_capacity = 100000;
 
     v = json_get(root, "max_concurrent_tasks");
-    if (v && v->type == JSON_NUMBER) config->max_concurrent_tasks = (int)v->data.number_val;
+    if (v && v->type == JSON_NUMBER) config->max_concurrent_tasks = json_to_int_clamped(v->data.number_val);
     if (config->max_concurrent_tasks <= 0) config->max_concurrent_tasks = 8;
 
     str_val = json_get_string(root, "power_mode");
@@ -113,7 +133,7 @@ int selflnn_config_load_from_file(const char* filepath, SystemConfig* config) {
 /* 加载端口字段（原只保存不加载） */
     v = json_get(root, "http_port");
     if (v && v->type == JSON_NUMBER) {
-        int json_hp = (int)v->data.number_val;
+        int json_hp = json_to_int_clamped(v->data.number_val);   /* P0修复: 钳制防止溢出UB */
         if (json_hp > 0 && json_hp <= 65535 && json_hp != SELFLNN_HTTP_PORT) {
             log_warning("[配置] system_config.json中http_port=%d与port_config.h中SELFLNN_HTTP_PORT=%d不一致，强制使用头文件定义值%d",
                         json_hp, SELFLNN_HTTP_PORT, SELFLNN_HTTP_PORT);
@@ -123,7 +143,7 @@ int selflnn_config_load_from_file(const char* filepath, SystemConfig* config) {
 
     v = json_get(root, "websocket_port");
     if (v && v->type == JSON_NUMBER) {
-        int json_ws = (int)v->data.number_val;
+        int json_ws = json_to_int_clamped(v->data.number_val);   /* P0修复: 钳制防止溢出UB */
         if (json_ws > 0 && json_ws <= 65535 && json_ws != SELFLNN_WEBSOCKET_PORT) {
             log_warning("[配置] system_config.json中websocket_port=%d与port_config.h中SELFLNN_WEBSOCKET_PORT=%d不一致，强制使用头文件定义值%d",
                         json_ws, SELFLNN_WEBSOCKET_PORT, SELFLNN_WEBSOCKET_PORT);
@@ -132,7 +152,7 @@ int selflnn_config_load_from_file(const char* filepath, SystemConfig* config) {
     config->websocket_port = SELFLNN_WEBSOCKET_PORT;
 
     v = json_get(root, "distributed_port");
-    if (v && v->type == JSON_NUMBER) config->distributed_port = (int)v->data.number_val;
+    if (v && v->type == JSON_NUMBER) config->distributed_port = json_to_int_clamped(v->data.number_val);   /* P0修复: 钳制防止溢出UB */
     if (config->distributed_port <= 0 || config->distributed_port > 65535) config->distributed_port = 8765;
 
     /* M-035修复: 从嵌套 training 节点读取混合精度配置

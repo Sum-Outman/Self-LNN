@@ -120,6 +120,7 @@ typedef struct {
     float joint_positions[32];    /**< 关节位置（rad） */
     float joint_velocities[32];   /**< 关节速度（rad/s） */
     float joint_torques[32];      /**< 关节力矩（Nm） */
+    float target_joint_positions[32]; /**< PD控制器目标关节位置（rad） */
     float contact_forces[6];      /**< 接触力（N） */
     float contact_positions[18];  /**< 接触位置（x, y, z）x6 */
     int contact_flags[6];         /**< 接触标志 */
@@ -127,6 +128,7 @@ typedef struct {
     int is_colliding;             /**< 是否发生碰撞 */
     int num_links;                /**< 链接数量 */
     int num_joints;               /**< 关节数量 */
+    int motion_mode;              /**< 当前运动控制模式(MotionMode),用于PD控制器与力矩模式切换 */
 } SimulatorRobotState;
 
 /**

@@ -11,6 +11,7 @@
 
 #include "selflnn/memory/short_term.h"
 #include "selflnn/memory/memory.h"
+#include "selflnn/core/errors.h"
 #include "selflnn/utils/memory_utils.h"
 
 #include <stdlib.h>
@@ -107,14 +108,18 @@ static void stm_apply_time_decay(ShortTermMemory* memory) {
         rec->current_strength *= (float)effective_decay;
         if (rec->current_strength < 0.01f) {
             /* 强度过低，触发主动遗忘 */
-            memory_forget(memory->memory_system, rec->key);
-            /* 从记录中移除 */
-            if (i < memory->record_count - 1) {
-                memcpy(&memory->access_records[i], &memory->access_records[memory->record_count - 1],
-                       sizeof(STMAccessRecord));
+            int forget_ret = memory_forget(memory->memory_system, rec->key);
+            /* P2修复: forget返回0或SELFLNN_ERROR_MEMORY_NOT_FOUND时表示底层记忆已不存在，
+             * 应同步移除access_record；其他错误码则保留记录待下次重试。 */
+            if (forget_ret == 0 || forget_ret == SELFLNN_ERROR_MEMORY_NOT_FOUND) {
+                /* 从记录中移除 */
+                if (i < memory->record_count - 1) {
+                    memcpy(&memory->access_records[i], &memory->access_records[memory->record_count - 1],
+                           sizeof(STMAccessRecord));
+                }
+                memory->record_count--;
+                i--;
             }
-            memory->record_count--;
-            i--;
         }
     }
     memory->last_decay_time = now;
@@ -167,36 +172,48 @@ int short_term_memory_store(ShortTermMemory* memory, const char* key,
     /* F-006: 应用时间衰减 */
     stm_apply_time_decay(memory);
     
-    /* F-006: 容量检查 + LRU驱逐 */
-    if (memory->record_count >= memory->config.capacity) {
-        int victim = stm_select_lru_victim(memory);
-        if (victim >= 0) {
-            memory_forget(memory->memory_system, memory->access_records[victim].key);
-            if ((size_t)victim < memory->record_count - 1) {
-                memcpy(&memory->access_records[victim],
-                       &memory->access_records[memory->record_count - 1],
-                       sizeof(STMAccessRecord));
-            }
-            memory->record_count--;
-        }
-    }
-    
-/* 干扰效应动态调整（原硬编码0.98）
-     * 干扰强度与存储容量成反比：容量越小干扰越大（资源竞争） */
-    float capacity_ratio = memory->record_capacity > 0
-        ? (float)memory->record_count / (float)memory->record_capacity : 0.0f;
-    float interference_factor = 0.98f + 0.02f * (1.0f - capacity_ratio);
-    for (size_t i = 0; i < memory->record_count; i++) {
-        memory->access_records[i].current_strength *= interference_factor;
-    }
-    
+    /* P1修复: 先存储再淘汰，避免存储失败时victim数据双向丢失 */
     int result = memory_store(memory->memory_system, key, data, data_size,
                               MEMORY_TYPE_SHORT_TERM, strength);
     if (result == 0) {
+        /* 存储成功后，若容量超限则淘汰LRU victim */
+        if (memory->record_count >= memory->config.capacity) {
+            int victim = stm_select_lru_victim(memory);
+            if (victim >= 0) {
+                /* P2修复: 检查memory_forget返回值。若失败（键已被其他线程移除），
+                 * 不移除access_record、不递减record_count，避免底层记忆项与索引记录不同步。 */
+                int forget_ret = memory_forget(memory->memory_system, memory->access_records[victim].key);
+                /* P2修复: forget返回0表示成功移除，返回SELFLNN_ERROR_MEMORY_NOT_FOUND(-304)
+                 * 表示底层记忆项已被其他线程移除。两种情况都意味着底层已不存在该记忆，
+                 * 应同步移除access_record以保持索引与底层一致。仅其他错误码才不移除。 */
+                if (forget_ret == 0 || forget_ret == SELFLNN_ERROR_MEMORY_NOT_FOUND) {
+                    if ((size_t)victim < memory->record_count - 1) {
+                        memcpy(&memory->access_records[victim],
+                               &memory->access_records[memory->record_count - 1],
+                               sizeof(STMAccessRecord));
+                    }
+                    memory->record_count--;
+                }
+            }
+        }
+
+        /* 干扰效应动态调整（原硬编码0.98）
+         * 干扰强度与存储容量成反比：容量越小干扰越大（资源竞争） */
+        float capacity_ratio = memory->record_capacity > 0
+            ? (float)memory->record_count / (float)memory->record_capacity : 0.0f;
+        float interference_factor = 0.98f + 0.02f * (1.0f - capacity_ratio);
+        for (size_t i = 0; i < memory->record_count; i++) {
+            memory->access_records[i].current_strength *= interference_factor;
+        }
+
         /* F-006: 更新访问记录 */
+        /* P1修复: 使用is_new标志位判断是否为新记录，避免错误重置已有记录的创建时间和访问计数 */
         int idx = stm_find_record(memory, key);
+        int is_new = 0;
         uint64_t now = stm_get_time_ms();
         if (idx < 0) {
+            /* 新记录 */
+            is_new = 1;
             if (memory->record_count < memory->record_capacity) {
                 idx = (int)memory->record_count;
                 memory->record_count++;
@@ -209,8 +226,13 @@ int short_term_memory_store(ShortTermMemory* memory, const char* key,
         strncpy(rec->key, key, sizeof(rec->key) - 1);
         rec->key[sizeof(rec->key) - 1] = '\0';
         rec->last_access_time = now;
-        rec->creation_time = (idx >= (int)memory->record_count - 1) ? now : rec->creation_time;
-        rec->access_count = (idx >= (int)memory->record_count - 1) ? 1 : rec->access_count + 1;
+        /* P1修复: 根据is_new决定是初始化还是递增，不再用idx位置猜测 */
+        if (is_new) {
+            rec->creation_time = now;
+            rec->access_count = 1;
+        } else {
+            rec->access_count = rec->access_count + 1;
+        }
         rec->current_strength = strength;
         rec->data_size = data_size;
         if (idx >= (int)memory->record_count) memory->record_count = (size_t)(idx + 1);

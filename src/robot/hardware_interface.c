@@ -514,7 +514,8 @@ HardwareInterface* robot_hardware_interface_create(const HardwareConfig* config)
     if (config->mode == 2) { /* 显式检查 mode=2（原HW_MODE_SIMULATION） */
         selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
                               "仿真模式(HW_MODE_SIMULATION)已永久禁用，请使用HW_MODE_REAL或HW_MODE_AUTO");
-        free(hw);
+        /* P-AUDIT修复: hw由safe_malloc分配,必须用safe_free释放 */
+        safe_free((void**)&hw);
         return NULL;
     } else if (config->mode == HW_MODE_REAL) {
         hw->mode = 0;        /* 尚未连接 */

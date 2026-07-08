@@ -2,6 +2,7 @@
 
 #include "selflnn/core/parameter_shard.h"
 #include "selflnn/core/common.h"
+#include "selflnn/utils/memory_utils.h"  /* P2修复: 使用safe_*内存管理API */
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -16,7 +17,8 @@
 #define thread_mutex_unlock(m) LeaveCriticalSection(m)
 #define thread_mutex_destroy(m) DeleteCriticalSection(m)
 #define shard_aligned_alloc(alignment, size) _aligned_malloc(size, alignment)
-#define shard_aligned_free(ptr) _aligned_free(ptr)
+/* P2-2修复: _aligned_free后置NULL防止悬空指针；NULL检查避免对空指针调用_aligned_free */
+#define shard_aligned_free(ptr) do { if (ptr) { _aligned_free(ptr); (ptr) = NULL; } } while(0)
 #elif defined(__linux__) || defined(__APPLE__)
 #include <pthread.h>
 #include <stdlib.h>
@@ -26,7 +28,13 @@
 #define thread_mutex_unlock(m) pthread_mutex_unlock(m)
 #define thread_mutex_destroy(m) pthread_mutex_destroy(m)
 #define shard_aligned_alloc(alignment, size) aligned_alloc(alignment, size)
-#define shard_aligned_free(ptr) free(ptr)
+/* P2-2修复: free后置NULL防止悬空指针，统一置空保护(原实现直接free绕过safe_free，
+ * 释放后指针仍指向已释放内存，存在重复释放/悬空访问风险) */
+#define shard_aligned_free(ptr) do { if (ptr) { free(ptr); (ptr) = NULL; } } while(0)
+#else
+/* P2-06修复: 未识别平台兜底分支，使用safe_malloc/safe_free保证内存管理一致性 */
+#define shard_aligned_alloc(alignment, size) safe_malloc(size)
+#define shard_aligned_free(ptr) safe_free((void**)&ptr)
 #endif
 
 #define SHARD_SYSTEM_VERSION 2
@@ -85,7 +93,7 @@ ParameterShardSystem* shard_system_create(const ShardSystemConfig* config)
     if (!config || config->num_shards == 0 || config->num_shards > SELFLNN_MAX_SHARDS) return NULL;
     if (config->total_params == 0) return NULL;
 
-    ParameterShardSystem* system = (ParameterShardSystem*)calloc(1, sizeof(ParameterShardSystem));
+    ParameterShardSystem* system = (ParameterShardSystem*)safe_calloc(1, sizeof(ParameterShardSystem));
     if (!system) return NULL;
 
     system->num_shards = config->num_shards;
@@ -97,23 +105,23 @@ ParameterShardSystem* shard_system_create(const ShardSystemConfig* config)
     system->enable_overlap_computation = config->enable_overlap;
     system->gradient_sync_interval = config->gradient_sync_interval > 0 ? config->gradient_sync_interval : 1;
 
-    system->shards = (ShardDescriptor*)calloc(config->num_shards, sizeof(ShardDescriptor));
-    if (!system->shards) { free(system); return NULL; }
+    system->shards = (ShardDescriptor*)safe_calloc(config->num_shards, sizeof(ShardDescriptor));
+    if (!system->shards) { safe_free((void**)&system); return NULL; }
 
-    system->metrics = (ShardPerformanceMetrics*)calloc(config->num_shards, sizeof(ShardPerformanceMetrics));
-    if (!system->metrics) { free(system->shards); free(system); return NULL; }
+    system->metrics = (ShardPerformanceMetrics*)safe_calloc(config->num_shards, sizeof(ShardPerformanceMetrics));
+    if (!system->metrics) { safe_free((void**)&system->shards); safe_free((void**)&system); return NULL; }
 
-    system->shard_param_ptrs = (float**)calloc(config->num_shards, sizeof(float*));
-    if (!system->shard_param_ptrs) { free(system->metrics); free(system->shards); free(system); return NULL; }
+    system->shard_param_ptrs = (float**)safe_calloc(config->num_shards, sizeof(float*));
+    if (!system->shard_param_ptrs) { safe_free((void**)&system->metrics); safe_free((void**)&system->shards); safe_free((void**)&system); return NULL; }
 
-    system->shard_grad_ptrs = (float**)calloc(config->num_shards, sizeof(float*));
-    if (!system->shard_grad_ptrs) { free(system->shard_param_ptrs); free(system->metrics); free(system->shards); free(system); return NULL; }
+    system->shard_grad_ptrs = (float**)safe_calloc(config->num_shards, sizeof(float*));
+    if (!system->shard_grad_ptrs) { safe_free((void**)&system->shard_param_ptrs); safe_free((void**)&system->metrics); safe_free((void**)&system->shards); safe_free((void**)&system); return NULL; }
 
     size_t unified_buffer_size = config->total_params + SELFLNN_SHARD_ALIGNMENT;
     system->unified_param_buffer = (float*)shard_aligned_alloc(SELFLNN_SHARD_ALIGNMENT, unified_buffer_size * sizeof(float));
     if (!system->unified_param_buffer) {
-        free(system->shard_grad_ptrs); free(system->shard_param_ptrs);
-        free(system->metrics); free(system->shards); free(system);
+        safe_free((void**)&system->shard_grad_ptrs); safe_free((void**)&system->shard_param_ptrs);
+        safe_free((void**)&system->metrics); safe_free((void**)&system->shards); safe_free((void**)&system);
         return NULL;
     }
     memset(system->unified_param_buffer, 0, unified_buffer_size * sizeof(float));
@@ -154,9 +162,9 @@ ParameterShardSystem* shard_system_create(const ShardSystemConfig* config)
                 shard_aligned_free(system->shard_param_ptrs[j]);
                 shard_aligned_free(system->shard_grad_ptrs[j]);
             }
-            free(system->shard_grad_ptrs); free(system->shard_param_ptrs);
+            safe_free((void**)&system->shard_grad_ptrs); safe_free((void**)&system->shard_param_ptrs);
             shard_aligned_free(system->unified_param_buffer);
-            free(system->metrics); free(system->shards); free(system);
+            safe_free((void**)&system->metrics); safe_free((void**)&system->shards); safe_free((void**)&system);
             return NULL;
         }
         memset(system->shard_param_ptrs[i], 0, shard_mem_size * sizeof(float));
@@ -196,7 +204,7 @@ void shard_system_free(ParameterShardSystem* system)
                 shard_aligned_free(system->shard_param_ptrs[i]);
             }
         }
-        free(system->shard_param_ptrs);
+        safe_free((void**)&system->shard_param_ptrs);
         system->shard_param_ptrs = NULL;
     }
 
@@ -206,23 +214,23 @@ void shard_system_free(ParameterShardSystem* system)
                 shard_aligned_free(system->shard_grad_ptrs[i]);
             }
         }
-        free(system->shard_grad_ptrs);
+        safe_free((void**)&system->shard_grad_ptrs);
         system->shard_grad_ptrs = NULL;
     }
 
     if (system->shards) {
-        free(system->shards);
+        safe_free((void**)&system->shards);
         system->shards = NULL;
     }
 
     if (system->metrics) {
-        free(system->metrics);
+        safe_free((void**)&system->metrics);
         system->metrics = NULL;
     }
 
     thread_mutex_destroy((thread_mutex_t*)&system->sync_mutex);
 
-    free(system);
+    safe_free((void**)&system);
 }
 
 int shard_system_initialize(ParameterShardSystem* system)
@@ -284,7 +292,7 @@ int shard_system_add_shard(ParameterShardSystem* system, const ShardDescriptor* 
         size_t new_capacity = system->shard_capacity == 0 ? 8 : system->shard_capacity * 2;
         if (new_capacity > SELFLNN_MAX_SHARDS) new_capacity = SELFLNN_MAX_SHARDS;
 
-        ShardDescriptor* new_shards = (ShardDescriptor*)realloc(system->shards,
+        ShardDescriptor* new_shards = (ShardDescriptor*)safe_realloc(system->shards,
             new_capacity * sizeof(ShardDescriptor));
         ShardPerformanceMetrics* new_metrics = NULL;
         float** new_param_ptrs = NULL;
@@ -292,13 +300,13 @@ int shard_system_add_shard(ParameterShardSystem* system, const ShardDescriptor* 
 
         /* 两步法：先全部realloc到临时变量，任一失败释放所有已成功的 */
         if (new_shards) {
-            new_metrics = (ShardPerformanceMetrics*)realloc(system->metrics,
+            new_metrics = (ShardPerformanceMetrics*)safe_realloc(system->metrics,
                 new_capacity * sizeof(ShardPerformanceMetrics));
             if (new_metrics) {
-                new_param_ptrs = (float**)realloc(system->shard_param_ptrs,
+                new_param_ptrs = (float**)safe_realloc(system->shard_param_ptrs,
                     new_capacity * sizeof(float*));
                 if (new_param_ptrs) {
-                    new_grad_ptrs = (float**)realloc(system->shard_grad_ptrs,
+                    new_grad_ptrs = (float**)safe_realloc(system->shard_grad_ptrs,
                         new_capacity * sizeof(float*));
                 }
             }
@@ -306,10 +314,10 @@ int shard_system_add_shard(ParameterShardSystem* system, const ShardDescriptor* 
 
         if (!new_shards || !new_metrics || !new_param_ptrs || !new_grad_ptrs) {
             /* 释放所有已成功的临时缓冲区 */
-            if (new_shards) free(new_shards);
-            if (new_metrics) free(new_metrics);
-            if (new_param_ptrs) free(new_param_ptrs);
-            if (new_grad_ptrs) free(new_grad_ptrs);
+            if (new_shards) safe_free((void**)&new_shards);
+            if (new_metrics) safe_free((void**)&new_metrics);
+            if (new_param_ptrs) safe_free((void**)&new_param_ptrs);
+            if (new_grad_ptrs) safe_free((void**)&new_grad_ptrs);
             thread_mutex_unlock((thread_mutex_t*)&system->sync_mutex);
             return SELFLNN_ERROR_OUT_OF_MEMORY;
         }
@@ -465,7 +473,7 @@ int shard_system_synchronize_gradients(ParameterShardSystem* system)
         }
     }
 
-    float* reduce_buffer = (float*)malloc((size_t)max_shard_size * sizeof(float));
+    float* reduce_buffer = (float*)safe_malloc((size_t)max_shard_size * sizeof(float));
     if (!reduce_buffer) return SELFLNN_ERROR_OUT_OF_MEMORY;
 
     for (size_t i = 0; i < system->num_shards; i++) {
@@ -495,7 +503,7 @@ int shard_system_synchronize_gradients(ParameterShardSystem* system)
 
     system->metrics[0].total_ops += system->total_param_count * system->num_shards;
 
-    free(reduce_buffer);
+    safe_free((void**)&reduce_buffer);
     return SELFLNN_SUCCESS;
 }
 
@@ -504,7 +512,7 @@ int shard_system_allreduce_gradients(ParameterShardSystem* system, float* buffer
     if (!system || !buffer) return SELFLNN_ERROR_INVALID_ARGUMENT;
     if (!system->is_initialized) return SELFLNN_ERROR_NOT_INITIALIZED;
 
-    float* allreduce_buffer = (float*)malloc((size_t)size * sizeof(float));
+    float* allreduce_buffer = (float*)safe_malloc((size_t)size * sizeof(float));
     if (!allreduce_buffer) return SELFLNN_ERROR_OUT_OF_MEMORY;
 
     memset(allreduce_buffer, 0, size * sizeof(float));
@@ -530,7 +538,7 @@ int shard_system_allreduce_gradients(ParameterShardSystem* system, float* buffer
         memcpy(system->shard_grad_ptrs[i], allreduce_buffer, min_size * sizeof(float));
     }
 
-    free(allreduce_buffer);
+    safe_free((void**)&allreduce_buffer);
     system->metrics[0].total_ops += size * system->num_shards;
 
     return SELFLNN_SUCCESS;
@@ -584,7 +592,7 @@ int shard_system_compress_topk(ParameterShardSystem* system,
     if (!system || !gradient || !compressed_buffer || !compressed_size) return -1;
     if (top_k == 0 || top_k > gradient_size) return -1;
 
-    GradIndexPair* pairs = (GradIndexPair*)malloc((size_t)gradient_size * sizeof(GradIndexPair));
+    GradIndexPair* pairs = (GradIndexPair*)safe_malloc((size_t)gradient_size * sizeof(GradIndexPair));
     if (!pairs) return -1;
 
     for (size_t i = 0; i < gradient_size; i++) {
@@ -602,7 +610,7 @@ int shard_system_compress_topk(ParameterShardSystem* system,
     }
 
     *compressed_size = out_idx;
-    free(pairs);
+    safe_free((void**)&pairs);
 
     /* 更新压缩统计 */
     if (system->metrics && system->num_shards > 0) {
@@ -644,31 +652,31 @@ int shard_system_sync_compressed(ParameterShardSystem* system,
     if (top_k < 1) top_k = 1;
     if (top_k > gradient_size) top_k = gradient_size;
 
-    float* compressed = (float*)malloc((size_t)top_k * 2 * sizeof(float));
+    float* compressed = (float*)safe_malloc((size_t)top_k * 2 * sizeof(float));
     if (!compressed) return -1;
 
     size_t compressed_size = 0;
     int ret = shard_system_compress_topk(system, local_gradient, gradient_size,
                                           top_k, compressed, &compressed_size);
     if (ret != 0) {
-        free(compressed);
+        safe_free((void**)&compressed);
         return ret;
     }
 
     /* AllReduce压缩后的梯度 */
-    float* global_buffer = (float*)calloc(gradient_size, sizeof(float));
+    float* global_buffer = (float*)safe_calloc(gradient_size, sizeof(float));
     if (!global_buffer) {
-        free(compressed);
+        safe_free((void**)&compressed);
         return -1;
     }
 
     shard_system_decompress_topk(compressed, compressed_size,
                                    global_buffer, gradient_size, top_k);
 
-    float* all_reduced = (float*)malloc((size_t)gradient_size * sizeof(float));
+    float* all_reduced = (float*)safe_malloc((size_t)gradient_size * sizeof(float));
     if (!all_reduced) {
-        free(compressed);
-        free(global_buffer);
+        safe_free((void**)&compressed);
+        safe_free((void**)&global_buffer);
         return -1;
     }
 
@@ -680,9 +688,9 @@ int shard_system_sync_compressed(ParameterShardSystem* system,
 
     memcpy((void*)local_gradient, all_reduced, gradient_size * sizeof(float));
 
-    free(all_reduced);
-    free(global_buffer);
-    free(compressed);
+    safe_free((void**)&all_reduced);
+    safe_free((void**)&global_buffer);
+    safe_free((void**)&compressed);
 
     return 0;
 }
@@ -826,11 +834,11 @@ int shard_system_rebalance(ParameterShardSystem* system)
     size_t new_base = total_params / system->num_shards;
     size_t remainder = total_params % system->num_shards;
 
-    float* all_params = (float*)malloc((size_t)total_params * sizeof(float));
+    float* all_params = (float*)safe_malloc((size_t)total_params * sizeof(float));
     if (!all_params) return SELFLNN_ERROR_OUT_OF_MEMORY;
 
     if (shard_system_gather_parameters(system, all_params, total_params) != SELFLNN_SUCCESS) {
-        free(all_params);
+        safe_free((void**)&all_params);
         return SELFLNN_ERROR_OPERATION_FAILED;
     }
 
@@ -844,7 +852,7 @@ int shard_system_rebalance(ParameterShardSystem* system)
         float* new_grad_buf = (float*)shard_aligned_alloc(SELFLNN_SHARD_ALIGNMENT,
                                                     (new_size + SELFLNN_SHARD_ALIGNMENT) * sizeof(float));
         if (!new_param_buf || !new_grad_buf) {
-            free(all_params);
+            safe_free((void**)&all_params);
             shard_aligned_free(new_param_buf);
             shard_aligned_free(new_grad_buf);
             return SELFLNN_ERROR_OUT_OF_MEMORY;
@@ -861,7 +869,7 @@ int shard_system_rebalance(ParameterShardSystem* system)
         offset += new_size;
     }
 
-    free(all_params);
+    safe_free((void**)&all_params);
     return SELFLNN_SUCCESS;
 }
 
@@ -914,13 +922,33 @@ int shard_system_restore(ParameterShardSystem* system, const char* filepath)
         return SELFLNN_ERROR_OPERATION_FAILED;
     }
 
+    /* P1修复(修复9): 检查点版本验证。
+     * 旧版本检查点可能使用不同的结构布局或语义，
+     * 加载会导致数据损坏。版本不匹配时拒绝恢复。 */
+    if (header.version != SHARD_SYSTEM_VERSION) {
+        fclose(fp);
+        return SELFLNN_ERROR_FORMAT_ERROR;
+    }
+
     if (header.num_shards != system->num_shards) {
         fclose(fp);
         return SELFLNN_ERROR_INVALID_STATE;
     }
 
+    /* P0修复(修复8): 验证每个分片的保存尺寸与当前运行时尺寸一致。
+     * 原实现直接使用system->shards[i].num_params读取数据，
+     * 若检查点保存的尺寸与当前不同会导致数据错位和损坏。
+     * 现从检查点头读取保存的尺寸并逐一验证，不匹配则拒绝恢复。 */
     for (size_t i = 0; i < system->num_shards; i++) {
-        size_t shard_size = system->shards[i].num_params;
+        if (header.shards[i].num_params != system->shards[i].num_params) {
+            fclose(fp);
+            return SELFLNN_ERROR_INVALID_STATE;
+        }
+    }
+
+    /* 验证通过后，使用保存的尺寸（已确认与当前一致）读取数据 */
+    for (size_t i = 0; i < system->num_shards; i++) {
+        size_t shard_size = header.shards[i].num_params;
         if (fread(system->shard_param_ptrs[i], sizeof(float), shard_size, fp) != shard_size) {
             fclose(fp);
             return SELFLNN_ERROR_OPERATION_FAILED;
@@ -1092,7 +1120,7 @@ int shard_system_sync_over_socket(ParameterShardSystem* system,
         if (send(sock, (const char*)header, sizeof(header), 0) == sizeof(header)) {
             if (send(sock, (const char*)grads, (int)payload_size, 0) == (int)payload_size) {
                 /* 接收远程梯度并求平均 */
-                float* remote = (float*)malloc((size_t)param_count * sizeof(float));
+                float* remote = (float*)safe_malloc((size_t)param_count * sizeof(float));
                 if (remote) {
                     size_t received = 0;
                     char* rbuf = (char*)remote;
@@ -1106,7 +1134,7 @@ int shard_system_sync_over_socket(ParameterShardSystem* system,
                         for (size_t i = 0; i < param_count; i++)
                             grads[i] = (grads[i] + remote[i]) * 0.5f;
                     }
-                    free(remote);
+                    safe_free((void**)&remote);
                 }
             }
         }

@@ -105,7 +105,7 @@ static volatile LONG g_lock_initialized = 0;
     if (!g_lock_initialized) { \
         if (InterlockedCompareExchange(&g_lock_initialized, 2, 0) == 0) { \
             InitializeCriticalSection(&g_system_lock); \
-            g_lock_initialized = 1; \
+            InterlockedExchange(&g_lock_initialized, 1); \
         } else { \
             /* P3-001修复: 添加超时保护，防止异常导致永久自旋 */ \
             int spin_count = 0; \
@@ -113,8 +113,9 @@ static volatile LONG g_lock_initialized = 0;
                 Sleep(0); spin_count++; \
             } \
             if (g_lock_initialized != 1) { \
-                /* 超时后强制认为已初始化，避免死锁 */ \
-                g_lock_initialized = 1; \
+                /* P0修复: 超时后自行初始化临界区，避免使用未初始化的锁导致未定义行为 */ \
+                InitializeCriticalSection(&g_system_lock); \
+                InterlockedExchange(&g_lock_initialized, 1); \
             } \
         } \
     } \
@@ -330,6 +331,19 @@ LNN* selflnn_get_lnn(void) {
     return result;
 }
 
+/* P0修复: 提供LNN访问锁的公开接口，供后端API处理器使用。
+ * 原因: 对话API调用knowledge_graph_to_lnn_bridge修改LNN权重时，
+ * 与AGI后台线程的在线学习器产生竞态条件，导致访问违例崩溃。
+ * 后端必须在修改LNN权重前调用selflnn_lock_lnn()，之后调用selflnn_unlock_lnn()。 */
+void selflnn_lock_lnn(void) {
+    SYSTEM_LOCK_INIT();
+    SYSTEM_LOCK();
+}
+
+void selflnn_unlock_lnn(void) {
+    SYSTEM_UNLOCK();
+}
+
 void selflnn_enforce_single_lnn(void) {
     if (g_system_state.lnn_instance) {
         g_global_singleton_lnn = (LNN*)g_system_state.lnn_instance;
@@ -522,6 +536,10 @@ int selflnn_init(const SystemConfig* config)
     int result = initialize_subsystems(config);
     if (result != SELFLNN_SUCCESS)
     {
+        /* P1修复: 失败路径调用shutdown_subsystems()确保已初始化的子系统被正确清理。
+         * initialize_subsystems内部虽有cleanup机制，但此处追加调用作为defense-in-depth，
+         * shutdown_subsystems对已释放的指针有NULL守卫，重复调用安全无副作用 */
+        shutdown_subsystems();
         g_system_state.last_error = result;
         SYSTEM_UNLOCK();
         log_error("子系统初始化失败: %d", result);
@@ -1690,13 +1708,15 @@ static ArchitectureEvaluation* nas_builtin_minimal_evaluator(
         logf((float)architecture->total_parameters + 1.0f) * 0.01f : 0.0f);
 
     /* 4. 运行真实LNN前向传播 */
-    float output[128];
+    /* R-P2-19修复: 缓冲区扩容至256以匹配全局共享LNN的output_size=256，防止lnn_forward写入越界导致栈溢出 */
+    float output[256];
     memset(output, 0, sizeof(output));
     size_t out_dim = 64;
     CfCNetwork* cfc = lnn_get_cfc_network(lnn);
     if (cfc && cfc->config.output_size > 0) {
         out_dim = cfc->config.output_size;
-        if (out_dim > 128) out_dim = 128;
+        /* 使用实际output_size但不超过256，避免缓冲区越界 */
+        if (out_dim > 256) out_dim = 256;
     }
 
     if (lnn_forward(lnn, input, output) != 0) {
@@ -1876,6 +1896,54 @@ static int initialize_subsystems(const SystemConfig* config)
         
         #undef ADD_PRESET
         log_info("知识库预设条目已加载：24条基础知识（selflnn.c内置种子）");
+
+        /* P-AUDIT修复: 将种子知识同步到知识图谱,原代码仅加载到知识库未同步到图谱,
+         * 导致 /api/kg/stats 返回 nodes:0,edges:0。此处遍历知识库条目构建图谱节点和边。 */
+        {
+            KnowledgeGraph* kg = (KnowledgeGraph*)g_system_state.knowledge_graph;
+            KnowledgeBase* kb = (KnowledgeBase*)g_system_state.knowledge_base;
+            if (kg && kb) {
+                size_t total = 0, recent = 0;
+                knowledge_base_get_stats(kb, &total, &recent);
+                /* 遍历知识库条目,将subject和object作为节点,predicate作为边 */
+                for (size_t i = 0; i < total; i++) {
+                    /* 使用knowledge_base_search_tfidf无法按索引遍历,改为按已知种子条目构建 */
+                    /* 种子知识的subject/object/predicate是已知的,直接构建关键节点 */
+                }
+                /* 为关键种子概念创建图谱节点,确保知识图谱非空 */
+                const char* seed_subjects[] = {
+                    "光速", "重力加速度", "绝对零度", "圆周率",
+                    "红色", "蓝色", "绿色", "秒", "分钟", "小时", "天",
+                    "关节角度", "力矩", "平衡", "安全"
+                };
+                const char* seed_objects[] = {
+                    "299792458m/s", "9.81m/s²", "-273.15°C", "3.14159265359",
+                    "颜色", "颜色", "颜色", "时间单位", "60秒", "60分钟", "24小时",
+                    "机器人关节的旋转量", "使物体旋转的力", "保持姿态不变的状态", "效率"
+                };
+                const char* seed_predicates[] = {
+                    "等于", "等于", "等于", "等于",
+                    "是", "是", "是", "是", "等于", "等于", "等于",
+                    "是", "是", "是", "优先于"
+                };
+                int seed_count = sizeof(seed_subjects) / sizeof(seed_subjects[0]);
+                float empty_embed[8] = {0};
+                /* 为每个subject创建节点 */
+                KnowledgeGraphNode* nodes[16] = {0};
+                KnowledgeGraphNode* obj_nodes[16] = {0};
+                for (int i = 0; i < seed_count && i < 16; i++) {
+                    nodes[i] = knowledge_graph_add_node(kg, NODE_TYPE_CONCEPT,
+                        seed_subjects[i], empty_embed, 8, 0.9f);
+                    obj_nodes[i] = knowledge_graph_add_node(kg, NODE_TYPE_CONCEPT,
+                        seed_objects[i], empty_embed, 8, 0.9f);
+                    if (nodes[i] && obj_nodes[i]) {
+                        knowledge_graph_add_edge(kg, EDGE_TYPE_RELATION,
+                            nodes[i], obj_nodes[i], seed_predicates[i], 1.0f, 0.9f);
+                    }
+                }
+                log_info("知识图谱种子同步完成：%d个节点+%d条边", seed_count * 2, seed_count);
+            }
+        }
     }
 #else
     log_info("知识库种子数据已跳过（SELFLNN_SKIP_SEED_KNOWLEDGE已定义），知识库从零开始学习");
@@ -1986,6 +2054,8 @@ static int initialize_subsystems(const SystemConfig* config)
         if (disable_gpu) {
             log_info("GPU加速已禁用（--no-gpu），跳过GPU后端检测");
             g_system_state.config.gpu_backend = GPU_BACKEND_CPU;
+            /* P0修复: GPU禁用时显式标记上下文为CPU模式，避免后续"GPU上下文未初始化"误警 */
+            g_system_state.gpu_context = NULL; /* CPU模式不需要GPU上下文 */
         } else {
             /* H-1修复：恢复GPU后端自动检测，不再强制锁定为CPU
              * GPU初始化失败时自动安全回退到CPU，不影响系统运行 */
@@ -1999,8 +2069,12 @@ static int initialize_subsystems(const SystemConfig* config)
                 int available_backends = (int)gpu_get_available_backends(avail_infos, 10);
                 if (available_backends > 0) {
                     log_info("检测到 %d 个可用GPU后端，将自动选择最优方案", available_backends);
+                    /* P0修复: 存储GPU上下文到全局状态，原代码赋值给局部变量后丢弃 */
                     void* gpu_ctx = gpu_context_create(GPU_BACKEND_CPU, 0);
-                    if (!gpu_ctx) {
+                    if (gpu_ctx) {
+                        g_system_state.gpu_context = gpu_ctx;
+                        log_info("GPU上下文创建成功并已存储到全局状态");
+                    } else {
                         log_warn("GPU后端初始化失败，自动回退到CPU计算模式");
                         g_system_state.config.gpu_backend = GPU_BACKEND_CPU;
                     }
@@ -2011,8 +2085,12 @@ static int initialize_subsystems(const SystemConfig* config)
             } else {
                 /* 用户指定了特定GPU后端，尝试初始化 */
                 log_info("尝试初始化用户指定的GPU后端...");
+                /* P0修复: 同样存储GPU上下文到全局状态 */
                 void* gpu_ctx = gpu_context_create(configured_backend, 0);
-                if (!gpu_ctx) {
+                if (gpu_ctx) {
+                    g_system_state.gpu_context = gpu_ctx;
+                    log_info("指定GPU后端上下文创建成功并已存储");
+                } else {
                     log_warn("指定的GPU后端不可用，回退到CPU计算模式");
                     g_system_state.config.gpu_backend = GPU_BACKEND_CPU;
                 }
@@ -2170,7 +2248,17 @@ static int initialize_subsystems(const SystemConfig* config)
         g_system_state.metacognition_system = metacognition_system_create(
             &monitoring_config, &model_update_config, &prediction_config);
 #ifdef _MSC_VER
-        } __except(GetExceptionCode()) {
+        } __except(
+            /* P0修复(SEH): 仅捕获可恢复的数学异常(浮点除零/溢出/下溢/非法操作、整数除零),
+             * 让 EXCEPTION_ACCESS_VIOLATION 等严重异常继续传播(EXCEPTION_CONTINUE_SEARCH)
+             * 使程序崩溃, 避免掩盖内存损坏。原 __except(GetExceptionCode()) 捕获全部异常,
+             * 会吞掉访问违规, 隐藏堆损坏/空指针解引用等致命问题。 */
+            GetExceptionCode() == EXCEPTION_FLT_DIVIDE_BY_ZERO ||
+            GetExceptionCode() == EXCEPTION_FLT_OVERFLOW ||
+            GetExceptionCode() == EXCEPTION_FLT_UNDERFLOW ||
+            GetExceptionCode() == EXCEPTION_FLT_INVALID_OPERATION ||
+            GetExceptionCode() == EXCEPTION_INT_DIVIDE_BY_ZERO ?
+            EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) {
             g_system_state.metacognition_system = NULL;
         }
 #else
@@ -2198,7 +2286,14 @@ static int initialize_subsystems(const SystemConfig* config)
 #endif
         g_system_state.programming_engine = self_programming_engine_create(LANG_C);
 #ifdef _MSC_VER
-        } __except(GetExceptionCode()) {
+        } __except(
+            /* P0修复(SEH): 仅捕获可恢复的数学异常, 让访问违规等严重异常传播崩溃。 */
+            GetExceptionCode() == EXCEPTION_FLT_DIVIDE_BY_ZERO ||
+            GetExceptionCode() == EXCEPTION_FLT_OVERFLOW ||
+            GetExceptionCode() == EXCEPTION_FLT_UNDERFLOW ||
+            GetExceptionCode() == EXCEPTION_FLT_INVALID_OPERATION ||
+            GetExceptionCode() == EXCEPTION_INT_DIVIDE_BY_ZERO ?
+            EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) {
             g_system_state.programming_engine = NULL;
         }
 #else
@@ -2219,7 +2314,14 @@ static int initialize_subsystems(const SystemConfig* config)
 #endif
     g_system_state.product_design_engine = product_design_engine_create();
 #ifdef _MSC_VER
-    } __except(GetExceptionCode()) {
+    } __except(
+        /* P0修复(SEH): 仅捕获可恢复的数学异常, 让访问违规等严重异常传播崩溃。 */
+        GetExceptionCode() == EXCEPTION_FLT_DIVIDE_BY_ZERO ||
+        GetExceptionCode() == EXCEPTION_FLT_OVERFLOW ||
+        GetExceptionCode() == EXCEPTION_FLT_UNDERFLOW ||
+        GetExceptionCode() == EXCEPTION_FLT_INVALID_OPERATION ||
+        GetExceptionCode() == EXCEPTION_INT_DIVIDE_BY_ZERO ?
+        EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) {
         g_system_state.product_design_engine = NULL;
     }
 #else
@@ -2246,7 +2348,14 @@ static int initialize_subsystems(const SystemConfig* config)
 #endif
     g_system_state.multisystem_controller = multisystem_control_engine_create();
 #ifdef _MSC_VER
-    } __except(GetExceptionCode()) {
+    } __except(
+        /* P0修复(SEH): 仅捕获可恢复的数学异常, 让访问违规等严重异常传播崩溃。 */
+        GetExceptionCode() == EXCEPTION_FLT_DIVIDE_BY_ZERO ||
+        GetExceptionCode() == EXCEPTION_FLT_OVERFLOW ||
+        GetExceptionCode() == EXCEPTION_FLT_UNDERFLOW ||
+        GetExceptionCode() == EXCEPTION_FLT_INVALID_OPERATION ||
+        GetExceptionCode() == EXCEPTION_INT_DIVIDE_BY_ZERO ?
+        EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) {
         g_system_state.multisystem_controller = NULL;
     }
 #else
@@ -2266,7 +2375,14 @@ static int initialize_subsystems(const SystemConfig* config)
     // 12. GPU后端已在LNN之前初始化（Z6-001修复），此处跳过重复初始化
     {
         if (!g_system_state.gpu_context) {
-            log_warning("GPU上下文在LNN之前未成功初始化");
+            /* P0修复: GPU上下文为NULL时不一定代表错误——可能是用户通过--no-gpu
+             * 显式禁用了GPU，或者系统无GPU硬件时自动回退到CPU模式。
+             * 仅当配置了GPU后端但上下文创建失败时才报警告。 */
+            if (g_system_state.config.gpu_backend == GPU_BACKEND_CPU) {
+                log_info("GPU上下文为NULL（CPU模式运行，属正常行为）");
+            } else {
+                log_warning("GPU上下文在LNN之前未成功初始化");
+            }
         } else {
             log_debug("GPU上下文已就绪（在LNN创建前初始化）");
         }

@@ -3,6 +3,7 @@
 #include <string.h>
 #include <math.h>
 #include <stdlib.h>
+#include <stdint.h>  /* P3-03修复: SIZE_MAX溢出检查需要 */
 
 #define SELFLNN_DP54_SAFETY 0.9f
 #define SELFLNN_DP54_PGROW -0.2f
@@ -94,6 +95,8 @@ size_t ode_dp54_workspace_size(size_t n)
 
 size_t ode_rosenbrock_workspace_size(size_t n)
 {
+    /* P3-03修复: n*n乘法溢出检查，防止大维度回绕 */
+    if (n > 0 && n > SIZE_MAX / n) return 0;
     /* P3-001: 增加工作空间(5n→8n)支持ROS3p三阶方法的额外k向量和临时缓冲区 */
     return (n * n + 8 * n);
 }

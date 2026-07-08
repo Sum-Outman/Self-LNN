@@ -5,6 +5,7 @@
 #include "selflnn/utils/math_utils.h"
 
 #include "selflnn/utils/secure_random.h"
+#include "selflnn/utils/platform.h"  /* P1修复: MutexHandle互斥锁API */
 
 #include <stdlib.h>
 #include <string.h>
@@ -87,7 +88,14 @@ static int salted_verify_key(const uint8_t* stored_salt, const uint8_t* stored_s
     memcpy(concat + AUTH_SALT_LEN, input_key_hash, AUTH_HASH_LEN);
     uint8_t computed_hash[AUTH_HASH_LEN];
     selflnn_sha256_hash(concat, sizeof(concat), computed_hash);
-    return memcmp(computed_hash, stored_salted_hash, AUTH_HASH_LEN) == 0 ? 1 : 0;
+    /* P1修复: 使用常量时间比较替代memcmp，防止时序攻击。
+     * memcmp在第一个不匹配字节处短路返回，攻击者可通过响应时间差异逐字节推断哈希。
+     * volatile关键字阻止编译器优化掉逐字节比较逻辑。 */
+    volatile uint8_t diff = 0;
+    for (int i = 0; i < AUTH_HASH_LEN; i++) {
+        diff |= (uint8_t)(computed_hash[i] ^ stored_salted_hash[i]);
+    }
+    return diff == 0 ? 1 : 0;
 }
 
 /* P2注释: 手动十六进制转换 - 避免依赖sprintf/printf系列函数，纯C实现
@@ -185,12 +193,23 @@ AuthSystem* auth_system_create(int require_auth) {
     auth->key_count = 0;
     auth->rule_count = 0;
     auth->initialized = 1;
+    /* P1修复: 创建互斥锁保护keys数组和令牌桶的并发访问 */
+    auth->auth_lock = (void*)mutex_create();
+    if (!auth->auth_lock) {
+        safe_free((void**)&auth);
+        return NULL;
+    }
     token_bucket_init(&auth->global_bucket, 1000, 100.0);
     return auth;
 }
 
 void auth_system_free(AuthSystem* auth) {
     if (!auth) return;
+    /* P1修复: 先销毁互斥锁，确保没有其他线程持有锁时再清理数据 */
+    if (auth->auth_lock) {
+        mutex_destroy((MutexHandle)auth->auth_lock);
+        auth->auth_lock = NULL;
+    }
     memset(auth->keys, 0, sizeof(auth->keys));
     auth->key_count = 0;
     auth->initialized = 0;
@@ -200,7 +219,12 @@ void auth_system_free(AuthSystem* auth) {
 int auth_generate_key(AuthSystem* auth, const char* name, AuthPermission permission,
                       int expiration_days, char* key_out, size_t key_out_size) {
     if (!auth || !name || !key_out) return -1;
-    if (auth->key_count >= AUTH_MAX_KEYS) return -2;
+    /* P1修复: 加锁保护keys数组和key_count的并发修改 */
+    mutex_lock((MutexHandle)auth->auth_lock);
+    if (auth->key_count >= AUTH_MAX_KEYS) {
+        mutex_unlock((MutexHandle)auth->auth_lock);
+        return -2;
+    }
 
     uint8_t random_bytes[32];
     generate_random_bytes(random_bytes, 32);
@@ -246,33 +270,53 @@ int auth_generate_key(AuthSystem* auth, const char* name, AuthPermission permiss
     strncpy(entry->name, name, AUTH_KEY_NAME_LEN - 1);
     entry->name[AUTH_KEY_NAME_LEN - 1] = '\0';
     auth->key_count++;
+    /* P1修复: 操作完成，释放锁 */
+    mutex_unlock((MutexHandle)auth->auth_lock);
     return 0;
 }
 
 int auth_validate_key(AuthSystem* auth, const char* key, AuthPermission required_permission) {
     if (!auth || !key) return 0;
+    /* P1修复: 加锁保护keys数组的遍历和usage_count等字段的修改 */
+    mutex_lock((MutexHandle)auth->auth_lock);
     uint8_t key_hash[AUTH_HASH_LEN];
-    if (string_to_key(key, key_hash) != 0) return 0;
+    if (string_to_key(key, key_hash) != 0) {
+        mutex_unlock((MutexHandle)auth->auth_lock);
+        return 0;
+    }
     for (int i = 0; i < auth->key_count; i++) {
         /* 使用SHA-256加盐哈希验证（强制，不再支持明文memcmp回退） */
         int match = salted_verify_key(auth->keys[i].salt, auth->keys[i].hash, key_hash);
         if (match) {
-            if (!auth->keys[i].enabled) return 0;
-            if (auth->keys[i].expires_at > 0 && time(NULL) > auth->keys[i].expires_at) {
-                auth->keys[i].enabled = 0;
+            if (!auth->keys[i].enabled) {
+                mutex_unlock((MutexHandle)auth->auth_lock);
                 return 0;
             }
-            if (auth->keys[i].permission < required_permission) return 0;
+            if (auth->keys[i].expires_at > 0 && time(NULL) > auth->keys[i].expires_at) {
+                auth->keys[i].enabled = 0;
+                mutex_unlock((MutexHandle)auth->auth_lock);
+                return 0;
+            }
+            if (auth->keys[i].permission < required_permission) {
+                mutex_unlock((MutexHandle)auth->auth_lock);
+                return 0;
+            }
             auth->keys[i].last_used_at = time(NULL);
             auth->keys[i].usage_count++;
+            mutex_unlock((MutexHandle)auth->auth_lock);
             return 1;
         }
     }
+    mutex_unlock((MutexHandle)auth->auth_lock);
     return 0;
 }
 
 int auth_revoke_key(AuthSystem* auth, const char* key_or_prefix) {
     if (!auth || !key_or_prefix) return -1;
+    /* P1修复: 空字符串会导致strncmp(...,0)总是返回0，错误匹配首个密钥 */
+    if (key_or_prefix[0] == '\0') return -1;
+    /* P1修复: 加锁保护keys数组和key_count的并发修改 */
+    mutex_lock((MutexHandle)auth->auth_lock);
     for (int i = 0; i < auth->key_count; i++) {
         if (strncmp(auth->keys[i].key_prefix, key_or_prefix, 
                     strlen(key_or_prefix) < 15 ? strlen(key_or_prefix) : 15) == 0) {
@@ -284,35 +328,48 @@ int auth_revoke_key(AuthSystem* auth, const char* key_or_prefix) {
             }
             memset(&auth->keys[auth->key_count - 1], 0, sizeof(AuthKeyEntry));
             auth->key_count--;
+            mutex_unlock((MutexHandle)auth->auth_lock);
             return 0;
         }
     }
+    mutex_unlock((MutexHandle)auth->auth_lock);
     return -1;
 }
 
 int auth_enable_key(AuthSystem* auth, const char* key_or_prefix, int enable) {
     if (!auth || !key_or_prefix) return -1;
+    /* P1修复: 空字符串会导致strncmp(...,0)总是返回0，错误匹配首个密钥 */
+    if (key_or_prefix[0] == '\0') return -1;
+    /* P1修复: 加锁保护keys数组的并发修改 */
+    mutex_lock((MutexHandle)auth->auth_lock);
     for (int i = 0; i < auth->key_count; i++) {
         size_t prefix_len = strlen(key_or_prefix);
         if (prefix_len > 15) prefix_len = 15;
         if (strncmp(auth->keys[i].key_prefix, key_or_prefix, prefix_len) == 0) {
             auth->keys[i].enabled = enable;
+            mutex_unlock((MutexHandle)auth->auth_lock);
             return 0;
         }
     }
+    mutex_unlock((MutexHandle)auth->auth_lock);
     return -1;
 }
 
 int auth_list_keys(AuthSystem* auth, AuthKeyEntry* entries, size_t* count, size_t max_count) {
     if (!auth || !entries || !count) return -1;
+    /* P1修复: 加锁保护keys数组的并发读取 */
+    mutex_lock((MutexHandle)auth->auth_lock);
     size_t copy_count = (size_t)auth->key_count < max_count ? (size_t)auth->key_count : max_count;
     memcpy(entries, auth->keys, copy_count * sizeof(AuthKeyEntry));
     *count = copy_count;
+    mutex_unlock((MutexHandle)auth->auth_lock);
     return 0;
 }
 
 int auth_get_stats(AuthSystem* auth, AuthStats* stats) {
     if (!auth || !stats) return -1;
+    /* P1修复: 加锁保护keys数组和global_bucket的并发读取 */
+    mutex_lock((MutexHandle)auth->auth_lock);
     memset(stats, 0, sizeof(AuthStats));
     stats->total_keys = auth->key_count;
     stats->active_keys = 0;
@@ -343,44 +400,63 @@ int auth_get_stats(AuthSystem* auth, AuthStats* stats) {
     stats->global_bucket_refill_per_sec = (int)(auth->global_bucket.refill_rate * 1000.0);
     stats->auth_failures = 0;
     stats->rate_limited = 0;
+    mutex_unlock((MutexHandle)auth->auth_lock);
     return 0;
 }
 
 int auth_register_endpoint_rule(AuthSystem* auth, const char* endpoint_pattern,
                                 AuthPermission min_permission, int require_auth) {
     if (!auth || !endpoint_pattern || auth->rule_count >= AUTH_MAX_API_ENDPOINTS) return -1;
+    /* P1修复: 加锁保护endpoint_rules数组的并发修改 */
+    mutex_lock((MutexHandle)auth->auth_lock);
     AuthEndpointRule* rule = &auth->endpoint_rules[auth->rule_count++];
     strncpy(rule->endpoint, endpoint_pattern, 127);
     rule->endpoint[127] = '\0';
     rule->min_permission = min_permission;
     rule->require_auth = require_auth;
+    mutex_unlock((MutexHandle)auth->auth_lock);
     return 0;
 }
 
 AuthPermission auth_get_required_permission(AuthSystem* auth, const char* endpoint) {
     if (!auth || !endpoint) return AUTH_PERM_NONE;
+    /* P1修复: 加锁保护endpoint_rules数组的并发读取 */
+    mutex_lock((MutexHandle)auth->auth_lock);
     for (int i = 0; i < auth->rule_count; i++) {
-        if (strstr(endpoint, auth->endpoint_rules[i].endpoint) != NULL)
-            return auth->endpoint_rules[i].min_permission;
+        if (strstr(endpoint, auth->endpoint_rules[i].endpoint) != NULL) {
+            AuthPermission perm = auth->endpoint_rules[i].min_permission;
+            mutex_unlock((MutexHandle)auth->auth_lock);
+            return perm;
+        }
     }
+    mutex_unlock((MutexHandle)auth->auth_lock);
     return AUTH_PERM_READONLY;
 }
 
 int auth_check_rate_limit(AuthSystem* auth, TokenBucket* bucket) {
     if (!bucket) return 0;
-    /* 自适应限流：利用认证上下文全局负载状态动态调整限流粒度 */
-    if (auth && auth->initialized) {
+    /* P1修复: 加锁保护global_bucket的并发读取和修改 */
+    if (auth && auth->initialized && auth->auth_lock) {
+        mutex_lock((MutexHandle)auth->auth_lock);
+        /* 自适应限流：利用认证上下文全局负载状态动态调整限流粒度 */
         /* 若全局令牌桶余量低于25%，触发更严格的限流：消耗双倍令牌 */
         if (auth->global_bucket.tokens < auth->global_bucket.max_tokens / 4) {
-            return token_bucket_consume(bucket, 2) ? 1 : 0;
+            int result = token_bucket_consume(bucket, 2) ? 1 : 0;
+            mutex_unlock((MutexHandle)auth->auth_lock);
+            return result;
         }
+        mutex_unlock((MutexHandle)auth->auth_lock);
     }
     return token_bucket_consume(bucket, 1) ? 1 : 0;
 }
 
 int auth_global_check_rate(AuthSystem* auth) {
     if (!auth) return 0;
-    return token_bucket_consume(&auth->global_bucket, 1) ? 1 : 0;
+    /* P1修复: 加锁保护global_bucket的并发修改 */
+    mutex_lock((MutexHandle)auth->auth_lock);
+    int result = token_bucket_consume(&auth->global_bucket, 1) ? 1 : 0;
+    mutex_unlock((MutexHandle)auth->auth_lock);
+    return result;
 }
 
 /* M-017修复: Bearer Token为统一主认证方式，旧式api_key仅作兼容保留 */
@@ -428,10 +504,13 @@ int auth_save_keys(AuthSystem* auth, const char* filepath) {
     if (!auth || !filepath) return -1;
     FILE* fp = fopen(filepath, "wb");
     if (!fp) return -1;
-    
+
+    /* P1修复: 加锁保护keys数组的并发读取，确保快照一致性 */
+    mutex_lock((MutexHandle)auth->auth_lock);
+
     uint8_t header[16] = "SELFLNN_AUTH_V3"; /* V3表示HKDF加密格式 */
     fwrite(header, 1, 16, fp);
-    
+
     int count = auth->key_count;
     fwrite(&count, sizeof(int), 1, fp);
     
@@ -467,7 +546,8 @@ int auth_save_keys(AuthSystem* auth, const char* filepath) {
     } else {
         fwrite(auth->keys, sizeof(AuthKeyEntry), (size_t)count, fp);
     }
-    
+
+    mutex_unlock((MutexHandle)auth->auth_lock);
     fclose(fp);
     return 0;
 }
@@ -494,7 +574,8 @@ int auth_load_keys(AuthSystem* auth, const char* filepath) {
     }
     
     int count = 0;
-    if (fread(&count, sizeof(int), 1, fp) != 1 || count > AUTH_MAX_KEYS) {
+    /* P1修复: 检查count为负数，防止负数转为巨大size_t导致整数溢出 */
+    if (fread(&count, sizeof(int), 1, fp) != 1 || count < 0 || count > AUTH_MAX_KEYS) {
         fclose(fp);
         return -1;
     }
@@ -508,12 +589,16 @@ int auth_load_keys(AuthSystem* auth, const char* filepath) {
         }
     }
     
+    /* P1修复: 加锁保护auth->keys和auth->key_count的并发写入 */
+    mutex_lock((MutexHandle)auth->auth_lock);
+
     size_t keys_size = (size_t)count * sizeof(AuthKeyEntry);
     if (is_encrypted) {
         uint8_t* keys_encrypted = (uint8_t*)safe_malloc(keys_size);
         if (!keys_encrypted || fread(keys_encrypted, 1, keys_size, fp) != keys_size) {
             /* P-FIX-012: 统一使用safe_free替代free，保持分配释放配对一致 */
             safe_free((void**)&keys_encrypted);
+            mutex_unlock((MutexHandle)auth->auth_lock);
             fclose(fp);
             return -1;
         }
@@ -525,15 +610,15 @@ int auth_load_keys(AuthSystem* auth, const char* filepath) {
             memcpy(kdf_buf, salt, 16);
             memcpy(kdf_buf + 16, filepath, path_len);
             memcpy(kdf_buf + 16 + path_len, salt, 16);
-            
+
             uint8_t h1[AUTH_HASH_LEN];
             selflnn_sha256_hash(kdf_buf, 16 + path_len + 16, h1);
-            
+
             memcpy(kdf_buf, salt, 16);
             memcpy(kdf_buf + 16, h1, AUTH_HASH_LEN);
             uint8_t xor_key[AUTH_HASH_LEN];
             selflnn_sha256_hash(kdf_buf, 16 + AUTH_HASH_LEN, xor_key);
-            
+
             for (size_t i = 0; i < keys_size; i++) keys_encrypted[i] ^= xor_key[i % AUTH_HASH_LEN];
         } else {
             /* V2格式：兼容旧的简单XOR密钥派生 */
@@ -547,12 +632,14 @@ int auth_load_keys(AuthSystem* auth, const char* filepath) {
         safe_free((void**)&keys_encrypted);
     } else {
         if (fread(auth->keys, sizeof(AuthKeyEntry), (size_t)count, fp) != (size_t)count) {
+            mutex_unlock((MutexHandle)auth->auth_lock);
             fclose(fp);
             return -1;
         }
     }
     auth->key_count = count;
-    
+
+    mutex_unlock((MutexHandle)auth->auth_lock);
     fclose(fp);
     return 0;
 }

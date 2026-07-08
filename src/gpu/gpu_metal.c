@@ -134,10 +134,18 @@ static void (*mtlComputePipelineStateRelease)(void* pipeline) = NULL;
 
 /**
  * @brief Metal上下文内部结构
+ *
+ * 修复1(P0): 以GpuContext header作为首字段，确保与GpuContext布局兼容。
+ * 这样metal_backend_context_create返回的指针既可以被上层当作GpuContext*使用
+ * （访问backend/device_index/is_initialized/device_name/kernel_cache等字段），
+ * 也可以在后端内部当作MetalContextInternal*使用（访问device/command_queue等字段）。
+ * 仿照CUDA后端的CudaContextInternal实现方式。
  */
 typedef struct {
+    GpuContext header;              /* 必须是首字段，确保与GpuContext布局兼容 */
     void* device;                   // Metal设备
     void* command_queue;            // 命令队列
+    void* library;                  // Metal库（编译后的着色器库，上下文级共享）
     int device_id;                  // 设备ID
     int initialized;                // 是否已初始化
 } MetalContextInternal;
@@ -435,7 +443,10 @@ int metal_cfc_ode_step(GpuContext* context,
                        float* h_out, float dt, int dim) {
     if (!context || !context->is_initialized) return -1;
     if (!h_in || !W || !b || !tau || !h_out || dim <= 0) return -1;
-    struct GpuContext* ctx = (struct GpuContext*)context;
+    /* 修复2(P0): 使用MetalContextInternal*而非struct GpuContext*，
+     * 因为后续访问ctx->device/ctx->command_queue是MetalContextInternal的字段，
+     * 而非GpuContext的字段。context指向MetalContextInternal首地址（即GpuContext header首地址）。 */
+    MetalContextInternal* ctx = (MetalContextInternal*)context;
 
     size_t state_byte = (size_t)dim * sizeof(float);
     size_t weight_byte = (size_t)dim * (size_t)dim * sizeof(float);
@@ -752,6 +763,15 @@ static GpuContext* metal_backend_context_create(int device_index) {
     }
     
     memset(ctx, 0, sizeof(MetalContextInternal));
+
+    /* 修复1(P0): 填充GpuContext header字段，使上层gpu_context_create能正确访问
+     * backend/device_index/is_initialized/device_name等字段。
+     * 设置is_initialized=1后，gpu_context_create会跳过二次设置。 */
+    ctx->header.backend = GPU_BACKEND_METAL;
+    ctx->header.device_index = device_index;
+    ctx->header.is_initialized = 1;
+    snprintf(ctx->header.device_name, sizeof(ctx->header.device_name), "Metal GPU %d", device_index);
+
     ctx->device = device;
     ctx->device_id = device_index;
     
@@ -2212,12 +2232,14 @@ static const char* METAL_BIAS_ADD_KERNEL =
 static GpuKernel* metal_backend_kernel_create(GpuContext* context, const char* kernel_source, const char* kernel_name) {
     UNUSED(context); UNUSED(kernel_source); UNUSED(kernel_name);
 #ifdef __APPLE__
-    if (!context || !context->backend_data || !kernel_name) {
-        set_metal_error_string("无效参数: 上下文、后端数据或内核名称为空");
+    if (!context || !kernel_name) {
+        set_metal_error_string("无效参数: 上下文或内核名称为空");
         return NULL;
     }
     
-    MetalContextInternal* metal_context = (MetalContextInternal*)context->backend_data;
+    /* 修复2(P0): 统一为包装模式。context指向MetalContextInternal首地址（即GpuContext header首地址），
+     * 直接强转即可获取MetalContextInternal，无需通过backend_data间接访问。 */
+    MetalContextInternal* metal_context = (MetalContextInternal*)context;
     if (!metal_context->device) {
         set_metal_error_string("Metal设备未初始化");
         return NULL;
@@ -2328,6 +2350,10 @@ static GpuKernel* metal_backend_kernel_create(GpuContext* context, const char* k
         pipeline_state = mtlDeviceNewComputePipelineStateWithFunction(metal_context->device, function, &err);
         if (!pipeline_state || err) {
             set_metal_error_string("缓存管道状态创建失败");
+            /* 修复4(P1): 释放已创建的function对象。library来自缓存，由缓存管理，不释放。 */
+            if (function && mtlFunctionRelease) {
+                mtlFunctionRelease(function);
+            }
             safe_free((void**)&metal_kernel);
             return NULL;
         }
@@ -2342,6 +2368,10 @@ static GpuKernel* metal_backend_kernel_create(GpuContext* context, const char* k
         function = mtlLibraryNewFunctionWithName(library, kernel_name);
         if (!function) {
             set_metal_error_string("获取函数失败: %s", kernel_name);
+            /* 修复4(P1): 释放已创建的library对象（尚未加入缓存） */
+            if (library && mtlLibraryRelease) {
+                mtlLibraryRelease(library);
+            }
             safe_free((void**)&metal_kernel);
             return NULL;
         }
@@ -2349,6 +2379,13 @@ static GpuKernel* metal_backend_kernel_create(GpuContext* context, const char* k
         pipeline_state = mtlDeviceNewComputePipelineStateWithFunction(metal_context->device, function, &err);
         if (!pipeline_state || err) {
             set_metal_error_string("管道状态创建失败");
+            /* 修复4(P1): 按创建逆序释放已创建的function和library对象（尚未加入缓存） */
+            if (function && mtlFunctionRelease) {
+                mtlFunctionRelease(function);
+            }
+            if (library && mtlLibraryRelease) {
+                mtlLibraryRelease(library);
+            }
             safe_free((void**)&metal_kernel);
             return NULL;
         }
@@ -2362,6 +2399,14 @@ static GpuKernel* metal_backend_kernel_create(GpuContext* context, const char* k
     GpuKernel* gpu_kernel = (GpuKernel*)safe_malloc(sizeof(GpuKernel));
     if (!gpu_kernel) {
         set_metal_error_string("内存分配失败: GPU内核包装");
+        /* 修复4(P1): 释放已创建的pipeline_state和function对象。
+         * library由缓存管理（is_from_cache时来自缓存，非cache时已加入缓存），不释放。 */
+        if (pipeline_state && mtlComputePipelineStateRelease) {
+            mtlComputePipelineStateRelease(pipeline_state);
+        }
+        if (function && mtlFunctionRelease) {
+            mtlFunctionRelease(function);
+        }
         safe_free((void**)&metal_kernel);
         return NULL;
     }
@@ -2453,7 +2498,8 @@ static int metal_backend_kernel_execute(GpuKernel* kernel, size_t global_work_si
     }
     
     MetalKernelInternal* metal_kernel = (MetalKernelInternal*)kernel->user_data;
-    MetalContextInternal* metal_context = (MetalContextInternal*)kernel->context->backend_data;
+    /* 修复2(P0): 统一为包装模式，直接强转获取MetalContextInternal */
+    MetalContextInternal* metal_context = (MetalContextInternal*)kernel->context;
     
     if (!metal_context->device || !metal_context->command_queue) {
         set_metal_error_string("Metal设备或命令队列未初始化");
@@ -2480,7 +2526,8 @@ static int metal_backend_kernel_execute(GpuKernel* kernel, size_t global_work_si
     void* compute_encoder = mtlCommandBufferComputeCommandEncoder(command_buffer);
     if (!compute_encoder) {
         set_metal_error_string("创建Metal计算命令编码器失败");
-/* Metal命令缓冲区释放 */
+        /* 修复3(P1): 失败路径中释放已创建的command_buffer，防止命令缓冲区泄漏 */
+        objc_msgSend((id)command_buffer, sel_registerName("release"));
         return -1;
     }
     
@@ -2537,7 +2584,8 @@ static int metal_backend_kernel_execute_nd(GpuKernel* kernel, int work_dim,
     }
     
     MetalKernelInternal* metal_kernel = (MetalKernelInternal*)kernel->user_data;
-    MetalContextInternal* metal_context = (MetalContextInternal*)kernel->context->backend_data;
+    /* 修复2(P0): 统一为包装模式，直接强转获取MetalContextInternal */
+    MetalContextInternal* metal_context = (MetalContextInternal*)kernel->context;
     
     if (!metal_context->device || !metal_context->command_queue) {
         set_metal_error_string("Metal设备或命令队列未初始化");
@@ -2564,7 +2612,8 @@ static int metal_backend_kernel_execute_nd(GpuKernel* kernel, int work_dim,
     void* compute_encoder = mtlCommandBufferComputeCommandEncoder(command_buffer);
     if (!compute_encoder) {
         set_metal_error_string("创建Metal计算命令编码器失败");
-// Metal命令缓冲区释放（第二个kernel函数）
+        /* 修复3(P1): 失败路径中释放已创建的command_buffer，防止命令缓冲区泄漏 */
+        objc_msgSend((id)command_buffer, sel_registerName("release"));
         return -1;
     }
     
@@ -2920,9 +2969,10 @@ int metal_forward_dense(GpuContext* context,
                         size_t batch_size, size_t input_size, size_t output_size,
                         GpuActivationType act_type, float alpha) {
 #ifdef __APPLE__
-    if (!context || !context->backend_data || !input || !weights || !output) return -1;
+    if (!context || !input || !weights || !output) return -1;
     if (batch_size == 0 || input_size == 0 || output_size == 0) return -1;
-    MetalContextInternal* ctx = (MetalContextInternal*)context->backend_data;
+    /* 修复2(P0): 统一为包装模式，直接强转获取MetalContextInternal */
+    MetalContextInternal* ctx = (MetalContextInternal*)context;
     if (!ctx->device || !ctx->command_queue) return -1;
 
     size_t temp_size = batch_size * output_size;
@@ -3055,9 +3105,10 @@ int metal_matmul_train(GpuContext* context,
                        size_t M, size_t N, size_t K,
                        float alpha, float beta) {
 #ifdef __APPLE__
-    if (!context || !context->backend_data || !A || !B || !C) return -1;
+    if (!context || !A || !B || !C) return -1;
     if (M == 0 || N == 0 || K == 0) return -1;
-    MetalContextInternal* ctx = (MetalContextInternal*)context->backend_data;
+    /* 修复2(P0): 统一为包装模式，直接强转获取MetalContextInternal */
+    MetalContextInternal* ctx = (MetalContextInternal*)context;
     if (!ctx->device || !ctx->command_queue) return -1;
 
     size_t a_byte = M * K * sizeof(float);
@@ -3136,9 +3187,10 @@ int metal_activation_forward(GpuContext* context,
                              const float* input, float* output,
                              size_t num_elements, GpuActivationType act_type, float alpha) {
 #ifdef __APPLE__
-    if (!context || !context->backend_data || !input || !output) return -1;
+    if (!context || !input || !output) return -1;
     if (num_elements == 0) return -1;
-    MetalContextInternal* ctx = (MetalContextInternal*)context->backend_data;
+    /* 修复2(P0): 统一为包装模式，直接强转获取MetalContextInternal */
+    MetalContextInternal* ctx = (MetalContextInternal*)context;
     if (!ctx->device || !ctx->command_queue) return -1;
 
     size_t byte_size = num_elements * sizeof(float);
@@ -3205,9 +3257,10 @@ int metal_activation_backward(GpuContext* context,
                               float* grad_input, size_t num_elements,
                               GpuActivationType act_type, float alpha) {
 #ifdef __APPLE__
-    if (!context || !context->backend_data || !input || !grad_output || !grad_input) return -1;
+    if (!context || !input || !grad_output || !grad_input) return -1;
     if (num_elements == 0) return -1;
-    MetalContextInternal* ctx = (MetalContextInternal*)context->backend_data;
+    /* 修复2(P0): 统一为包装模式，直接强转获取MetalContextInternal */
+    MetalContextInternal* ctx = (MetalContextInternal*)context;
     if (!ctx->device || !ctx->command_queue) return -1;
 
     size_t byte_size = num_elements * sizeof(float);
@@ -3281,9 +3334,10 @@ int metal_batch_norm_forward(GpuContext* context,
                              size_t num_elements, size_t num_features,
                              const GpuBatchNormConfig* config, int is_training) {
 #ifdef __APPLE__
-    if (!context || !context->backend_data || !input || !output || !gamma || !beta || !config) return -1;
+    if (!context || !input || !output || !gamma || !beta || !config) return -1;
     if (num_elements == 0 || num_features == 0) return -1;
-    MetalContextInternal* ctx = (MetalContextInternal*)context->backend_data;
+    /* 修复2(P0): 统一为包装模式，直接强转获取MetalContextInternal */
+    MetalContextInternal* ctx = (MetalContextInternal*)context;
     if (!ctx->device || !ctx->command_queue) return -1;
 
     size_t spatial_size = num_elements / num_features;
@@ -3407,10 +3461,11 @@ int metal_batch_norm_backward(GpuContext* context,
                               size_t num_elements, size_t num_features,
                               const GpuBatchNormConfig* config) {
 #ifdef __APPLE__
-    if (!context || !context->backend_data || !input || !grad_output || !grad_input) return -1;
+    if (!context || !input || !grad_output || !grad_input) return -1;
     if (!mean || !var || !gamma || !grad_gamma || !grad_beta || !config) return -1;
     if (num_elements == 0 || num_features == 0) return -1;
-    MetalContextInternal* ctx = (MetalContextInternal*)context->backend_data;
+    /* 修复2(P0): 统一为包装模式，直接强转获取MetalContextInternal */
+    MetalContextInternal* ctx = (MetalContextInternal*)context;
     if (!ctx->device || !ctx->command_queue) return -1;
 
     size_t spatial_size = num_elements / num_features;
@@ -3591,9 +3646,10 @@ int metal_dropout_forward(GpuContext* context,
                           float* mask, size_t num_elements,
                           float dropout_rate, int is_training) {
 #ifdef __APPLE__
-    if (!context || !context->backend_data || !input || !output) return -1;
+    if (!context || !input || !output) return -1;
     if (num_elements == 0) return -1;
-    MetalContextInternal* ctx = (MetalContextInternal*)context->backend_data;
+    /* 修复2(P0): 统一为包装模式，直接强转获取MetalContextInternal */
+    MetalContextInternal* ctx = (MetalContextInternal*)context;
     if (!ctx->device || !ctx->command_queue) return -1;
 
     if (!is_training) {
@@ -3674,9 +3730,10 @@ int metal_dropout_backward(GpuContext* context,
                            const float* mask, size_t num_elements,
                            float dropout_rate) {
 #ifdef __APPLE__
-    if (!context || !context->backend_data || !grad_output || !grad_input || !mask) return -1;
+    if (!context || !grad_output || !grad_input || !mask) return -1;
     if (num_elements == 0) return -1;
-    MetalContextInternal* ctx = (MetalContextInternal*)context->backend_data;
+    /* 修复2(P0): 统一为包装模式，直接强转获取MetalContextInternal */
+    MetalContextInternal* ctx = (MetalContextInternal*)context;
     if (!ctx->device || !ctx->command_queue) return -1;
 
     size_t byte_size = num_elements * sizeof(float);
@@ -3747,9 +3804,10 @@ int metal_rmsprop_update(GpuContext* context, float* weights, const float* gradi
                          float learning_rate, float decay, float epsilon,
                          float weight_decay) {
 #ifdef __APPLE__
-    if (!context || !context->backend_data || !weights || !gradients || !square_avg) return -1;
+    if (!context || !weights || !gradients || !square_avg) return -1;
     if (num_params == 0) return -1;
-    MetalContextInternal* ctx = (MetalContextInternal*)context->backend_data;
+    /* 修复2(P0): 统一为包装模式，直接强转获取MetalContextInternal */
+    MetalContextInternal* ctx = (MetalContextInternal*)context;
     if (!ctx->device || !ctx->command_queue) return -1;
 
     size_t byte_size = num_params * sizeof(float);
@@ -3826,9 +3884,10 @@ int metal_cross_entropy_loss_gradient(GpuContext* context,
                                        size_t num_elements, int num_classes,
                                        int is_integer_label) {
 #ifdef __APPLE__
-    if (!context || !context->backend_data || !logits || !targets || !gradients) return -1;
+    if (!context || !logits || !targets || !gradients) return -1;
     if (num_elements == 0 || num_classes <= 0) return -1;
-    MetalContextInternal* ctx = (MetalContextInternal*)context->backend_data;
+    /* 修复2(P0): 统一为包装模式，直接强转获取MetalContextInternal */
+    MetalContextInternal* ctx = (MetalContextInternal*)context;
     if (!ctx->device || !ctx->command_queue) return -1;
 
     int batch_size = (int)(num_elements / num_classes);

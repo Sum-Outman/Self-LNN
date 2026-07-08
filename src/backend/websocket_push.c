@@ -57,6 +57,7 @@ typedef int ws_socket_t;
 typedef struct {
     ws_socket_t sock;
     int active;
+    struct sockaddr_in addr;  /* P2-17修复: 存储客户端地址用于速率限制 */
     char recv_buffer[WS_MAX_MESSAGE_SIZE];
     size_t recv_len;
     char send_buffer[WS_SEND_BUFFER_SIZE];
@@ -266,8 +267,13 @@ static int ws_parse_frame_with_fin(const unsigned char* frame, size_t len,
     else if (plen == 126) {
         *payload_len = ((size_t)frame[2] << 8) | (size_t)frame[3];
     } else {
-        *payload_len = 0;
-        for (int i = 0; i < 8; i++) *payload_len = (*payload_len << 8) | (size_t)frame[2 + i];
+        /* P1修复: 使用uint64_t中间变量解析64位payload长度，
+         * 防止32位平台size_t(4字节)移位溢出导致截断。
+         * 解析后检查是否超过WS_MAX_MESSAGE_SIZE，拒绝超大帧防止内存耗尽攻击 */
+        uint64_t len64 = 0;
+        for (int i = 0; i < 8; i++) len64 = (len64 << 8) | (uint64_t)frame[2 + i];
+        if (len64 > WS_MAX_MESSAGE_SIZE) return -1;
+        *payload_len = (size_t)len64;
     }
     if (header + *payload_len + (masked ? 4 : 0) > len) return -1;
     unsigned char* raw_payload = (unsigned char*)frame + header + (masked ? 4 : 0);
@@ -275,7 +281,10 @@ static int ws_parse_frame_with_fin(const unsigned char* frame, size_t len,
         unsigned char* unmasked = (unsigned char*)safe_malloc(*payload_len);
         if (!unmasked) return -1;
         unsigned char mask[4];
-        memcpy(mask, frame + header - 4, 4);
+        /* P0修复: 掩码密钥位于header之后，而非header-4位置。
+         * header变量(2/4/10)仅计基础帧头大小，不含掩码4字节。
+         * 原代码 frame+header-4 当header=2时读取frame-2，导致缓冲区下溢。 */
+        memcpy(mask, frame + header, 4);
         memcpy(unmasked, raw_payload, *payload_len);
         for (size_t i = 0; i < *payload_len; i++) unmasked[i] ^= mask[i % 4];
         *payload = unmasked;
@@ -307,9 +316,16 @@ static int ws_fragment_append(WSClientInternal* cli, const unsigned char* data, 
 static int ws_do_handshake(ws_socket_t sock)
 {
     char buf[4096];
-    int n = (int)recv(sock, buf, sizeof(buf) - 1, 0);
-    if (n <= 0) return -1;
-    buf[n] = '\0';
+    int total = 0;
+    int n;
+    /* P2-16修复: 循环读取直到完整HTTP头，处理TCP分片 */
+    while (total < (int)sizeof(buf) - 1) {
+        n = (int)recv(sock, buf + total, (int)sizeof(buf) - 1 - total, 0);
+        if (n <= 0) return -1;
+        total += n;
+        buf[total] = '\0';
+        if (strstr(buf, "\r\n\r\n")) break; /* HTTP头结束 */
+    }
 
     /* C-003修复: 提取URI路径并校验，仅允许合法WebSocket端点 */
     {
@@ -351,7 +367,7 @@ static int ws_do_handshake(ws_socket_t sock)
         "Upgrade: websocket\r\n"
         "Connection: Upgrade\r\n"
         "Sec-WebSocket-Accept: %s\r\n"
-        "Access-Control-Allow-Origin: *\r\n"
+        "Access-Control-Allow-Origin: http://localhost:8080\r\n"  /* P3-10修复: 限制CORS来源，移除通配符 */
         "\r\n", accept_key);
     return send(sock, response, rlen, 0) == rlen ? 0 : -1;
 }
@@ -386,12 +402,13 @@ static int ws_send_pong(ws_socket_t sock, const unsigned char* data, size_t len)
     return ws_send_frame(sock, 0x0A, data, len);
 }
 
-static void ws_client_init(WSClientInternal* cli, ws_socket_t sock)
+static void ws_client_init(WSClientInternal* cli, ws_socket_t sock, struct sockaddr_in addr)
 {
     if (!cli) return;
     memset(cli, 0, sizeof(WSClientInternal));
     cli->sock = sock;
     cli->active = 1;
+    cli->addr = addr;  /* P2-17修复: 存储客户端地址 */
     cli->last_active = (long)time(NULL);
 }
 
@@ -455,6 +472,18 @@ static void* ws_push_accept_thread(void* arg)
         ws_socket_t client = accept(srv->listen_sock, (struct sockaddr*)&client_addr, &addr_len);
         if (client == WS_INVALID) continue;
 
+        /* P2-17修复: 每IP连接数限制，防止DoS */
+        int ip_count = 0;
+        for (int i = 0; i < WS_MAX_CLIENTS; i++) {
+            if (srv->clients[i].active && srv->clients[i].addr.sin_addr.s_addr == client_addr.sin_addr.s_addr) {
+                ip_count++;
+            }
+        }
+        if (ip_count >= 10) { /* 每IP最多10个连接 */
+            WS_CLOSE(client);
+            continue;
+        }
+
         /* PF-003修复: 互斥锁保护槽位分配，防止accept线程与poll函数竞态 */
         mutex_lock(srv->mutex);
         int slot = -1;
@@ -467,7 +496,7 @@ static void* ws_push_accept_thread(void* arg)
          * 原代码在mutex_unlock之后才调用ws_client_init，导致另一个线程
          * (如ws_push_broadcast_json)在active=1但sock未设置时访问，
          * 可能使用未初始化的socket导致崩溃或数据损坏。 */
-        ws_client_init(&srv->clients[slot], client);
+        ws_client_init(&srv->clients[slot], client, client_addr);
         srv->clients[slot].active = 1;
         mutex_unlock(srv->mutex);
 
@@ -669,16 +698,37 @@ int ws_push_broadcast(WSPushServer* srv, WSMessageType type, const char* data)
         (long)time(NULL), data);
     if (jlen <= 0 || jlen >= (int)sizeof(json)) return -1;
     int sent = 0;
-    /* H-007修复: 广播时加锁保护客户端数组遍历 */
+    /* P1修复: 仿照ws_push_broadcast_json()的锁内快照、锁外发送模式，
+     * 避免在mutex内进行网络IO导致慢客户端阻塞整个服务器。 */
+    ws_socket_t active_socks[WS_MAX_CLIENTS];
+    int active_indices[WS_MAX_CLIENTS];
+    int active_count = 0;
+
+    /* 第一阶段：锁定后快照活跃客户端socket列表 */
     mutex_lock(srv->mutex);
     for (int i = 0; i < WS_MAX_CLIENTS; i++) {
         if (!srv->clients[i].active) continue;
         ws_socket_t sock = srv->clients[i].sock;
         if (sock == WS_INVALID) continue;
-        if (ws_send_frame(sock, 0x01, (unsigned char*)json, jlen) == 0) sent++;
-        else ws_client_close(&srv->clients[i]);
+        active_socks[active_count] = sock;
+        active_indices[active_count] = i;
+        active_count++;
     }
     mutex_unlock(srv->mutex);
+
+    /* 第二阶段：锁外发送数据，避免慢客户端阻塞mutex */
+    for (int i = 0; i < active_count; i++) {
+        if (ws_send_frame(active_socks[i], 0x01, (unsigned char*)json, jlen) == 0) {
+            sent++;
+        } else {
+            /* 发送失败：重新加锁关闭该客户端 */
+            mutex_lock(srv->mutex);
+            if (active_indices[i] < WS_MAX_CLIENTS && srv->clients[active_indices[i]].active) {
+                ws_client_close(&srv->clients[active_indices[i]]);
+            }
+            mutex_unlock(srv->mutex);
+        }
+    }
     return sent;
 }
 
@@ -761,30 +811,66 @@ int ws_push_send_to_client(WSPushServer* srv, int client_index, const char* json
 int ws_push_get_next_available_client(WSPushServer* srv)
 {
     if (!srv) return -1;
+    /* P3-11修复: 添加互斥锁保护clients数组遍历 */
+    mutex_lock(srv->mutex);
     for (int i = 0; i < WS_MAX_CLIENTS; i++) {
-        if (srv->clients[i].active) return i;
+        if (srv->clients[i].active) {
+            mutex_unlock(srv->mutex);
+            return i;
+        }
     }
+    mutex_unlock(srv->mutex);
     return -1;
 }
 
 /* ZSFJJJ-C002修复: 实现 ws_client_process() — WebSocket客户端帧处理
- * C-002修复: 增加server和client_slot参数以支持消息回调分发 */
+ * C-002修复: 增加server和client_slot参数以支持消息回调分发
+ * P0修复: 添加帧头越界读取防护，在读取ptr[1]/ptr[2]/ptr[3]前检查remain
+ * P1修复: 使用cli->recv_buffer实现跨TCP段帧重组，不完整帧保留到下次recv */
 static void ws_client_process(WSPushServer* server, int client_slot, WSClientInternal* cli) {
     if (!cli || !cli->active || cli->sock == WS_INVALID) return;
 
-    unsigned char buf[8192];
-    int n = (int)recv(cli->sock, (char*)buf, sizeof(buf), 0);
+    /* P1修复: 使用持久接收缓冲区实现跨TCP段帧重组。
+     * 原代码将recv数据读入局部缓冲区直接处理，当WebSocket帧跨越
+     * 多个TCP段时不完整帧的数据被丢弃，导致帧丢失和解析错误。
+     * 现使用cli->recv_buffer累积数据，完整帧处理后才移除。 */
+    unsigned char tmp[8192];
+    int n = (int)recv(cli->sock, (char*)tmp, sizeof(tmp), 0);
     if (n <= 0) {
         ws_client_close(cli);
         return;
     }
-    size_t remain = (size_t)n;
-    unsigned char* ptr = buf;
+
+    /* 将新接收的数据追加到持久接收缓冲区 */
+    if (cli->recv_len + (size_t)n > WS_MAX_MESSAGE_SIZE) {
+        /* 接收缓冲区溢出，可能是客户端发送了超大帧或恶意数据 */
+        cli->recv_len = 0;
+        ws_client_close(cli);
+        return;
+    }
+    memcpy(cli->recv_buffer + cli->recv_len, tmp, (size_t)n);
+    cli->recv_len += (size_t)n;
+
+    /* 从接收缓冲区解析帧 */
+    size_t remain = cli->recv_len;
+    size_t consumed = 0;
+
     while (remain > 0) {
+        unsigned char* ptr = (unsigned char*)cli->recv_buffer + consumed;
+
+        /* P0修复: 在读取帧头字段前检查是否有足够字节，防止越界读取。
+         * 原代码在检查frame_size > remain之前就读取ptr[1], ptr[2], ptr[3]，
+         * 当remain只有1字节时会发生越界读取。 */
+        if (remain < 2) break;  /* 至少需要2字节读取opcode和基本payload_len */
         size_t header_size = 2;
         uint8_t raw_plen = ptr[1] & 0x7F;
-        if (raw_plen == 126) header_size += 2;
-        else if (raw_plen == 127) header_size += 8;
+        if (raw_plen == 126) {
+            if (remain < 4) break;  /* 需要额外2字节读取16位extended payload length */
+            header_size += 2;
+        } else if (raw_plen == 127) {
+            if (remain < 10) break;  /* 需要额外8字节读取64位extended payload length */
+            header_size += 8;
+        }
         int masked = (ptr[1] & 0x80) ? 1 : 0;
         if (masked) header_size += 4;
 
@@ -798,7 +884,7 @@ static void ws_client_process(WSPushServer* server, int client_slot, WSClientInt
                 raw_payload_len = (raw_payload_len << 8) | (size_t)ptr[2 + m];
         }
         size_t frame_size = header_size + raw_payload_len;
-        if (frame_size > remain) break;
+        if (frame_size > remain) break;  /* 帧不完整，等待更多数据到达 */
 
         uint8_t opcode;
         unsigned char* payload;
@@ -806,10 +892,6 @@ static void ws_client_process(WSPushServer* server, int client_slot, WSClientInt
         int fin_flag;
         /* L-006修复: 使用ws_parse_frame_with_fin获取FIN标志，支持分片消息 */
         if (ws_parse_frame_with_fin(ptr, remain, &opcode, &payload, &payload_len, &fin_flag) != 0) break;
-        if (frame_size > remain) {
-            if (masked) safe_free((void**)&payload);
-            break;
-        }
 
         /* 控制帧(opcode>=0x08)不允许分片，直接处理 */
         if (opcode == 0x08) {
@@ -869,9 +951,15 @@ static void ws_client_process(WSPushServer* server, int client_slot, WSClientInt
         }
 
         if (masked) safe_free((void**)&payload);
+        consumed += frame_size;
         remain -= frame_size;
-        ptr += frame_size;
     }
+
+    /* 将未消费的数据移到缓冲区开头，供下次recv继续累积 */
+    if (consumed > 0 && remain > 0) {
+        memmove(cli->recv_buffer, cli->recv_buffer + consumed, remain);
+    }
+    cli->recv_len = remain;
     cli->last_active = (long)time(NULL);
 }
 
@@ -900,7 +988,7 @@ int ws_push_server_poll(WSPushServer* srv, int timeout_ms)
                         if (!srv->clients[j].active) { found = j; break; }
                     }
                     if (found >= 0) {
-                        ws_client_init(&srv->clients[found], client);
+                        ws_client_init(&srv->clients[found], client, client_addr);
                         srv->clients[found].active = 1;
                         mutex_unlock(srv->mutex);
                         /* 注册新客户端到epoll */
@@ -955,7 +1043,7 @@ int ws_push_server_poll(WSPushServer* srv, int timeout_ms)
                         if (!srv->clients[j].active) { found = j; break; }
                     }
                     if (found >= 0) {
-                        ws_client_init(&srv->clients[found], client);
+                        ws_client_init(&srv->clients[found], client, client_addr);
                         srv->clients[found].active = 1;
                         mutex_unlock(srv->mutex);
                         struct kevent ev;
@@ -1000,6 +1088,11 @@ int ws_push_server_poll(WSPushServer* srv, int timeout_ms)
     int has_write = 0;
     for (int i = 0; i < WS_MAX_CLIENTS; i++) {
         if (!srv->clients[i].active || srv->clients[i].sock == WS_INVALID) continue;
+        /* P1-15修复: FD_SETSIZE溢出防护，防止栈损坏 */
+        if ((int)srv->clients[i].sock < 0 || (int)srv->clients[i].sock >= FD_SETSIZE) {
+            /* 客户端socket超出FD_SETSIZE范围，跳过避免栈溢出 */
+            continue;
+        }
         FD_SET(srv->clients[i].sock, &rfds);
         if (srv->clients[i].send_len > srv->clients[i].send_pos) {
             FD_SET(srv->clients[i].sock, &wfds);
@@ -1007,6 +1100,8 @@ int ws_push_server_poll(WSPushServer* srv, int timeout_ms)
         }
         if (srv->clients[i].sock > maxfd) maxfd = srv->clients[i].sock;
     }
+    /* P1-15修复: 确保maxfd不超过FD_SETSIZE */
+    if ((int)maxfd >= FD_SETSIZE) maxfd = FD_SETSIZE - 1;
     struct timeval tv;
     tv.tv_sec = timeout_ms / 1000;
     tv.tv_usec = (timeout_ms % 1000) * 1000;
@@ -1025,7 +1120,7 @@ int ws_push_server_poll(WSPushServer* srv, int timeout_ms)
                 if (!srv->clients[i].active) { found = i; break; }
             }
             if (found >= 0) {
-                ws_client_init(&srv->clients[found], client);
+                ws_client_init(&srv->clients[found], client, client_addr);
                 srv->clients[found].active = 1;
                 mutex_unlock(srv->mutex);
                 if (ws_do_handshake(client) != 0) {
@@ -1041,17 +1136,37 @@ int ws_push_server_poll(WSPushServer* srv, int timeout_ms)
         WSClientInternal* cli = &srv->clients[i];
         if (!cli->active || cli->sock == WS_INVALID) continue;
         if (FD_ISSET(cli->sock, &rfds)) {
-            unsigned char buf[8192];
-            int n = (int)recv(cli->sock, (char*)buf, sizeof(buf), 0);
+            /* P1修复: select路径也使用持久接收缓冲区实现跨TCP段帧重组。
+             * P0修复: 添加帧头越界读取防护。 */
+            unsigned char tmp[8192];
+            int n = (int)recv(cli->sock, (char*)tmp, sizeof(tmp), 0);
             if (n <= 0) { ws_client_close(cli); continue; }
-            size_t remain = n;
-            unsigned char* ptr = buf;
+
+            /* 将新数据追加到持久接收缓冲区 */
+            if (cli->recv_len + (size_t)n > WS_MAX_MESSAGE_SIZE) {
+                cli->recv_len = 0;
+                ws_client_close(cli);
+                continue;
+            }
+            memcpy(cli->recv_buffer + cli->recv_len, tmp, (size_t)n);
+            cli->recv_len += (size_t)n;
+
+            size_t remain = cli->recv_len;
+            size_t consumed = 0;
             while (remain > 0) {
-                /* B-012修复: 从原始帧头计算帧总大小，而非依赖payload指针（因payload可能指向堆内存） */
+                unsigned char* ptr = (unsigned char*)cli->recv_buffer + consumed;
+
+                /* P0修复: 在读取帧头字段前检查是否有足够字节，防止越界读取 */
+                if (remain < 2) break;  /* 至少需要2字节读取opcode和基本payload_len */
                 size_t header_size = 2;
                 uint8_t raw_plen = ptr[1] & 0x7F;
-                if (raw_plen == 126) header_size += 2;
-                else if (raw_plen == 127) header_size += 8;
+                if (raw_plen == 126) {
+                    if (remain < 4) break;  /* 需要额外2字节读取16位extended payload length */
+                    header_size += 2;
+                } else if (raw_plen == 127) {
+                    if (remain < 10) break;  /* 需要额外8字节读取64位extended payload length */
+                    header_size += 8;
+                }
                 int masked = (ptr[1] & 0x80) ? 1 : 0;
                 if (masked) header_size += 4;
                 /* 从帧头预计算payload长度以确定帧总大小 */
@@ -1065,7 +1180,7 @@ int ws_push_server_poll(WSPushServer* srv, int timeout_ms)
                         raw_payload_len = (raw_payload_len << 8) | (size_t)ptr[2 + m];
                 }
                 size_t frame_size = header_size + raw_payload_len;
-                if (frame_size > remain) break;
+                if (frame_size > remain) break;  /* 帧不完整，等待更多数据到达 */
 
                 uint8_t opcode;
                 unsigned char* payload;
@@ -1073,10 +1188,6 @@ int ws_push_server_poll(WSPushServer* srv, int timeout_ms)
                 int fin_flag_select;
                 /* L-006修复: select路径也使用ws_parse_frame_with_fin支持分片 */
                 if (ws_parse_frame_with_fin(ptr, remain, &opcode, &payload, &payload_len, &fin_flag_select) != 0) break;
-                if (frame_size > remain) {
-                    if (masked) safe_free((void**)&payload);
-                    break;
-                }
                 if (opcode == 0x08) {
                     if (masked) safe_free((void**)&payload);
                     ws_client_close(cli);
@@ -1105,9 +1216,14 @@ int ws_push_server_poll(WSPushServer* srv, int timeout_ms)
                 }
                 /* B-012修复: 若帧是掩码帧，释放ws_parse_frame中分配的独立缓冲区 */
                 if (masked) safe_free((void**)&payload);
+                consumed += frame_size;
                 remain -= frame_size;
-                ptr += frame_size;
             }
+            /* 将未消费的数据移到缓冲区开头，供下次recv继续累积 */
+            if (consumed > 0 && remain > 0) {
+                memmove(cli->recv_buffer, cli->recv_buffer + consumed, remain);
+            }
+            cli->recv_len = remain;
             cli->last_active = (long)time(NULL);
         }
         if (FD_ISSET(cli->sock, &wfds) && cli->send_len > cli->send_pos) {

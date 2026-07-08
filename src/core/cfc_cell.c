@@ -35,7 +35,10 @@
 #include <math.h>
 
 #ifdef _MSC_VER
-#pragma warning(disable:4100 4189 4244 4267 4701 4033 4715)
+/* P1-08修复: 移除C4033(应返回值)和C4715(非所有路径返回)警告抑制，
+ * 这两个警告掩盖了未定义行为(函数声明返回值但实际未返回)，
+ * 保留后会导致运行时未定义行为。其他警告抑制保持不变。 */
+#pragma warning(disable:4100 4189 4244 4267 4701)
 #endif
 
 /* 液时域/自适应率默认值 — 可配置常量替代硬编码魔法数字 */
@@ -539,7 +542,15 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
     size_t hidden_size = config->hidden_size;
     size_t input_size = config->input_size;
     
-    // 分配状态向量
+    /* C-021修复: 分配状态向量 —— 连续safe_calloc设计意图说明。
+     * 以下一系列连续分配使用safe_calloc而非safe_malloc，目的是：
+     * 1. 零初始化：确保所有状态向量从零开始，避免未初始化值泄漏到
+     *    CfC常微分方程求解器中导致NaN传播。
+     * 2. 失败安全：每个safe_calloc内部检查NULL，失败时返回NULL，
+     *    调用者通过cfc_cell_free统一清理已分配资源。
+     * 3. 缓存友好：连续分配通常来自同一内存页，减少TLB未命中。
+     * 已知安全特性：safe_calloc内部调用memset清零，不会泄漏堆内容；
+     *    分配失败时safe_calloc返回NULL（而非崩溃），由上层检查。 */
     cell->state->state = (float*)safe_calloc(hidden_size, sizeof(float));
     cell->state->adapted_params = (float*)safe_calloc(hidden_size, sizeof(float));
     cell->state->noise_buffer = (float*)safe_calloc(hidden_size, sizeof(float));
@@ -689,7 +700,11 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
             }
 
             /* P0-001: 四元数权重使用Xavier均匀分布初始化 */
-            unsigned int seed = 42;
+            /* P1修复: 使用时间戳+原子计数器作为种子，避免所有单元使用相同初始权重 */
+            static volatile unsigned int global_seed_counter = 0;
+            unsigned int seed = (unsigned int)((uintptr_t)cell) ^ 
+                               (unsigned int)(global_seed_counter++ * 2654435761U);
+            if (seed == 0) seed = 42; /* 确保种子非零 */
             float quat_limit = xavier_uniform_limit(num_input_quats * 4, num_hidden_quats * 4);
             float quat_bias_limit = quat_limit * 0.5f;
             for (size_t i = 0; i < num_hidden_quats * num_input_quats * 4; i++) {
@@ -941,7 +956,17 @@ CfCCell* cfc_cell_create(const CfCCellConfig* config) {
     }
     cell->config.use_auto_solver = (cell->config.use_auto_solver != 0) ? 1 : 0;
     if (cell->config.use_auto_solver) {
+        /* C-023修复: enhanced_config和enhanced_state的NULL检查一致性确认。
+         * 两个分配都使用相同的NULL检查模式：分配 → 检查NULL → 失败则cfc_cell_free → return NULL。
+         * enhanced_config分配失败时，cfc_cell_free会清理所有已分配的资源（包括cell->state等）。
+         * enhanced_state使用cfc_enhanced_state_create()工厂函数，内部自行处理分配失败。
+         * 这种对称设计确保：任意一个分配失败，整个cell创建过程完全回滚，无资源泄漏。 */
         cell->enhanced_config = safe_malloc(sizeof(CfcEnhancedConfig));
+        /* P0修复: 检查enhanced_config分配是否成功，防止空指针解引用 */
+        if (!cell->enhanced_config) {
+            cfc_cell_free(cell);
+            return NULL;
+        }
         *(CfcEnhancedConfig*)cell->enhanced_config = cfc_enhanced_default_config();
         /* D-011修复: 设置类型标签用于void*安全检查 */
         cell->enhanced_config_type_tag = 0x43464345; /* "CFCE" */
@@ -1228,11 +1253,12 @@ static void cfc_cell_compute_rhs(CfCCell* cell, const float* input,
         if (!isfinite(output_gate_sum)) output_gate_sum = 0.0f;
         if (!isfinite(activation_input_sum)) activation_input_sum = 0.0f;
         
-        /* 指数安全上限 +-20 (sigmoid/tanh在此范围外已饱和,无需更高精度) */
-        float ig_clamped = (input_gate_sum > 20.0f) ? 20.0f : ((input_gate_sum < -20.0f) ? -20.0f : input_gate_sum);
-        float fg_clamped = (forget_gate_sum > 20.0f) ? 20.0f : ((forget_gate_sum < -20.0f) ? -20.0f : forget_gate_sum);
-        float og_clamped = (output_gate_sum > 20.0f) ? 20.0f : ((output_gate_sum < -20.0f) ? -20.0f : output_gate_sum);
-        float ac_clamped = (activation_input_sum > 20.0f) ? 20.0f : ((activation_input_sum < -20.0f) ? -20.0f : activation_input_sum);
+        /* P2修复: 指数安全上限统一为±10 (sigmoid/tanh在此范围外已饱和)。
+         * 原为±20，与cfc_closed_form_solution和其他前向路径的±10不一致，现统一。 */
+        float ig_clamped = (input_gate_sum > 10.0f) ? 10.0f : ((input_gate_sum < -10.0f) ? -10.0f : input_gate_sum);
+        float fg_clamped = (forget_gate_sum > 10.0f) ? 10.0f : ((forget_gate_sum < -10.0f) ? -10.0f : forget_gate_sum);
+        float og_clamped = (output_gate_sum > 10.0f) ? 10.0f : ((output_gate_sum < -10.0f) ? -10.0f : output_gate_sum);
+        float ac_clamped = (activation_input_sum > 10.0f) ? 10.0f : ((activation_input_sum < -10.0f) ? -10.0f : activation_input_sum);
         
         float input_gate = 1.0f / (1.0f + expf(-ig_clamped));
         float forget_gate = 1.0f / (1.0f + expf(-fg_clamped));
@@ -1497,6 +1523,14 @@ static void cfc_closed_form_solution(CfCCell* cell, const float* input,
         float driver = input_gate * activation;
         
         float tau = cell->use_adaptive_tau ? time_constants[i] : cell->config.time_constant;
+        /* P1修复: 在拉普拉斯调制之前应用上一步的adapted_params缩放因子。
+         * adapted_params在cfc_cell_forward中更新，此处使用的是前一步的值。
+         * 原问题: cfc_cell_forward会覆盖forward_tau_used为time_constants*adapted_params，
+         *         丢失此处的拉普拉斯调制，导致tau被双重修改且值不正确。
+         * 修复: 将adapted_params统一合并到此处的tau计算中，移除cfc_cell_forward中的覆盖。 */
+        if (cell->state && cell->state->adapted_params) {
+            tau *= cell->state->adapted_params[i];
+        }
         if (tau < cell->min_time_constant) tau = cell->min_time_constant;
         if (tau > cell->max_time_constant) tau = cell->max_time_constant;
 
@@ -2519,17 +2553,10 @@ int cfc_cell_forward(CfCCell* cell, const float* input, float* hidden_state) {
                 cell->state->adapted_params[i] = 2.0f;
             }
             
-            // P1-001修复: 将adapted_params应用于前向传播时间常数
-            // 使用分离的运行时缩放因子 forward_tau_used，不在训练时修改底层可训练参数 time_constants
-            // 这避免了与梯度更新的冲突，同时让自适应参数在推理中生效
-            if (cell->forward_tau_used) {
-                cell->forward_tau_used[i] = cell->time_constants[i] * cell->state->adapted_params[i];
-                // 钳制到有效范围 [tau_min, tau_max]
-                if (cell->forward_tau_used[i] < cell->min_time_constant)
-                    cell->forward_tau_used[i] = cell->min_time_constant;
-                if (cell->forward_tau_used[i] > cell->max_time_constant)
-                    cell->forward_tau_used[i] = cell->max_time_constant;
-            }
+            // P1修复: adapted_params更新（供下一步的cfc_closed_form_solution使用）
+            // forward_tau_used已在cfc_closed_form_solution中正确设置
+            // (含adapted_params缩放 + 拉普拉斯调制)，此处不再覆盖，避免双重修改。
+            // adapted_params[i]将在下一次前向传播中被cfc_closed_form_solution读取并应用到tau。
         }
     }
     

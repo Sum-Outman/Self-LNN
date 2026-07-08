@@ -78,6 +78,9 @@ typedef struct {
     int dependent_count;
     /* AGI-007修复: 老化计数器字段，用于优先级提升 */
     int aging_counter;
+    /* P0修复: 统计计数标记，标记任务完成/失败后是否已计入统计。
+     * 同步模式下tick内立即计数并置1；异步模式下由后续tick扫描补计 */
+    int stats_counted;
 } ScheduledTask;
 
 struct TaskScheduler {
@@ -297,6 +300,15 @@ static int ts_select_next(TaskScheduler* s) {
                 } else {
                     return tid;
                 }
+            } else if (t->status == TASK_PREEMPTED) {
+                /* P0修复: 被抢占/超时降级的任务需要恢复执行。
+                 * 之前ts_select_next只选择PENDING任务，导致PREEMPTED任务
+                 * 永远不会被重新选中，造成任务停滞。
+                 * PREEMPTED任务之前已开始执行，依赖应已满足，
+                 * 但仍检查以防依赖任务被取消 */
+                if (ts_dependencies_met(s, t)) {
+                    return tid;
+                }
             }
             tid = s->queue_next[tid];
         }
@@ -336,6 +348,22 @@ int task_scheduler_tick(TaskScheduler* s) {
     if (!s) return -1;
 
     TS_MUTEX_LOCK(&s->lock);
+
+    /* P0修复: 扫描异步模式(线程池)下已完成但未计入统计的任务。
+     * task_wrapper_execute在异步模式下只设置status，不更新total_completed/total_failed，
+     * 因为它无法安全访问调度器的统计字段。此处补计。 */
+    for (int i = 0; i < s->task_count; i++) {
+        ScheduledTask* t = &s->tasks[i];
+        if (!t->stats_counted) {
+            if (t->status == TASK_COMPLETED) {
+                s->total_completed++;
+                t->stats_counted = 1;
+            } else if (t->status == TASK_FAILED) {
+                s->total_failed++;
+                t->stats_counted = 1;
+            }
+        }
+    }
 
     /* 检查当前运行任务是否超时 */
     if (s->running_task_id >= 0) {
@@ -388,6 +416,12 @@ int task_scheduler_tick(TaskScheduler* s) {
                         t->status = (ret == 0) ? TASK_COMPLETED : TASK_FAILED;
                         if (t->status == TASK_COMPLETED) s->total_completed++;
                         else if (t->status == TASK_FAILED) s->total_failed++;
+                        /* P0修复: 标记统计已计数，避免后续tick重复计数 */
+                        t->stats_counted = 1;
+                        /* P0修复: 同步模式下执行完毕后释放context(TSWrapperArg)，
+                         * 与异步模式task_wrapper_execute中的释放行为保持一致。
+                         * 此分支状态必为COMPLETED或FAILED(终态)，安全释放 */
+                        safe_free(&t->context);
                     }
                 }
                 s->running_task_id = -1;
@@ -414,10 +448,57 @@ int task_scheduler_tick(TaskScheduler* s) {
                     }
                     if (t->status == TASK_COMPLETED) s->total_completed++;
                     else if (t->status == TASK_FAILED) s->total_failed++;
+                    /* P0修复: 标记统计已计数(仅终态)，避免后续tick重复计数。
+                     * PREEMPTED状态不计入统计，也不标记 */
+                    if (t->status == TASK_COMPLETED || t->status == TASK_FAILED) {
+                        t->stats_counted = 1;
+                    }
+                    /* P0修复: 同步模式下执行完毕后释放context(TSWrapperArg)。
+                     * 注意: PREEMPTED状态(超时降级)时保留context，
+                     * 因为任务可能被恢复后再次执行需要context。
+                     * 仅在终态(COMPLETED/FAILED)时释放 */
+                    if (t->status == TASK_COMPLETED || t->status == TASK_FAILED) {
+                        safe_free(&t->context);
+                    }
                 }
             }
             s->running_task_id = -1;
             executed++;
+        }
+    }
+
+    /* P0修复: 回收已完成的任务槽位，防止task_count只增不减最终耗尽TS_MAX_TASKS。
+     * 当所有任务都处于终态(COMPLETED/FAILED)且task_count超过阈值时，
+     * 重置队列结构，保留累计统计(total_completed/total_failed/total_preempted)。
+     * 注意: 异步模式下需确保所有线程池任务已完成(状态已是终态)才回收 */
+    if (s->task_count > 256) {
+        int all_done = 1;
+        for (int i = 0; i < s->task_count; i++) {
+            TaskStatus st = s->tasks[i].status;
+            if (st == TASK_PENDING || st == TASK_RUNNING || st == TASK_PREEMPTED) {
+                all_done = 0;
+                break;
+            }
+        }
+        if (all_done) {
+            int recycled = s->task_count;
+            /* 释放所有已完成任务的context(防御性释放，正常情况已释放) */
+            for (int i = 0; i < s->task_count; i++) {
+                if (s->tasks[i].context) {
+                    safe_free(&s->tasks[i].context);
+                }
+            }
+            s->task_count = 0;
+            s->running_task_id = -1;
+            /* 重置优先级队列 */
+            for (int p = 0; p < TS_PRIORITY_LEVELS; p++) {
+                s->queue_heads[p] = -1;
+                s->queue_tails[p] = -1;
+            }
+            for (int i = 0; i < TS_MAX_TASKS; i++) {
+                s->queue_next[i] = -1;
+            }
+            log_info("[调度器] 回收%d个已完成任务槽位，重置任务计数", recycled);
         }
     }
 
@@ -442,8 +523,9 @@ void task_scheduler_get_stats(const TaskScheduler* s,
 
     int p = 0, r = 0;
     for (int i = 0; i < s->task_count; i++) {
-        /* P-FIX-026: TASK_PREEMPTED不应计入pending，它需要重新调度 */
-        if (s->tasks[i].status == TASK_PENDING)
+        /* P0修复: PREEMPTED任务在P0-5a修复后会被ts_select_next重新选中，
+         * 因此应计入pending(等待重新调度) */
+        if (s->tasks[i].status == TASK_PENDING || s->tasks[i].status == TASK_PREEMPTED)
             p++;
         if (s->tasks[i].status == TASK_RUNNING) r++;
     }

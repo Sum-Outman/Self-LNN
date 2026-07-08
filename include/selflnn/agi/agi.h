@@ -65,7 +65,9 @@ typedef enum {
     AGI_TASK_RUNNING = 1,
     AGI_TASK_COMPLETED = 2,
     AGI_TASK_FAILED = 3,
-    AGI_TASK_CANCELLED = 4
+    AGI_TASK_CANCELLED = 4,
+    /* P0修复: 新增QUEUED状态，标记已提交到TaskScheduler的任务，防止重复提交 */
+    AGI_TASK_QUEUED = 5
 } AGITaskStatus;
 
 typedef enum {

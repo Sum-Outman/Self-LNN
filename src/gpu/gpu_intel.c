@@ -596,15 +596,30 @@ static int intel_backend_init(void) {
             g_intel_state.ze_context = g_ze_lib.context;
 
             ze_command_queue_desc_t qdesc = {0};
-            qdesc.stype = 0;
+            /* P-AUDIT修复(G-6): stype=0无效,Level Zero规范要求设为ZE_STRUCTURE_TYPE_COMMAND_QUEUE_DESC(0x12) */
+            qdesc.stype = 0x12;
             qdesc.ordinal = 0;
             qdesc.mode = 0;
-            g_ze_lib.zeCommandQueueCreate(g_ze_lib.context, g_ze_lib.devices[0], &qdesc, &g_intel_state.queue);
+            /* P-AUDIT修复(G-5): 检查zeCommandQueueCreate返回值,失败时不应标记初始化成功 */
+            int qresult = g_ze_lib.zeCommandQueueCreate(g_ze_lib.context, g_ze_lib.devices[0], &qdesc, &g_intel_state.queue);
+            if (qresult != 0) {
+                LOG_ERROR("Intel GPU: zeCommandQueueCreate失败 (错误码=%d)", qresult);
+                g_intel_state.is_initialized = 0;
+                return 0;
+            }
 
             ze_command_list_desc_t ldesc = {0};
-            ldesc.stype = 0;
+            /* P-AUDIT修复(G-6): stype=0无效,Level Zero规范要求设为ZE_STRUCTURE_TYPE_COMMAND_LIST_DESC(0x13) */
+            ldesc.stype = 0x13;
             ldesc.commandQueueGroupOrdinal = 0;
-            g_ze_lib.zeCommandListCreate(g_ze_lib.context, g_ze_lib.devices[0], &ldesc, &g_intel_state.list);
+            int lresult = g_ze_lib.zeCommandListCreate(g_ze_lib.context, g_ze_lib.devices[0], &ldesc, &g_intel_state.list);
+            if (lresult != 0) {
+                LOG_ERROR("Intel GPU: zeCommandListCreate失败 (错误码=%d)", lresult);
+                if (g_intel_state.queue) g_ze_lib.zeCommandQueueDestroy(g_intel_state.queue);
+                g_intel_state.queue = NULL;
+                g_intel_state.is_initialized = 0;
+                return 0;
+            }
         }
         g_intel_state.is_initialized = 1;
         LOG_INFO("Intel GPU后端初始化成功 (Level Zero硬件加速)");
@@ -622,9 +637,9 @@ static void intel_backend_cleanup(void) {
         if (g_intel_state.list) g_ze_lib.zeCommandListDestroy(g_intel_state.list);
         if (g_intel_state.queue) g_ze_lib.zeCommandQueueDestroy(g_intel_state.queue);
         if (g_ze_lib.context) g_ze_lib.zeContextDestroy(g_ze_lib.context);
-        if (g_ze_lib.devices) { free(g_ze_lib.devices); g_ze_lib.devices = NULL; }
-        if (g_ze_lib.device_props) { free(g_ze_lib.device_props); g_ze_lib.device_props = NULL; }
-        if (g_ze_lib.drivers) { free(g_ze_lib.drivers); g_ze_lib.drivers = NULL; }
+        if (g_ze_lib.devices) { safe_free((void**)&g_ze_lib.devices); }
+        if (g_ze_lib.device_props) { safe_free((void**)&g_ze_lib.device_props); }
+        if (g_ze_lib.drivers) { safe_free((void**)&g_ze_lib.drivers); }
         if (g_ze_lib.handle) { ZE_DLCLOSE(g_ze_lib.handle); g_ze_lib.handle = NULL; }
     }
 

@@ -3,6 +3,9 @@
 #include <math.h>
 #include <float.h>
 #include <string.h>
+#ifdef _MSC_VER
+#include <windows.h>  /* P3-02修复: InterlockedExchange原子写需要 */
+#endif
 
 /* ZSF-048修复：使用1e-5替代FLT_EPSILON(1.19e-7)，提升Focal Loss数值稳定性 */
 #define FOCAL_EPS_SAFE 1e-5f
@@ -22,13 +25,49 @@ static volatile float g_default_triplet_margin = 1.0f;
 static volatile float g_default_huber_delta = 1.0f;
 static volatile float g_default_quantile_tau = 0.5f;
 
-/* 可配置超参数setter函数 —— 使用volatile保证写入可见性（原使用atomic_store） */
-void loss_set_default_focal_gamma(float gamma) { g_default_focal_gamma = gamma; }
-void loss_set_default_focal_alpha(float alpha) { g_default_focal_alpha = alpha; }
-void loss_set_default_dice_smooth(float smooth) { g_default_dice_smooth = smooth; }
-void loss_set_default_triplet_margin(float margin) { g_default_triplet_margin = margin; }
-void loss_set_default_huber_delta(float delta) { g_default_huber_delta = delta; }
-void loss_set_default_quantile_tau(float tau) { g_default_quantile_tau = tau; }
+/* 可配置超参数setter函数 —— P3-02修复: Windows下使用InterlockedExchange原子写 */
+void loss_set_default_focal_gamma(float gamma) {
+#ifdef _MSC_VER
+    InterlockedExchange((volatile LONG*)&g_default_focal_gamma, *(LONG*)&gamma);
+#else
+    g_default_focal_gamma = gamma;
+#endif
+}
+void loss_set_default_focal_alpha(float alpha) {
+#ifdef _MSC_VER
+    InterlockedExchange((volatile LONG*)&g_default_focal_alpha, *(LONG*)&alpha);
+#else
+    g_default_focal_alpha = alpha;
+#endif
+}
+void loss_set_default_dice_smooth(float smooth) {
+#ifdef _MSC_VER
+    InterlockedExchange((volatile LONG*)&g_default_dice_smooth, *(LONG*)&smooth);
+#else
+    g_default_dice_smooth = smooth;
+#endif
+}
+void loss_set_default_triplet_margin(float margin) {
+#ifdef _MSC_VER
+    InterlockedExchange((volatile LONG*)&g_default_triplet_margin, *(LONG*)&margin);
+#else
+    g_default_triplet_margin = margin;
+#endif
+}
+void loss_set_default_huber_delta(float delta) {
+#ifdef _MSC_VER
+    InterlockedExchange((volatile LONG*)&g_default_huber_delta, *(LONG*)&delta);
+#else
+    g_default_huber_delta = delta;
+#endif
+}
+void loss_set_default_quantile_tau(float tau) {
+#ifdef _MSC_VER
+    InterlockedExchange((volatile LONG*)&g_default_quantile_tau, *(LONG*)&tau);
+#else
+    g_default_quantile_tau = tau;
+#endif
+}
 
 static float get_gamma(const LossConfig* c) {
     return (c && c->focal_gamma > 0.0f) ? c->focal_gamma : g_default_focal_gamma;

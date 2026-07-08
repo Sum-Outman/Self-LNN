@@ -113,6 +113,9 @@ static void policy_forward(const PolicyNetwork* net,
 static void policy_update(PolicyNetwork* net,
                            const float* input, const float* target,
                            float learning_rate) {
+    /* R-P2-19修复: output[16]/delta_o[16]缓冲区固定为16，
+       若output_dim超过16会导致policy_forward写入越界，此处提前返回防止栈溢出 */
+    if (net->output_dim > 16) return;
     int sd = net->input_dim, hd = net->hidden_dim, ad = net->output_dim;
     if (hd <= 0) hd = (sd + ad) / 2;
     if (hd < 8) hd = 8;

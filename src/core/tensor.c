@@ -44,6 +44,8 @@ static size_t compute_numel(const int* shape, int ndim) {
         if (shape[i] <= 0) {
             return 0; // 无效形状
         }
+        /* P2-01修复: 乘法前溢出检查，防止超大形状导致numel回绕 */
+        if (numel > SIZE_MAX / (size_t)shape[i]) return 0;
         numel *= (size_t)shape[i];
     }
     

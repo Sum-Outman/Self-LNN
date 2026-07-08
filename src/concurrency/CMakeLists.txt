@@ -8,11 +8,16 @@ set(CONCURRENCY_SOURCES
     rw_lock_map.c
 )
 
-# 头文件目录
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../../include)
+# BLD-021修复: 使用target_include_directories替代include_directories
+# include_directories为全局影响，target_include_directories按需作用当前目标，更精确
 
 # 创建库
 add_library(selflnn_concurrency ${CONCURRENCY_SOURCES})
+
+# BLD-021修复: 目标级别include目录，替代全局include_directories
+target_include_directories(selflnn_concurrency PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../include
+)
 
 # 链接库
 # M-004(K-CYCLE-001)修复: 使用selflnn_base（仅错误报告）替代selflnn_core，打破循环依赖

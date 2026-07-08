@@ -480,11 +480,14 @@ float slam_compute_sampson_distance(const float* F, float x1, float y1,
 
 /* slam_norm_squared/slam_cross_product/slam_rodrigues_rotation
  * 三个数学辅助函数已在slam_frontend.c中以外部链接完整实现，
- * 并在slam_internal.h中声明。此处移除slam.c中的static inline重复定义，
- * 消除因static inline(内部链接)与extern声明(外部链接)不一致导致的符号冲突。
- * 这些函数仅在slam_frontend.c中被调用，slam.c本身不使用它们。 */
+ * 并在slam_internal.h中声明。
+ *
+ * slam_quaternion_to_rotation_matrix / slam_rotation_matrix_to_quaternion
+ * 在slam_frontend.c中有外部链接定义，slam.c中也需要使用这两个函数。
+ * 使用static inline定义使slam.c拥有内部链接的本地副本，避免与
+ * slam_frontend.c中的外部链接定义产生LNK2005多重定义冲突。 */
 
-inline void slam_quaternion_to_rotation_matrix(const float* q, float* R) {
+static inline void slam_quaternion_to_rotation_matrix(const float* q, float* R) {
     float qw = q[0], qx = q[1], qy = q[2], qz = q[3];
     
     R[0] = 1.0f - 2.0f*qy*qy - 2.0f*qz*qz;
@@ -500,7 +503,7 @@ inline void slam_quaternion_to_rotation_matrix(const float* q, float* R) {
     R[8] = 1.0f - 2.0f*qx*qx - 2.0f*qy*qy;
 }
 
-inline void slam_rotation_matrix_to_quaternion(const float* R, float* q) {
+static inline void slam_rotation_matrix_to_quaternion(const float* R, float* q) {
     float trace = R[0] + R[4] + R[8];
     
     if (trace > 0.0f) {
@@ -1139,7 +1142,12 @@ int slam_process_visual_frame(SlamSystem* system,
     }
     
     /* 估计相机运动（2D-2D或2D-3D） */
-    float R[9], t[3];
+    /* P1修复: R和t声明时初始化为单位矩阵和零向量，防止PnP成功路径
+     * 未设置R和t时后续代码读取垃圾值。motion_estimated标志仅在
+     * 运动估计成功且R/t有效时置位，用于关键帧决策条件。 */
+    float R[9] = {1,0,0,0,1,0,0,0,1};
+    float t[3] = {0,0,0};
+    int motion_estimated = 0;
     float camera_params[4] = {SLAM_DEFAULT_FOCAL_LENGTH, SLAM_DEFAULT_FOCAL_LENGTH,
                              width/2.0f, height/2.0f};
     
@@ -1156,7 +1164,12 @@ int slam_process_visual_frame(SlamSystem* system,
             if (prev_feature_idx >= 0 && prev_feature_idx < prev_frame->num_landmarks) {
                 int landmark_id = prev_frame->landmark_ids[prev_feature_idx];
                 if (landmark_id >= 0 && landmark_id < system->local_map.num_landmarks) {
-                    num_3d_matches++;
+                    /* P1修复: 同时验证当前帧特征索引有效性，避免无效索引
+                     * 回退到features[0]将错误对应关系喂给PnP */
+                    int curr_feature_idx = matches[i].train_idx;
+                    if (curr_feature_idx >= 0 && curr_feature_idx < current_frame->num_features) {
+                        num_3d_matches++;
+                    }
                 }
             }
         }
@@ -1173,6 +1186,13 @@ int slam_process_visual_frame(SlamSystem* system,
                     if (prev_feature_idx >= 0 && prev_feature_idx < prev_frame->num_landmarks) {
                         int landmark_id = prev_frame->landmark_ids[prev_feature_idx];
                         if (landmark_id >= 0 && landmark_id < system->local_map.num_landmarks) {
+                            /* P1修复: 无效特征索引时跳过该匹配（continue），
+                             * 不添加到features_2d/points_3d数组，避免错误对应关系喂给PnP */
+                            int curr_feature_idx = matches[i].train_idx;
+                            if (curr_feature_idx < 0 || curr_feature_idx >= current_frame->num_features) {
+                                continue;
+                            }
+                            
                             Landmark* landmark = &system->local_map.landmarks[landmark_id];
                             
                             /* 复制3D点 */
@@ -1181,30 +1201,79 @@ int slam_process_visual_frame(SlamSystem* system,
                             points_3d[match_idx * 3 + 2] = landmark->position[2];
                             
                             /* 复制对应的当前帧2D特征点 */
-                            int curr_feature_idx = matches[i].train_idx;
-                            if (curr_feature_idx >= 0 && curr_feature_idx < current_frame->num_features) {
-                                features_2d[match_idx] = current_frame->features[curr_feature_idx];
-                            } else {
-                                /* 如果索引无效，使用匹配的特征点 */
-                                features_2d[match_idx] = current_frame->features[0];
-                            }
+                            features_2d[match_idx] = current_frame->features[curr_feature_idx];
                             
                             match_idx++;
                         }
                     }
                 }
                 
-                /* 使用PnP估计运动 */
+                /* P1修复: 使用本地7元素缓冲区接收PnP结果（position[3]+quaternion[4]）。
+                 * 原代码直接传入current_frame->pose.orientation（仅4元素），
+                 * 但slam_estimate_motion_3d2d输出7个值，导致缓冲区溢出。 */
+                float pnp_pose[7];
                 motion_result = slam_estimate_motion_3d2d(features_2d,
-                                                         points_3d, num_3d_matches,
+                                                         points_3d, match_idx,
                                                          camera_params,
                                                          prev_frame->pose.orientation, /* 初始位姿 */
-                                                         current_frame->pose.orientation);
+                                                         pnp_pose);
                 
                 /* 清理临时内存 */
                 slam_free(points_3d);
                 slam_free(features_2d);
+                
+                if (motion_result == 0) {
+                    /* P1修复: PnP成功时更新相机位置（原代码仅更新orientation不更新position）。
+                     * pnp_pose[0..2]为绝对位置，pnp_pose[3..6]为四元数(w,x,y,z) */
+                    current_frame->pose.position[0] = pnp_pose[0];
+                    current_frame->pose.position[1] = pnp_pose[1];
+                    current_frame->pose.position[2] = pnp_pose[2];
+                    current_frame->pose.orientation[0] = pnp_pose[3]; /* qw */
+                    current_frame->pose.orientation[1] = pnp_pose[4]; /* qx */
+                    current_frame->pose.orientation[2] = pnp_pose[5]; /* qy */
+                    current_frame->pose.orientation[3] = pnp_pose[6]; /* qz */
+                    
+                    /* 提取R和t用于后续关键帧决策 */
+                    slam_quaternion_to_rotation_matrix(&pnp_pose[3], R);
+                    /* P1修复: PnP路径得到的R为绝对旋转矩阵(当前帧相机姿态),
+                     * 而2D-2D路径的R是相对旋转。后续关键帧决策使用R的迹计算
+                     * 旋转角, 若直接用绝对R, 计算的是绝对旋转角而非单帧相对
+                     * 旋转角, 会错误触发关键帧创建。此处将绝对R转为相对R:
+                     * R_rel = R_abs * R_prev^T, 使两路径语义一致。
+                     * 注: trace(R_abs*R_prev^T) == trace(R_prev^T*R_abs),
+                     * 故相对旋转角计算与左右乘顺序无关, 此处取右乘。 */
+                    {
+                        float R_prev[9];
+                        slam_quaternion_to_rotation_matrix(prev_frame->pose.orientation, R_prev);
+                        /* R_prev的转置: R_prev_T[k*3+c] = R_prev[c*3+k] (行主序转置) */
+                        float R_prev_T[9];
+                        R_prev_T[0] = R_prev[0]; R_prev_T[1] = R_prev[3]; R_prev_T[2] = R_prev[6];
+                        R_prev_T[3] = R_prev[1]; R_prev_T[4] = R_prev[4]; R_prev_T[5] = R_prev[7];
+                        R_prev_T[6] = R_prev[2]; R_prev_T[7] = R_prev[5]; R_prev_T[8] = R_prev[8];
+                        /* R_rel = R_abs * R_prev_T (3x3矩阵乘法, 行主序) */
+                        float R_rel[9];
+                        for (int r = 0; r < 3; r++) {
+                            for (int c = 0; c < 3; c++) {
+                                R_rel[r*3+c] = R[r*3+0]*R_prev_T[0*3+c]
+                                             + R[r*3+1]*R_prev_T[1*3+c]
+                                             + R[r*3+2]*R_prev_T[2*3+c];
+                            }
+                        }
+                        memcpy(R, R_rel, 9*sizeof(float));
+                    }
+                    /* 计算相对平移（当前绝对位置 - 上一帧位置） */
+                    t[0] = pnp_pose[0] - prev_frame->pose.position[0];
+                    t[1] = pnp_pose[1] - prev_frame->pose.position[1];
+                    t[2] = pnp_pose[2] - prev_frame->pose.position[2];
+                    motion_estimated = 1;
+                }
             } else {
+                /* P2修复: points_3d与features_2d可能仅其中一个分配成功,
+                 * 原代码未释放已成功分配的指针, 造成内存泄漏。
+                 * slam_free对NULL安全(内部检查*ptr为空则跳过), 且释放后置NULL,
+                 * 可避免悬空指针与后续误用。 */
+                slam_free(points_3d);
+                slam_free(features_2d);
                 /* 内存分配失败，回退到2D-2D */
                 motion_result = -1;
             }
@@ -1226,46 +1295,50 @@ int slam_process_visual_frame(SlamSystem* system,
                                                  current_frame->features,
                                                  matches, num_matches,
                                                  camera_params, R, t);
+    }
+    
+    /* P1修复: 统一的2D-2D位姿更新 — 当运动来自2D-2D（非PnP）时更新位姿。
+     * 原代码仅在直接2D-2D路径中更新位姿，PnP失败回退到2D-2D时漏更新。
+     * motion_estimated为0表示未经过PnP成功路径，需要执行2D-2D位姿组合。 */
+    if (motion_result == 0 && !motion_estimated) {
+        /* 将旋转矩阵转换为四元数 */
+        float q[4];
+        slam_rotation_matrix_to_quaternion(R, q);
         
-        if (motion_result == 0) {
-            /* 将旋转矩阵转换为四元数 */
-            float q[4];
-            slam_rotation_matrix_to_quaternion(R, q);
-            
-            /* 更新当前帧位姿 */
-            current_frame->pose.position[0] = prev_frame->pose.position[0] + t[0];
-            current_frame->pose.position[1] = prev_frame->pose.position[1] + t[1];
-            current_frame->pose.position[2] = prev_frame->pose.position[2] + t[2];
-            
-            /* 旋转组合：当前旋转 = 上一帧旋转 * 相对旋转 */
-            float prev_q[4] = {prev_frame->pose.orientation[0],
-                              prev_frame->pose.orientation[1],
-                              prev_frame->pose.orientation[2],
-                              prev_frame->pose.orientation[3]};
-            float rel_q[4] = {q[0], q[1], q[2], q[3]};
-            
-            /* 四元数乘法：当前 = 上一帧 × 相对 */
-            current_frame->pose.orientation[0] = prev_q[0]*rel_q[0] - prev_q[1]*rel_q[1] - 
-                                                prev_q[2]*rel_q[2] - prev_q[3]*rel_q[3];
-            current_frame->pose.orientation[1] = prev_q[0]*rel_q[1] + prev_q[1]*rel_q[0] + 
-                                                prev_q[2]*rel_q[3] - prev_q[3]*rel_q[2];
-            current_frame->pose.orientation[2] = prev_q[0]*rel_q[2] - prev_q[1]*rel_q[3] + 
-                                                prev_q[2]*rel_q[0] + prev_q[3]*rel_q[1];
-            current_frame->pose.orientation[3] = prev_q[0]*rel_q[3] + prev_q[1]*rel_q[2] - 
-                                                prev_q[2]*rel_q[1] + prev_q[3]*rel_q[0];
-            
-            /* 归一化四元数 */
-            float norm = sqrtf(current_frame->pose.orientation[0]*current_frame->pose.orientation[0] +
-                              current_frame->pose.orientation[1]*current_frame->pose.orientation[1] +
-                              current_frame->pose.orientation[2]*current_frame->pose.orientation[2] +
-                              current_frame->pose.orientation[3]*current_frame->pose.orientation[3]);
-            if (norm > SLAM_EPSILON) {
-                current_frame->pose.orientation[0] /= norm;
-                current_frame->pose.orientation[1] /= norm;
-                current_frame->pose.orientation[2] /= norm;
-                current_frame->pose.orientation[3] /= norm;
-            }
+        /* 更新当前帧位姿 */
+        current_frame->pose.position[0] = prev_frame->pose.position[0] + t[0];
+        current_frame->pose.position[1] = prev_frame->pose.position[1] + t[1];
+        current_frame->pose.position[2] = prev_frame->pose.position[2] + t[2];
+        
+        /* 旋转组合：当前旋转 = 上一帧旋转 * 相对旋转 */
+        float prev_q[4] = {prev_frame->pose.orientation[0],
+                          prev_frame->pose.orientation[1],
+                          prev_frame->pose.orientation[2],
+                          prev_frame->pose.orientation[3]};
+        float rel_q[4] = {q[0], q[1], q[2], q[3]};
+        
+        /* 四元数乘法：当前 = 上一帧 × 相对 */
+        current_frame->pose.orientation[0] = prev_q[0]*rel_q[0] - prev_q[1]*rel_q[1] - 
+                                            prev_q[2]*rel_q[2] - prev_q[3]*rel_q[3];
+        current_frame->pose.orientation[1] = prev_q[0]*rel_q[1] + prev_q[1]*rel_q[0] + 
+                                            prev_q[2]*rel_q[3] - prev_q[3]*rel_q[2];
+        current_frame->pose.orientation[2] = prev_q[0]*rel_q[2] - prev_q[1]*rel_q[3] + 
+                                            prev_q[2]*rel_q[0] + prev_q[3]*rel_q[1];
+        current_frame->pose.orientation[3] = prev_q[0]*rel_q[3] + prev_q[1]*rel_q[2] - 
+                                            prev_q[2]*rel_q[1] + prev_q[3]*rel_q[0];
+        
+        /* 归一化四元数 */
+        float norm = sqrtf(current_frame->pose.orientation[0]*current_frame->pose.orientation[0] +
+                          current_frame->pose.orientation[1]*current_frame->pose.orientation[1] +
+                          current_frame->pose.orientation[2]*current_frame->pose.orientation[2] +
+                          current_frame->pose.orientation[3]*current_frame->pose.orientation[3]);
+        if (norm > SLAM_EPSILON) {
+            current_frame->pose.orientation[0] /= norm;
+            current_frame->pose.orientation[1] /= norm;
+            current_frame->pose.orientation[2] /= norm;
+            current_frame->pose.orientation[3] /= norm;
         }
+        motion_estimated = 1;
     }
     
     current_frame->pose.frame_id = frame_id;
@@ -1297,8 +1370,10 @@ int slam_process_visual_frame(SlamSystem* system,
         create_keyframe = 1;
     }
     
-    /* 条件3：相机运动幅度判断（如果R和t可用） */
-    if (R && t) {
+    /* 条件3：相机运动幅度判断（仅在运动估计成功且R/t有效时） */
+    /* P1修复: 原代码用if(R && t)检查指针有效性，但R和t是栈数组地址始终非NULL，
+     * 导致PnP成功路径R/t未设置时也进入此分支读取垃圾值。改为motion_estimated标志。 */
+    if (motion_estimated) {
         /* 计算平移幅度 */
         float translation_magnitude = sqrtf(t[0]*t[0] + t[1]*t[1] + t[2]*t[2]);
         /* 计算旋转幅度（从旋转矩阵提取角度） */
@@ -1657,8 +1732,19 @@ int slam_process_point_cloud(SlamSystem* system,
         memcpy(&result->estimated_pose, &initial_pose, sizeof(SlamPose));
         result->tracking_quality = 100;
         result->new_keyframe_created = 1;
-        result->local_map_points = system->local_map.map_points;
+        /* P0修复: 原代码直接别名内部指针result->local_map_points = system->local_map.map_points，
+         * 当system内部map_points被释放或重新分配时result指针变为悬垂指针。
+         * 改为深拷贝（与视觉帧路径1510-1514行一致）。 */
         result->local_map_point_count = system->local_map.num_map_points;
+        if (result->local_map_point_count > 0 && system->local_map.map_points) {
+            result->local_map_points = (float*)slam_malloc(3 * (size_t)point_count * sizeof(float));
+            if (result->local_map_points) {
+                memcpy(result->local_map_points, system->local_map.map_points,
+                       3 * (size_t)point_count * sizeof(float));
+            }
+        } else {
+            result->local_map_points = NULL;
+        }
         
         /* 更新SLAM状态 */
         system->state.tracking_state = 2;

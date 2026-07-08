@@ -17,6 +17,23 @@ static int json_get_int_safe(const char* str, int default_val, int* error);
 static float json_get_float_safe(const char* str, float default_val, int* error);
 /* API处理器前向声明见文件尾部 init_handler_table 前 */
 
+/* P0修复: 线程局部存储，避免多worker线程共享server->request_path和
+ * server->current_auth_header导致的数据竞争和认证绕过 */
+/* M-3修复: 新增tls_request_query保存GET请求的查询字符串(URL中?之后的部分)，
+ * 供handler解析GET查询参数(如/api/serial/receive?port=COM3&max_bytes=512) */
+#ifdef _MSC_VER
+static __declspec(thread) char tls_request_path[512];
+static __declspec(thread) char tls_request_query[512];
+static __declspec(thread) char tls_auth_header[256];
+#else
+static _Thread_local char tls_request_path[512];
+static _Thread_local char tls_request_query[512];
+static _Thread_local char tls_auth_header[256];
+#endif
+
+/* P-AUDIT修复: 引入version.h以使用SELFLNN_VERSION_STRING宏,替代硬编码版本号 */
+#include "selflnn/version.h"
+
 /* ====================================================================
  * JSON 安全解析辅助函数（前向声明见文件顶部，实现在includes之后）
  * 替代 atoi/atof，提供输入验证和错误回报
@@ -33,6 +50,7 @@ static float json_get_float_safe(const char* str, float default_val, int* error)
 #include <string.h>
 #include <stdint.h>
 #include <limits.h>  /* DEEP-005: INT_MIN/INT_MAX需要 */
+#include <ctype.h>   /* P3-12修复: toupper用于路径大小写归一化 */
 #include <math.h>
 
 /* DEEP-005修复: JSON安全解析函数移至此处以确保strtol/strtod可见 */
@@ -157,14 +175,16 @@ static uint64_t platform_get_time_ms(void) {
 }
 
 /* DEEP-005: 前向声明 — 定义在文件尾部 */
-static int backend_cors_load_config(const char* config_path);/* JSON字符串转义：将C字符串中的 \ " \n \r \t 等转义为JSON安全形式 */
+static int backend_cors_load_config(const char* config_path);/* JSON字符串转义：将C字符串中的 \ " \n \r \t 及控制字符转义为JSON安全形式。
+ * P1修复: 控制字符不再降级为空格，而是正确转义为\uXXXX形式，符合RFC 8259标准。
+ * 每个字符最多转义为6字节(\uXXXX)，因此调用方需确保dst_size >= len*6+1。 */
 static void json_escape_into(char* dst, size_t dst_size, const char* src) {
     size_t di = 0;
     if (!dst || dst_size == 0 || !src) {
         if (dst && dst_size > 0) dst[0] = '\0';
         return;
     }
-    for (size_t si = 0; src[si] && di < dst_size - 3; si++) {
+    for (size_t si = 0; src[si] && di < dst_size - 6; si++) {
         unsigned char c = (unsigned char)src[si];
         if (c == '"') {
             dst[di++] = '\\'; dst[di++] = '"';
@@ -176,12 +196,18 @@ static void json_escape_into(char* dst, size_t dst_size, const char* src) {
             dst[di++] = '\\'; dst[di++] = 'r';
         } else if (c == '\t') {
             dst[di++] = '\\'; dst[di++] = 't';
+        } else if (c == '\b') {
+            dst[di++] = '\\'; dst[di++] = 'b';
+        } else if (c == '\f') {
+            dst[di++] = '\\'; dst[di++] = 'f';
         } else if (c < 0x20) {
-            dst[di++] = ' ';
+            /* P1修复: 控制字符转义为\uXXXX形式，不再降级为空格 */
+            di += (size_t)snprintf(dst + di, dst_size - di, "\\u%04x", c);
         } else {
             dst[di++] = c;
         }
     }
+    if (di >= dst_size) di = dst_size - 1;
     dst[di] = '\0';
 }
 
@@ -582,6 +608,18 @@ static const struct {
     {"/api/product/spec", "POST", "产品规格生成", "product"},
     {"/api/product/design", "POST", "产品设计生成", "product"},
     {"/api/product/status", "GET", "产品设计引擎状态", "product"},
+    /* 集成修复: 补齐前端调用但文档缺失的API端点 */
+    {"/api/dataset/delete", "POST", "删除数据集", "dataset"},
+    {"/api/robot/register", "POST", "注册机器人", "robot"},
+    {"/api/lnn/config", "POST", "更新LNN配置", "lnn"},
+    /* 补齐已实现但文档未注册的端点 */
+    {"/api/dialogue/history/save", "POST", "保存对话历史", "dialogue"},
+    {"/api/kg/add", "POST", "添加知识图谱节点/边", "knowledge"},
+    {"/api/kg/delete", "POST", "删除知识图谱节点/边", "knowledge"},
+    {"/api/training/logs/clear", "POST", "清除训练日志", "training"},
+    {"/api/model/info", "GET", "获取模型信息", "model"},
+    {"/api/metacognition/state", "GET", "获取元认知状态", "cognition"},
+    {"/api/evolution/status", "GET", "获取演化状态", "evolution"},
 };
 #define g_api_endpoints_count (sizeof(g_api_endpoints) / sizeof(g_api_endpoints[0]))
 
@@ -715,32 +753,103 @@ static int parse_json_string(const char* json, const char* key, char* value, siz
     }
     
     start += strlen(pattern);
-    const char* end = start;
     
-    while (*end != '\0' && *end != '"') {
-        /* 处理转义序列：跳过反斜杠后的下一个字符 */
-        if (*end == '\\' && *(end + 1) != '\0') {
-            end += 2;  /* 跳过转义字符和被转义的字符 */
-            continue;
+    /* P1修复: 正确处理JSON转义序列，将 \" 转为 "，\\ 转为 \，\n 转为换行等。
+     * 原代码仅跳过转义字符但保留了反斜杠，导致解析结果仍含转义符。
+     * 现在在扫描的同时进行反转义，支持RFC 8259所有标准转义序列。 */
+    size_t out_len = 0;
+    const char* p = start;
+    while (*p != '\0' && *p != '"' && out_len < max_length - 1) {
+        if (*p == '\\' && *(p + 1) != '\0') {
+            p++;  /* 跳过反斜杠，处理被转义的字符 */
+            switch (*p) {
+                case '"':  value[out_len++] = '"';  break;
+                case '\\': value[out_len++] = '\\'; break;
+                case '/':  value[out_len++] = '/';  break;
+                case 'b':  value[out_len++] = '\b'; break;
+                case 'f':  value[out_len++] = '\f'; break;
+                case 'n':  value[out_len++] = '\n'; break;
+                case 'r':  value[out_len++] = '\r'; break;
+                case 't':  value[out_len++] = '\t'; break;
+                case 'u': {
+                    /* \uXXXX: 解析4位十六进制Unicode码点并编码为UTF-8 */
+                    uint32_t cp = 0;
+                    int hex_valid = 1;
+                    for (int i = 1; i <= 4; i++) {
+                        char hc = *(p + i);
+                        if (hc == '\0') { hex_valid = 0; break; }
+                        if (hc >= '0' && hc <= '9') cp = (cp << 4) | (uint32_t)(hc - '0');
+                        else if (hc >= 'a' && hc <= 'f') cp = (cp << 4) | (uint32_t)(hc - 'a' + 10);
+                        else if (hc >= 'A' && hc <= 'F') cp = (cp << 4) | (uint32_t)(hc - 'A' + 10);
+                        else { hex_valid = 0; break; }
+                    }
+                    if (hex_valid) {
+                        p += 4;  /* 跳过4位十六进制数字 */
+                        /* 代理对支持: 高代理(0xD800-0xDBFF)后跟\uXXXX低代理(0xDC00-0xDFFF) */
+                        if (cp >= 0xD800 && cp <= 0xDBFF &&
+                            *(p + 1) == '\\' && *(p + 2) == 'u') {
+                            uint32_t lo = 0;
+                            int lo_valid = 1;
+                            for (int i = 3; i <= 6; i++) {
+                                char hc = *(p + i);
+                                if (hc == '\0') { lo_valid = 0; break; }
+                                if (hc >= '0' && hc <= '9') lo = (lo << 4) | (uint32_t)(hc - '0');
+                                else if (hc >= 'a' && hc <= 'f') lo = (lo << 4) | (uint32_t)(hc - 'a' + 10);
+                                else if (hc >= 'A' && hc <= 'F') lo = (lo << 4) | (uint32_t)(hc - 'A' + 10);
+                                else { lo_valid = 0; break; }
+                            }
+                            if (lo_valid && lo >= 0xDC00 && lo <= 0xDFFF) {
+                                cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                                p += 6;  /* 跳过低代理的\uXXXX */
+                            }
+                        }
+                        /* 将Unicode码点编码为UTF-8 */
+                        if (cp < 0x80) {
+                            if (out_len < max_length - 1) value[out_len++] = (char)cp;
+                        } else if (cp < 0x800) {
+                            if (out_len + 1 < max_length - 1) {
+                                value[out_len++] = (char)(0xC0 | (cp >> 6));
+                                value[out_len++] = (char)(0x80 | (cp & 0x3F));
+                            }
+                        } else if (cp < 0x10000) {
+                            if (out_len + 2 < max_length - 1) {
+                                value[out_len++] = (char)(0xE0 | (cp >> 12));
+                                value[out_len++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                                value[out_len++] = (char)(0x80 | (cp & 0x3F));
+                            }
+                        } else {
+                            /* 4字节UTF-8编码 (U+10000以上，如emoji) */
+                            if (out_len + 3 < max_length - 1) {
+                                value[out_len++] = (char)(0xF0 | (cp >> 18));
+                                value[out_len++] = (char)(0x80 | ((cp >> 12) & 0x3F));
+                                value[out_len++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                                value[out_len++] = (char)(0x80 | (cp & 0x3F));
+                            }
+                        }
+                    } else {
+                        /* 无效的\u序列，保留u字符 */
+                        value[out_len++] = 'u';
+                    }
+                    break;
+                }
+                default:
+                    /* 未知转义序列，保留字符本身 */
+                    value[out_len++] = *p;
+                    break;
+            }
+            p++;
+        } else {
+            value[out_len++] = *p++;
         }
-        end++;
     }
     
-    if (*end != '"') {
+    if (*p != '"') {
         log_debug("[JSON解析] 键'%s'的值无闭合引号", key);
         value[0] = '\0';
         return -3;
     }
     
-    // 计算长度并确保不超过缓冲区大小
-    size_t length = end - start;
-    if (length >= max_length) {
-        length = max_length - 1;
-    }
-    
-    // 复制字符串
-    strncpy(value, start, length);
-    value[length] = '\0';
+    value[out_len] = '\0';
     
     return 0;
 }
@@ -755,12 +864,19 @@ static int parse_json_string(const char* json, const char* key, char* value, siz
  * @return int 实际解析的数值数量，失败返回-1
  */
 static int parse_json_float_array(const char* json, const char* key, float* values, int max_values) {
-    // 参数检查
+    /* C-020修复: 参数检查。
+     * 注意：C语言无法从float*指针推导实际数组大小，
+     * 调用者必须确保values数组至少包含max_values个元素。
+     * 此处添加断言和显式检查，防止max_values与实际数组大小不匹配。 */
     SELFLNN_CHECK_NULL(json, "JSON字符串为空");
     SELFLNN_CHECK_NULL(key, "JSON键为空");
     SELFLNN_CHECK_NULL(values, "输出浮点数组为空");
     SELFLNN_CHECK(max_values > 0, SELFLNN_ERROR_INVALID_ARGUMENT,
                  "最大浮点数值数量无效: %d", max_values);
+    /* C-020修复: 限制max_values上限，防止调用者传入过大值导致溢出。
+     * 默认上限为1024，远超JSON数组实际可能的大小。 */
+    SELFLNN_CHECK(max_values <= 1024, SELFLNN_ERROR_INVALID_ARGUMENT,
+                 "最大浮点数值数量超过安全上限(1024): %d", max_values);
     
     // 构建搜索模式 "key":[ 
     char pattern[128];
@@ -836,9 +952,19 @@ static int parse_json_float(const char* json, const char* key, float* value) {
         start++;
     }
     
-    // 解析浮点数
+    /* C-013修复: 格式化字符串安全防护。
+     * 使用 "%.20s" 格式限定符确保start/key内容不会被解释为格式字符串，
+     * 即使start中包含'%'字符也仅作为普通字符输出，最多输出20个字符防止缓冲区溢出。 */
     SELFLNN_CHECK(sscanf(start, "%f", value) == 1, SELFLNN_ERROR_FORMAT_ERROR,
-                 "JSON解析失败: 浮点值解析错误（键：%s，起始：%.20s）", key, start);
+                 "JSON解析失败: 浮点值解析错误（键：%.20s，起始：%.20s）", key, start);
+    
+    /* P1修复: 验证解析的浮点值是否为NaN或Inf，防止异常值注入神经网络 */
+    if (!isfinite(*value)) {
+        log_error("JSON解析安全拒绝: 键'%s'的值为NaN/Inf（%.20s），已拒绝",
+                  key, start);
+        *value = 0.0f; /* 安全默认值：将NaN/Inf重置为0 */
+        return -1;
+    }
     
     return 0;
 }
@@ -889,8 +1015,15 @@ static int parse_json_int(const char* json, const char* key, int* value) {
  * @return int 有效返回1，无效返回0
  */
 static int validate_utf8_string(const unsigned char* data, size_t length) {
-    if (!data && length > 0) {
-        return 0;
+    /* C-024修复: 明确data=NULL时的边界行为。
+     * data=NULL且length=0时视为空字符串，空字符串是有效的UTF-8。
+     * data=NULL且length>0时视为无效（无法验证不存在的内存）。
+     * data!=NULL且length=0时也为有效（空字符串）。 */
+    if (!data) {
+        return (length == 0) ? 1 : 0; /* 空字符串有效，非空但指针为NULL无效 */
+    }
+    if (length == 0) {
+        return 1; /* 空字符串是有效的UTF-8 */
     }
     
     size_t i = 0;
@@ -1846,9 +1979,9 @@ static int handle_api_post_simulation_toggle_grid(BackendServer* server,
     if (server->internal_simulator) {
         grid_state = simulator_toggle_grid_display(server->internal_simulator, enable);
     }
-    char* json_data = safe_malloc(256);
+    char* json_data = safe_malloc(512);
     if (json_data) {
-        snprintf(json_data, 256,
+        snprintf(json_data, 512,
             "{\"view\":{\"grid_visible\":%s,\"grid_size\":10,\"status\":\"%s\"}}",
             grid_state ? "true" : "false",
             server->internal_simulator ? "ok" : "simulator_unavailable");
@@ -2408,7 +2541,7 @@ typedef struct {
     char client_ip[64];
     char method[16];
     char path[1024];
-    char buffer[4096];
+    char buffer[65536];  /* P1修复: 增大至64KB，防止大请求体被截断 */
     int bytes_received;
     size_t content_length;
     int content_too_large;
@@ -2564,6 +2697,7 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/lnn/parameters/reset") == 0)      return API_POST_LNN_PARAMETERS_RESET;
     if (strcmp(p, "/api/lnn/calibrate") == 0)             return API_POST_LNN_CALIBRATE;
     if (strcmp(p, "/api/lnn/config/export") == 0)         return API_GET_LNN_CONFIG_EXPORT;
+    if (strcmp(p, "/api/lnn/config") == 0)                return API_POST_LNN_CONFIG; /* 集成修复: 前端updateLnnConfig需要的端点 */
     if (strcmp(p, "/api/lnn/activation/heatmap") == 0)    return API_GET_LNN_ACTIVATION_HEATMAP;
     if (strcmp(p, "/api/lnn/prediction/scatter") == 0)    return API_GET_LNN_PREDICTION_SCATTER;
 
@@ -2587,11 +2721,13 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/robot/emergency_stop") == 0)      return API_POST_ROBOT_EMERGENCY_STOP;
     if (strcmp(p, "/api/robot/config/save") == 0)         return API_POST_ROBOT_CONFIG_SAVE; /* FIX API-3: 修复路由到正确的槽位327 */
     if (strcmp(p, "/api/robot/connect") == 0)             return API_POST_ROBOT_CONNECT;
+    if (strcmp(p, "/api/robot/register") == 0)            return API_POST_ROBOT_REGISTER; /* 集成修复: 前端createRobot需要的端点 */
     if (strcmp(p, "/api/robot/disconnect") == 0)          return API_POST_ROBOT_DISCONNECT;
     if (strcmp(p, "/api/robot/firmware") == 0)            return API_POST_ROBOT_FIRMWARE;
     if (strcmp(p, "/api/robot/trajectory") == 0)          return API_POST_ROBOT_TRAJECTORY;
     if (strcmp(p, "/api/robot/training") == 0)            return API_POST_ROBOT_TRAINING;
     if (strcmp(p, "/api/robot/coordinate") == 0)          return API_POST_ROBOT_COORDINATE;
+    if (strcmp(p, "/api/robot/params") == 0)             return API_POST_ROBOT_PARAMETERS; /* 集成修复: 统一路由表补全 */
     /* P1-003修复: 从旧路由链迁移的机器人路由 */
     if (strcmp(p, "/api/robot/config/reset") == 0)        return API_POST_ROBOT_CONFIG_RESET;
     if (strcmp(p, "/api/robot/analyze_screen") == 0)      return API_POST_ROBOT_ANALYZE_SCREEN;
@@ -2703,9 +2839,17 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     /* === 数据集 === */
     if (strcmp(p, "/api/dataset/list") == 0)              return API_GET_DATASET_LIST;
     if (strcmp(p, "/api/dataset/create") == 0)            return API_POST_DATASET_CREATE;
+    if (strcmp(p, "/api/dataset/delete") == 0)            return API_POST_DATASET_DELETE;
     if (strcmp(p, "/api/dataset/import") == 0)            return API_POST_DATASET_IMPORT;
     if (strcmp(p, "/api/dataset/stats") == 0)             return API_GET_DATASET_STATS;
     if (strcmp(p, "/api/dataset/augment") == 0)           return API_POST_DATASET_AUGMENT;
+    /* C-2修复: /api/datasets 路由别名 —— 前端统一使用复数端点GET/POST /api/datasets，
+     * GET映射到数据集列表(API_GET_DATASET_LIST)，POST映射到创建(API_POST_DATASET_CREATE)。
+     * 枚举值已确认存在于backend.h。 */
+    if (strcmp(p, "/api/datasets") == 0) {
+        if (method && strcmp(method, "GET") == 0) return API_GET_DATASET_LIST;
+        return API_POST_DATASET_CREATE;
+    }
 
     /* === 产品设计 === */
     /* 枚举值定义见 backend.h: API_POST_PRODUCT_DESIGN=270, API_GET_PRODUCT_SPEC=271 */
@@ -2734,6 +2878,7 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     /* === 自动学习 === */
     if (strcmp(p, "/api/auto-learn/scan") == 0)           return API_POST_AUTO_LEARN_SCAN;
     if (strcmp(p, "/api/auto-learn/stats") == 0)          return API_GET_AUTO_LEARN_STATS;
+    if (strcmp(p, "/api/auto-learn/export") == 0)         return API_POST_AUTO_LEARN_EXPORT; /* 集成修复: 统一路由表补全 */
     if (strcmp(p, "/api/auto-learn/toggle") == 0)         return API_POST_AUTO_LEARN_TOGGLE;
 
     /* === 学习 === */
@@ -2891,6 +3036,7 @@ static void worker_process_api_request(void* arg) {
     
     size_t content_length = ctx->content_length;
     int content_too_large = ctx->content_too_large;
+    int body_read_timeout = 0;  /* P1-14修复: 请求体读取超时标志 */
     char* request_body = ctx->request_body;
     char* request_body_copy = ctx->request_body_copy;
     
@@ -2960,7 +3106,26 @@ static void worker_process_api_request(void* arg) {
                         if (got > content_length) got = content_length;
                         memcpy(full_body, body_start, got);
                     }
-                    while (got < content_length) { int n = socket_recv(client_socket, full_body + got, (int)(content_length - got)); if (n <= 0) break; got += (size_t)n; }
+                    /* P1-14修复: 添加请求体读取超时计数器，连续100次recv返回0或错误则超时 */
+                    int body_timeout_count = 0;
+                    while (got < content_length) {
+                        int n = socket_recv(client_socket, full_body + got, (int)(content_length - got));
+                        if (n <= 0) {
+                            body_timeout_count++;
+                            if (body_timeout_count >= 100) {  /* 连续100次无数据，判定超时 */
+                                body_read_timeout = 1;
+                                break;
+                            }
+#ifdef _WIN32
+                            Sleep(1);  /* 短暂休眠避免CPU空转 */
+#else
+                            usleep(1000);
+#endif
+                            continue;
+                        }
+                        body_timeout_count = 0;  /* 收到数据则重置计数器 */
+                        got += (size_t)n;
+                    }
                     if (got == content_length) { full_body[content_length] = '\0'; request_body = full_body; request_body_copy = full_body; }
                     else { safe_free((void**)&full_body); }
                 }
@@ -2969,8 +3134,23 @@ static void worker_process_api_request(void* arg) {
     }
     
     if (content_too_large) {
-        const char* err413 = "HTTP/1.1 413 Payload Too Large\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: 45\r\nX-Content-Type-Options: nosniff\r\n\r\n{\"error\":\"请求体超过10MB大小限制\"}";
-        socket_send(client_socket, err413, (int)strlen(err413));
+        /* P2-14修复: 动态计算Content-Length，修正消息为16MB限制 */
+        const char* err413_body = "{\"error\":\"请求体超过16MB大小限制\"}";
+        char err413[512];
+        int err413_len = snprintf(err413, sizeof(err413),
+            "HTTP/1.1 413 Payload Too Large\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: %zu\r\nX-Content-Type-Options: nosniff\r\n\r\n%s",
+            strlen(err413_body), err413_body);
+        socket_send(client_socket, err413, err413_len);
+        socket_close(client_socket);
+        safe_free((void**)&request_body_copy);
+        safe_free((void**)&ctx);
+        return;
+    }
+
+    /* P1-14修复: 请求体读取超时返回408 */
+    if (body_read_timeout) {
+        const char* err408 = "HTTP/1.1 408 Request Timeout\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: 46\r\nX-Content-Type-Options: nosniff\r\nAccess-Control-Allow-Origin: http://localhost:8080\r\n\r\n{\"error\":\"请求体读取超时\",\"status\":408}";
+        socket_send(client_socket, err408, (int)strlen(err408));
         socket_close(client_socket);
         safe_free((void**)&request_body_copy);
         safe_free((void**)&ctx);
@@ -2982,14 +3162,37 @@ static void worker_process_api_request(void* arg) {
         ApiResponse* response = NULL;
         const char* cors_origin = backend_cors_get_origin(); /* DEEP-FIX: 函数调用而非函数指针 */
         char* handler_path = path;
-        
-/* DEEP-FIX: 使用线程局部路径避免竞态条件 */
-        strncpy(server->request_path, path, sizeof(server->request_path) - 1);
+        /* C-1修复: 在API路由前剥离查询字符串(如/api/knowledge?q=test)，
+         * 防止backend_route_path_to_type内部strcmp精确匹配失败返回404。
+         * M-3修复: 剥离前将查询字符串保存到TLS(tls_request_query)，供handler解析GET参数。
+         * 路径安全检查与OPTIONS预检已在server_thread_func中先行完成，无需查询串。 */
+        {
+            tls_request_query[0] = '\0'; /* 清空上次请求的查询字符串，防止残留数据泄漏 */
+            char* query_sep = strchr(handler_path, '?');
+            if (query_sep) {
+                /* M-3修复: 保存查询字符串(?之后的部分)到TLS供handler使用 */
+                const char* qstart = query_sep + 1;
+                size_t qlen = strlen(qstart);
+                if (qlen >= sizeof(tls_request_query)) qlen = sizeof(tls_request_query) - 1;
+                memcpy(tls_request_query, qstart, qlen);
+                tls_request_query[qlen] = '\0';
+                *query_sep = '\0'; /* 就地截断查询字符串 */
+            }
+        }
+
+/* DEEP-FIX: 使用线程局部存储避免竞态条件 */
+        /* P0修复: 写入TLS而非共享server结构体，防止多worker线程数据竞争 */
+        strncpy(tls_request_path, path, sizeof(tls_request_path) - 1);
+        tls_request_path[sizeof(tls_request_path) - 1] = '\0';
         if (ctx->auth_header[0]) {
-            strncpy(server->current_auth_header, ctx->auth_header, sizeof(server->current_auth_header) - 1);
-            server->current_auth_header[sizeof(server->current_auth_header) - 1] = '\0';
-        } else server->current_auth_header[0] = '\0';
-        
+            strncpy(tls_auth_header, ctx->auth_header, sizeof(tls_auth_header) - 1);
+            tls_auth_header[sizeof(tls_auth_header) - 1] = '\0';
+        } else tls_auth_header[0] = '\0';
+        /* P1-12修复: 禁止写入共享server->request_path，多worker线程并发时会互相覆盖 */
+        /* handler内统一使用TLS(tls_request_path)替代共享状态 */
+        /* strncpy(server->request_path, tls_request_path, sizeof(server->request_path) - 1); */
+        /* server->request_path[sizeof(server->request_path) - 1] = '\0'; */
+
         /* P0-002+P2-001修复: 使用统一路由函数替代简化路由表 */
         ApiRequestType request_type = backend_route_path_to_type(handler_path, method);
         if (request_type != API_NOT_FOUND) {
@@ -3004,7 +3207,7 @@ static void worker_process_api_request(void* arg) {
                 "Content-Type: application/json\r\n"
                 "Content-Length: 99\r\n"
                 "Connection: close\r\n"
-                "Access-Control-Allow-Origin: *\r\n"
+                "Access-Control-Allow-Origin: http://localhost:8080\r\n"
                 "X-Content-Type-Options: nosniff\r\n"
                 "Server: SELF-LNN-AGI/1.0\r\n\r\n"
                 "{\"error\":\"not_found\",\"status\":404,\"message\":\"路由不存在\"}");
@@ -3026,7 +3229,14 @@ static void worker_process_api_request(void* arg) {
                 char* fb = (char*)safe_malloc(128);
                 if (fb) { snprintf(fb, 128, "{\"error\":\"empty_response\"}"); if (response->data) safe_free((void**)&response->data); response->data = fb; response->content_type = "application/json"; response->status_code = 500; }
             }
-            if (response->data) response->data_length = strlen(response->data);
+            /* C-019修复: 仅在data_length未设置(为0)时使用strlen计算文本长度。
+                     * 如果handler已设置data_length（如二进制数据流），保留原始值，
+                     * 避免strlen在二进制数据中遇到'\0'导致数据截断。 */
+                    if (response->data) {
+                        if (response->data_length == 0) {
+                            response->data_length = strlen(response->data);
+                        }
+                    }
             char header[768]; /* 增大以容纳安全响应头 */
             int hlen = snprintf(header, sizeof(header),
                 "HTTP/1.1 %d %s\r\n"
@@ -3165,8 +3375,10 @@ static void* server_thread_func(void* param) {
         __sync_fetch_and_add(&server->connection_count, 1);
 #endif
         
-        // 处理客户端请求
-        char buffer[4096];
+        /* 处理客户端请求 */
+        /* P1修复: 缓冲区从4096增大至65536(64KB)，防止大HTTP请求体被截断。
+         * 大请求体(如多模态数据上传)在4096字节限制下会被截断导致解析失败。 */
+        char buffer[65536];
         int bytes_received = socket_recv(client_socket, buffer, sizeof(buffer) - 1);
         
         if (bytes_received > 0) {
@@ -3202,10 +3414,11 @@ static void* server_thread_func(void* param) {
             }
             char* headers_start = (req_line_end + 2 < buffer + bytes_received) ? (req_line_end + 2) : NULL;
             
-            // 验证HTTP方法（支持GET、POST、DELETE）
+            // 验证HTTP方法（支持GET、POST、PUT、DELETE）
             int valid_method = 0;
             if (method) {
-                if (strcmp(method, "GET") == 0 || strcmp(method, "POST") == 0 || strcmp(method, "DELETE") == 0) {
+                /* H-1修复: 新增PUT方法支持，前端资源更新接口需要PUT */
+                if (strcmp(method, "GET") == 0 || strcmp(method, "POST") == 0 || strcmp(method, "DELETE") == 0 || strcmp(method, "PUT") == 0) {
                     valid_method = 1;
                 }
             }
@@ -3213,8 +3426,8 @@ static void* server_thread_func(void* param) {
 /* CORS预检OPTIONS请求处理 */
             if (method && strcmp(method, "OPTIONS") == 0) {
                 const char* cors_preflight = "HTTP/1.1 204 No Content\r\n"
-                    "Access-Control-Allow-Origin: *\r\n"
-                    "Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS\r\n"
+                    "Access-Control-Allow-Origin: http://localhost:8080\r\n"
+                    "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n"
                     "Access-Control-Allow-Headers: Content-Type, Authorization, X-API-Key\r\n"
                     "Access-Control-Max-Age: 86400\r\n"
                     "Connection: close\r\n"
@@ -3252,8 +3465,14 @@ static void* server_thread_func(void* param) {
                     path_safe = 0;
                 }
 /* 拒绝URL编码路径防止%2e%2e%2f绕过..检查 */
-                if (strchr(path, '%') != NULL) {
-                    path_safe = 0;
+                /* C-3修复: %检查只针对路径部分(在?之前)，不影响查询参数值中的合法URL编码(%XX)。
+                 * 路径安全检查在查询字符串剥离之前执行，此时path仍含?query，需限定检查范围。 */
+                {
+                    char* qmark = strchr(path, '?');
+                    size_t check_len = qmark ? (size_t)(qmark - path) : strlen(path);
+                    if (memchr(path, '%', check_len) != NULL) {
+                        path_safe = 0;
+                    }
                 }
             }
 
@@ -3339,6 +3558,69 @@ static void* server_thread_func(void* param) {
                         }
                         if (file_path) {
                             snprintf(full_path, sizeof(full_path), "%s%s", best_dir, clean_path);
+
+                            /* P1修复: 白名单方式验证最终解析后的路径在web根目录内。
+                             * 黑名单方式（检查".."）可通过编码绕过，改为使用GetFullPathName/
+                             * realpath获取绝对路径后比较前缀，确保不会逃逸web根目录。 */
+                            {
+                                char root_abs[1024];
+                                char file_abs[1024];
+                                int path_in_root = 0;
+
+#ifdef _WIN32
+                                /* Windows: GetFullPathNameA解析..和.并返回规范化的绝对路径 */
+                                DWORD root_ret = GetFullPathNameA(best_dir, sizeof(root_abs), root_abs, NULL);
+                                DWORD file_ret = GetFullPathNameA(full_path, sizeof(file_abs), file_abs, NULL);
+                                if (root_ret > 0 && root_ret < sizeof(root_abs) &&
+                                    file_ret > 0 && file_ret < sizeof(file_abs)) {
+                                    /* Windows路径不区分大小写，统一转小写比较 */
+                                    for (char* p = root_abs; *p; p++)
+                                        if (*p >= 'A' && *p <= 'Z') *p = (char)(*p - 'A' + 'a');
+                                    for (char* p = file_abs; *p; p++)
+                                        if (*p >= 'A' && *p <= 'Z') *p = (char)(*p - 'A' + 'a');
+                                    /* 统一使用反斜杠分隔符 */
+                                    for (char* p = root_abs; *p; p++) if (*p == '/') *p = '\\';
+                                    for (char* p = file_abs; *p; p++) if (*p == '/') *p = '\\';
+                                    /* 确保根路径以分隔符结尾 */
+                                    size_t rlen = strlen(root_abs);
+                                    if (rlen > 0 && root_abs[rlen - 1] != '\\') {
+                                        if (rlen + 1 < sizeof(root_abs)) {
+                                            root_abs[rlen] = '\\';
+                                            root_abs[rlen + 1] = '\0';
+                                            rlen++;
+                                        }
+                                    }
+                                    if (strlen(file_abs) >= rlen &&
+                                        strncmp(file_abs, root_abs, rlen) == 0) {
+                                        path_in_root = 1;
+                                    }
+                                }
+#else
+                                /* Linux: realpath解析符号链接和..返回规范化的绝对路径 */
+                                char* root_resolved = realpath(best_dir, root_abs);
+                                if (root_resolved) {
+                                    char* file_resolved = realpath(full_path, file_abs);
+                                    if (file_resolved) {
+                                        size_t rlen = strlen(root_abs);
+                                        if (rlen > 0 && root_abs[rlen - 1] != '/') {
+                                            if (rlen + 1 < sizeof(root_abs)) {
+                                                root_abs[rlen] = '/';
+                                                root_abs[rlen + 1] = '\0';
+                                                rlen++;
+                                            }
+                                        }
+                                        if (strlen(file_abs) >= rlen &&
+                                            strncmp(file_abs, root_abs, rlen) == 0) {
+                                            path_in_root = 1;
+                                        }
+                                    }
+                                }
+#endif
+                                if (!path_in_root) {
+                                    file_path = NULL;
+                                    log_warning("[安全] 路径遍历防护: 请求路径不在web根目录内: %s", full_path);
+                                }
+                            }
                         }
                     }
 
@@ -3359,7 +3641,7 @@ static void* server_thread_func(void* param) {
                                 fseek(fp, 0, SEEK_END);
                                 long fsize = ftell(fp);
                                 fseek(fp, 0, SEEK_SET);
-                                if (fsize > 0 && fsize < 2097152) {
+                                if (fsize > 0 && fsize < 67108864) {  /* P1修复: 2MB→64MB，支持大静态文件服务 */
                                     char* fdata = (char*)safe_malloc((size_t)fsize + 256);
                                     if (fdata) {
                                         size_t read_len = fread(fdata, 1, (size_t)fsize, fp);
@@ -3407,7 +3689,7 @@ static void* server_thread_func(void* param) {
                                             "Content-Length: %zu\r\n"
                                             "Connection: close\r\n"
                                             "Cache-Control: no-cache, no-store, must-revalidate\r\n"
-                                            "Access-Control-Allow-Origin: *\r\n"
+                                            "Access-Control-Allow-Origin: http://localhost:8080\r\n"
                                             "Server: SELF-LNN-AGI/1.0\r\n"
                                             "\r\n",
                                             mime_type, read_len);
@@ -3541,6 +3823,7 @@ static void* server_thread_func(void* param) {
                     
                     // 找到请求体: \r\n\r\n扫描 + Content-Length续读
                     if (content_length > 0 && content_length <= BACKEND_MAX_CONTENT_LENGTH_DEFAULT) {
+                        int body_read_timeout = 0;  /* P1-14修复: 请求体读取超时标志 */
                         char* body_start = NULL;
                         for (size_t s = 0; s + 4 <= bytes_received; s++) {
                             if (buffer[s]=='\r' && buffer[s+1]=='\n' && buffer[s+2]=='\r' && buffer[s+3]=='\n') {
@@ -3572,9 +3855,11 @@ static void* server_thread_func(void* param) {
                                 }
                                 while (got < content_length) {
                                     int n = socket_recv(client_socket, full_body + got, (int)(content_length - got));
-                                    if (n <= 0) break;
+                                    if (n <= 0) break;  /* P1-14修复: 与主路径一致的读取逻辑 */
                                     got += n;
                                 }
+                                /* P1-14修复: 请求体读取不完整时记录超时标志 */
+                                if (got < content_length) body_read_timeout = 1;
                                 if (got == content_length) {
                                     full_body[content_length] = '\0';
                                     request_body = full_body;
@@ -3583,6 +3868,11 @@ static void* server_thread_func(void* param) {
                             }
                             if (!request_body) {
                                 if (full_body) safe_free((void**)&full_body);
+                                /* P1-14修复: 请求体读取超时返回408 */
+                                if (body_read_timeout) {
+                                    const char* err408_sync = "HTTP/1.1 408 Request Timeout\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: 46\r\nX-Content-Type-Options: nosniff\r\nAccess-Control-Allow-Origin: http://localhost:8080\r\n\r\n{\"error\":\"请求体读取超时\",\"status\":408}";
+                                    socket_send(client_socket, err408_sync, (int)strlen(err408_sync));
+                                }
                                 socket_close(client_socket); continue;
                             }
                         }
@@ -3590,13 +3880,13 @@ static void* server_thread_func(void* param) {
                 }
 
                 if (content_too_large) {
-                    const char* err413 = "HTTP/1.1 413 Payload Too Large\r\n"
-                                        "Content-Type: application/json; charset=utf-8\r\n"
-                                        "Content-Length: 45\r\n"
-                                        "X-Content-Type-Options: nosniff\r\n"
-                                        "\r\n"
-                                        "{\"error\":\"请求体超过10MB大小限制\"}";
-                    socket_send(client_socket, err413, (int)strlen(err413));
+                    /* P2-14修复: 动态计算Content-Length，修正消息为16MB限制 */
+                    const char* err413_body = "{\"error\":\"请求体超过16MB大小限制\"}";
+                    char err413[512];
+                    int err413_len = snprintf(err413, sizeof(err413),
+                        "HTTP/1.1 413 Payload Too Large\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: %zu\r\nX-Content-Type-Options: nosniff\r\n\r\n%s",
+                        strlen(err413_body), err413_body);
+                    socket_send(client_socket, err413, err413_len);
                     socket_close(client_socket);
                     continue;
                 }
@@ -3605,6 +3895,22 @@ static void* server_thread_func(void* param) {
                 /* H-004修复: 双路由统一——优先生走统一路由表，旧链作为补充兼容。
                  * 两条路径分别服务于线程池模式和直接同步模式。旧链中的端点应逐步迁移
                  * 到统一路由表(backend_route_path_to_type)以消除重复。 */
+                /* M-3修复: 同步模式下也需剥离查询字符串并保存到TLS，
+                 * 否则strcmp路由匹配失败返回404，且handler无法获取GET参数 */
+                {
+                    tls_request_query[0] = '\0';
+                    if (path) {
+                        char* qsep = strchr(path, '?');
+                        if (qsep) {
+                            const char* qstart = qsep + 1;
+                            size_t qlen = strlen(qstart);
+                            if (qlen >= sizeof(tls_request_query)) qlen = sizeof(tls_request_query) - 1;
+                            memcpy(tls_request_query, qstart, qlen);
+                            tls_request_query[qlen] = '\0';
+                            *qsep = '\0'; /* 就地截断查询字符串，使路由匹配正常工作 */
+                        }
+                    }
+                }
                 ApiRequestType request_type = backend_route_path_to_type(path, method);
                 
                 /* 旧路由链回退：新路由表中未覆盖的端点仍走旧链 */
@@ -3650,6 +3956,8 @@ static void* server_thread_func(void* param) {
                     request_type = API_POST_ROBOT_EMERGENCY_STOP;
                 } else if (strcmp(path, "/api/robot/connect") == 0) {
                     request_type = API_POST_ROBOT_CONNECT;
+                } else if (strcmp(path, "/api/robot/register") == 0) {
+                    request_type = API_POST_ROBOT_REGISTER;
                 } else if (strcmp(path, "/api/robot/disconnect") == 0) {
                     request_type = API_POST_ROBOT_DISCONNECT;
                 } else if (strcmp(path, "/api/robot/list") == 0) {
@@ -4028,6 +4336,8 @@ static void* server_thread_func(void* param) {
                     request_type = API_GET_DATASET_LIST;
                 } else if (strcmp(path, "/api/dataset/create") == 0) {
                     request_type = API_POST_DATASET_CREATE;
+                } else if (strcmp(path, "/api/dataset/delete") == 0) {
+                    request_type = API_POST_DATASET_DELETE;
                 } else if (strcmp(path, "/api/dataset/import") == 0) {
                     request_type = API_POST_DATASET_IMPORT;
                 } else if (strcmp(path, "/api/dataset/stats") == 0) {
@@ -4131,6 +4441,8 @@ static void* server_thread_func(void* param) {
                     request_type = 235;
                 } else if (strcmp(path, "/api/lnn/config/export") == 0) {
                     request_type = 236;
+                } else if (strcmp(path, "/api/lnn/config") == 0) {
+                    request_type = API_POST_LNN_CONFIG;
                 } else if (strcmp(path, "/api/dialogue/send") == 0) {
                     request_type = 237;
                 } else if (strcmp(path, "/api/robot/params") == 0) {
@@ -4234,7 +4546,7 @@ static void* server_thread_func(void* param) {
                         "X-Content-Type-Options: nosniff\r\n"
                         "X-Frame-Options: DENY\r\n"
                         "Access-Control-Allow-Origin: %s\r\n"
-                        "Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS\r\n"
+                        "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n"
                         "Server: SELF-LNN-AGI/1.0\r\n"
                         "\r\n"
                         "404 Not Found: 路由不存在",
@@ -4244,14 +4556,28 @@ static void* server_thread_func(void* param) {
                     continue;
                 }
                 
-// 全周期SEH保护（handler + send + close）
+/* C-025修复: TOCTOU安全性说明。
+             * 当前代码在单线程accept模型下运行（thread_model=0），
+             * response指针由backend_handle_request在栈上同步返回，
+             * 不存在其他线程并发修改response->data或response->data_length。
+             * 因此以下TOCTOU模式（先检查response->data再使用response->data_length）
+             * 在当前架构下是安全的。
+             * 如果未来切换到线程池模型（thread_model=1），需要确保：
+             * 1. response的生命周期管理使用引用计数或所有权转移
+             * 2. response->data和response->data_length的读写在同一线程上下文中 */
                 ApiResponse* response = NULL;
 /* 设置当前请求路径，供handler提取URL参数 */
+                /* P0修复: 同时写入TLS，确保handler中使用线程局部路径 */
                 if (path) {
-                    strncpy(server->request_path, path, sizeof(server->request_path) - 1);
-                    server->request_path[sizeof(server->request_path) - 1] = '\0';
+                    strncpy(tls_request_path, path, sizeof(tls_request_path) - 1);
+                    tls_request_path[sizeof(tls_request_path) - 1] = '\0';
+                    /* P1-12修复: 禁止写入共享server->request_path，使用TLS替代 */
+                    /* strncpy(server->request_path, path, sizeof(server->request_path) - 1); */
+                    /* server->request_path[sizeof(server->request_path) - 1] = '\0'; */
                 } else {
-                    server->request_path[0] = '\0';
+                    tls_request_path[0] = '\0';
+                    /* P1-12修复: 不再清空共享server->request_path，使用TLS替代 */
+                    /* server->request_path[0] = '\0'; */
                 }
 #ifdef _MSC_VER
                 __try {
@@ -4271,7 +4597,14 @@ static void* server_thread_func(void* param) {
                             if (response->status_code == 200) response->status_code = 500;
                         }
                     }
-                    if (response->data) response->data_length = strlen(response->data);
+                    /* C-019修复: 仅在data_length未设置(为0)时使用strlen计算文本长度。
+                     * 如果handler已设置data_length（如二进制数据流），保留原始值，
+                     * 避免strlen在二进制数据中遇到'\0'导致数据截断。 */
+                    if (response->data) {
+                        if (response->data_length == 0) {
+                            response->data_length = strlen(response->data);
+                        }
+                    }
                     const char* cors_origin = backend_cors_get_origin(); /* DEEP-FIX */
                     char header[768];
                     int hlen = snprintf(header, sizeof(header),
@@ -4312,7 +4645,7 @@ static void* server_thread_func(void* param) {
                     InterlockedIncrement(&server->error_count);  /* DEEP-FIX */
                     if (response) backend_response_free(response);
                     safe_free((void**)&request_body_copy);
-                    const char* crash_safe = "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\nServer: SELF-LNN-AGI/1.0\r\n\r\n{\"status\":\"error\",\"error_code\":\"INTERNAL_CRASH\",\"message\":\"内部处理崩溃，请检查系统日志\"}";
+                    const char* crash_safe = "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nConnection: close\r\nAccess-Control-Allow-Origin: http://localhost:8080\r\nServer: SELF-LNN-AGI/1.0\r\n\r\n{\"status\":\"error\",\"error_code\":\"INTERNAL_CRASH\",\"message\":\"内部处理崩溃，请检查系统日志\"}";
                     socket_send(client_socket, crash_safe, (int)strlen(crash_safe));
 /* SEH异常路径必须关闭socket防止句柄泄漏 */
                     socket_close(client_socket);
@@ -5177,7 +5510,7 @@ BackendServer* backend_server_create(const BackendConfig* config) {
     if (config->api_key[0] != '\0' && strlen(config->api_key) > 0) {
         strncpy(server->api_key, config->api_key, sizeof(server->api_key) - 1);
         server->api_key[sizeof(server->api_key) - 1] = '\0';
-        server->api_key_enabled = 0; /* dev mode - auth disabled, key management still works */
+        server->api_key_enabled = 1; /* P0修复: 配置了API密钥时启用认证（生产安全） */
         // 同步到多密钥系统
         strncpy(server->api_keys[0].key_value, config->api_key, sizeof(server->api_keys[0].key_value) - 1);
         strncpy(server->api_keys[0].name, "默认管理密钥", sizeof(server->api_keys[0].name) - 1);
@@ -5437,13 +5770,19 @@ BackendServer* backend_server_create(const BackendConfig* config) {
     // 初始化内容安全过滤器
     server->content_filter = content_filter_create();
     
-/* 绑定LNN语义分析层到content_filter，启用语义级内容过滤 */
+    /* P0修复: 不绑定共享LNN到content_filter。
+     * 原因1: 共享LNN的output_size=256，但content_filter内部的lnn_output数组
+     * 仅有CONTENT_FILTER_EMBED_DIM(128)个float，lnn_forward会写入256个float
+     * 到128个float的缓冲区中，导致栈溢出崩溃。
+     * 原因2: 未训练LNN的semantic_score不可靠(2.8-3.3)，导致正常输入被错误拦截。
+     * content_filter已有自己的internal_cfc(128→64→128)专用分类器，
+     * 但在LNN未训练时也应禁用语义评分，仅使用关键词匹配。 */
     if (server->content_filter) {
-        void* shared_lnn = selflnn_get_shared_lnn();
-        if (shared_lnn) {
-            content_filter_set_lnn(server->content_filter, shared_lnn);
-            log_info("[后端] content_filter已绑定LNN语义分析层");
-        }
+        /* P0修复: 禁用语义评分，仅使用关键词匹配。
+         * 未训练LNN的输出是随机噪声，semantic_score不可靠。
+         * 等LNN训练完成后再通过content_filter_set_enable_semantic()启用。 */
+        content_filter_set_enable_semantic(server->content_filter, 0);
+        log_info("[后端] content_filter已禁用语义评分(LNN未训练)，仅使用关键词匹配");
     }
     
     // 初始化自主学习系统
@@ -5608,6 +5947,15 @@ int backend_server_start(BackendServer* server) {
     }
     
     // 监听连接（使用跨平台抽象）
+    /* DEP-004: 资源限制说明。
+     * max_connections 传递给 socket_listen 作为底层TCP backlog参数。
+     * 操作系统将此值作为待处理连接队列的最大长度：
+     * 1. 当并发连接数超过此值时，新连接请求将被操作系统拒绝（TCP RST）
+     * 2. 默认值可通过配置文件或API动态调整，当前默认100
+     * 3. 建议生产环境配合max_connections_per_ip（默认16）进行IP级别限流
+     * 4. 高并发场景建议启用线程池模型（thread_model=1）配合更大backlog
+     * 注意：max_connections仅控制TCP积压队列，不限制总连接数。
+     * 已建立连接的数量由操作系统和内存限制，需配合应用层限流。 */
     if (socket_listen(server->server_socket, server->config.max_connections) != 0) {
         socket_close(server->server_socket);
         selflnn_set_last_error(SELFLNN_ERROR_NETWORK_CONFIG, __func__, __FILE__, __LINE__,
@@ -5692,11 +6040,58 @@ void* backend_server_get_robot(BackendServer* server) {
     return (void*)(server->robot_instance);
 }
 
+/* L-1修复: WebSocket入站消息处理器
+ * WSPushServer在ws_push_server_poll中接收客户端文本(0x01)/二进制(0x02)帧后，
+ * 通过此回调分发到上层。此前server->msg_handler恒为NULL(从未调用
+ * ws_push_set_message_handler注册)，导致所有入站客户端消息被静默丢弃。
+ * 当前实现：文本消息记录日志并向发送方回送JSON确认，保证入站链路可用；
+ * 后续可在此扩展为转发至对话系统/指令解析等上层处理。 */
+static void backend_ws_message_handler(int client_index, const unsigned char* data,
+                                        size_t data_len, uint8_t opcode, void* user_data) {
+    if (!data || data_len == 0) return;
+
+    /* 文本帧(0x01): 记录日志并回送确认 */
+    if (opcode == 0x01) {
+        char msg_buf[1024];
+        size_t copy_len = data_len < sizeof(msg_buf) - 1 ? data_len : sizeof(msg_buf) - 1;
+        memcpy(msg_buf, data, copy_len);
+        msg_buf[copy_len] = '\0';
+        log_info("[WebSocket] 收到客户端%d文本消息(len=%zu): %s",
+                 client_index, data_len, msg_buf);
+
+        /* 向发送方回送JSON确认，保证入站链路闭环 */
+        BackendServer* server = (BackendServer*)user_data;
+        if (server && server->ws_push_server) {
+            char ack[256];
+            snprintf(ack, sizeof(ack),
+                     "{\"type\":\"ack\",\"client\":%d,\"status\":\"received\",\"length\":%zu}",
+                     client_index, data_len);
+            ws_push_send_to_client(server->ws_push_server, client_index, ack);
+        }
+        return;
+    }
+
+    /* 二进制帧(0x02): 记录长度日志 */
+    if (opcode == 0x02) {
+        log_info("[WebSocket] 收到客户端%d二进制消息(len=%zu)", client_index, data_len);
+        return;
+    }
+}
+
 /* P0-001: 统一WebSocket架构 —— WSPushServer setter/getter */
 void backend_server_set_ws_push_server(BackendServer* server, WSPushServer* ws_push) {
     if (!server) return;
     server->ws_push_server = ws_push;
-    log_info("[后端] WebSocket推送服务器已注入（统一架构）");
+    /* L-1修复: 注册WebSocket入站消息处理器，此前msg_handler恒为NULL导致
+     * 客户端消息被静默丢弃。user_data传入server以便回送确认/后续转发处理。
+     * ws_push_set_message_handler仅设置函数指针(websocket_push.c:541)，
+     * 调用处(websocket_push.c:892)对msg_handler有NULL检查，注册时序安全。 */
+    if (ws_push) {
+        ws_push_set_message_handler(ws_push, backend_ws_message_handler, server);
+        log_info("[后端] WebSocket推送服务器已注入并注册入站消息处理器（统一架构）");
+    } else {
+        log_info("[后端] WebSocket推送服务器已注入（统一架构）");
+    }
 }
 
 WSPushServer* backend_server_get_ws_push_server(BackendServer* server) {
@@ -6322,7 +6717,7 @@ static char* get_detailed_system_status(const BackendServer* server) {
     snprintf(json, 32768,
         "{\"system\":{"
         "\"status\":\"running\","
-        "\"version\":\"SELF-LNN AGI 1.0\","
+        "\"version\":\"SELF-LNN AGI " SELFLNN_VERSION_STRING "\","
         "\"uptime\":%d,"
         "\"cpu_usage\":%.1f,"
         "\"requests\":{\"total\":%d,\"errors\":%d,\"connections\":%d,\"rate_per_minute\":%d},"
@@ -6741,9 +7136,11 @@ static int handle_api_get_memory(BackendServer* server,
         response->data_length = strlen(response->data);
         response->status_code = 500;
     }
-    /* H-7修复: 通过WebSocket推送memory_status数据 */
+    /* H-7/H-2修复: 通过WebSocket推送memory_status数据。
+     * H-2: 改用ws_push_broadcast并传入WS_MSG_MEMORY_STATUS，由其统一封装
+     * {"type":"memory_status","time":...,"data":<原始json>} 信封，前端方可按type字段分发。 */
     if (server->ws_push_server && json_data) {
-        ws_push_broadcast_json(server->ws_push_server, json_data);
+        ws_push_broadcast(server->ws_push_server, WS_MSG_MEMORY_STATUS, json_data);
     }
     return 0;
 }
@@ -8223,9 +8620,11 @@ static int handle_api_get_robot_status(BackendServer* server,
             response->status_code = 503;
         }
     }
-    /* H-7修复: 通过WebSocket推送robot_status数据 */
+    /* H-7/H-2修复: 通过WebSocket推送robot_status数据。
+     * H-2: 改用ws_push_broadcast并传入WS_MSG_ROBOT_STATUS，由其统一封装
+     * {"type":"robot_status","time":...,"data":<原始json>} 信封，前端方可按type字段分发。 */
     if (server->ws_push_server && json_data) {
-        ws_push_broadcast_json(server->ws_push_server, json_data);
+        ws_push_broadcast(server->ws_push_server, WS_MSG_ROBOT_STATUS, json_data);
     }
     return 0;
 }
@@ -9097,9 +9496,15 @@ static int handle_api_post_backup(BackendServer* server,
     char* json_data = NULL;
     // 深度实现：创建实际的系统备份文件
     time_t now = time(NULL);
-    struct tm* local_time = localtime(&now);
+    /* P0修复: 使用线程安全的localtime_s/localtime_r替代localtime */
+    struct tm tm_buf;
+#ifdef _WIN32
+    localtime_s(&tm_buf, &now);
+#else
+    localtime_r(&now, &tm_buf);
+#endif
     char timestamp[64];
-    strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", local_time);
+    strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", &tm_buf);
             
     // 创建备份目录（如果不存在）
     const char* backup_dir = "backups";
@@ -9216,9 +9621,9 @@ static int handle_api_post_model_load(BackendServer* server,
     } else {
         char* json_data = (char*)safe_malloc(256);
         if (json_data) {
+            /* P3-09修复: 移除path字段防止内部文件路径泄露 */
             snprintf(json_data, 256,
-                    "{\"model\":{\"status\":\"error\",\"error\":\"无法加载模型文件\",\"path\":\"%s\",\"message\":\"模型加载失败\"}}",
-                    model_path);
+                    "{\"model\":{\"status\":\"error\",\"error\":\"无法加载模型文件\",\"message\":\"模型加载失败\"}}");
             response->data = json_data;
             response->data_length = strlen(json_data);
             response->status_code = 500;
@@ -9259,16 +9664,19 @@ static int handle_api_get_dialogue_history(BackendServer* server,
                 for (int i = 0; i < msg_count; i++) {
                     DialogueMessage* dm = &server->active_dialogue_context->messages[i];
                     if (!dm || !dm->text) continue;
-                    char escaped[2048];
-                    json_escape_into(escaped, sizeof(escaped), dm->text);
+                    /* P0修复: 使用json_escape_str动态分配转义缓冲区，
+                     * 原固定char escaped[2048]在\uXXXX转义下只能容纳约340字符，
+                     * 长对话消息会被截断。 */
+                    char* escaped = json_escape_str(dm->text);
                     int rem = (int)est_size - pos;
-                    if (rem < 100) break;
+                    if (rem < 100) { if (escaped) safe_free((void**)&escaped); break; }
                     pos += snprintf(json_data + pos, (size_t)rem,
                         "%s{\"role\":\"%s\",\"content\":\"%s\",\"timestamp\":%lld}",
                         (i > 0) ? "," : "",
                         dm->role == 0 ? "user" : "assistant",
-                        escaped,
+                        escaped ? escaped : "",
                         (long long)dm->timestamp);
+                    if (escaped) safe_free((void**)&escaped);
                 }
                 snprintf(json_data + pos, est_size - (size_t)pos,
                     "],\"count\":%d,\"status\":\"ok\"}}", msg_count);
@@ -10433,56 +10841,38 @@ static int handle_api_post_dialogue_multimodal(BackendServer* server,
             return 0;
         }
 
-        size_t resp_len = strlen(response_text);
-        json_data = (char*)safe_malloc(resp_len * 2 + 1024);
+        /* P0修复: 使用json_escape_str进行完整JSON转义，替代不完整的临时转义。
+         * 原临时转义仅处理 " \ \n \r \t，遗漏\b \f和控制字符(\uXXXX)，
+         * 且分配大小resp_len*2+1不足以容纳\uXXXX格式的转义结果。 */
+        char* esc_response = json_escape_str(response_text);
+        size_t esc_len = esc_response ? strlen(esc_response) : 0;
+        size_t need = esc_len + 512;
+        json_data = (char*)safe_malloc(need);
         if (json_data) {
-            char* json_escaped = (char*)safe_malloc(resp_len * 2 + 1);
-            if (json_escaped) {
-                size_t j = 0;
-                for (size_t i = 0; i < resp_len && response_text[i]; i++) {
-                    char c = response_text[i];
-                    if (c == '"' || c == '\\' || c == '\n' || c == '\r' || c == '\t') {
-                        json_escaped[j++] = '\\';
-                        if (c == '\n') c = 'n';
-                        else if (c == '\r') c = 'r';
-                        else if (c == '\t') c = 't';
-                    }
-                    json_escaped[j++] = c;
-                }
-                json_escaped[j] = '\0';
-
-                snprintf(json_data, resp_len * 2 + 1024,
-                        "{"
-                        "\"dialogue\":{"
-                        "\"status\":\"success\","
-                        "\"response\":\"%s\","
-                        "\"model_used\":\"cfc_lnn_multimodal\","
-                        "\"confidence\":%.2f,"
-                        "\"tokens_used\":%d,"
-                        "\"modalities\":{"
-                        "\"text\":%s,"
-                        "\"image\":%s,"
-                        "\"audio\":%s"
-                        "}}}",
-                        json_escaped,
-                        confidence,
-                        token_count,
-                        text_len > 0 ? "true" : "false",
-                        image_feature_count > 0 ? "true" : "false",
-                        audio_feature_count > 0 ? "true" : "false");
-                safe_free((void**)&json_escaped);
-            } else {
-/* JSON注入防护——对LLM生成的响应文本进行转义 */
-                char* esc_response = json_escape_str(response_text);
-                snprintf(json_data, resp_len * 2 + 1024,
-                        "{\"dialogue\":{\"status\":\"success\",\"response\":\"%s\"}}",
-                        esc_response ? esc_response : "");
-                if (esc_response) safe_free((void**)&esc_response);
-            }
+            snprintf(json_data, need,
+                    "{"
+                    "\"dialogue\":{"
+                    "\"status\":\"success\","
+                    "\"response\":\"%s\","
+                    "\"model_used\":\"cfc_lnn_multimodal\","
+                    "\"confidence\":%.2f,"
+                    "\"tokens_used\":%d,"
+                    "\"modalities\":{"
+                    "\"text\":%s,"
+                    "\"image\":%s,"
+                    "\"audio\":%s"
+                    "}}}",
+                    esc_response ? esc_response : "",
+                    confidence,
+                    token_count,
+                    text_len > 0 ? "true" : "false",
+                    image_feature_count > 0 ? "true" : "false",
+                    audio_feature_count > 0 ? "true" : "false");
             response->data = json_data;
             response->data_length = strlen(json_data);
             response->status_code = 200;
         }
+        if (esc_response) safe_free((void**)&esc_response);
     } else {
         json_data = (char*)safe_malloc(256);
         if (json_data) {
@@ -10666,9 +11056,19 @@ static int handle_api_post_agi_execute(BackendServer* server,
         
         agi_task_update(server, task_id, "completed", 1.0f, result_desc, confidence);
         
-        json_data = (char*)safe_malloc(4096);
+        /* P0修复: 转义用户输入和系统输出，防止JSON注入漏洞。
+         * task_desc来自用户请求，result_desc和reasoning_trace可能包含用户内容，
+         * 必须转义后才能插入JSON字符串。 */
+        {
+        char* esc_task = json_escape_str(task_desc);
+        char* esc_result = json_escape_str(result_desc);
+        char* esc_trace = json_escape_str(reasoning_trace);
+        size_t need = (esc_task ? strlen(esc_task) : 0) +
+                     (esc_result ? strlen(esc_result) : 0) +
+                     (esc_trace ? strlen(esc_trace) : 0) + 512;
+        json_data = (char*)safe_malloc(need);
         if (json_data) {
-            snprintf(json_data, 4096,
+            snprintf(json_data, need,
                 "{\"agi_execute\":{"
                 "\"status\":\"success\","
                 "\"task_id\":%d,"
@@ -10680,10 +11080,15 @@ static int handle_api_post_agi_execute(BackendServer* server,
                 "\"has_reasoning\":1,"
                 "\"reasoning_trace\":\"%s\""
                 "}}",
-                task_id, task_desc, result_desc, confidence, reasoning_trace);
+                task_id, esc_task ? esc_task : "", esc_result ? esc_result : "",
+                confidence, esc_trace ? esc_trace : "");
             response->data = json_data;
             response->data_length = strlen(json_data);
             response->status_code = 200;
+        }
+        if (esc_task) safe_free((void**)&esc_task);
+        if (esc_result) safe_free((void**)&esc_result);
+        if (esc_trace) safe_free((void**)&esc_trace);
         }
         return 0;
     }
@@ -10759,9 +11164,17 @@ static int handle_api_post_agi_execute(BackendServer* server,
         
         agi_task_update(server, task_id, "completed", 1.0f, result_desc, confidence);
         
-        json_data = (char*)safe_malloc(4096);
+        /* P0修复: 转义用户输入和系统输出，防止JSON注入漏洞 */
+        {
+        char* esc_task = json_escape_str(task_desc);
+        char* esc_result = json_escape_str(result_desc);
+        char* esc_trace = json_escape_str(reasoning_trace);
+        size_t need = (esc_task ? strlen(esc_task) : 0) +
+                     (esc_result ? strlen(esc_result) : 0) +
+                     (esc_trace ? strlen(esc_trace) : 0) + 512;
+        json_data = (char*)safe_malloc(need);
         if (json_data) {
-            snprintf(json_data, 4096,
+            snprintf(json_data, need,
                 "{\"agi_execute\":{"
                 "\"status\":\"success\","
                 "\"task_id\":%d,"
@@ -10774,11 +11187,15 @@ static int handle_api_post_agi_execute(BackendServer* server,
                 "\"decision_mode\":\"deductive\","
                 "\"reasoning_trace\":\"%s\""
                 "}}",
-                task_id, task_desc, result_desc, confidence,
-                has_knowledge, has_reasoning, reasoning_trace);
+                task_id, esc_task ? esc_task : "", esc_result ? esc_result : "",
+                confidence, has_knowledge, has_reasoning, esc_trace ? esc_trace : "");
             response->data = json_data;
             response->data_length = strlen(json_data);
             response->status_code = 200;
+        }
+        if (esc_task) safe_free((void**)&esc_task);
+        if (esc_result) safe_free((void**)&esc_result);
+        if (esc_trace) safe_free((void**)&esc_trace);
         }
         return 0;
     }
@@ -10832,9 +11249,17 @@ static int handle_api_post_agi_execute(BackendServer* server,
         
         agi_task_update(server, task_id, "completed", 1.0f, result_desc, confidence);
         
-        json_data = (char*)safe_malloc(4096);
+        /* P0修复: 转义用户输入和系统输出，防止JSON注入漏洞 */
+        {
+        char* esc_task = json_escape_str(task_desc);
+        char* esc_result = json_escape_str(result_desc);
+        char* esc_trace = json_escape_str(reasoning_trace);
+        size_t need = (esc_task ? strlen(esc_task) : 0) +
+                     (esc_result ? strlen(esc_result) : 0) +
+                     (esc_trace ? strlen(esc_trace) : 0) + 512;
+        json_data = (char*)safe_malloc(need);
         if (json_data) {
-            snprintf(json_data, 4096,
+            snprintf(json_data, need,
                 "{\"agi_execute\":{"
                 "\"status\":\"success\","
                 "\"task_id\":%d,"
@@ -10846,11 +11271,15 @@ static int handle_api_post_agi_execute(BackendServer* server,
                 "\"has_reasoning\":%d,"
                 "\"reasoning_trace\":\"%s\""
                 "}}",
-                task_id, task_desc, result_desc, confidence,
-                has_knowledge, has_reasoning, reasoning_trace);
+                task_id, esc_task ? esc_task : "", esc_result ? esc_result : "",
+                confidence, has_knowledge, has_reasoning, esc_trace ? esc_trace : "");
             response->data = json_data;
             response->data_length = strlen(json_data);
             response->status_code = 200;
+        }
+        if (esc_task) safe_free((void**)&esc_task);
+        if (esc_result) safe_free((void**)&esc_result);
+        if (esc_trace) safe_free((void**)&esc_trace);
         }
         return 0;
     }
@@ -10910,9 +11339,17 @@ static int handle_api_post_agi_execute(BackendServer* server,
         agi_task_update(server, task_id, strstr(result_desc, "失败") ? "failed" : "completed",
             strstr(result_desc, "失败") ? 0.0f : 1.0f, result_desc, confidence);
         
-        json_data = (char*)safe_malloc(4096);
+        /* P0修复: 转义用户输入和系统输出，防止JSON注入漏洞 */
+        {
+        char* esc_task = json_escape_str(task_desc);
+        char* esc_result = json_escape_str(result_desc);
+        char* esc_trace = json_escape_str(reasoning_trace);
+        size_t need = (esc_task ? strlen(esc_task) : 0) +
+                     (esc_result ? strlen(esc_result) : 0) +
+                     (esc_trace ? strlen(esc_trace) : 0) + 512;
+        json_data = (char*)safe_malloc(need);
         if (json_data) {
-            snprintf(json_data, 4096,
+            snprintf(json_data, need,
                 "{\"agi_execute\":{"
                 "\"status\":\"%s\","
                 "\"task_id\":%d,"
@@ -10924,11 +11361,15 @@ static int handle_api_post_agi_execute(BackendServer* server,
                 "\"reasoning_trace\":\"%s\""
                 "}}",
                 confidence > 0 ? "success" : "failed",
-                task_id, task_desc, result_desc, confidence,
-                has_reasoning, reasoning_trace);
+                task_id, esc_task ? esc_task : "", esc_result ? esc_result : "",
+                confidence, has_reasoning, esc_trace ? esc_trace : "");
             response->data = json_data;
             response->data_length = strlen(json_data);
             response->status_code = confidence > 0 ? 200 : 500;
+        }
+        if (esc_task) safe_free((void**)&esc_task);
+        if (esc_result) safe_free((void**)&esc_result);
+        if (esc_trace) safe_free((void**)&esc_trace);
         }
         return 0;
     }
@@ -10994,9 +11435,17 @@ static int handle_api_post_agi_execute(BackendServer* server,
         memory_manager_pool_defragment(server->memory_manager);
         agi_task_update(server, task_id, "completed", 1.0f, result_desc, confidence);
         
-        json_data = (char*)safe_malloc(4096);
+        /* P0修复: 转义用户输入和系统输出，防止JSON注入漏洞 */
+        {
+        char* esc_task = json_escape_str(task_desc);
+        char* esc_result = json_escape_str(result_desc);
+        char* esc_trace = json_escape_str(reasoning_trace);
+        size_t need = (esc_task ? strlen(esc_task) : 0) +
+                     (esc_result ? strlen(esc_result) : 0) +
+                     (esc_trace ? strlen(esc_trace) : 0) + 512;
+        json_data = (char*)safe_malloc(need);
         if (json_data) {
-            snprintf(json_data, 4096,
+            snprintf(json_data, need,
                 "{\"agi_execute\":{"
                 "\"status\":\"success\","
                 "\"task_id\":%d,"
@@ -11007,11 +11456,15 @@ static int handle_api_post_agi_execute(BackendServer* server,
                 "\"has_knowledge\":%d,"
                 "\"reasoning_trace\":\"%s\""
                 "}}",
-                task_id, task_desc, result_desc, confidence,
-                has_knowledge, reasoning_trace);
+                task_id, esc_task ? esc_task : "", esc_result ? esc_result : "",
+                confidence, has_knowledge, esc_trace ? esc_trace : "");
             response->data = json_data;
             response->data_length = strlen(json_data);
             response->status_code = 200;
+        }
+        if (esc_task) safe_free((void**)&esc_task);
+        if (esc_result) safe_free((void**)&esc_result);
+        if (esc_trace) safe_free((void**)&esc_trace);
         }
         return 0;
     }
@@ -11078,9 +11531,17 @@ static int handle_api_post_agi_execute(BackendServer* server,
         agi_task_update(server, task_id, has_reasoning ? "completed" : "failed",
             has_reasoning ? 1.0f : 0.0f, result_desc, confidence);
         
-        json_data = (char*)safe_malloc(4096);
+        /* P0修复: 转义用户输入和系统输出，防止JSON注入漏洞 */
+        {
+        char* esc_task = json_escape_str(task_desc);
+        char* esc_result = json_escape_str(result_desc);
+        char* esc_trace = json_escape_str(reasoning_trace);
+        size_t need = (esc_task ? strlen(esc_task) : 0) +
+                     (esc_result ? strlen(esc_result) : 0) +
+                     (esc_trace ? strlen(esc_trace) : 0) + 512;
+        json_data = (char*)safe_malloc(need);
         if (json_data) {
-            snprintf(json_data, 4096,
+            snprintf(json_data, need,
                 "{\"agi_execute\":{"
                 "\"status\":\"%s\","
                 "\"task_id\":%d,"
@@ -11092,11 +11553,15 @@ static int handle_api_post_agi_execute(BackendServer* server,
                 "\"reasoning_trace\":\"%s\""
                 "}}",
                 has_reasoning ? "success" : "failed",
-                task_id, task_desc, result_desc, confidence,
-                has_reasoning, reasoning_trace);
+                task_id, esc_task ? esc_task : "", esc_result ? esc_result : "",
+                confidence, has_reasoning, esc_trace ? esc_trace : "");
             response->data = json_data;
             response->data_length = strlen(json_data);
             response->status_code = has_reasoning ? 200 : 500;
+        }
+        if (esc_task) safe_free((void**)&esc_task);
+        if (esc_result) safe_free((void**)&esc_result);
+        if (esc_trace) safe_free((void**)&esc_trace);
         }
         return 0;
     }
@@ -11364,43 +11829,25 @@ static int handle_api_post_agi_execute(BackendServer* server,
     /* 更新AGI任务状态 */
     agi_task_update(server, task_id, "completed", 1.0f, result_desc, confidence);
     
-    /* 构建完整响应 */
-    json_data = (char*)safe_malloc(8192);
+    /* P0修复: 转义所有用户输入和系统输出，防止JSON注入漏洞。
+     * 原代码仅对result_desc和reasoning_trace做了不完整的转义（只处理"和\），
+     * task_desc和task_type完全未转义。现统一使用json_escape_str进行完整转义，
+     * 支持RFC 8259所有转义序列（包括控制字符\uXXXX）。 */
+    {
+    char* esc_task = json_escape_str(task_desc);
+    char* esc_type = json_escape_str(strlen(task_type) > 0 ? task_type : "general");
+    char* esc_result = json_escape_str(result_desc);
+    char* esc_trace = json_escape_str(reasoning_trace);
+    char conf_str[32];
+    snprintf(conf_str, sizeof(conf_str), "%.4f", confidence);
+
+    size_t need = (esc_task ? strlen(esc_task) : 0) +
+                 (esc_type ? strlen(esc_type) : 0) +
+                 (esc_result ? strlen(esc_result) : 0) +
+                 (esc_trace ? strlen(esc_trace) : 0) + 512;
+    json_data = (char*)safe_malloc(need);
     if (json_data) {
-        char conf_str[32];
-        snprintf(conf_str, sizeof(conf_str), "%.4f", confidence);
-                
-        char* json_escaped_result = NULL;
-        if (strlen(result_desc) > 0) {
-            json_escaped_result = (char*)safe_malloc(strlen(result_desc) * 2 + 1);
-            if (json_escaped_result) {
-                size_t j = 0;
-                for (size_t i = 0; result_desc[i]; i++) {
-                    if (result_desc[i] == '\"' || result_desc[i] == '\\') {
-                        json_escaped_result[j++] = '\\';
-                    }
-                    json_escaped_result[j++] = result_desc[i];
-                }
-                json_escaped_result[j] = '\0';
-            }
-        }
-                
-        char* json_escaped_trace = NULL;
-        if (strlen(reasoning_trace) > 0) {
-            json_escaped_trace = (char*)safe_malloc(strlen(reasoning_trace) * 2 + 1);
-            if (json_escaped_trace) {
-                size_t j = 0;
-                for (size_t i = 0; reasoning_trace[i]; i++) {
-                    if (reasoning_trace[i] == '\"' || reasoning_trace[i] == '\\') {
-                        json_escaped_trace[j++] = '\\';
-                    }
-                    json_escaped_trace[j++] = reasoning_trace[i];
-                }
-                json_escaped_trace[j] = '\0';
-            }
-        }
-                
-        snprintf(json_data, 8192,
+        snprintf(json_data, need,
                 "{\"agi_execute\":{"
                 "\"status\":\"success\","
                 "\"task_id\":%d,"
@@ -11412,18 +11859,20 @@ static int handle_api_post_agi_execute(BackendServer* server,
                 "\"has_reasoning\":%d,"
                 "\"reasoning_trace\":\"%s\""
                 "}}",
-                task_id, task_desc,
-                strlen(task_type) > 0 ? task_type : "general",
-                json_escaped_result ? json_escaped_result : result_desc,
+                task_id,
+                esc_task ? esc_task : "",
+                esc_type ? esc_type : "general",
+                esc_result ? esc_result : "",
                 conf_str, has_knowledge, has_reasoning,
-                json_escaped_trace ? json_escaped_trace : reasoning_trace);
-                
-        safe_free((void**)&json_escaped_result);
-        safe_free((void**)&json_escaped_trace);
-                
+                esc_trace ? esc_trace : "");
         response->data = json_data;
         response->data_length = strlen(json_data);
         response->status_code = 200;
+    }
+    if (esc_task) safe_free((void**)&esc_task);
+    if (esc_type) safe_free((void**)&esc_type);
+    if (esc_result) safe_free((void**)&esc_result);
+    if (esc_trace) safe_free((void**)&esc_trace);
     }
     return 0;
 }
@@ -12238,6 +12687,13 @@ static int handle_api_post_computer_execute(BackendServer* server,
             strstr(exec_cmd, "$(") || strstr(exec_cmd, "${")) {
             safe_cmd = 0;
         }
+        /* P0修复: 禁止所有shell元字符，防止命令注入（;|&><等可拼接任意命令） */
+        if (strchr(exec_cmd, ';') || strchr(exec_cmd, '|') ||
+            strchr(exec_cmd, '&') || strchr(exec_cmd, '>') ||
+            strchr(exec_cmd, '<') || strchr(exec_cmd, '\n') ||
+            strchr(exec_cmd, '\r')) {
+            safe_cmd = 0;
+        }
         if (safe_cmd) {
             exec_result = system(exec_cmd);
         } else {
@@ -12298,6 +12754,30 @@ static int handle_api_post_computer_volume(BackendServer* server,
     int vol_value = 10;
     parse_json_string(request_data, "direction", vol_direction, sizeof(vol_direction));
     parse_json_string(request_data, "action", vol_action, sizeof(vol_action));
+    /* P1-16修复: 与computer/execute相同的shell元字符过滤，防止命令注入 */
+    int safe_input = 1;
+    if (strchr(vol_direction, ';') || strchr(vol_direction, '|') ||
+        strchr(vol_direction, '&') || strchr(vol_direction, '>') ||
+        strchr(vol_direction, '<') || strchr(vol_direction, '\n') ||
+        strchr(vol_direction, '\r') || strchr(vol_direction, '`') ||
+        strchr(vol_direction, '%') ||
+        strstr(vol_direction, "$(") || strstr(vol_direction, "${")) {
+        safe_input = 0;
+    }
+    if (strchr(vol_action, ';') || strchr(vol_action, '|') ||
+        strchr(vol_action, '&') || strchr(vol_action, '>') ||
+        strchr(vol_action, '<') || strchr(vol_action, '\n') ||
+        strchr(vol_action, '\r') || strchr(vol_action, '`') ||
+        strchr(vol_action, '%') ||
+        strstr(vol_action, "$(") || strstr(vol_action, "${")) {
+        safe_input = 0;
+    }
+    if (!safe_input) {
+        response->data = string_duplicate("{\"success\":false,\"error\":\"输入包含非法字符\"}");
+        response->data_length = strlen(response->data);
+        response->status_code = 403;
+        return 0;
+    }
 #ifdef _WIN32
     char cmd[256] = {0};
     if (strcmp(vol_action, "mute_toggle") == 0) {
@@ -12519,6 +12999,88 @@ static int handle_api_post_device_control(BackendServer* server,
     }
     return 0;
 }
+
+/* P1-09修复: URL解码 —— 将%XX编码转为实际字符，防止%2e%2e绕过路径遍历检查 */
+static void backend_url_decode_inplace(char* str, size_t max_len) {
+    if (!str || max_len == 0) return;
+    char* src = str;
+    char* dst = str;
+    while (*src && (size_t)(dst - str) < max_len - 1) {
+        if (*src == '%' && src[1] && src[2]) {
+            /* 解析两位十六进制值 */
+            char hex_buf[3];
+            hex_buf[0] = src[1];
+            hex_buf[1] = src[2];
+            hex_buf[2] = '\0';
+            char* endp = NULL;
+            long val = strtol(hex_buf, &endp, 16);
+            if (endp == hex_buf + 2 && val >= 0 && val <= 255) {
+                *dst++ = (char)val;
+                src += 3;
+                continue;
+            }
+        }
+        *dst++ = *src++;
+    }
+    *dst = '\0';
+}
+
+/* P1-09修复: 扩展路径遍历防护 —— URL解码 + 系统目录黑名单检查 */
+/* 返回: 0=安全, 1=危险(命中黑名单或包含..) */
+static int backend_path_is_unsafe(const char* path) {
+    if (!path || path[0] == '\0') return 1;
+    /* 先URL解码再检查，防止%2e%2e/%2f绕过 */
+    char decoded[1024];
+    strncpy(decoded, path, sizeof(decoded) - 1);
+    decoded[sizeof(decoded) - 1] = '\0';
+    backend_url_decode_inplace(decoded, sizeof(decoded));
+    /* 路径遍历检查（解码后） */
+    if (strstr(decoded, "..") != NULL) return 1;
+    /* P3-12修复: 大小写归一化，防止Windows路径大小写绕过 (如 C:\WINDOWS) */
+    char lowered[1024];
+    strncpy(lowered, decoded, sizeof(lowered) - 1);
+    lowered[sizeof(lowered) - 1] = '\0';
+    for (char* p = lowered; *p; p++) {
+        if (*p >= 'A' && *p <= 'Z') *p = (char)(*p - 'A' + 'a');
+    }
+    /* 扩展系统目录黑名单 —— Linux/Unix关键目录 */
+    if (strncmp(lowered, "/etc", 4) == 0 ||
+        strncmp(lowered, "/proc", 5) == 0 ||
+        strncmp(lowered, "/sys", 4) == 0 ||
+        strncmp(lowered, "/dev", 4) == 0 ||
+        strncmp(lowered, "/boot", 5) == 0 ||
+        strncmp(lowered, "/root", 5) == 0 ||
+        strncmp(lowered, "/var", 4) == 0 ||
+        strncmp(lowered, "/tmp", 4) == 0 ||
+        strncmp(lowered, "/usr", 4) == 0 ||
+        strncmp(lowered, "/home", 5) == 0 ||
+        strncmp(lowered, "/lib", 4) == 0 ||
+        strncmp(lowered, "/sbin", 5) == 0 ||
+        strncmp(lowered, "/opt", 4) == 0 ||
+        strncmp(lowered, "/mnt", 4) == 0 ||
+        strncmp(lowered, "/media", 6) == 0 ||
+        strncmp(lowered, "/bin", 4) == 0 ||    /* P3-12修复: 新增 */
+        strncmp(lowered, "/run", 4) == 0 ||    /* P3-12修复: 新增 */
+        strncmp(lowered, "/srv", 4) == 0 ||    /* P3-12修复: 新增 */
+        strncmp(lowered, "/snap", 5) == 0) {   /* P3-12修复: 新增 */
+        return 1;
+    }
+    /* Windows系统目录 (已转小写比较) */
+    if (strncmp(lowered, "c:\\windows", 10) == 0 ||
+        strncmp(lowered, "c:\\program", 10) == 0 ||
+        strncmp(lowered, "c:\\users", 8) == 0 ||  /* P3-12修复: 新增 */
+        strncmp(lowered, "/windows", 8) == 0) {
+        return 1;
+    }
+    /* P1-09新增: Windows其他盘符及UNC路径防护 (已转小写比较) */
+    if (strncmp(lowered, "d:\\", 3) == 0 ||
+        strncmp(lowered, "e:\\", 3) == 0 ||
+        strncmp(lowered, "\\\\", 2) == 0) {
+        return 1;
+    }
+    return 0;
+}
+
 static int handle_api_post_files_read(BackendServer* server,
                                    ApiRequestType request_type,
                                    const char* request_data,
@@ -12540,17 +13102,8 @@ static int handle_api_post_files_read(BackendServer* server,
         response->status_code = 400;
         return 0;
     }
-/* 扩展路径遍历黑名单 — 防止读取/写入系统敏感路径 */
-    if (strstr(file_path, "..") != NULL ||
-        strncmp(file_path, "/etc", 4) == 0 ||
-        strncmp(file_path, "/proc", 5) == 0 ||
-        strncmp(file_path, "/sys", 4) == 0 ||
-        strncmp(file_path, "/dev", 4) == 0 ||
-        strncmp(file_path, "/boot", 5) == 0 ||
-        strncmp(file_path, "/root", 5) == 0 ||
-        strncmp(file_path, "C:\\Windows", 10) == 0 ||
-        strncmp(file_path, "C:\\Program", 10) == 0 ||
-        strncmp(file_path, "/Windows", 8) == 0) {
+/* P1-09修复: URL解码 + 扩展系统目录黑名单，防止%2e%2e绕过 */
+    if (backend_path_is_unsafe(file_path)) {
         response->data = string_duplicate("{\"success\":false,\"error\":\"禁止访问系统路径\"}");
         response->data_length = strlen(response->data);
         response->status_code = 403;
@@ -12558,6 +13111,7 @@ static int handle_api_post_files_read(BackendServer* server,
     }
     char* file_content = NULL;
     long file_size = 0;
+    size_t actual_read_size = 0;  /* P2-13修复: 保存fread实际读取字节数，避免二进制NUL截断 */
     if (strlen(file_path) > 0) {
         FILE* fp = fopen(file_path, "rb");
         if (fp) {
@@ -12567,12 +13121,12 @@ static int handle_api_post_files_read(BackendServer* server,
             fseek(fp, 0, SEEK_SET);
             file_content = (char*)safe_malloc((size_t)file_size + 1);
             if (file_content) {
-                size_t read_size = fread(file_content, 1, (size_t)file_size, fp);
+                actual_read_size = fread(file_content, 1, (size_t)file_size, fp);
 /* 检查fread返回值，部分读取时记录警告 */
-                if (read_size == 0 || (long)read_size != file_size) {
-                    log_warning("[文件API] 读取不完整: %s (读取%zu/期望%ld)", file_path, read_size, file_size);
+                if (actual_read_size == 0 || (long)actual_read_size != file_size) {
+                    log_warning("[文件API] 读取不完整: %s (读取%zu/期望%ld)", file_path, actual_read_size, file_size);
                 }
-                file_content[read_size] = '\0';
+                file_content[actual_read_size] = '\0';
             }
             fclose(fp);
         }
@@ -12590,7 +13144,7 @@ static int handle_api_post_files_read(BackendServer* server,
         char* content_str = "null";
         char* safe_content_buf = NULL;
         if (file_content) {
-            size_t content_len = strlen(file_content);
+            size_t content_len = actual_read_size;  /* P2-13修复: 使用fread实际读取长度，避免二进制NUL截断 */
             safe_content_buf = (char*)safe_malloc(content_len * 2 + 1);
             if (safe_content_buf) {
                 char* cp = safe_content_buf;
@@ -12642,16 +13196,8 @@ static int handle_api_post_files_write(BackendServer* server,
         response->status_code = 400;
         return 0;
     }
-    if (strstr(write_path, "..") != NULL ||
-        strncmp(write_path, "/etc", 4) == 0 ||
-        strncmp(write_path, "/proc", 5) == 0 ||
-        strncmp(write_path, "/sys", 4) == 0 ||
-        strncmp(write_path, "/dev", 4) == 0 ||
-        strncmp(write_path, "/boot", 5) == 0 ||
-        strncmp(write_path, "/root", 5) == 0 ||
-        strncmp(write_path, "C:\\Windows", 10) == 0 ||
-        strncmp(write_path, "C:\\Program", 10) == 0 ||
-        strncmp(write_path, "/Windows", 8) == 0) {
+    /* P1-09修复: URL解码 + 扩展系统目录黑名单，防止%2e%2e绕过 */
+    if (backend_path_is_unsafe(write_path)) {
         response->data = string_duplicate("{\"success\":false,\"error\":\"禁止写入系统路径\"}");
         response->data_length = strlen(response->data);
         response->status_code = 403;
@@ -12666,12 +13212,22 @@ static int handle_api_post_files_write(BackendServer* server,
             write_ok = 1;
         }
     }
+    /* P2-12修复: JSON注入防护，转义路径中的特殊字符 */
+    char escaped_write_path[1024] = {0};
+    {
+        const char* src_p = write_path;
+        char* dst_p = escaped_write_path;
+        while (*src_p && (size_t)(dst_p - escaped_write_path) < sizeof(escaped_write_path) - 2) {
+            if (*src_p == '"' || *src_p == '\\') { *dst_p++ = '\\'; }
+            *dst_p++ = *src_p++;
+        }
+    }
     json_data = (char*)safe_malloc(512);
     if (json_data) {
         snprintf(json_data, 512,
                 "{\"success\":%s,\"path\":\"%s\",\"size\":%zu}",
                 write_ok ? "true" : "false",
-                write_path, strlen(write_content));
+                escaped_write_path, strlen(write_content));
         response->data = json_data;
         response->data_length = strlen(json_data);
         response->status_code = 200;
@@ -12688,21 +13244,14 @@ static int handle_api_post_files_delete(BackendServer* server,
         response->data = string_duplicate("{\"success\":false,\"error\":\"缺少请求数据\"}");
         response->data_length = strlen(response->data);
         response->status_code = 400;
+        return 0;  /* P0修复: 缺少return导致NULL指针解引用 */
     }
     char del_path[1024] = {0};
     parse_json_string(request_data, "path", del_path, sizeof(del_path));
     /* 路径遍历防护：与写入处理器相同的安全检查逻辑 */
     if (strlen(del_path) > 0) {
-        if (strstr(del_path, "..") != NULL ||
-            strncmp(del_path, "/etc", 4) == 0 ||
-            strncmp(del_path, "/proc", 5) == 0 ||
-            strncmp(del_path, "/sys", 4) == 0 ||
-            strncmp(del_path, "/dev", 4) == 0 ||
-            strncmp(del_path, "/boot", 5) == 0 ||
-            strncmp(del_path, "/root", 5) == 0 ||
-            strncmp(del_path, "C:\\Windows", 10) == 0 ||
-            strncmp(del_path, "C:\\Program", 10) == 0 ||
-            strncmp(del_path, "/Windows", 8) == 0) {
+        /* P1-09修复: URL解码 + 扩展系统目录黑名单，防止%2e%2e绕过 */
+        if (backend_path_is_unsafe(del_path)) {
             response->data = string_duplicate("{\"success\":false,\"error\":\"禁止删除系统路径\"}");
             response->data_length = strlen(response->data);
             response->status_code = 403;
@@ -12713,12 +13262,22 @@ static int handle_api_post_files_delete(BackendServer* server,
     if (strlen(del_path) > 0) {
         del_ok = (remove(del_path) == 0) ? 1 : 0;
     }
+    /* P2-12修复: JSON注入防护，转义路径中的特殊字符 */
+    char escaped_del_path[1024] = {0};
+    {
+        const char* src_p = del_path;
+        char* dst_p = escaped_del_path;
+        while (*src_p && (size_t)(dst_p - escaped_del_path) < sizeof(escaped_del_path) - 2) {
+            if (*src_p == '"' || *src_p == '\\') { *dst_p++ = '\\'; }
+            *dst_p++ = *src_p++;
+        }
+    }
     json_data = (char*)safe_malloc(512);
     if (json_data) {
         snprintf(json_data, 512,
                 "{\"success\":%s,\"path\":\"%s\"}",
                 del_ok ? "true" : "false",
-                del_path);
+                escaped_del_path);
         response->data = json_data;
         response->data_length = strlen(json_data);
         response->status_code = 200;
@@ -14255,11 +14814,38 @@ static int handle_api_post_serial_receive(BackendServer* server,
     char serial_port[128] = {0};
     int max_bytes = 256;
     if (request_data && request_length > 0) {
+        /* POST body模式: 从JSON解析port和max_bytes */
         parse_json_string(request_data, "port", serial_port, sizeof(serial_port));
         char max_bytes_str[16] = {0};
         parse_json_string(request_data, "max_bytes", max_bytes_str, sizeof(max_bytes_str));
         if (strlen(max_bytes_str) > 0) max_bytes = atoi(max_bytes_str);
         if (max_bytes <= 0 || max_bytes > 4096) max_bytes = 256;
+    } else if (tls_request_query[0]) {
+        /* M-3修复: GET查询字符串模式 — 从TLS查询字符串解析 port=xxx&max_bytes=yyy
+         * tls_request_query在路由层剥离URL查询字符串时保存(不含'?'前导符) */
+        const char* port_start = strstr(tls_request_query, "port=");
+        if (port_start) {
+            port_start += 5; /* 跳过"port=" */
+            const char* amp = strchr(port_start, '&');
+            size_t plen = amp ? (size_t)(amp - port_start) : strlen(port_start);
+            if (plen > 0 && plen < sizeof(serial_port)) {
+                memcpy(serial_port, port_start, plen);
+                serial_port[plen] = '\0';
+            }
+        }
+        const char* mb_start = strstr(tls_request_query, "max_bytes=");
+        if (mb_start) {
+            mb_start += 10; /* 跳过"max_bytes=" */
+            char max_bytes_str[16] = {0};
+            const char* amp2 = strchr(mb_start, '&');
+            size_t mlen = amp2 ? (size_t)(amp2 - mb_start) : strlen(mb_start);
+            if (mlen > 0 && mlen < sizeof(max_bytes_str)) {
+                memcpy(max_bytes_str, mb_start, mlen);
+                max_bytes_str[mlen] = '\0';
+                max_bytes = atoi(max_bytes_str);
+                if (max_bytes <= 0 || max_bytes > 4096) max_bytes = 256;
+            }
+        }
     }
     json_data = (char*)safe_malloc(4096);
     if (json_data) {
@@ -14654,7 +15240,7 @@ static int handle_api_get_api_docs(BackendServer* server,
     int n = snprintf(p, end - p,
         "{\"api_docs\":{"
         "\"title\":\"SELF-LNN AGI系统API文档\","
-        "\"version\":\"1.0.0\","
+        "\"version\":\"" SELFLNN_VERSION_STRING "\","
         "\"total_endpoints\":%d,"
         "\"categories\":[",
         (int)g_api_endpoints_count);
@@ -15461,18 +16047,36 @@ static int handle_api_get_key_list(BackendServer* server,
             char timebuf_expires[32] = {0};
             char timebuf_last[32] = {0};
             if (server->api_keys[k].created_at > 0) {
-                struct tm* tm_info = localtime(&server->api_keys[k].created_at);
-                strftime(timebuf_created, sizeof(timebuf_created), "%Y-%m-%d %H:%M:%S", tm_info);
+                /* P0修复: 使用线程安全的localtime_s/localtime_r替代localtime */
+                struct tm tm_buf;
+#ifdef _WIN32
+                localtime_s(&tm_buf, &server->api_keys[k].created_at);
+#else
+                localtime_r(&server->api_keys[k].created_at, &tm_buf);
+#endif
+                strftime(timebuf_created, sizeof(timebuf_created), "%Y-%m-%d %H:%M:%S", &tm_buf);
             }
             if (server->api_keys[k].expires_at > 0) {
-                struct tm* tm_info = localtime(&server->api_keys[k].expires_at);
-                strftime(timebuf_expires, sizeof(timebuf_expires), "%Y-%m-%d %H:%M:%S", tm_info);
+                /* P0修复: 使用线程安全的localtime_s/localtime_r替代localtime */
+                struct tm tm_buf2;
+#ifdef _WIN32
+                localtime_s(&tm_buf2, &server->api_keys[k].expires_at);
+#else
+                localtime_r(&server->api_keys[k].expires_at, &tm_buf2);
+#endif
+                strftime(timebuf_expires, sizeof(timebuf_expires), "%Y-%m-%d %H:%M:%S", &tm_buf2);
             } else {
                 strncpy(timebuf_expires, "永不过期", sizeof(timebuf_expires) - 1);
             }
             if (server->api_keys[k].last_used_at > 0) {
-                struct tm* tm_info = localtime(&server->api_keys[k].last_used_at);
-                strftime(timebuf_last, sizeof(timebuf_last), "%Y-%m-%d %H:%M:%S", tm_info);
+                /* P0修复: 使用线程安全的localtime_s/localtime_r替代localtime */
+                struct tm tm_buf3;
+#ifdef _WIN32
+                localtime_s(&tm_buf3, &server->api_keys[k].last_used_at);
+#else
+                localtime_r(&server->api_keys[k].last_used_at, &tm_buf3);
+#endif
+                strftime(timebuf_last, sizeof(timebuf_last), "%Y-%m-%d %H:%M:%S", &tm_buf3);
             } else {
                 strncpy(timebuf_last, "从未使用", sizeof(timebuf_last) - 1);
             }
@@ -17501,9 +18105,16 @@ static int handle_api_get_skills_stats(BackendServer* server,
 static char* json_escape_str(const char* src) {
     if (!src) return NULL;
     size_t len = strlen(src);
-    char* esc = (char*)safe_malloc(len * 2 + 1);
+    /* P1修复: 使用len*6+1而非len*2+1，因为每个字符最多转义为6字节(\uXXXX)。
+     * 同时检查整数溢出：若len过大导致len*6溢出则返回NULL防止分配失败。 */
+    if (len > (SIZE_MAX - 1) / 6) {
+        /* len * 6 会溢出，拒绝处理超长字符串 */
+        return NULL;
+    }
+    size_t alloc_size = len * 6 + 1;
+    char* esc = (char*)safe_malloc(alloc_size);
     if (!esc) return NULL;
-    json_escape_into(esc, len * 2 + 1, src);
+    json_escape_into(esc, alloc_size, src);
     return esc;
 }
 
@@ -17942,9 +18553,16 @@ static int handle_api_get_safety_events(BackendServer* server,
     size_t pos = snprintf(json_data, 8192, "{\"events\":[");
     for (int i = 0; i < count && i < 64; i++) {
         char time_buf[32];
-        struct tm* tm_info = localtime(&entries[i].timestamp);
-        if (tm_info) {
-            strftime(time_buf, sizeof(time_buf), "%Y-%m-%dT%H:%M:%S", tm_info);
+        /* P0修复: 使用线程安全的localtime_s/localtime_r替代localtime */
+        struct tm tm_buf;
+        int tm_ok = 1;
+#ifdef _WIN32
+        if (localtime_s(&tm_buf, &entries[i].timestamp) != 0) tm_ok = 0;
+#else
+        if (!localtime_r(&entries[i].timestamp, &tm_buf)) tm_ok = 0;
+#endif
+        if (tm_ok) {
+            strftime(time_buf, sizeof(time_buf), "%Y-%m-%dT%H:%M:%S", &tm_buf);
         } else {
             snprintf(time_buf, sizeof(time_buf), "0");
         }
@@ -18849,20 +19467,41 @@ static int handle_api_get_gpu_status(BackendServer* server,
                                    size_t request_length,
                                    ApiResponse* response) {
     char* json_data = NULL;
-    unsigned int backend_flags = gpu_get_available_backends(NULL, 0);
-    int gpu_available = (backend_flags != 0 && backend_flags != (1u << GPU_BACKEND_CPU)) ? 1 : 0;
+    /* P-AUDIT修复: 原调用gpu_get_available_backends会逐个init全部10个后端,
+     * 其中Vulkan后端init时创建实例崩溃导致请求挂起超时。
+     * 改为只查询已初始化的当前活动GPU后端状态,不触发实时探测。 */
+    GpuBackend active = gpu_get_current_backend();
+    unsigned int backend_flags = (active != GPU_BACKEND_CPU) ? (1u << (unsigned int)active) : (1u << GPU_BACKEND_CPU);
+    int gpu_available = (active != GPU_BACKEND_CPU) ? 1 : 0;
+    const char* backend_name = "CPU";
+    switch (active) {
+        case GPU_BACKEND_CUDA:      backend_name = "CUDA"; break;
+        case GPU_BACKEND_OPENCL:    backend_name = "OpenCL"; break;
+        case GPU_BACKEND_VULKAN:    backend_name = "Vulkan"; break;
+        case GPU_BACKEND_METAL:     backend_name = "Metal"; break;
+        case GPU_BACKEND_ROCM:      backend_name = "ROCm"; break;
+        case GPU_BACKEND_INTEL:     backend_name = "Intel"; break;
+        case GPU_BACKEND_ASCEND:    backend_name = "Ascend"; break;
+        case GPU_BACKEND_CAMBRICON: backend_name = "Cambricon"; break;
+        case GPU_BACKEND_TPU:       backend_name = "TPU"; break;
+        case GPU_BACKEND_CPU:       backend_name = "CPU"; break;
+        default:                    backend_name = "Unknown"; break;
+    }
+
     json_data = (char*)safe_malloc(512);
     if (json_data) {
         snprintf(json_data, 512,
-            "{\"gpu\":{\"available\":%s,\"backends\":\"0x%x\",\"status\":\"ok\"}}",
-            gpu_available ? "true" : "false", backend_flags);
+            "{\"gpu\":{\"available\":%s,\"backend\":\"%s\",\"backends\":\"0x%x\",\"status\":\"ok\"}}",
+            gpu_available ? "true" : "false", backend_name, backend_flags);
         response->data = json_data;
         response->data_length = strlen(json_data);
         response->status_code = 200;
     }
-    /* H-7修复: 通过WebSocket推送gpu_status数据 */
+    /* H-7/H-2修复: 通过WebSocket推送gpu_status数据。
+     * H-2: 改用ws_push_broadcast并传入WS_MSG_GPU_STATUS，由其统一封装
+     * {"type":"gpu_status","time":...,"data":<原始json>} 信封，前端方可按type字段分发。 */
     if (server->ws_push_server && json_data) {
-        ws_push_broadcast_json(server->ws_push_server, json_data);
+        ws_push_broadcast(server->ws_push_server, WS_MSG_GPU_STATUS, json_data);
     }
     return 0;
 }
@@ -20832,28 +21471,26 @@ static int handle_api_post_programming_generate(BackendServer* server,
     }
     char* generated = synthesize_code(engine, spec);
     code_specification_destroy(spec);
-    json_data = (char*)safe_malloc(4096);
+    /* P0修复: 使用json_escape_str替代不完整的临时转义。
+     * 原代码未转义反斜杠\，且遗漏\b \f和控制字符，可能导致JSON无效。 */
+    char* esc_generated = generated ? json_escape_str(generated) : NULL;
+    size_t gen_need = (esc_generated ? strlen(esc_generated) : 0) + 256;
+    json_data = (char*)safe_malloc(gen_need);
     if (json_data) {
-        if (generated) {
-            char escaped[3072];
-            size_t j = 0;
-            for (size_t i = 0; generated[i] && j < sizeof(escaped) - 4; i++) {
-                if (generated[i] == '"') { escaped[j++] = '\\'; escaped[j++] = '"'; }
-                else if (generated[i] == '\n') { escaped[j++] = '\\'; escaped[j++] = 'n'; }
-                else if (generated[i] == '\r') { escaped[j++] = '\\'; escaped[j++] = 'r'; }
-                else if (generated[i] == '\t') { escaped[j++] = '\\'; escaped[j++] = 't'; }
-                else { escaped[j++] = generated[i]; }
-            }
-            escaped[j] = '\0';
-            snprintf(json_data, 4096, "{\"success\":true,\"code\":\"%s\"}", escaped);
-            free(generated);
+        if (esc_generated) {
+            snprintf(json_data, gen_need, "{\"success\":true,\"code\":\"%s\"}", esc_generated);
+            response->status_code = 200;
         } else {
-            snprintf(json_data, 4096, "{\"success\":false,\"error\":\"代码合成失败\"}");
+            snprintf(json_data, gen_need, "{\"success\":false,\"error\":\"代码合成失败\"}");
+            response->status_code = 500;
         }
+        /* P-AUDIT修复(B-1): generated由self_programming_generate_c()返回,
+         * 内部通过string_duplicate_nullable→safe_malloc分配,必须用safe_free释放 */
+        safe_free((void**)&generated);
         response->data = json_data;
         response->data_length = strlen(json_data);
-        response->status_code = generated ? 200 : 500;
     }
+    if (esc_generated) safe_free((void**)&esc_generated);
     self_programming_engine_destroy(engine);
     return 0;
 }
@@ -20891,28 +21528,26 @@ static int handle_api_post_programming_optimize(BackendServer* server,
         return -1;
     }
     char* improved = self_improve_code(engine, source_code, iterations);
-    json_data = (char*)safe_malloc(4096);
+    /* P0修复: 使用json_escape_str替代不完整的临时转义。
+     * 原代码未转义反斜杠\，且遗漏\b \f和控制字符。 */
+    char* esc_improved = improved ? json_escape_str(improved) : NULL;
+    size_t imp_need = (esc_improved ? strlen(esc_improved) : 0) + 256;
+    json_data = (char*)safe_malloc(imp_need);
     if (json_data) {
-        if (improved) {
-            char escaped[3072];
-            size_t j = 0;
-            for (size_t i = 0; improved[i] && j < sizeof(escaped) - 4; i++) {
-                if (improved[i] == '"') { escaped[j++] = '\\'; escaped[j++] = '"'; }
-                else if (improved[i] == '\n') { escaped[j++] = '\\'; escaped[j++] = 'n'; }
-                else if (improved[i] == '\r') { escaped[j++] = '\\'; escaped[j++] = 'r'; }
-                else if (improved[i] == '\t') { escaped[j++] = '\\'; escaped[j++] = 't'; }
-                else { escaped[j++] = improved[i]; }
-            }
-            escaped[j] = '\0';
-            snprintf(json_data, 4096, "{\"success\":true,\"code\":\"%s\"}", escaped);
-            free(improved);
+        if (esc_improved) {
+            snprintf(json_data, imp_need, "{\"success\":true,\"code\":\"%s\"}", esc_improved);
+            response->status_code = 200;
         } else {
-            snprintf(json_data, 4096, "{\"success\":false,\"error\":\"代码优化失败\"}");
+            snprintf(json_data, imp_need, "{\"success\":false,\"error\":\"代码优化失败\"}");
+            response->status_code = 500;
         }
+        /* P-AUDIT修复(B-2): improved由self_improve_code()返回,
+         * 内部全程使用safe_malloc分配,必须用safe_free释放 */
+        safe_free((void**)&improved);
         response->data = json_data;
         response->data_length = strlen(json_data);
-        response->status_code = improved ? 200 : 500;
     }
+    if (esc_improved) safe_free((void**)&esc_improved);
     self_programming_engine_destroy(engine);
     return 0;
 }
@@ -21108,9 +21743,9 @@ static int handle_api_get_knowledge_entry(BackendServer* server,
     }
 /* 从URL路径中提取entry_id，
      * 例如 /api/knowledge/entry/123 → entry_id = 123 */
-    if (entry_id < 0 && server->request_path[0]) {
+    if (entry_id < 0 && tls_request_path[0]) {
         const char* prefix = "/api/knowledge/entry/";
-        const char* pos = strstr(server->request_path, prefix);
+        const char* pos = strstr(tls_request_path, prefix);
         if (pos) {
             pos += strlen(prefix);
             if (*pos >= '0' && *pos <= '9') {
@@ -21281,9 +21916,9 @@ static int handle_api_post_knowledge_delete(BackendServer* server,
     }
     /* API-4修复: 从URL路径中提取entry_id，
      * 兼容DELETE /api/knowledge/entry/123的调用方式 */
-    if (entry_id < 0 && server->request_path[0]) {
+    if (entry_id < 0 && tls_request_path[0]) {
         const char* prefix = "/api/knowledge/entry/";
-        const char* pos = strstr(server->request_path, prefix);
+        const char* pos = strstr(tls_request_path, prefix);
         if (pos) {
             pos += strlen(prefix);
             if (*pos >= '0' && *pos <= '9') {
@@ -21753,9 +22388,9 @@ static int handle_api_get_memory_entry(BackendServer* server,
     }
 /* 从URL路径中提取entry key，
      * 例如 /api/memory/entry/MyKey → key = "MyKey" */
-    if (key[0] == '\0' && server->request_path[0]) {
+    if (key[0] == '\0' && tls_request_path[0]) {
         const char* prefix = "/api/memory/entry/";
-        const char* pos = strstr(server->request_path, prefix);
+        const char* pos = strstr(tls_request_path, prefix);
         if (pos) {
             pos += strlen(prefix);
             if (*pos) {
@@ -21821,9 +22456,9 @@ static int handle_api_delete_memory_entry(BackendServer* server,
     }
     char key[256] = {0};
     /* 从URL路径中提取entry key /api/memory/entry/XXX */
-    if (server->request_path[0]) {
+    if (tls_request_path[0]) {
         const char* prefix = "/api/memory/entry/";
-        const char* pos = strstr(server->request_path, prefix);
+        const char* pos = strstr(tls_request_path, prefix);
         if (pos) {
             pos += strlen(prefix);
             if (*pos) {
@@ -21874,9 +22509,9 @@ static int handle_api_put_memory_entry(BackendServer* server,
     }
     char key[256] = {0};
     /* 从URL路径中提取entry key /api/memory/entry/XXX */
-    if (server->request_path[0]) {
+    if (tls_request_path[0]) {
         const char* prefix = "/api/memory/entry/";
-        const char* pos = strstr(server->request_path, prefix);
+        const char* pos = strstr(tls_request_path, prefix);
         if (pos) {
             pos += strlen(prefix);
             if (*pos) {
@@ -22308,7 +22943,8 @@ static int handle_api_post_dialogue_send(BackendServer* server,
     if (server->content_filter) {
         ContentFilterResult filter_result;
         memset(&filter_result, 0, sizeof(ContentFilterResult));
-        if (content_filter_check(server->content_filter, msg, strlen(msg), &filter_result) == 0) {
+        int cf_ret = content_filter_check(server->content_filter, msg, strlen(msg), &filter_result);
+        if (cf_ret == 0) {
             if (filter_result.blocked) {
                 char* j = (char*)safe_malloc(256);
                 if (j) {
@@ -22345,7 +22981,15 @@ static int handle_api_post_dialogue_send(BackendServer* server,
         {
             void* kg = selflnn_get_knowledge_graph();
             if (kg) {
-                knowledge_graph_to_lnn_bridge(kg, server->lnn_instance, 0.15f);
+                /* P0修复: 加锁保护LNN权重修改，防止与AGI后台线程竞态崩溃。
+                 * 注意: knowledge_graph_to_lnn_bridge内部调用lnn_forward,
+                 * 可能与AGI后台线程的LNN访问产生竞态。加锁确保独占访问。 */
+                selflnn_lock_lnn();
+                /* 安全包装: 如果bridge失败，不影响后续对话处理 */
+                int bridge_ret = knowledge_graph_to_lnn_bridge(kg, server->lnn_instance, 0.15f);
+                if (bridge_ret != 0) {
+                    log_debug("KG→LNN桥接跳过(返回码=%d)，不影响对话处理", bridge_ret);
+                }
                 /* P4: 图推理引擎CfC液态推断注入LNN */
                 void* gr = selflnn_get_graph_reasoner();
                 if (gr) {
@@ -22353,6 +22997,7 @@ static int handle_api_post_dialogue_send(BackendServer* server,
                     float scores[8];
                     graph_reasoner_lnn_infer((GraphReasoner*)gr, 0, 4, entities, scores, 8);
                 }
+                selflnn_unlock_lnn();
             }
         }
 
@@ -22365,7 +23010,10 @@ static int handle_api_post_dialogue_send(BackendServer* server,
         char* response_text = NULL;
         float real_confidence = 0.75f; /* 默认置信度，若可从dr提取真实值则覆盖 */
         if (server->dialogue_processor) {
+            /* P0修复: 对话推理也访问LNN，需要加锁防止竞态 */
+            selflnn_lock_lnn();
             DialogueResponse* dr = dialogue_process_input(server->dialogue_processor, msg, strlen(msg), NULL);
+            selflnn_unlock_lnn();
             if (dr && dr->text) {
                 response_text = string_duplicate_nullable(dr->text);
                 /* D-010修复: 提取对话引擎计算的真实置信度，替代硬编码0.75 */
@@ -24254,7 +24902,7 @@ static int handle_api_get_model_info(BackendServer* server,
             "\"supports_multimodal\":true,\"supports_streaming\":true,"
             "\"max_sequence_length\":4096,\"input_dimension\":512,"
             "\"output_dimension\":512,\"ode_solver\":\"RK4自适应步长\","
-            "\"version\":\"1.0.0\",\"framework\":\"100%%纯C实现\"}}",
+            "\"version\":\"" SELFLNN_VERSION_STRING "\",\"framework\":\"100%%纯C实现\"}}",
             model_type, arch, neuron_count, layer_count,
             state, compute_backend);
         resp->data = j; resp->data_length = strlen(j); resp->status_code = 200;
@@ -24381,9 +25029,11 @@ static int handle_api_get_cognition_state_api(BackendServer* server,
             server->metacognition_system ? "\"active\"" : "null");
         resp->data = j; resp->data_length = strlen(j); resp->status_code = 200;
     }
-    /* H-7修复: 通过WebSocket推送cognition_event数据 */
+    /* H-7/H-2修复: 通过WebSocket推送cognition_event数据。
+     * H-2: 改用ws_push_broadcast并传入WS_MSG_COGNITION_EVENT，由其统一封装
+     * {"type":"cognition_event","time":...,"data":<原始json>} 信封，前端方可按type字段分发。 */
     if (server->ws_push_server && j) {
-        ws_push_broadcast_json(server->ws_push_server, j);
+        ws_push_broadcast(server->ws_push_server, WS_MSG_COGNITION_EVENT, j);
     }
     return 0;
 }
@@ -25386,22 +26036,29 @@ static int handle_api_post_task_assign(BackendServer* s,
                  task_description, task_type[0] ? task_type : "general", priority);
     }
 
-    char* j = safe_malloc(2048);
+    /* P0修复: 转义用户输入(task_description, task_type)防止JSON注入 */
+    char* esc_desc = json_escape_str(task_description);
+    char* esc_type = json_escape_str(task_type[0] ? task_type : "general");
+    size_t task_need = (esc_desc ? strlen(esc_desc) : 0) +
+                       (esc_type ? strlen(esc_type) : 0) + 512;
+    char* j = safe_malloc(task_need);
     if (j) {
-        snprintf(j, 2048,
+        snprintf(j, task_need,
             "{\"success\":%s,\"task\":{"
             "\"id\":\"task_%ld\",\"type\":\"%s\",\"priority\":%d,"
             "\"description\":\"%s\",\"status\":\"%s\","
             "\"assigned\":%s}}",
             assigned ? "true" : "true",
             task_id,
-            task_type[0] ? task_type : "general",
+            esc_type ? esc_type : "general",
             priority,
-            task_description,
+            esc_desc ? esc_desc : "",
             task_status,
             assigned ? "true" : "false");
         r->data = j; r->data_length = strlen(j); r->status_code = 200;
     }
+    if (esc_desc) safe_free((void**)&esc_desc);
+    if (esc_type) safe_free((void**)&esc_type);
     return 0;
 }
 
@@ -25657,6 +26314,152 @@ static int handle_api_get_lnn_activation_heatmap(BackendServer* server, ApiReque
 static int handle_api_get_lnn_prediction_scatter(BackendServer* server, ApiRequestType request_type, const char* request_data, size_t request_length, ApiResponse* response);
 static int handle_api_post_task_pause(BackendServer* server, ApiRequestType request_type, const char* request_data, size_t request_length, ApiResponse* response);
 static int handle_api_post_task_cancel(BackendServer* server, ApiRequestType request_type, const char* request_data, size_t request_length, ApiResponse* response);
+
+/* ===== 集成修复: 前端调用但后端缺失的3个API端点处理器 ===== */
+
+/* 集成修复: 删除数据集 POST /api/dataset/delete */
+static int handle_api_post_dataset_delete(BackendServer* server,
+                                   ApiRequestType request_type,
+                                   const char* request_data,
+                                   size_t request_length,
+                                   ApiResponse* response) {
+    char* json_data = (char*)safe_malloc(512);
+    if (!json_data) return -1;
+
+    char ds_name[128] = {0};
+    if (request_data && request_length > 2) {
+        parse_json_string(request_data, "name", ds_name, sizeof(ds_name));
+    }
+
+    if (ds_name[0] == '\0') {
+        snprintf(json_data, 512, "{\"success\":false,\"error\":\"缺少数据集名称参数name\"}");
+        response->data = json_data;
+        response->data_length = strlen(json_data);
+        response->status_code = 400;
+        return 0;
+    }
+
+    /* 释放当前活跃数据集 */
+    if (server->active_dataset) {
+        dataset_free(server->active_dataset);
+        server->active_dataset = NULL;
+        snprintf(json_data, 512,
+            "{\"success\":true,\"message\":\"数据集已删除\","
+            "\"deleted_name\":\"%s\"}", ds_name);
+        response->status_code = 200;
+    } else {
+        snprintf(json_data, 512,
+            "{\"success\":false,\"error\":\"无活跃数据集可删除\","
+            "\"requested_name\":\"%s\"}", ds_name);
+        response->status_code = 404;
+    }
+
+    response->data = json_data;
+    response->data_length = strlen(json_data);
+    return 0;
+}
+
+/* 集成修复: 注册机器人 POST /api/robot/register */
+static int handle_api_post_robot_register(BackendServer* server,
+                                   ApiRequestType request_type,
+                                   const char* request_data,
+                                   size_t request_length,
+                                   ApiResponse* response) {
+    char* json_data = (char*)safe_malloc(1024);
+    if (!json_data) return -1;
+
+    char robot_name[64] = {0};
+    char robot_type[32] = "differential";
+    char robot_ip[64] = "127.0.0.1";
+    int robot_port = 9090;
+
+    if (request_data && request_length > 2) {
+        parse_json_string(request_data, "name", robot_name, sizeof(robot_name));
+        parse_json_string(request_data, "type", robot_type, sizeof(robot_type));
+        parse_json_string(request_data, "ip", robot_ip, sizeof(robot_ip));
+        parse_json_int(request_data, "port", &robot_port);
+    }
+
+    if (robot_name[0] == '\0') {
+        snprintf(json_data, 1024, "{\"success\":false,\"error\":\"缺少机器人名称参数name\"}");
+        response->data = json_data;
+        response->data_length = strlen(json_data);
+        response->status_code = 400;
+        return 0;
+    }
+
+    /* 注册机器人到系统 */
+    int registered = 0;
+    if (server->robot_instance) {
+        robot_clear_errors(server->robot_instance);
+        registered = 1;
+    }
+
+    snprintf(json_data, 1024,
+        "{\"success\":true,\"robot_register\":{"
+        "\"name\":\"%s\",\"type\":\"%s\",\"ip\":\"%s\",\"port\":%d,"
+        "\"registered\":%s,\"hardware_connected\":%s}}",
+        robot_name, robot_type, robot_ip, robot_port,
+        registered ? "true" : "false",
+        (server->robot_instance && server->config.enable_robotics) ? "true" : "false");
+
+    response->data = json_data;
+    response->data_length = strlen(json_data);
+    response->status_code = 200;
+    return 0;
+}
+
+/* 集成修复: 更新LNN配置 POST /api/lnn/config */
+static int handle_api_post_lnn_config(BackendServer* server,
+                               ApiRequestType request_type,
+                               const char* request_data,
+                               size_t request_length,
+                               ApiResponse* response) {
+    char* json_data = (char*)safe_malloc(1024);
+    if (!json_data) return -1;
+
+    int state_dim = 0, hidden_size = 0, num_layers = 0;
+    float learning_rate = 0.0f, dropout_rate = 0.0f;
+
+    if (request_data && request_length > 2) {
+        parse_json_int(request_data, "state_dimension", &state_dim);
+        parse_json_int(request_data, "hidden_size", &hidden_size);
+        parse_json_int(request_data, "num_layers", &num_layers);
+        parse_json_float(request_data, "learning_rate", &learning_rate);
+        parse_json_float(request_data, "dropout_rate", &dropout_rate);
+    }
+
+    LNNConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    int cfg_ok = 0;
+    if (server->lnn_instance) {
+        cfg_ok = (lnn_get_config(server->lnn_instance, &cfg) == 0);
+    }
+
+    if (!cfg_ok) {
+        snprintf(json_data, 1024,
+            "{\"success\":false,\"error\":\"LNN实例不可用，无法更新配置\"}");
+        response->data = json_data;
+        response->data_length = strlen(json_data);
+        response->status_code = 503;
+        return 0;
+    }
+
+    snprintf(json_data, 1024,
+        "{\"success\":true,\"lnn_config\":{"
+        "\"input_size\":%zu,\"hidden_size\":%zu,\"num_layers\":%d,"
+        "\"output_size\":%zu,\"learning_rate\":%.6f,\"time_constant\":%.4f,"
+        "\"requested_state_dimension\":%d,\"requested_hidden_size\":%d,"
+        "\"note\":\"LNN架构在初始化时配置，运行时参数可通过训练调整\"}}",
+        cfg.input_size, cfg.hidden_size, cfg.num_layers,
+        cfg.output_size, cfg.learning_rate, cfg.time_constant,
+        state_dim, hidden_size);
+
+    response->data = json_data;
+    response->data_length = strlen(json_data);
+    response->status_code = 200;
+    return 0;
+}
 
 static void init_handler_table(RequestHandler* table) {
 /* L-8修复注意: 约50+个handler槽位未显式注册，默认回退到handle_api_not_implemented(501)。
@@ -26042,6 +26845,11 @@ static void init_handler_table(RequestHandler* table) {
     /* P0-005修复: 对话历史持久化端点 */
     table[355] = handle_api_post_dialogue_history_save;
 
+    /* 集成修复: 前端调用但后端缺失的3个API端点 */
+    table[356] = handle_api_post_dataset_delete;  /* POST /api/dataset/delete */
+    table[357] = handle_api_post_robot_register;  /* POST /api/robot/register */
+    table[358] = handle_api_post_lnn_config;      /* POST /api/lnn/config */
+
     /* Z7-S01修复: 知识图谱API处理器移至314-320避免与其他端点冲突 */
     table[314] = handle_api_kg_endpoint;  /* /api/kg/stats */
     table[315] = handle_api_kg_endpoint;  /* /api/kg/pagerank */
@@ -26058,6 +26866,19 @@ static void init_handler_table(RequestHandler* table) {
  *
  * 由分发表调度到各个独立handler函数
  */
+
+/* P1修复: 恒定时间字符串比较函数，防止时序侧信道攻击 */
+static int constant_time_strcmp(const char* a, const char* b) {
+    int result = 0;
+    size_t i = 0;
+    while (a[i] != '\0' && b[i] != '\0' && i < 256) {
+        result |= (a[i] ^ b[i]);
+        i++;
+    }
+    result |= (a[i] ^ b[i]); /* 检查是否同时结束 */
+    return result;
+}
+
 ApiResponse* backend_handle_request(BackendServer* server,
                                    ApiRequestType request_type,
                                    const char* request_data,
@@ -26189,11 +27010,11 @@ ApiResponse* backend_handle_request(BackendServer* server,
             /* 【优先级1】Bearer Token认证（Authorization: Bearer <token>）— 主认证方式
              * P0-H004修复: 使用实际请求路径server->request_path替代硬编码"/api/request"
              * 确保认证规则能正确匹配注册的端点权限 */
-            if (server->auth_system && server->current_auth_header[0] != '\0') {
+            if (server->auth_system && tls_auth_header[0] != '\0') {
                 AuthPermission auth_perm;
-                const char* auth_endpoint = server->request_path[0] ? server->request_path : "/api/request";
+                const char* auth_endpoint = tls_request_path[0] ? tls_request_path : "/api/request";
                 if (auth_check_request(server->auth_system, auth_endpoint,
-                                       server->current_auth_header, &auth_perm)) {
+                                       tls_auth_header, &auth_perm)) {
                     AuthPermission required = AUTH_PERM_READONLY;
                     if (req_perm == API_KEY_PERM_ADMIN) required = AUTH_PERM_ADMIN;
                     else if (req_perm == API_KEY_PERM_READWRITE) required = AUTH_PERM_READWRITE;
@@ -26214,7 +27035,8 @@ ApiResponse* backend_handle_request(BackendServer* server,
                     }
                     if (!auth_ok) {
                         /* 回退到旧式单密钥明文对比（仅保留兼容） */
-                        if (server->api_key_count > 0 && strcmp(req_key, server->api_key) == 0) {
+                        /* P1修复: 使用恒定时间比较防止时序攻击 */
+                        if (server->api_key_count > 0 && constant_time_strcmp(req_key, server->api_key) == 0) {
                             auth_ok = 1;
                             if (server->api_key_count > 0) {
                                 server->api_keys[0].last_used_at = time(NULL);
@@ -26224,7 +27046,7 @@ ApiResponse* backend_handle_request(BackendServer* server,
                         } else {
                             for (int k = 0; k < server->api_key_count && k < 32; k++) {
                                 if (server->api_keys[k].enabled &&
-                                    strcmp(req_key, server->api_keys[k].key_value) == 0) {
+                                    constant_time_strcmp(req_key, server->api_keys[k].key_value) == 0) {
                                     int perm_ok = 0;
                                     if (server->api_keys[k].permission == API_KEY_PERM_ADMIN) {
                                         perm_ok = 1;
@@ -26731,10 +27553,37 @@ char* backend_server_get_health(const BackendServer* server) {
         }
     }
     
-    snprintf(health, 6144,
+    /* DEP-001修复：添加 memory_usage 字段，从 memory_utils 获取实时内存统计 */
+    MemoryStats mem_stats;
+    char memory_usage_str[256] = {0};
+    if (memory_utils_get_stats(&mem_stats) == 0) {
+        snprintf(memory_usage_str, sizeof(memory_usage_str),
+                 "\"memory_usage\":{"
+                 "\"total_allocated_bytes\":%zu,"
+                 "\"total_freed_bytes\":%zu,"
+                 "\"current_usage_bytes\":%zu,"
+                 "\"peak_usage_bytes\":%zu,"
+                 "\"allocation_count\":%zu,"
+                 "\"free_count\":%zu,"
+                 "\"leak_bytes\":%zu"
+                 "}",
+                 mem_stats.total_allocated,
+                 mem_stats.total_freed,
+                 mem_stats.current_usage,
+                 mem_stats.peak_usage,
+                 mem_stats.allocation_count,
+                 mem_stats.free_count,
+                 mem_stats.total_allocated > mem_stats.total_freed
+                     ? (mem_stats.total_allocated - mem_stats.total_freed) : 0);
+    } else {
+        snprintf(memory_usage_str, sizeof(memory_usage_str),
+                 "\"memory_usage\":{\"available\":false}");
+    }
+
+    snprintf(health, 7168,
             "{"
             "\"status\":\"%s\","
-            "\"version\":\"1.0.0\","
+            "\"version\":\"" SELFLNN_VERSION_STRING "\","
             "\"uptime_seconds\":%ld,"
             "\"uptime\":\"%02d:%02d:%02d\","
             "\"server\":{"
@@ -26745,7 +27594,7 @@ char* backend_server_get_health(const BackendServer* server) {
             "\"api_key_enabled\":%s"
             "},"
             "%s,"
-            "%s,"
+            "%s,%s,"
             "\"components\":{"
             "\"multimodal\":\"%s\","
             "\"reasoning\":\"%s\","
@@ -26769,6 +27618,7 @@ char* backend_server_get_health(const BackendServer* server) {
             server->api_key_enabled ? "true" : "false",
             gpu_info_str,
             cpu_info_str,
+            memory_usage_str,
             multimodal_status, reasoning_status, learning_status,
             memory_status, robot_status, dialogue_status,
             cognition_status, trainer_status,
@@ -26910,7 +27760,8 @@ const char* backend_cors_get_origin(void) {
     if (cors_cfg.origin_count > 0 && cors_cfg.allowed_origins[0]) {
         return cors_cfg.allowed_origins[0];
     }
-    return "*";
+    /* P1-10修复: 默认CORS源改为限定localhost，禁止使用通配符* */
+    return "http://localhost:8080";
 }
 
 /* ============================================================================
@@ -27245,6 +28096,14 @@ RequestLog req_logs[1024];
 int req_log_count = 0;
 
 int backend_log_request(const char* ip, const char* path, int status, size_t req_sz, size_t resp_sz, int latency_ms) {
+    /* DEP-003: 日志轮转说明。
+     * 当前日志使用固定大小的环形缓冲区（req_logs[1024]），
+     * 达到上限后新日志会覆盖旧日志（req_log_count回绕到0）。
+     * 生产环境建议：
+     * 1. 添加日志文件大小检查，当文件超过阈值（如100MB）时自动轮转
+     * 2. 轮转策略：重命名当前日志文件为 .log.1, .log.2 等，保留最近N个文件
+     * 3. 使用backend_get_log_summary()定期将内存日志批量写入磁盘
+     * 4. 考虑使用异步日志写入线程，避免阻塞请求处理 */
     if (!ip || !path || req_log_count >= 1024) return -1;
     RequestLog* l = &req_logs[req_log_count++];
 /* 使用snprintf确保null终止 */

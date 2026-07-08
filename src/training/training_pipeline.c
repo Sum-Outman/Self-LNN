@@ -2498,7 +2498,8 @@ int pipeline_run_pretrain_phase(TrainingPipeline* pipeline, int epochs, float* f
     for (size_t i = 0; i < total_samples; i++) shuffle_idx[i] = i;
 
     for (int epoch = 0; epoch < epochs; epoch++) {
-        if (pipeline->state.is_paused) { epoch--; continue; }
+        /* P2修复: 暂停时添加10ms休眠，避免100% CPU占用的忙等待 */
+        if (pipeline->state.is_paused) { epoch--; platform_sleep_ms(10); continue; }
         if (!pipeline->state.is_running) { safe_free((void**)&shuffle_idx); return 0; }
 
         /* 每个epoch打乱数据顺序（K-012修复：使用安全随机数） */

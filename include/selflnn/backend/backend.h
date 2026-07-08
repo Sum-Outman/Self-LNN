@@ -516,7 +516,12 @@ typedef enum {
     /* ===== P0-005修复: 对话历史持久化端点 ===== */
     API_POST_DIALOGUE_HISTORY_SAVE = 355,     /**< 对话历史持久化 POST /api/dialogue/history/save */
 
-    /* ===== L-016修复: 哨兵值紧随最高枚举值（API_REQUEST_COUNT = 356，handler_table大小自动适配） ===== */
+    /* ===== 集成修复: 前端调用但后端缺失的3个API端点 ===== */
+    API_POST_DATASET_DELETE = 356,            /**< 删除数据集 POST /api/dataset/delete */
+    API_POST_ROBOT_REGISTER = 357,            /**< 注册机器人 POST /api/robot/register */
+    API_POST_LNN_CONFIG = 358,                /**< 更新LNN配置 POST /api/lnn/config */
+
+    /* ===== L-016修复: 哨兵值紧随最高枚举值（API_REQUEST_COUNT = 359，handler_table大小自动适配） ===== */
     API_REQUEST_COUNT                        /**< 自动计算枚举最大值+1，反映API处理程序分发表大小 */
 } ApiRequestType;
 
@@ -568,7 +573,34 @@ typedef struct {
 } ApiResponse;
 
 /**
- * @brief 默认配置文件路径
+ * @brief 默认后端配置文件路径（双轨制配置系统）
+ *
+ * BLD-004修复：明确说明双轨制配置的命名规范与职责划分。
+ *
+ * 项目采用两套并存配置系统，各自职责不同：
+ *
+ * ┌─────────────────────────────┬──────────────────────────────────┐
+ * │ SELFLNN_CONFIG_FILE         │ config/system_config.json        │
+ * │ ("selflnn_config.json")     │                                  │
+ * ├─────────────────────────────┼──────────────────────────────────┤
+ * │ 保存: BackendConfig         │ 保存: SystemConfig               │
+ * │ 内容: 端口号、连接数、      │ 内容: 输入/隐藏/输出维度、       │
+ * │       功能开关(推理/学习/   │       CfC通道数、LNN容量、       │
+ * │       演化/机器人等)、      │       训练超参数、模态配置等     │
+ * │       API密钥、限流配置     │       系统级结构参数             │
+ * │ 用途: 运行时行为配置        │ 用途: 模型架构与训练配置         │
+ * │ 加载: backend_load_config() │ 加载: selflnn_config_load_...()  │
+ * │ 保存: backend_save_config() │ 保存: selflnn_config_save_...()  │
+ * └─────────────────────────────┴──────────────────────────────────┘
+ *
+ * 加载优先级（backend_load_config / backend_save_config）：
+ *   1. 函数参数 path（非NULL时直接使用）
+ *   2. 环境变量 SELFLNN_CONFIG_PATH（支持运行时自定义路径）
+ *   3. 本宏默认值 "selflnn_config.json"（相对路径，工作目录下）
+ *
+ * 注意：此双轨制设计是刻意为之，两套配置互不覆盖，避免
+ * 模型架构参数与运行时行为参数混在一起造成配置管理混乱。
+ * 如需统一配置入口，请使用上层管理脚本而非修改此宏定义。
  */
 #define SELFLNN_CONFIG_FILE "selflnn_config.json"
 

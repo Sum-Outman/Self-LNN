@@ -83,6 +83,27 @@
                 setTimeout(function() { if (div.parentNode) div.parentNode.removeChild(div); }, 4000);
             }
         };
+        /* FE-023修复: 添加前端hash路由支持（pushState/popstate），
+         * 使浏览器前进/后退按钮能正确切换页面section */
+        window._hashRouteHandler = function() {
+            var hash = window.location.hash;
+            if (!hash) return;
+            var targetId = hash.substring(1);
+            /* 切换section显示 */
+            document.querySelectorAll('.section').forEach(function(s) { s.classList.remove('active'); });
+            var target = document.getElementById(targetId);
+            if (target) target.classList.add('active');
+            /* 更新导航高亮 */
+            document.querySelectorAll('.nav a').forEach(function(a) {
+                a.classList.remove('active');
+                if (a.getAttribute('href') === '#' + targetId) a.classList.add('active');
+            });
+        };
+        window.addEventListener('hashchange', window._hashRouteHandler);
+        /* 页面加载时处理初始hash */
+        if (window.location.hash) {
+            setTimeout(function() { window._hashRouteHandler(); }, 100);
+        }
     </script>
     <script src="js/programming-workbench.js"></script>
     <script src="js/product-design.js"></script>
@@ -6030,18 +6051,23 @@ response = requests.get(
                     var lastUsed = k.last_used_at ? new Date(k.last_used_at*1000).toLocaleString() : '从未使用';
                     var now = Date.now()/1000;
                     var expired = k.expires_at > 0 && now > k.expires_at;
+                    /* P1-10修复: 对所有用户可控字段使用escapeHtml防止XSS */
+                    var safeName = window.escapeHtml(k.name||'未命名');
+                    var safeKeyPrefix = window.escapeHtml(k.key_prefix||'sk-***');
+                    var safePerm = window.escapeHtml(PERM_NAMES[k.permission]||'未知');
+                    var safeCreated = window.escapeHtml(created);
                     return '<tr>' +
-                        '<td>' + (k.name||'未命名') + '</td>' +
-                        '<td><code>' + (k.key_prefix||'sk-***') + '</code></td>' +
-                        '<td>' + (PERM_NAMES[k.permission]||'未知') + '</td>' +
+                        '<td>' + safeName + '</td>' +
+                        '<td><code>' + safeKeyPrefix + '</code></td>' +
+                        '<td>' + safePerm + '</td>' +
                         '<td><span class="status-badge ' + (expired?'expired':(k.enabled?'active':'inactive')) + '">' + (expired?'已过期':(k.enabled?'启用':'禁用')) + '</span></td>' +
-                        '<td>' + created + '</td>' +
+                        '<td>' + safeCreated + '</td>' +
                         '<td>' + expires + '</td>' +
                         '<td>' + (k.usage_count||0) + '</td>' +
                         '<td>' + lastUsed + '</td>' +
                         '<td>' +
-                            '<button onclick="toggleKey(\'' + k.key_prefix + '\', ' + (k.enabled?0:1) + ')" class="btn btn-sm">' + (k.enabled?'禁用':'启用') + '</button>' +
-                            '<button onclick="deleteKey(\'' + k.key_prefix + '\')" class="btn btn-sm btn-danger">删除</button>' +
+                            '<button onclick="toggleKey(\'' + safeKeyPrefix + '\', ' + (k.enabled?0:1) + ')" class="btn btn-sm">' + (k.enabled?'禁用':'启用') + '</button>' +
+                            '<button onclick="deleteKey(\'' + safeKeyPrefix + '\')" class="btn btn-sm btn-danger">删除</button>' +
                         '</td>' +
                     '</tr>';
                 }).join('');
@@ -6190,7 +6216,8 @@ response = requests.get(
                     return; 
                 }
                 body.innerHTML = logs.slice(0, 50).map(function(l) {
-                    return '<tr><td>'+(l.time||'-')+'</td><td>'+(l.endpoint||'-')+'</td><td>'+(l.method||'GET')+'</td><td>'+(l.status_code||200)+'</td><td>'+(l.duration_ms||0)+'ms</td><td>'+(l.client_ip||'-')+'</td></tr>';
+                    /* P1-11修复: 对所有日志字段使用escapeHtml防止XSS */
+                    return '<tr><td>'+window.escapeHtml(l.time||'-')+'</td><td>'+window.escapeHtml(l.endpoint||'-')+'</td><td>'+window.escapeHtml(l.method||'GET')+'</td><td>'+window.escapeHtml(String(l.status_code||200))+'</td><td>'+window.escapeHtml(String(l.duration_ms||0))+'ms</td><td>'+window.escapeHtml(l.client_ip||'-')+'</td></tr>';
                 }).join('');
 
                 /* 端点排行 */
@@ -7355,8 +7382,9 @@ response = requests.get(
                 var logContainer = document.getElementById('training-log-container');
                 if (logContainer) {
                     if (data.logs.length > 0) {
+                        /* P1-12修复: 对训练日志的time和message字段使用escapeHtml防止XSS */
                         logContainer.innerHTML = data.logs.map(function(l) {
-                            return '<div class="log-item"><span class="log-time">' + (l.time || '') + '</span><span class="log-message">' + (l.message || '') + '</span></div>';
+                            return '<div class="log-item"><span class="log-time">' + window.escapeHtml(l.time || '') + '</span><span class="log-message">' + window.escapeHtml(l.message || '') + '</span></div>';
                         }).join('');
                     } else {
                         logContainer.innerHTML = '<div class="log-item system"><span class="log-time">未连接</span><span class="log-message">系统就绪，等待训练任务...</span></div>';

@@ -94,10 +94,21 @@ float* audio_load_wav(const char* filepath, int* sample_rate_out,
         fclose(fp);
         return NULL;
     }
+    /* P0修复: 限制num_channels上限，防止后续乘积(total_raw_samples*num_channels*sizeof)
+     * 在32位平台发生size_t溢出。256声道已覆盖7.1.4等所有实际音频场景。 */
+    if (num_channels > 256) {
+        log_error("[音频加载] 声道数过大: %d (上限256)", num_channels);
+        fclose(fp);
+        return NULL;
+    }
 
     /* 跳过fmt块剩余数据(如果有) */
     if (header.fmt_size > 16) {
-        fseek(fp, (long)(header.fmt_size - 16), SEEK_CUR);
+        if (fseek(fp, (long)(header.fmt_size - 16), SEEK_CUR) != 0) {
+            log_error("[音频加载] 跳过fmt块剩余数据失败");
+            fclose(fp);
+            return NULL;
+        }
     }
 
     /* 查找"data"块 */
@@ -116,7 +127,11 @@ float* audio_load_wav(const char* filepath, int* sample_rate_out,
         }
         if (memcmp(chunk_id, "data", 4) == 0) break;
         /* 跳过非data块 */
-        fseek(fp, (long)chunk_size, SEEK_CUR);
+        if (fseek(fp, (long)chunk_size, SEEK_CUR) != 0) {
+            log_error("[音频加载] 跳过非data块失败");
+            fclose(fp);
+            return NULL;
+        }
     }
 
     if (memcmp(chunk_id, "data", 4) != 0) {
@@ -152,12 +167,20 @@ float* audio_load_wav(const char* filepath, int* sample_rate_out,
     /* 读取并转换PCM数据到float */
     if (bits_per_sample == 16) {
         /* 16位有符号PCM */
-        int16_t* raw_buf = (int16_t*)safe_malloc((size_t)total_raw_samples * num_channels * sizeof(int16_t));
+        /* P0修复: 乘积溢出检查 — total_raw_samples*num_channels*sizeof(int16_t) */
+        size_t alloc16 = (size_t)total_raw_samples * (size_t)num_channels * sizeof(int16_t);
+        if (num_channels > 0 && alloc16 / (size_t)num_channels / sizeof(int16_t) != (size_t)total_raw_samples) {
+            log_error("[音频加载] 16位PCM缓冲区大小计算溢出");
+            safe_free((void**)&audio_data); fclose(fp); return NULL;
+        }
+        int16_t* raw_buf = (int16_t*)safe_malloc(alloc16);
         if (!raw_buf) { safe_free((void**)&audio_data); fclose(fp); return NULL; }
         size_t raw_count = (size_t)total_raw_samples * num_channels;
         size_t bytes_read = fread(raw_buf, sizeof(int16_t), raw_count, fp);
         if (bytes_read != raw_count) {
             log_warning("[音频加载] 实际读取%d采样点(期望%d)", (int)bytes_read, (int)raw_count);
+            /* P1修复: 根据实际读取数量修正样本数，避免循环访问未初始化内存区域 */
+            total_raw_samples = (int)(bytes_read / (size_t)num_channels);
         }
         for (int i = 0; i < total_raw_samples; i++) {
             float sum = 0.0f;
@@ -169,12 +192,20 @@ float* audio_load_wav(const char* filepath, int* sample_rate_out,
         safe_free((void**)&raw_buf);
     } else if (bits_per_sample == 8) {
         /* 8位无符号PCM */
-        uint8_t* raw_buf = (uint8_t*)safe_malloc((size_t)total_raw_samples * num_channels);
+        /* P0修复: 乘积溢出检查 — total_raw_samples*num_channels (8位每采样1字节) */
+        size_t alloc8 = (size_t)total_raw_samples * (size_t)num_channels;
+        if (num_channels > 0 && alloc8 / (size_t)num_channels != (size_t)total_raw_samples) {
+            log_error("[音频加载] 8位PCM缓冲区大小计算溢出");
+            safe_free((void**)&audio_data); fclose(fp); return NULL;
+        }
+        uint8_t* raw_buf = (uint8_t*)safe_malloc(alloc8);
         if (!raw_buf) { safe_free((void**)&audio_data); fclose(fp); return NULL; }
         size_t raw_count = (size_t)total_raw_samples * num_channels;
         size_t bytes_read = fread(raw_buf, 1, raw_count, fp);
         if (bytes_read != raw_count) {
             log_warning("[音频加载] 8位实际读取%d字节(期望%d)", (int)bytes_read, (int)raw_count);
+            /* P1修复: 根据实际读取字节数修正样本数，避免循环访问未初始化内存区域 */
+            total_raw_samples = (int)(bytes_read / (size_t)num_channels);
         }
         for (int i = 0; i < total_raw_samples; i++) {
             float sum = 0.0f;
@@ -186,12 +217,19 @@ float* audio_load_wav(const char* filepath, int* sample_rate_out,
         safe_free((void**)&raw_buf);
     } else if (bits_per_sample == 24) {
         /* 24位有符号PCM (3字节) */
-        size_t raw_bytes = (size_t)total_raw_samples * num_channels * 3;
+        /* P0修复: 乘积溢出检查 — total_raw_samples*num_channels*3 (24位每采样3字节) */
+        size_t raw_bytes = (size_t)total_raw_samples * (size_t)num_channels * 3;
+        if (num_channels > 0 && raw_bytes / (size_t)num_channels / 3 != (size_t)total_raw_samples) {
+            log_error("[音频加载] 24位PCM缓冲区大小计算溢出");
+            safe_free((void**)&audio_data); fclose(fp); return NULL;
+        }
         uint8_t* raw_buf = (uint8_t*)safe_malloc(raw_bytes);
         if (!raw_buf) { safe_free((void**)&audio_data); fclose(fp); return NULL; }
         size_t bytes_read = fread(raw_buf, 1, raw_bytes, fp);
         if (bytes_read != raw_bytes) {
             log_warning("[音频加载] 24位实际读取%d字节(期望%d)", (int)bytes_read, (int)raw_bytes);
+            /* P1修复: 根据实际读取字节数修正样本数，避免循环访问未初始化内存区域 */
+            total_raw_samples = (int)(bytes_read / ((size_t)num_channels * 3));
         }
         for (int i = 0; i < total_raw_samples; i++) {
             float sum = 0.0f;
@@ -206,12 +244,20 @@ float* audio_load_wav(const char* filepath, int* sample_rate_out,
         safe_free((void**)&raw_buf);
     } else if (bits_per_sample == 32) {
         /* 32位有符号PCM */
-        int32_t* raw_buf = (int32_t*)safe_malloc((size_t)total_raw_samples * num_channels * sizeof(int32_t));
+        /* P0修复: 乘积溢出检查 — total_raw_samples*num_channels*sizeof(int32_t) */
+        size_t alloc32 = (size_t)total_raw_samples * (size_t)num_channels * sizeof(int32_t);
+        if (num_channels > 0 && alloc32 / (size_t)num_channels / sizeof(int32_t) != (size_t)total_raw_samples) {
+            log_error("[音频加载] 32位PCM缓冲区大小计算溢出");
+            safe_free((void**)&audio_data); fclose(fp); return NULL;
+        }
+        int32_t* raw_buf = (int32_t*)safe_malloc(alloc32);
         if (!raw_buf) { safe_free((void**)&audio_data); fclose(fp); return NULL; }
         size_t raw_count = (size_t)total_raw_samples * num_channels;
         size_t bytes_read = fread(raw_buf, sizeof(int32_t), raw_count, fp);
         if (bytes_read != raw_count) {
             log_warning("[音频加载] 32位实际读取%d采样点(期望%d)", (int)bytes_read, (int)raw_count);
+            /* P1修复: 根据实际读取数量修正样本数，避免循环访问未初始化内存区域 */
+            total_raw_samples = (int)(bytes_read / (size_t)num_channels);
         }
         for (int i = 0; i < total_raw_samples; i++) {
             float sum = 0.0f;
@@ -278,9 +324,22 @@ int audio_wav_info(const char* filepath, int* sample_rate_out,
         return -1;
     }
 
-    if (sample_rate_out) *sample_rate_out = (int)header.sample_rate;
-    if (num_channels_out) *num_channels_out = (int)header.num_channels;
-    if (bits_per_sample_out) *bits_per_sample_out = (int)header.bits_per_sample;
+    /* P2修复: 验证头部字段有效性，与audio_load_wav保持一致 */
+    int sample_rate = (int)header.sample_rate;
+    int num_channels = (int)header.num_channels;
+    int bits_per_sample = (int)header.bits_per_sample;
+    if (sample_rate <= 0 || num_channels < 1 || bits_per_sample < 8) {
+        fclose(fp);
+        return -1;
+    }
+    if (num_channels > 256) {
+        fclose(fp);
+        return -1;
+    }
+
+    if (sample_rate_out) *sample_rate_out = sample_rate;
+    if (num_channels_out) *num_channels_out = num_channels;
+    if (bits_per_sample_out) *bits_per_sample_out = bits_per_sample;
 
     /* 计算时长 */
     if (duration_sec_out && header.byte_rate > 0) {
@@ -299,7 +358,8 @@ int audio_wav_info(const char* filepath, int* sample_rate_out,
                 found = 1;
                 break;
             }
-            fseek(fp, (long)chunk_size, SEEK_CUR);
+            /* P2修复: 检查fseek返回值，失败时终止扫描 */
+            if (fseek(fp, (long)chunk_size, SEEK_CUR) != 0) break;
         }
 
         if (found && bytes_per_sample > 0) {

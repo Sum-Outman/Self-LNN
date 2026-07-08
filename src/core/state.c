@@ -69,6 +69,11 @@ NetworkState* network_state_create(const NetworkStateConfig* config) {
     
     // 分配历史缓冲区（保留最近100个状态）
     state->history_size = 100;
+    /* P2-03修复: 乘法溢出检查，防止state_size * history_size回绕 */
+    if (state_size > 0 && (size_t)state->history_size > SIZE_MAX / state_size) {
+        network_state_free(state);
+        return NULL;
+    }
     state->state_history = (float*)safe_calloc(state_size * state->history_size, sizeof(float));
     
     // 检查内存分配

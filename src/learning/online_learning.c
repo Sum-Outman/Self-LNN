@@ -666,7 +666,12 @@ int online_learner_update(OnlineLearner* learner,
      * 后续由学习器的SGD/Kalman/Adaptive算法直接对LNN参数应用更新
      * 当LNN未附着时：直接返回错误码(-1)，不回退到线性模型，
      * 因为错误的线性回退会产生虚假训练数据，污染学习器状态 */
-    float* lnn_output_buf = (float*)safe_malloc((size_t)RL_MAX(target_size, input_size) * sizeof(float));
+    /* P0修复: 缓冲区大小必须匹配LNN的实际output_size，否则lnn_forward会堆溢出。
+     * 使用lnn_get_output_size()动态获取LNN输出维度，替代max(target_size,input_size)。 */
+    size_t lnn_out_size = lnn_get_output_size(learner->attached_lnn);
+    if (lnn_out_size == 0) lnn_out_size = (size_t)RL_MAX(target_size, input_size); /* 安全回退 */
+    size_t buf_size = (size_t)RL_MAX(lnn_out_size, RL_MAX(target_size, input_size));
+    float* lnn_output_buf = (float*)safe_malloc(buf_size * sizeof(float));
     if (!lnn_output_buf) {
         safe_free((void**)&gradient);
         return -1;
@@ -2652,7 +2657,9 @@ int online_learner_compute_ewc_fisher(OnlineLearner* learner,
 /* EWC Fisher优先使用附着的LNN，而非全局查找
      * 通过共享LNN的CfC动力学进行前向传播计算预测
      * 与 update() 保持一致 */
-    float predicted[64] = {0};
+    /* P0修复: 缓冲区大小必须匹配共享LNN的output_size(256)，
+     * 原float[64]导致lnn_forward写入越界栈溢出 */
+    float predicted[256] = {0};
     LNN* use_lnn = learner->attached_lnn;
     if (!use_lnn) {
         use_lnn = (LNN*)selflnn_get_shared_lnn();
@@ -2661,14 +2668,14 @@ int online_learner_compute_ewc_fisher(OnlineLearner* learner,
         /* 使用LNN前向传播做预测 */
         if (lnn_forward(use_lnn, (float*)input, predicted) != 0) {
             /* 回退: 线性近似 */
-            for (size_t i = 0; i < target_size && i < 64; i++) {
+            for (size_t i = 0; i < target_size && i < 256; i++) {
                 for (size_t j = 0; j < input_size && (i * input_size + j) < n; j++) {
                     predicted[i] += input[j] * learner->weights[i * input_size + j];
                 }
             }
         }
     } else {
-        for (size_t i = 0; i < target_size && i < 64; i++) {
+        for (size_t i = 0; i < target_size && i < 256; i++) {
             for (size_t j = 0; j < input_size && (i * input_size + j) < n; j++) {
                 predicted[i] += input[j] * learner->weights[i * input_size + j];
             }
@@ -2676,7 +2683,7 @@ int online_learner_compute_ewc_fisher(OnlineLearner* learner,
     }
 
     /* Fisher信息: 梯度平方的指数移动平均 */
-    for (size_t i = 0; i < target_size && i < 64; i++) {
+    for (size_t i = 0; i < target_size && i < 256; i++) {
         float error = predicted[i] - target[i];
         for (size_t j = 0; j < input_size && (i * input_size + j) < n; j++) {
             float grad = error * input[j];

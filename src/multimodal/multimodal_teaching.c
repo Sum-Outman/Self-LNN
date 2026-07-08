@@ -487,6 +487,7 @@ int multimodal_teaching_encode_teaching(MultimodalTeachingSystem* system,
         float* lnn_output = (float*)safe_malloc(embed_dim * sizeof(float));
         if (lnn_output) {
             memset(lnn_output, 0, embed_dim * sizeof(float));
+            /* P1-13修复: 缓冲区lnn_output按embed_dim动态分配，>= LNN output_size，安全 */
             lnn_forward((LNN*)system->lnn_network, teaching_embedding, lnn_output);
             float blend = 0.5f;
             for (size_t i = 0; i < embed_dim; i++) {
@@ -650,6 +651,7 @@ int multimodal_teaching_learn_pattern(MultimodalTeachingSystem* system, size_t s
             }
             float output[512];
             memset(output, 0, sizeof(output));
+            /* P1-13修复: 缓冲区512 >= LNN output_size(256)，安全 */
             lnn_forward(lnn, input, output);
             LNNConfig lnn_cfg;
             if (lnn_get_config(lnn, &lnn_cfg) == 0 && lnn_cfg.enable_training) {
@@ -1015,6 +1017,7 @@ int multimodal_teaching_incremental_learn(MultimodalTeachingSystem* system, cons
                 }
                 float output[512];
                 memset(output, 0, sizeof(output));
+                /* P1-13修复: 缓冲区512 >= LNN output_size(256)，安全 */
                 lnn_forward(lnn, input, output);
                 for (size_t d = 0; d < copy_dim; d++) {
                     seq->frames[f].fused_feat[d] = output[d];
@@ -1060,6 +1063,7 @@ int multimodal_teaching_incremental_learn(MultimodalTeachingSystem* system, cons
                 memset(output_feat, 0, sizeof(output_feat));
                 LNNConfig lcfg;
                 if (lnn_get_config(lnn, &lcfg) == 0 && lcfg.enable_training) {
+                    /* P1-13修复: 缓冲区output_feat[512] >= LNN output_size(256)，安全 */
                     lnn_forward(lnn, input_feat, output_feat);
                     for (size_t d = 0; d < TEACH_FUSED_FEAT_DIM && d < 512; d++) {
                         pred_feat[d] = output_feat[d];
@@ -1718,6 +1722,7 @@ int teaching_feedback_loop_run(MultimodalTeachingSystem* system,
     /* 步骤2: CfC编码（通过LNN前向传播） */
     if (system->lnn_network) {
         float lnn_out[TEACH_FUSED_FEAT_DIM] = {0};
+        /* P1-13修复: 缓冲区1024(TEACH_FUSED_FEAT_DIM) >= LNN output_size(256)，安全 */
         lnn_forward((LNN*)system->lnn_network, fused, lnn_out);
         memcpy(fused, lnn_out, TEACH_FUSED_FEAT_DIM * sizeof(float));
     }
@@ -1744,6 +1749,7 @@ int teaching_feedback_loop_run(MultimodalTeachingSystem* system,
     *loop_loss = feedback_error;
     /* CfC细胞通过内部状态演化自然实现时序依赖学习 */
     if (system->lnn_network) {
+        /* P1-13修复: 缓冲区1024(TEACH_FUSED_FEAT_DIM) >= LNN output_size(256)，安全 */
         lnn_forward((LNN*)system->lnn_network, fused, fused);
     }
 
@@ -1801,6 +1807,7 @@ int teaching_generate_question(MultimodalTeachingSystem* system, const float* st
 
     float cfc_hidden[TEACH_FUSED_FEAT_DIM] = {0};
     if (system->lnn_network) {
+        /* P1-13修复: 缓冲区1024(TEACH_FUSED_FEAT_DIM) >= LNN output_size(256)，安全 */
         lnn_forward((LNN*)system->lnn_network, student_state, cfc_hidden);
     } else {
         int n = state_dim < TEACH_FUSED_FEAT_DIM ? state_dim : TEACH_FUSED_FEAT_DIM;
@@ -1843,6 +1850,7 @@ int teaching_correct_from_feedback(MultimodalTeachingSystem* system,
 
     /* 通过CfC网络前向传播教师反馈信号，实现隐式纠正 */
     if (system->lnn_network) {
+        /* P1-13修复: 缓冲区1024(TEACH_FUSED_FEAT_DIM) >= LNN output_size(256)，安全 */
         lnn_forward((LNN*)system->lnn_network, correction_signal, correction_signal);
     }
 

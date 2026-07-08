@@ -474,18 +474,20 @@ typedef struct {
     float pos[3], vel[3], quat[4], ang_vel[3];
 } PERK4State;
 
-/* 计算刚体在给定状态下的加速度（力累积→加速度） */
-static void pe_rk4_compute_accel(PEWorld* world, const float* pos, const float* vel,
+/* 计算刚体在给定状态下的加速度（力累积→加速度）
+ * gravity由调用方(pe_rk4_step_body)传入，避免依赖PEWorld*指针，
+ * 从而彻底消除原实现传入NULL world导致的world->gravity空指针解引用(P0)。 */
+static void pe_rk4_compute_accel(const float* gravity, const float* pos, const float* vel,
                                   const float* quat, const float* ang_vel,
                                   float mass, float inv_mass,
                                   const float* inv_inertia,
                                   float* out_acc, float* out_ang_acc) {
     if (inv_mass < 1e-10f) { pe_vec3_zero(out_acc); pe_vec3_zero(out_ang_acc); return; }
 
-    /* 外力：重力 */
-    out_acc[0] = world->gravity[0];
-    out_acc[1] = world->gravity[1];
-    out_acc[2] = world->gravity[2];
+    /* 外力：重力（gravity来自pe_rk4_step_body的gravity形参，最终源自world->gravity，恒有效） */
+    out_acc[0] = gravity[0];
+    out_acc[1] = gravity[1];
+    out_acc[2] = gravity[2];
 
     /* 线性阻尼 */
     float linear_damping = 0.01f;
@@ -532,49 +534,74 @@ static void pe_rk4_step_body(PEBody* body, float dt, const float* gravity) {
     pe_vec3_copy(body->pos, y0.pos);
     pe_vec3_copy(body->vel, y0.vel);
     pe_vec3_copy(body->quat, y0.quat);
+    y0.quat[3] = body->quat[3];  /* P1修复(修复5): pe_vec3_copy仅复制前3个(向量)分量，
+                                  * 标量分量 quat[3] 需单独复制，否则后续旋转矩阵计算
+                                  * (pe_mat3_from_quat 读取 quat[3]) 使用未初始化值 */
     pe_vec3_copy(body->ang_vel, y0.ang_vel);
 
     /* k1 = f(y0) */
-    float k1_v[3], k1_w[3], k1_pos[3], k1_ang[3];
-    pe_rk4_compute_accel(NULL, y0.pos, y0.vel, y0.quat, y0.ang_vel,
+    float k1_v[3], k1_w[3], k1_pos[3], k1_ang[4];
+    pe_rk4_compute_accel(gravity, y0.pos, y0.vel, y0.quat, y0.ang_vel,
                           mass, inv_mass, inv_inertia, k1_v, k1_w);
     pe_vec3_copy(y0.vel, k1_pos);  /* dr/dt = v */
-    /* 角速度→四元数导数：dq/dt = 0.5 * omega * q */
-    { float dq[4]; pe_quat_from_angular_vel(y0.ang_vel, 1.0f, dq); k1_ang[0]=dq[0]; k1_ang[1]=dq[1]; k1_ang[2]=dq[2]; }
+    /* 角速度→四元数导数：dq/dt = 0.5 * q ⊗ (omega, 0)
+     * P1修复(修复5): k_ang 数组由 [3] 扩展为 [4]。
+     * 向量部分取自 pe_quat_from_angular_vel（一阶近似 ≈ 0.5*omega），
+     * 标量部分导数 = -0.5 * dot(q_vec, omega)。
+     * 原实现仅存前3个向量分量、丢弃标量分量，导致四元数标量永不更新，
+     * 累积漂移使旋转失真。 */
+    { float dq[4]; pe_quat_from_angular_vel(y0.ang_vel, 1.0f, dq);
+      k1_ang[0]=dq[0]; k1_ang[1]=dq[1]; k1_ang[2]=dq[2];
+      k1_ang[3] = -0.5f * pe_vec3_dot(y0.quat, y0.ang_vel); }
 
     /* k2 = f(y0 + 0.5*dt*k1) */
     float h2 = 0.5f * dt;
     float y1_pos[3], y1_vel[3], y1_quat[4], y1_angvel[3];
     for (int i=0;i<3;i++) { y1_pos[i]=y0.pos[i]+h2*k1_pos[i]; y1_vel[i]=y0.vel[i]+h2*k1_v[i]; y1_angvel[i]=y0.ang_vel[i]+h2*k1_w[i]; }
-    { float tmp_q[4], dq[4]; pe_vec3_scale(k1_ang, h2, dq); pe_quat_add(y0.quat, dq, tmp_q); quat_normalize(tmp_q); pe_vec3_copy(tmp_q, y1_quat); }
+    /* P1修复(修复5): 对 k1_ang 的全部4个分量按 h2 缩放后加到 y0.quat，
+     * 再归一化得到中间状态四元数。原实现用 pe_vec3_scale 仅缩放前3个分量并强制
+     * dq[3]=0，丢失标量导数项。pe_vec3_copy 仅写 y1_quat[0..2]，需补 y1_quat[3]。 */
+    { float tmp_q[4], dq[4]; for (int i=0;i<4;i++) dq[i]=h2*k1_ang[i];
+      pe_quat_add(y0.quat, dq, tmp_q); quat_normalize(tmp_q);
+      pe_vec3_copy(tmp_q, y1_quat); y1_quat[3]=tmp_q[3]; }
 
-    float k2_v[3], k2_w[3], k2_pos[3], k2_ang[3];
-    pe_rk4_compute_accel(NULL, y1_pos, y1_vel, y1_quat, y1_angvel,
+    float k2_v[3], k2_w[3], k2_pos[3], k2_ang[4];
+    pe_rk4_compute_accel(gravity, y1_pos, y1_vel, y1_quat, y1_angvel,
                           mass, inv_mass, inv_inertia, k2_v, k2_w);
     pe_vec3_copy(y1_vel, k2_pos);
-    { float dq[4]; pe_quat_from_angular_vel(y1_angvel, 1.0f, dq); k2_ang[0]=dq[0]; k2_ang[1]=dq[1]; k2_ang[2]=dq[2]; }
+    { float dq[4]; pe_quat_from_angular_vel(y1_angvel, 1.0f, dq);
+      k2_ang[0]=dq[0]; k2_ang[1]=dq[1]; k2_ang[2]=dq[2];
+      k2_ang[3] = -0.5f * pe_vec3_dot(y1_quat, y1_angvel); }
 
     /* k3 = f(y0 + 0.5*dt*k2) */
     float y2_pos[3], y2_vel[3], y2_quat[4], y2_angvel[3];
     for (int i=0;i<3;i++) { y2_pos[i]=y0.pos[i]+h2*k2_pos[i]; y2_vel[i]=y0.vel[i]+h2*k2_v[i]; y2_angvel[i]=y0.ang_vel[i]+h2*k2_w[i]; }
-    { float tmp_q[4], dq[4]; pe_vec3_scale(k2_ang, h2, dq); pe_quat_add(y0.quat, dq, tmp_q); quat_normalize(tmp_q); pe_vec3_copy(tmp_q, y2_quat); }
+    { float tmp_q[4], dq[4]; for (int i=0;i<4;i++) dq[i]=h2*k2_ang[i];
+      pe_quat_add(y0.quat, dq, tmp_q); quat_normalize(tmp_q);
+      pe_vec3_copy(tmp_q, y2_quat); y2_quat[3]=tmp_q[3]; }
 
-    float k3_v[3], k3_w[3], k3_pos[3], k3_ang[3];
-    pe_rk4_compute_accel(NULL, y2_pos, y2_vel, y2_quat, y2_angvel,
+    float k3_v[3], k3_w[3], k3_pos[3], k3_ang[4];
+    pe_rk4_compute_accel(gravity, y2_pos, y2_vel, y2_quat, y2_angvel,
                           mass, inv_mass, inv_inertia, k3_v, k3_w);
     pe_vec3_copy(y2_vel, k3_pos);
-    { float dq[4]; pe_quat_from_angular_vel(y2_angvel, 1.0f, dq); k3_ang[0]=dq[0]; k3_ang[1]=dq[1]; k3_ang[2]=dq[2]; }
+    { float dq[4]; pe_quat_from_angular_vel(y2_angvel, 1.0f, dq);
+      k3_ang[0]=dq[0]; k3_ang[1]=dq[1]; k3_ang[2]=dq[2];
+      k3_ang[3] = -0.5f * pe_vec3_dot(y2_quat, y2_angvel); }
 
     /* k4 = f(y0 + dt*k3) */
     float y3_pos[3], y3_vel[3], y3_quat[4], y3_angvel[3];
     for (int i=0;i<3;i++) { y3_pos[i]=y0.pos[i]+dt*k3_pos[i]; y3_vel[i]=y0.vel[i]+dt*k3_v[i]; y3_angvel[i]=y0.ang_vel[i]+dt*k3_w[i]; }
-    { float tmp_q[4], dq[4]; pe_vec3_scale(k3_ang, dt, dq); pe_quat_add(y0.quat, dq, tmp_q); quat_normalize(tmp_q); pe_vec3_copy(tmp_q, y3_quat); }
+    { float tmp_q[4], dq[4]; for (int i=0;i<4;i++) dq[i]=dt*k3_ang[i];
+      pe_quat_add(y0.quat, dq, tmp_q); quat_normalize(tmp_q);
+      pe_vec3_copy(tmp_q, y3_quat); y3_quat[3]=tmp_q[3]; }
 
-    float k4_v[3], k4_w[3], k4_pos[3], k4_ang[3];
-    pe_rk4_compute_accel(NULL, y3_pos, y3_vel, y3_quat, y3_angvel,
+    float k4_v[3], k4_w[3], k4_pos[3], k4_ang[4];
+    pe_rk4_compute_accel(gravity, y3_pos, y3_vel, y3_quat, y3_angvel,
                           mass, inv_mass, inv_inertia, k4_v, k4_w);
     pe_vec3_copy(y3_vel, k4_pos);
-    { float dq[4]; pe_quat_from_angular_vel(y3_angvel, 1.0f, dq); k4_ang[0]=dq[0]; k4_ang[1]=dq[1]; k4_ang[2]=dq[2]; }
+    { float dq[4]; pe_quat_from_angular_vel(y3_angvel, 1.0f, dq);
+      k4_ang[0]=dq[0]; k4_ang[1]=dq[1]; k4_ang[2]=dq[2];
+      k4_ang[3] = -0.5f * pe_vec3_dot(y3_quat, y3_angvel); }
 
     /* 6维RK4更新: y = y0 + (dt/6)*(k1+2k2+2k3+k4) */
     float dt6 = dt / 6.0f;
@@ -583,15 +610,18 @@ static void pe_rk4_step_body(PEBody* body, float dt, const float* gravity) {
         body->vel[i] = y0.vel[i] + dt6*(k1_v[i]   + 2.0f*k2_v[i]   + 2.0f*k3_v[i]   + k4_v[i]);
         body->ang_vel[i] = y0.ang_vel[i] + dt6*(k1_w[i] + 2.0f*k2_w[i] + 2.0f*k3_w[i] + k4_w[i]);
     }
-    /* 四元数更新: q += dt6*(k1_q + 2k2_q + 2k3_q + k4_q) 然后归一化 */
+    /* 四元数更新: q += dt6*(k1_q + 2k2_q + 2k3_q + k4_q) 然后归一化
+     * P1修复(修复5): 原实现循环仅 i<3，标量分量 new_q[3]=y0.quat[3] 直接复制，
+     * 忽略RK4导数项。现将四阶RK4组合扩展到全部4个分量（含标量）。
+     * 标量导数 = -0.5*dot(q_vec, omega) 非零时原实现产生模长漂移与旋转累积误差。
+     * pe_vec3_copy 仅写 body->quat[0..2]，需补 body->quat[3]。 */
     float new_q[4];
-    for (int i = 0; i < 3; i++) {
-        /* 四元数分量只用前3个（标量部分从归一化隐含） */
+    for (int i = 0; i < 4; i++) {
         new_q[i] = y0.quat[i] + dt6*(k1_ang[i] + 2.0f*k2_ang[i] + 2.0f*k3_ang[i] + k4_ang[i]);
     }
-    new_q[3] = y0.quat[3];
     quat_normalize(new_q);
     pe_vec3_copy(new_q, body->quat);
+    body->quat[3] = new_q[3];
 }
 
 /* 完整的RK4世界步进：所有刚体用RK4推进 */
@@ -907,6 +937,17 @@ static void pe_solve_contact(PEContact* ct, PEBody* body_a, PEBody* body_b, floa
     float max_friction = ct->friction * ct->impulse_n;
 
     for (int ti = 0; ti < 2; ti++) {
+        /* P2修复: 法向冲量已在上方改变速度，摩擦力循环每次迭代也会改变速度。
+         * 需在每次迭代开始时重新计算rel_vel，否则摩擦力基于过时速度计算，
+         * 导致物体在接触面上异常滑动或抖动。 */
+        pe_vec3_sub(body_a->vel, body_b->vel, rel_vel);
+        float ra_cw_a[3], rb_cw_b[3];
+        pe_vec3_cross(body_a->ang_vel, ra, ra_cw_a);
+        pe_vec3_cross(body_b->ang_vel, rb, rb_cw_b);
+        rel_vel[0] += ra_cw_a[0] - rb_cw_b[0];
+        rel_vel[1] += ra_cw_a[1] - rb_cw_b[1];
+        rel_vel[2] += ra_cw_a[2] - rb_cw_b[2];
+
         float ra_cross_t[3], rb_cross_t[3];
         pe_vec3_cross(ra, tangent[ti], ra_cross_t);
         pe_vec3_cross(rb, tangent[ti], rb_cross_t);
@@ -1237,7 +1278,10 @@ int pe_step(PEWorld* world, float dt) {
             if (!b->props.active || b->props.type == PE_BODY_STATIC) continue;
             if (b->props.type == PE_BODY_KINEMATIC) continue;
 
-            b->force_acc[1] += world->gravity[1] * (b->props.type == PE_BODY_DYNAMIC ? b->props.mass : 0.0f);
+            /* P2修复: 原代码仅施加Y轴重力，遗漏X/Z轴。
+             * 改为循环施加所有3个分量，确保重力为完整的三维向量。 */
+            for (int gi = 0; gi < 3; gi++)
+                b->force_acc[gi] += world->gravity[gi] * (b->props.type == PE_BODY_DYNAMIC ? b->props.mass : 0.0f);
             pe_integrate_forces(b, sub_dt);
         }
 

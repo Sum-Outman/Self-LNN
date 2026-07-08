@@ -832,7 +832,8 @@ int swarm_optimize(Swarm* swarm, SwarmResult* result) {
         
         /* 执行单次迭代 */
         if (swarm_iterate(swarm) != 0) {
-            strcpy(result->error_message, "迭代失败");
+            strncpy(result->error_message, "迭代失败", sizeof(result->error_message) - 1);
+            result->error_message[sizeof(result->error_message) - 1] = '\0';
             return -1;
         }
         
@@ -877,7 +878,8 @@ int swarm_optimize(Swarm* swarm, SwarmResult* result) {
     if (result->best_position == NULL) {
         result->best_position = (float*)safe_malloc(sizeof(float) * swarm->config.dimensions);
         if (result->best_position == NULL) {
-            strcpy(result->error_message, "分配最佳位置内存失败");
+            strncpy(result->error_message, "分配最佳位置内存失败", sizeof(result->error_message) - 1);
+            result->error_message[sizeof(result->error_message) - 1] = '\0';
             return -1;
         }
     }
@@ -885,7 +887,8 @@ int swarm_optimize(Swarm* swarm, SwarmResult* result) {
     
     /* 获取最终状态 */
     if (swarm_get_state(swarm, &result->final_state) != 0) {
-        strcpy(result->error_message, "获取最终状态失败");
+        strncpy(result->error_message, "获取最终状态失败", sizeof(result->error_message) - 1);
+        result->error_message[sizeof(result->error_message) - 1] = '\0';
         return -1;
     }
     

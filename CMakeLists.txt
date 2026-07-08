@@ -26,7 +26,9 @@ set(PROJECT_VERSION_FULL "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}.${PR
 # C-007修复: 条件性安装docs目录（目录已创建并有.gitkeep）
 option(INSTALL_DOCS "安装文档目录" OFF)
 option(BUILD_TESTS "构建测试程序" ON)
-option(BUILD_EXAMPLES "构建示例程序" ON)
+# BLD-017修复: BUILD_EXAMPLES默认OFF，因为examples/目录不存在
+# 用户如需构建示例程序，需手动设置-DBUILD_EXAMPLES=ON
+option(BUILD_EXAMPLES "构建示例程序" OFF)
 option(ENABLE_GPU "启用GPU加速支持" ON)
 if(ENABLE_GPU)
     add_definitions(-DENABLE_GPU)
@@ -92,16 +94,17 @@ endif()
 
 # MSVC: 公共基础编译选项（全局，因作用于所有静态库目标）
 if(MSVC)
-    # 从20个警告禁用减少到19个（移除/wd4013隐式函数声明——掩盖真实bug）
-    # 路线图: v1.5移除/wd4100, v1.6移除/wd4189, v1.7移除/wd4244, v2.0移除/wd4028/wd4029
+    # 从20个警告禁用减少到17个（移除/wd4013隐式函数声明、/wd4100未引用形参、/wd4702不可达代码——掩盖真实bug）
+    # P3-14修复: 已移除/wd4100和/wd4702（原计划v1.5移除/wd4100，提前完成）
+    # 路线图: v1.6移除/wd4189, v1.7移除/wd4244, v2.0移除/wd4028/wd4029
     # DEEP-005修复: 移除/WX(警告作为错误)
     # 代码库包含大量预存的自洽性问题(selflnn_set_last_error参数传递、
     # struct成员名称不一致、优化器内部标识符等)，在/WX下无法通过编译。
     # 这些不是本次审计引入的问题，保留/W4警告级别供后续逐项修复，
     # 但不再将警告当作编译错误阻止构建。
     add_compile_options(/W4 /EHa /wd4142 /wd4205 /wd4210 /wd4996 /wd4152
-        /wd4211 /wd4028 /wd4029 /wd4100 /wd4189 /wd4244
-        /wd4457 /wd4431 /wd4218 /wd4127 /wd4102 /wd4702 /FImath.h /FS)
+        /wd4211 /wd4028 /wd4029 /wd4189 /wd4244
+        /wd4457 /wd4431 /wd4218 /wd4127 /wd4102 /FImath.h /FS)
     # 修复#3: 已移除 /wd4013（隐式函数声明），此警告将暴露缺失的头文件包含
     
     # Release配置的优化选项
@@ -369,6 +372,51 @@ if(BUILD_TESTS)
         target_link_libraries(lnn_verify PRIVATE Threads::Threads m dl)
     endif()
     add_test(NAME lnn_correctness COMMAND lnn_verify WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+    # BLD-003修复: 注册asan_test和diag_mem为CTest
+    # asan_test: 内存安全与AddressSanitizer测试
+    add_executable(asan_test tests/asan_test.c)
+    target_include_directories(asan_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(asan_test PRIVATE
+        selflnn_core selflnn_memory selflnn_math
+        selflnn_concurrency selflnn_gpu
+        selflnn_reasoning selflnn_learning
+        selflnn_knowledge selflnn_evolution
+        selflnn_cognition selflnn_agi
+        selflnn_safety selflnn_distributed
+        selflnn_programming selflnn_product_design
+        selflnn_multisystem selflnn_multimodal
+        selflnn_backend selflnn_robot
+        utils
+    )
+    set_target_properties(asan_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+    if(MSVC)
+        set_target_properties(asan_test PROPERTIES LINK_FLAGS "/STACK:67108864")
+        target_compile_definitions(asan_test PRIVATE _CRT_SECURE_NO_WARNINGS _USE_MATH_DEFINES WIN32_LEAN_AND_MEAN _WINSOCK_DEPRECATED_NO_WARNINGS)
+        target_link_libraries(asan_test PRIVATE uuid ole32 winmm mmdevapi propsys)
+    endif()
+    add_test(NAME asan_test COMMAND asan_test WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+    # diag_mem: 内存诊断测试
+    add_executable(diag_mem tests/diag_mem.c)
+    target_include_directories(diag_mem PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(diag_mem PRIVATE
+        selflnn_core selflnn_memory selflnn_concurrency
+        selflnn_math selflnn_gpu
+        selflnn_reasoning selflnn_learning
+        selflnn_knowledge selflnn_evolution
+        selflnn_cognition selflnn_agi
+        selflnn_safety selflnn_distributed
+        selflnn_programming selflnn_product_design
+        selflnn_multisystem selflnn_multimodal
+        selflnn_backend selflnn_robot
+        utils
+    )
+    set_target_properties(diag_mem PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+    if(MSVC)
+        set_target_properties(diag_mem PROPERTIES LINK_FLAGS "/STACK:67108864")
+        target_compile_definitions(diag_mem PRIVATE _CRT_SECURE_NO_WARNINGS _USE_MATH_DEFINES WIN32_LEAN_AND_MEAN _WINSOCK_DEPRECATED_NO_WARNINGS)
+        target_link_libraries(diag_mem PRIVATE uuid ole32 winmm mmdevapi propsys)
+    endif()
+    add_test(NAME diag_mem COMMAND diag_mem WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
 
 if(BUILD_EXAMPLES AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/examples/CMakeLists.txt)
@@ -376,7 +424,10 @@ if(BUILD_EXAMPLES AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/examples/CMakeLists.txt
 endif()
 
 # 安装规则
-install(DIRECTORY include/ DESTINATION include)
+# BLD-018修复: 添加FILES_MATCHING PATTERN "*.h"，仅安装头文件
+# 避免将include/目录下的非头文件（如.gitkeep、临时文件等）安装到目标目录
+install(DIRECTORY include/ DESTINATION include
+    FILES_MATCHING PATTERN "*.h")
 # C-007修复: 仅在INSTALL_DOCS开启时安装docs目录
 if(INSTALL_DOCS)
     install(DIRECTORY docs/ DESTINATION docs)

@@ -13,6 +13,12 @@
 #include <stdint.h>
 #include <math.h>
 #include <time.h>
+/* P2-10修复: 原子CAS操作所需的平台头文件 */
+#ifdef _MSC_VER
+#include <windows.h>   /* InterlockedCompareExchange, InterlockedExchange, Sleep */
+#else
+#include <sched.h>     /* sched_yield */
+#endif
 
 /* M-018修复: 知识推理引擎→LNN桥接外部声明
  * 推理结果需要反馈到LNN连续动态系统产生状态扰动，
@@ -21,6 +27,8 @@
 
 
 static MutexHandle g_temp_reasoner_mutex = NULL;
+/* P2-10修复: 互斥锁初始化的原子保护标志，配合CAS防止竞态 */
+static volatile long g_temp_reasoner_init = 0;
 
 struct KnowledgeInferenceEngine {
     KIRule rules[128];
@@ -2143,9 +2151,25 @@ typedef struct {
 static TemporalReasoner temp_reasoner = {{0}, 0, 0, {0}};
 
 static void temporal_reasoner_lock(void) {
+    /* P2-10修复: 使用原子CAS替代check-then-act，防止互斥锁初始化竞态 */
+#ifdef _MSC_VER
+    while (InterlockedCompareExchange(&g_temp_reasoner_init, 1, 0) != 0) {
+        /* 等待其他线程完成初始化 */
+        Sleep(0);
+    }
     if (!g_temp_reasoner_mutex) {
         g_temp_reasoner_mutex = mutex_create();
     }
+    InterlockedExchange(&g_temp_reasoner_init, 0);
+#else
+    while (__sync_lock_test_and_set(&g_temp_reasoner_init, 1)) {
+        sched_yield();
+    }
+    if (!g_temp_reasoner_mutex) {
+        g_temp_reasoner_mutex = mutex_create();
+    }
+    __sync_lock_release(&g_temp_reasoner_init);
+#endif
     if (g_temp_reasoner_mutex) {
         mutex_lock(g_temp_reasoner_mutex);
     }

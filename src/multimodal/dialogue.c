@@ -1516,9 +1516,15 @@ int dialogue_analyze_intent(const char* text, size_t text_length,
         /* LNN驱动意图分类: 将文本tokenize后经CfC ODE编码，取输出向量做意图分类 */
         if (global_processor->dialogue_state_buffer && global_processor->gen_projection_lnn) {
             /* 使用LNN嵌入编码文本语义 */
-            float intent_vec[16] = {0};
+            /* P0修复: intent_vec大小必须匹配共享LNN的output_size(256)，
+             * 原float[16]导致lnn_forward写入越界栈溢出。
+             * embed_buf也必须至少256个float以匹配LNN的input_size。 */
+            float intent_vec[256] = {0};
             LNN* lnn = (LNN*)global_processor->lnn_instance;
-            float* embed_buf = (float*)safe_calloc(global_processor->dialogue_buffer_size, sizeof(float));
+            /* 确保embed_buf至少256个float以匹配LNN input_size */
+            size_t embed_dim = global_processor->dialogue_buffer_size;
+            if (embed_dim < 256) embed_dim = 256;
+            float* embed_buf = (float*)safe_calloc(embed_dim, sizeof(float));
             if (embed_buf) {
                 /* 文本→LNN嵌入编码 */
                 size_t flen = (text_length < global_processor->dialogue_buffer_size)
@@ -1529,6 +1535,7 @@ int dialogue_analyze_intent(const char* text, size_t text_length,
                 /* 通过共享LNN前向传播获取语义表示 */
                 lnn_forward(lnn, embed_buf, intent_vec);
                 /* 从LNN输出向量计算意图类别和置信度 */
+                /* P0修复: 使用前16维做意图分类（12种意图类型），避免越界 */
                 float max_val = intent_vec[0];
                 int max_idx = 0;
                 float sum_exp = 0.0f;

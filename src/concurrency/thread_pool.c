@@ -104,6 +104,10 @@ struct ThreadPool {
     
     // 工作线程
     WorkerThread* threads;        /**< 工作线程数组 */
+    size_t threads_capacity;     /**< threads/thread_queues/queue_locks数组已分配容量(>=num_threads)。
+                                      P1修复6: 缩容时数组不重新分配，仍保持原容量。
+                                      用此字段而非config.num_threads作为线程索引上界，
+                                      使被缩容标记STOPPING的孤立线程仍能查到自身索引并退出。 */
     
     // 状态信息
     int is_running;               /**< 线程池是否运行 */
@@ -322,7 +326,11 @@ static int get_current_thread_index(const ThreadPool* pool) {
         return -1;
     }
     
-    for (size_t i = 0; i < pool->config.num_threads; i++) {
+    /* P1修复6: 用threads_capacity而非config.num_threads作为上界。
+     * 缩容后config.num_threads已减小，但被缩容的孤立线程句柄仍存于
+     * threads[old_num..]中(数组未重新分配)。若用num_threads作上界，
+     * 孤立线程在此查不到自身→返回-1→worker的STOPPING检查被跳过→永不退出。 */
+    for (size_t i = 0; i < pool->threads_capacity; i++) {
 #ifdef _WIN32
         DWORD thread_id = GetThreadId(pool->threads[i].handle);
         DWORD current_id = GetCurrentThreadId();
@@ -398,11 +406,22 @@ static int work_steal(ThreadPool* pool, int current_thread, ThreadPoolTask* task
         return -1;
     }
     
-    // 随机选择起始窃取位置（线程局部避免竞态）
+    /* C-014修复: 随机选择起始窃取位置（线程局部避免竞态）。
+     * 使用线程ID和指针地址混入初始种子，避免所有线程首次窃取都从相同目标开始。
+     * 线程ID确保不同线程有不同的起始偏移，指针地址增加随机性。
+     * steal_seed递增确保同一线程连续调用时伪随机地变化起始位置。 */
 #if defined(_MSC_VER)
     static __declspec(thread) unsigned int steal_seed = 0;
+    if (steal_seed == 0) {
+        steal_seed = ((unsigned int)(uintptr_t)GetCurrentThreadId() * 2654435761U)
+                   ^ ((unsigned int)(uintptr_t)&steal_seed);
+    }
 #else
     static __thread unsigned int steal_seed = 0;
+    if (steal_seed == 0) {
+        steal_seed = ((unsigned int)(uintptr_t)pthread_self() * 2654435761U)
+                   ^ ((unsigned int)(uintptr_t)&steal_seed);
+    }
 #endif
     int start = (steal_seed++ % (pool->config.num_threads - 1));
     
@@ -516,7 +535,11 @@ static void* worker_thread_func(void* arg)
     
     while (1) {
         // 检查线程是否应该停止
-        if (thread_index >= 0 && thread_index < (int)pool->config.num_threads) {
+        /* P1修复6: 用threads_capacity而非config.num_threads作上界。
+         * 缩容后config.num_threads减小，thread_index>=新num_threads的孤立线程
+         * 会因guard失败而跳过STOPPING检查→永不退出。改用容量(>=原num_threads)
+         * 解耦STOPPING检查与当前线程数，使被缩容标记STOPPING的线程能正常退出。 */
+        if (thread_index >= 0 && thread_index < (int)pool->threads_capacity) {
             if (pool->threads[thread_index].state == THREAD_STATE_STOPPING) {
                 // 线程被标记为停止，退出循环
                 break;
@@ -681,8 +704,11 @@ static void* worker_thread_func(void* arg)
                 task.function(task.argument);
             }
             
-            // 更新线程状态为空闲
-            if (thread_index >= 0) {
+            // 更新线程状态为空闲（若已被标记为STOPPING则不覆盖，保留退出标记）
+            // P1修复: 缩容resize设置threads[i].state=STOPPING后，若孤立线程任务完成
+            // 无条件写IDLE会覆盖STOPPING标记，导致线程无法退出
+            if (thread_index >= 0 &&
+                pool->threads[thread_index].state != THREAD_STATE_STOPPING) {
                 pool->threads[thread_index].state = THREAD_STATE_IDLE;
             }
             
@@ -863,6 +889,10 @@ ThreadPool* thread_pool_create(const ThreadPoolConfig* config) {
     pool->is_paused = 0;
     pool->completed_tasks = 0;
     pool->next_thread_index = 0;
+    /* P1修复6: 记录线程/队列数组已分配容量。
+     * threads/thread_queues/queue_locks均按config->num_threads分配，
+     * 后续缩容仅改config.num_threads而不重新分配数组，故容量保持不变。 */
+    pool->threads_capacity = config->num_threads;
     
     // 创建工作线程
     for (size_t i = 0; i < config->num_threads; i++) {
@@ -1388,9 +1418,25 @@ int thread_pool_resize(ThreadPool* pool, size_t new_num_threads) {
 #endif
         
         /* FIX-010修复: 释放缩减后多余线程对应队列中的残留任务，防止内存泄漏 */
+        /* P1修复7: 清理队列前必须持有对应queue_locks[i]，防止与孤立线程并发
+         * 访问同一队列导致数据竞争/链表损坏。原实现在未持锁情况下直接
+         * task_queue_clear，孤立线程可能正通过trylock读取该队列。
+         * 锁序: 此处已持有pool->lock→再取queue_locks[i]，与worker(get_task_from_pool)
+         * 的pool->lock→queue_locks顺序一致，无锁序反转死锁风险。
+         * i必小于old_num_threads故i%old_num_threads==i，直接用i索引更清晰。 */
         for (size_t i = new_num_threads; i < old_num_threads; i++) {
-            if (pool->thread_queues) {
-                task_queue_clear(pool, &pool->thread_queues[i % old_num_threads]);
+            if (pool->thread_queues && pool->queue_locks) {
+#ifdef _WIN32
+                EnterCriticalSection(&pool->queue_locks[i]);
+#else
+                pthread_mutex_lock(&pool->queue_locks[i]);
+#endif
+                task_queue_clear(pool, &pool->thread_queues[i]);
+#ifdef _WIN32
+                LeaveCriticalSection(&pool->queue_locks[i]);
+#else
+                pthread_mutex_unlock(&pool->queue_locks[i]);
+#endif
             }
         }
         
@@ -1531,6 +1577,9 @@ int thread_pool_resize(ThreadPool* pool, size_t new_num_threads) {
         // 替换线程数组
         safe_free((void**)&pool->threads);
         pool->threads = new_threads;
+        /* P1修复6: 扩容时threads/thread_queues/queue_locks均重新分配为new_num_threads，
+         * 同步更新容量上限。 */
+        pool->threads_capacity = new_num_threads;
         
         // 更新配置
         pool->config.num_threads = new_num_threads;

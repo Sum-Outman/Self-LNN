@@ -136,7 +136,8 @@ void matrix_init_random(float* mat, size_t rows, size_t cols, float scale) {
     if (!mat) return;
     size_t n = rows * cols;
     /* N-003修复: 使用时间混合种子替代纯确定性LCG */
-    unsigned int seed = (unsigned int)((uintptr_t)&n ^ (uint64_t)clock() & 0xFFFFFFFFu);
+    /* P2-09修复: 添加括号明确运算符优先级，原代码 & 优先级低于 ^ 导致只取clock()低32位 */
+    unsigned int seed = (unsigned int)(((uintptr_t)&n ^ (uint64_t)clock()) & 0xFFFFFFFFu);
     for (size_t i = 0; i < n; i++) {
         seed = seed * 1103515245 + 12345;
         float u1 = (float)(seed & 0x7FFFFFFF) / 2147483648.0f;
@@ -374,7 +375,7 @@ float matrix_power_iteration(const float* A, float* eigenvector, size_t n,
     }
     
     float eigenvalue = 0.0f;
-    float* temp = (float*)malloc(n * sizeof(float));
+    float* temp = (float*)safe_malloc(n * sizeof(float));
     if (!temp) return NAN;
     
     for (int iter = 0; iter < max_iter; iter++) {
@@ -404,6 +405,6 @@ float matrix_power_iteration(const float* A, float* eigenvector, size_t n,
         if (diff < tol) break;
     }
     
-    free(temp);
+    safe_free((void**)&temp);
     return eigenvalue;
 }

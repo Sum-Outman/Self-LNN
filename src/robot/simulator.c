@@ -842,26 +842,47 @@ static void sim_solver_warmstart(SimPhysicsPipeline* pipe) {
 
 static void sim_solver_solve_contact(SimContactPoint* cp, SimCollisionObject* obj_a,
                                       SimCollisionObject* obj_b, float dt) {
-    (void)dt;
     if (!cp->active) return;
+    /* dt为零或负时回退到安全下限,避免除零 */
+    float safe_dt = (dt > 1e-6f) ? dt : 0.01f;
     float inv_mass_sum = obj_a->inv_mass + obj_b->inv_mass;
     if (inv_mass_sum < 1e-10f) {
         cp->active = 0;
         return;
     }
 
-    float bias = SIM_BAUMGARTE_FACTOR * cp->penetration / 0.01f;
+    /* P2修复: Baumgarte偏置使用实际时间步dt,而非硬编码0.01f。
+     * 原硬编码值在dt≠0.01时导致偏置过大/过小,穿透修正失真。 */
+    float bias = SIM_BAUMGARTE_FACTOR * cp->penetration / safe_dt;
     if (bias < 0.0f) bias = 0.0f;
     if (bias > 0.2f) bias = 0.2f;
 
     float rel_vel_n = (obj_a->velocity[0] - obj_b->velocity[0]) * cp->normal[0] +
                       (obj_a->velocity[1] - obj_b->velocity[1]) * cp->normal[1] +
                       (obj_a->velocity[2] - obj_b->velocity[2]) * cp->normal[2];
-    float normal_impulse = (bias + rel_vel_n * cp->restitution) / inv_mass_sum;
+    /* P1修复(R7补全): SI法向冲量公式符号修正。
+     * 符号约定: normal指向B->A(EPA在A-B差集上求最近点)。
+     * 接近时 rel_vel_n < 0(两物体相向运动),分离时 rel_vel_n > 0。
+     * 正确公式: Jn = (-(1+e)*rel_vel_n + bias) / inv_mass_sum
+     *   - 恢复项系数为 (1+e) 而非 e,保证碰撞后分离速度 = e * 接近速度
+     *   - 接近时(rel_vel_n<0): -(1+e)*rel_vel_n > 0,产生正向冲量推开物体(反弹)
+     *   - 分离时(rel_vel_n>0): -(1+e)*rel_vel_n < 0,冲量被钳为0(不再注入能量)
+     * 原公式 (bias + rel_vel_n*e) 在接近时算出负值被钳为0(无反弹),
+     * 在分离时持续注入正向冲量(能量注入),完全错误。 */
+    float normal_impulse = (-(1.0f + cp->restitution) * rel_vel_n + bias) / inv_mass_sum;
     float old_impulse = cp->impulse_normal;
     cp->impulse_normal += normal_impulse;
     if (cp->impulse_normal < 0.0f) cp->impulse_normal = 0.0f;
     normal_impulse = cp->impulse_normal - old_impulse;
+    /* P0修复: 将法向冲量增量应用到物体速度。
+     * 原代码计算冲量后仅存储到cp->impulse_normal,从未更新obj_a/obj_b的velocity,
+     * 导致碰撞物体互相穿透,无反弹/分离效果。
+     * 符号约定与sim_process_collisions中的contact_forces一致:
+     * 法线方向指向B→A,故obj_a沿+normal,obj_b沿-normal。 */
+    for (int i = 0; i < 3; i++) {
+        obj_a->velocity[i] += normal_impulse * cp->normal[i] * obj_a->inv_mass;
+        obj_b->velocity[i] -= normal_impulse * cp->normal[i] * obj_b->inv_mass;
+    }
 
     /* 库仑摩擦锥 */
     float tangent[2][3];
@@ -894,6 +915,23 @@ static void sim_solver_solve_contact(SimContactPoint* cp, SimCollisionObject* ob
         if (cp->impulse_tangent[t] > max_friction) cp->impulse_tangent[t] = max_friction;
         if (cp->impulse_tangent[t] < -max_friction) cp->impulse_tangent[t] = -max_friction;
         friction_impulse = cp->impulse_tangent[t] - old_friction;
+        /* P0修复: 将摩擦冲量增量应用到物体速度(同法向冲量符号约定)。 */
+        for (int i = 0; i < 3; i++) {
+            obj_a->velocity[i] += friction_impulse * tangent[t][i] * obj_a->inv_mass;
+            obj_b->velocity[i] -= friction_impulse * tangent[t][i] * obj_b->inv_mass;
+        }
+    }
+
+    /* P2修复: 冲量应用后对速度做有限性+上限检查。
+     * 大冲量或迭代累积可能导致速度爆炸(非有限值或超大值),
+     * 此处仅将非有限值(NaN/Inf)钳为零以防止数值发散传播;
+     * 超过1000的合法高速运动改为限幅到±1000并保留方向,
+     * 避免原实现直接钳零导致合法高速运动被突然归零。 */
+    for (int i = 0; i < 3; i++) {
+        if (!isfinite(obj_a->velocity[i])) obj_a->velocity[i] = 0.0f;
+        else if (fabsf(obj_a->velocity[i]) > 1000.0f) obj_a->velocity[i] = copysignf(1000.0f, obj_a->velocity[i]);
+        if (!isfinite(obj_b->velocity[i])) obj_b->velocity[i] = 0.0f;
+        else if (fabsf(obj_b->velocity[i]) > 1000.0f) obj_b->velocity[i] = copysignf(1000.0f, obj_b->velocity[i]);
     }
 }
 
@@ -1094,7 +1132,30 @@ static void sim_joint_compute_error(const SimJoint* joint,
     }
 }
 
-static void sim_solver_joints(SimPhysicsPipeline* pipe, float dt) {
+/* P1修复: 将碰撞物体的位置修正写回到原始物理状态。
+ * sim_solver_joints原代码仅修改world_transform,下次sim_update_collision_objects
+ * 调用时world_transform被原始position/orientation覆盖,约束修正完全失效。
+ * 此函数同时更新world_transform(供同帧后续约束迭代使用)和原始物理状态。 */
+static void sim_writeback_pos_correction(Simulator* sim, SimCollisionObject* obj, int k, float delta) {
+    obj->world_transform[k] += delta;
+    if (obj->is_robot && obj->object_id >= 0 && obj->object_id < sim->robot_count) {
+        sim->robots[obj->object_id].position[k] += delta;
+    } else if (!obj->is_robot && obj->object_id >= 0 && obj->object_id < sim->internal.physics_object_count) {
+        sim->internal.physics_objects[obj->object_id].position[k] += delta;
+    }
+}
+
+/* P1修复: 将碰撞物体的姿态修正写回到原始物理状态(四元数xyz分量)。 */
+static void sim_writeback_rot_correction(Simulator* sim, SimCollisionObject* obj, int k, float delta) {
+    obj->world_transform[3 + k] += delta;
+    if (obj->is_robot && obj->object_id >= 0 && obj->object_id < sim->robot_count) {
+        sim->robots[obj->object_id].orientation[k] += delta;
+    } else if (!obj->is_robot && obj->object_id >= 0 && obj->object_id < sim->internal.physics_object_count) {
+        sim->internal.physics_objects[obj->object_id].orientation[k] += delta;
+    }
+}
+
+static void sim_solver_joints(Simulator* sim, SimPhysicsPipeline* pipe, float dt) {
     for (int i = 0; i < pipe->joint_count; i++) {
         SimJoint* j = &pipe->joints[i];
         if (!j->active) continue;
@@ -1116,11 +1177,12 @@ static void sim_solver_joints(SimPhysicsPipeline* pipe, float dt) {
                 -erp * pos_error[1] * dt_inv / pos_inv_mass,
                 -erp * pos_error[2] * dt_inv / pos_inv_mass
             };
-            /* 对两个物体施加等大反向的冲量 */
+            /* P1修复: 对两个物体施加等大反向的冲量,并写回到原始物理状态。
+             * 原代码仅写world_transform,下次sim_update_collision_objects时被覆盖。 */
             for (int k = 0; k < 3; k++) {
                 float impulse = pos_correct[k];
-                obj_a->world_transform[k] += impulse * obj_a->inv_mass;
-                obj_b->world_transform[k] -= impulse * obj_b->inv_mass;
+                sim_writeback_pos_correction(sim, obj_a, k, impulse * obj_a->inv_mass);
+                sim_writeback_pos_correction(sim, obj_b, k, -impulse * obj_b->inv_mass);
             }
         }
 
@@ -1131,8 +1193,9 @@ static void sim_solver_joints(SimPhysicsPipeline* pipe, float dt) {
             float rot_scale = erp * rot_mag * dt_inv * cfm;
             for (int k = 0; k < 3; k++) {
                 float impulse_r = rot_error[k] * rot_scale;
-                obj_a->world_transform[3 + k] -= impulse_r * obj_a->inv_inertia[k];
-                obj_b->world_transform[3 + k] += impulse_r * obj_b->inv_inertia[k];
+                /* P1修复: 同步写回到原始物理状态的orientation */
+                sim_writeback_rot_correction(sim, obj_a, k, -impulse_r * obj_a->inv_inertia[k]);
+                sim_writeback_rot_correction(sim, obj_b, k, impulse_r * obj_b->inv_inertia[k]);
             }
         }
 
@@ -1143,12 +1206,13 @@ static void sim_solver_joints(SimPhysicsPipeline* pipe, float dt) {
                 float diff = obj_b->world_transform[k] - obj_a->world_transform[k];
                 if (diff > j->limit_upper + limit_margin) {
                     float excess = diff - j->limit_upper;
-                    obj_a->world_transform[k] += excess * 0.5f;
-                    obj_b->world_transform[k] -= excess * 0.5f;
+                    /* P1修复: 写回到原始物理状态 */
+                    sim_writeback_pos_correction(sim, obj_a, k, excess * 0.5f);
+                    sim_writeback_pos_correction(sim, obj_b, k, -excess * 0.5f);
                 } else if (diff < j->limit_lower - limit_margin) {
                     float deficit = diff - j->limit_lower;
-                    obj_a->world_transform[k] += deficit * 0.5f;
-                    obj_b->world_transform[k] -= deficit * 0.5f;
+                    sim_writeback_pos_correction(sim, obj_a, k, deficit * 0.5f);
+                    sim_writeback_pos_correction(sim, obj_b, k, -deficit * 0.5f);
                 }
             }
         }
@@ -1167,7 +1231,7 @@ static int sim_process_collisions(Simulator* sim, float friction_coeff, float re
     sim_broadphase(pipe);
     sim_narrowphase(pipe, friction_coeff, restitution);
     sim_solver_solve(pipe, dt);
-    sim_solver_joints(pipe, dt);
+    sim_solver_joints(sim, pipe, dt);
 
     for (int c = 0; c < pipe->contact_count; c++) {
         SimContactPoint* cp = &pipe->contacts[c];
@@ -1270,6 +1334,12 @@ static void sim_eval_object_force(Simulator* sim, InternalPhysicsObject* obj,
     force_out[2] -= vel[2] * obj->mass * 0.02f;
 }
 
+/* P1修复: URDF配置的关节限位访问器前向声明（实现在get_extension之后） */
+static float sim_urdf_get_max_torque(Simulator* sim, int joint_idx);
+static float sim_urdf_get_max_velocity(Simulator* sim, int joint_idx);
+static float sim_urdf_get_joint_limit_lower(Simulator* sim, int joint_idx);
+static float sim_urdf_get_joint_limit_upper(Simulator* sim, int joint_idx);
+
 static void simulator_update_internal_physics(Simulator* sim, float dt) {
     if (!sim || dt <= 0.0f) return;
     /* [P2-03修复] 数据来源: 内部纯C物理引擎(Pure C Internal Physics Engine)
@@ -1359,6 +1429,16 @@ static void simulator_update_internal_physics(Simulator* sim, float dt) {
             r->position[1] = p0[1] + sub_dt * inv6 * (k1p[1] + 2.0f*k2p[1] + 2.0f*k3p[1] + k4p[1]);
             r->position[2] = p0[2] + sub_dt * inv6 * (k1p[2] + 2.0f*k2p[2] + 2.0f*k3p[2] + k4p[2]);
 
+            /* P1修复: NaN/Inf检查,防止RK4积分结果发散导致整个物理系统崩溃。
+             * 极端工况(如极大加速度、除零、数值溢出)下积分结果可能产生NaN/Inf,
+             * 若不检查会通过后续计算传播到整个系统,导致所有机器人状态失效。 */
+            if (!isfinite(r->velocity[0])) r->velocity[0] = 0.0f;
+            if (!isfinite(r->velocity[1])) r->velocity[1] = 0.0f;
+            if (!isfinite(r->velocity[2])) r->velocity[2] = 0.0f;
+            if (!isfinite(r->position[0])) r->position[0] = 0.0f;
+            if (!isfinite(r->position[1])) r->position[1] = 0.0f;
+            if (!isfinite(r->position[2])) r->position[2] = 0.0f;
+
             /* 加速度: 使用k1的力作为当前加速度近似 */
             r->acceleration[0] = f1[0];
             r->acceleration[1] = f1[1];
@@ -1394,11 +1474,26 @@ static void simulator_update_internal_physics(Simulator* sim, float dt) {
             quat_normalize(new_q);
             memcpy(r->orientation, new_q, 4 * sizeof(float));
 
+            /* P1修复: 检查角速度和姿态四元数的NaN/Inf。
+             * 姿态更新后若产生非有限值,重置为单位四元数[0,0,0,1]。 */
+            if (!isfinite(r->angular_velocity[0])) r->angular_velocity[0] = 0.0f;
+            if (!isfinite(r->angular_velocity[1])) r->angular_velocity[1] = 0.0f;
+            if (!isfinite(r->angular_velocity[2])) r->angular_velocity[2] = 0.0f;
+            if (!isfinite(r->orientation[0]) || !isfinite(r->orientation[1]) ||
+                !isfinite(r->orientation[2]) || !isfinite(r->orientation[3])) {
+                r->orientation[0] = 0.0f; r->orientation[1] = 0.0f;
+                r->orientation[2] = 0.0f; r->orientation[3] = 1.0f;
+            }
+
             /* ===== 关节级PD控制 ===== */
             for (int j = 0; j < 32; j++) {
                 /* 关节限位弹簧-阻尼 */
                 float limit_spring = 0.0f;
-                float limit_min = -3.14159f, limit_max = 3.14159f;
+                /* P1修复: 使用URDF缓存中的真实关节限位替代硬编码±π。
+                 * 原代码硬编码-3.14159f/3.14159f，忽略URDF中定义的关节限位，
+                 * 导致有限行程关节(如±1.0rad)在仿真中可超出行程范围。 */
+                float limit_min = sim_urdf_get_joint_limit_lower(sim, j);
+                float limit_max = sim_urdf_get_joint_limit_upper(sim, j);
                 if (r->joint_positions[j] < limit_min) {
                     float pen = limit_min - r->joint_positions[j];
                     limit_spring = 500.0f * pen - 50.0f * r->joint_velocities[j];
@@ -1411,21 +1506,35 @@ static void simulator_update_internal_physics(Simulator* sim, float dt) {
                     r->joint_velocities[j] = 0.0f;
                 }
 
-                /* PD控制 */
-                float kp = 200.0f, kd = 20.0f;
-                float pos_error = 0.0f - r->joint_positions[j];
-                float desired_torque = kp * pos_error - kd * r->joint_velocities[j];
-                float max_torque = 200.0f;
-                if (desired_torque > max_torque) desired_torque = max_torque;
-                if (desired_torque < -max_torque) desired_torque = -max_torque;
+                /* P1修复: 根据motion_mode分支处理。
+                 * MOTION_MODE_TORQUE: 直接使用用户设定的joint_torques,跳过PD位置控制,
+                 *   避免低通滤波用陈旧target_joint_positions覆盖用户力矩命令。
+                 * 其他模式(POSITION/VELOCITY/TRAJECTORY): 执行PD位置控制。 */
+                float max_torque = sim_urdf_get_max_torque(sim, j);
+                if (r->motion_mode == MOTION_MODE_TORQUE) {
+                    /* 力矩模式: 仅施加力矩限幅保护,不做PD位置校正 */
+                    if (r->joint_torques[j] > max_torque) r->joint_torques[j] = max_torque;
+                    if (r->joint_torques[j] < -max_torque) r->joint_torques[j] = -max_torque;
+                } else {
+                    /* PD控制 */
+                    float kp = 200.0f, kd = 20.0f;
+                    /* P0修复: 原代码目标位置硬编码为0,导致位置控制完全失效。
+                     * 改为使用target_joint_positions作为PD控制目标。 */
+                    float pos_error = r->target_joint_positions[j] - r->joint_positions[j];
+                    float desired_torque = kp * pos_error - kd * r->joint_velocities[j];
+                    /* P1修复: 使用URDF配置的最大力矩限制替代硬编码200.0f */
+                    if (desired_torque > max_torque) desired_torque = max_torque;
+                    if (desired_torque < -max_torque) desired_torque = -max_torque;
 
-                /* 执行器响应滞后（一阶低通滤波） */
-                float alpha = sub_dt / (0.1f + sub_dt);
-                r->joint_torques[j] += alpha * (desired_torque - r->joint_torques[j]);
+                    /* 执行器响应滞后（一阶低通滤波） */
+                    float alpha = sub_dt / (0.1f + sub_dt);
+                    r->joint_torques[j] += alpha * (desired_torque - r->joint_torques[j]);
+                }
 
                 float net_torque = r->joint_torques[j] + limit_spring;
                 r->joint_velocities[j] += net_torque * sub_dt / 10.0f;
-                float max_vel = 10.0f;
+                /* P1修复: 使用URDF配置的最大速度限制替代硬编码10.0f */
+                float max_vel = sim_urdf_get_max_velocity(sim, j);
                 if (r->joint_velocities[j] > max_vel) r->joint_velocities[j] = max_vel;
                 if (r->joint_velocities[j] < -max_vel) r->joint_velocities[j] = -max_vel;
                 r->joint_positions[j] += r->joint_velocities[j] * sub_dt;
@@ -2169,6 +2278,8 @@ int simulator_load_robot(Simulator* simulator, const RobotConfig* robot_config, 
         robot->joint_positions[i] = 0.0f;
         robot->joint_velocities[i] = 0.0f;
         robot->joint_torques[i] = 0.0f;
+        /* P0修复: 同步初始化PD控制器目标位置 */
+        robot->target_joint_positions[i] = 0.0f;
     }
     
     // 初始化其他状态
@@ -2357,6 +2468,8 @@ int simulator_set_joint_torques(Simulator* simulator, int robot_id, const float*
     for (int i = 0; i < num_joints; i++) {
         robot->joint_torques[i] = joint_torques[i];
     }
+    /* P1修复: 标记为力矩模式,防止PD控制器在物理循环中覆盖用户设定的力矩 */
+    robot->motion_mode = (int)MOTION_MODE_TORQUE;
     
     return 0;
 }
@@ -2395,6 +2508,9 @@ int simulator_apply_robot_command(Simulator* simulator, int robot_id, const Robo
     }
     
     // 根据控制模式执行操作
+    /* P1修复: 记录当前运动控制模式,供PD控制器判断是否跳过位置控制。
+     * 当模式为MOTION_MODE_TORQUE时,PD控制器不应覆盖用户设定的joint_torques。 */
+    simulator->robots[robot_index].motion_mode = (int)command->mode;
     switch (command->mode) {
         case MOTION_MODE_POSITION:
             simulator->robots[robot_index].position[0] = command->target_position[0];
@@ -2424,6 +2540,8 @@ int simulator_apply_robot_command(Simulator* simulator, int robot_id, const Robo
         case MOTION_MODE_TRAJECTORY:
             for (int j = 0; j < 32; j++) {
                 simulator->robots[robot_index].joint_positions[j] = command->target_joint_positions[j];
+                /* P0修复: 同时设置PD控制器目标位置,否则PD将关节驱动回0(硬编码目标)。 */
+                simulator->robots[robot_index].target_joint_positions[j] = command->target_joint_positions[j];
                 simulator->robots[robot_index].joint_velocities[j] = command->target_joint_velocities[j];
             }
             break;
@@ -3150,6 +3268,50 @@ static SimulatorExtension* get_extension(Simulator* sim) {
     }
     sim->extension_data = ext;
     return ext;
+}
+
+/* P1修复: 从URDF缓存获取关节最大力矩，无缓存时回退到默认值 */
+static float sim_urdf_get_max_torque(Simulator* sim, int joint_idx) {
+    if (!sim || !sim->extension_data) return 200.0f;
+    if (joint_idx < 0 || joint_idx >= 32) return 200.0f;
+    SimulatorExtension* ext = (SimulatorExtension*)sim->extension_data;
+    float t = ext->urdf_cache.joint_max_torque[joint_idx];
+    return (t > 0.0f) ? t : 200.0f;
+}
+
+/* P1修复: 从URDF缓存获取关节最大速度，无缓存时回退到默认值 */
+static float sim_urdf_get_max_velocity(Simulator* sim, int joint_idx) {
+    if (!sim || !sim->extension_data) return 10.0f;
+    if (joint_idx < 0 || joint_idx >= 32) return 10.0f;
+    SimulatorExtension* ext = (SimulatorExtension*)sim->extension_data;
+    float v = ext->urdf_cache.joint_max_velocity[joint_idx];
+    return (v > 0.0f) ? v : 10.0f;
+}
+
+/* P1修复: 从URDF缓存获取关节下限位，无缓存或未设置时回退到-π。
+ * 原代码硬编码limit_min=-3.14159f，未使用真实joint_limits_lower，
+ * 导致URDF中定义的关节限位（如±1.57或0~2.0等）在仿真中被忽略。 */
+static float sim_urdf_get_joint_limit_lower(Simulator* sim, int joint_idx) {
+    if (!sim || !sim->extension_data) return -3.14159f;
+    if (joint_idx < 0 || joint_idx >= 32) return -3.14159f;
+    SimulatorExtension* ext = (SimulatorExtension*)sim->extension_data;
+    float lower = ext->urdf_cache.joint_limits_lower[joint_idx];
+    float upper = ext->urdf_cache.joint_limits_upper[joint_idx];
+    /* lower>=upper表示未加载URDF或限位未设置(memset初始化为0)，回退到-π */
+    if (lower >= upper) return -3.14159f;
+    return lower;
+}
+
+/* P1修复: 从URDF缓存获取关节上限位，无缓存或未设置时回退到+π */
+static float sim_urdf_get_joint_limit_upper(Simulator* sim, int joint_idx) {
+    if (!sim || !sim->extension_data) return 3.14159f;
+    if (joint_idx < 0 || joint_idx >= 32) return 3.14159f;
+    SimulatorExtension* ext = (SimulatorExtension*)sim->extension_data;
+    float lower = ext->urdf_cache.joint_limits_lower[joint_idx];
+    float upper = ext->urdf_cache.joint_limits_upper[joint_idx];
+    /* lower>=upper表示未加载URDF或限位未设置(memset初始化为0)，回退到+π */
+    if (lower >= upper) return 3.14159f;
+    return upper;
 }
 
 /* ============================================================================
@@ -3914,6 +4076,8 @@ int simulator_load_urdf(Simulator* simulator, const char* urdf_path,
     if (idx >= 0) {
         for (int j = 0; j < cache.joint_count && j < 32; j++) {
             simulator->robots[idx].joint_positions[j] = 0.0f;
+            /* P0修复: 同步重置PD控制器目标位置 */
+            simulator->robots[idx].target_joint_positions[j] = 0.0f;
         }
     }
     return robot_id;
@@ -3932,6 +4096,8 @@ static int simulator_set_joint_velocity(Simulator* simulator, int robot_id, int 
 static int simulator_set_joint_torque(Simulator* simulator, int robot_id, int joint_id, float torque) {
     if (!simulator || robot_id < 0 || robot_id >= simulator->robot_count || joint_id < 0 || joint_id >= 32) return -1;
     simulator->robots[robot_id].joint_torques[joint_id] = torque;
+    /* P1修复: 标记为力矩模式,防止PD控制器覆盖用户设定的力矩 */
+    simulator->robots[robot_id].motion_mode = (int)MOTION_MODE_TORQUE;
     return 0;
 }
 
@@ -4476,6 +4642,8 @@ void simulator_update_training(Simulator* simulator, float dt) {
             for (int j = 0; j < 32 && j < PPO_ACT_DIM; j++) {
                 float joint_range = 1.5f;
                 r->joint_positions[j] = noisy_action[j] * joint_range;
+                /* P0修复: 同步设置PD控制器目标,否则PD将关节驱动回0 */
+                r->target_joint_positions[j] = noisy_action[j] * joint_range;
             }
 
             /* 5. 计算奖励 */

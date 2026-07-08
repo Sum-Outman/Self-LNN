@@ -110,6 +110,15 @@ CfCNetwork* cfc_create(const CfCNetworkConfig* config) {
     
     // 分配缓冲区
     size_t total_layers = config->num_layers;
+    /* P2-02修复: 乘法溢出检查，防止total_layers * max_layer_size回绕 */
+    if (max_layer_size > 0 && total_layers > SIZE_MAX / max_layer_size) {
+        selflnn_set_last_error(SELFLNN_ERROR_NETWORK_CONFIG, __func__, __FILE__, __LINE__,
+                              "CfC缓冲区大小溢出: total_layers=%zu, max_layer_size=%zu",
+                              total_layers, max_layer_size);
+        safe_free((void**)&network->layers);
+        safe_free((void**)&network);
+        return NULL;
+    }
     network->layer_outputs = (float*)safe_calloc(total_layers * max_layer_size, sizeof(float));
     network->layer_gradients = (float*)safe_calloc(total_layers * max_layer_size, sizeof(float));
     network->activation_buffer = (float*)safe_calloc(max_layer_size, sizeof(float));
@@ -592,14 +601,35 @@ static void cfc_adam_update_group(float* params, const float* grads,
     /* P0-FIX: ODR违规导致grads/params可能为无效指针(0x1等), 守卫跳过 */
     if ((uintptr_t)params < 0x1000 || (uintptr_t)grads < 0x1000 ||
         (uintptr_t)m < 0x1000 || (uintptr_t)v < 0x1000) return;
+    /* C-018修复: 记录跳过的NaN/Inf梯度计数，用于后续日志警告。
+     * 单独跳过NaN/Inf梯度是安全的，但大量跳过可能表明梯度爆炸或数值不稳定。 */
+    size_t nan_skip_count = 0;
     for (size_t i = 0; i < count; i++) {
         float g = grads[i];
-        if (!isfinite(g)) continue;
+        if (!isfinite(g)) {
+            nan_skip_count++; /* C-018修复: 记录NaN/Inf计数 */
+            continue;
+        }
         m[i] = b1 * m[i] + (1.0f - b1) * g;
         v[i] = b2 * v[i] + (1.0f - b2) * g * g;
         float m_hat = m[i] * b1c;
         float v_hat = v[i] * b2c;
         params[i] -= lr * m_hat / (sqrtf(v_hat) + eps);
+    }
+    /* C-018修复: 在梯度裁剪后，如果跳过的NaN/Inf数量超过阈值则发出警告 */
+    if (nan_skip_count > 0) {
+        if (nan_skip_count > count / 10) {
+            /* 超过10%的梯度为NaN/Inf，表明存在严重的数值不稳定问题 */
+            log_error("[梯度优化] 严重NaN/Inf梯度: %zu/%zu (%.1f%%) 个梯度被跳过，"
+                      "可能存在梯度爆炸或数值不稳定",
+                      nan_skip_count, count, 
+                      100.0f * (float)nan_skip_count / (float)count);
+        } else {
+            /* 少量NaN/Inf梯度，记录为警告级别 */
+            log_warning("[梯度优化] 跳过%zu个NaN/Inf梯度 (共%zu个, %.1f%%)",
+                       nan_skip_count, count,
+                       100.0f * (float)nan_skip_count / (float)count);
+        }
     }
 }
 
@@ -879,7 +909,14 @@ int cfc_backward_ex(CfCNetwork* network, const float* error,
 /* 步骤3 — 单样本路径梯度累积而非直接SGD更新
      * skip_cell_update=1时跳过所有参数更新（批量模式，调用方负责统一下发）。
      * skip_cell_update=0时采用梯度累积模式（+=）而非直接SGD（-=lr*grad），
-     * 确保与外部优化器（Adam/AdamW等）的单元格更新路径一致。 */
+     * 确保与外部优化器（Adam/AdamW等）的单元格更新路径一致。
+     *
+     * P2修复说明: 梯度裁剪(lnn_clip_gradients)统一在lnn.c的_lnn_backward_internal中处理，
+     * 不在此处重复裁剪，避免双重裁剪导致梯度过度衰减。
+     * - lnn.c路径: _lnn_backward_internal使用skip=1调用cfc_backward_ex(仅计算梯度)，
+     *   然后在_lnn_backward_internal_ex中完成梯度裁剪，最后调用Adam更新。
+     * - 直接调用cfc_backward(公开API): 使用skip=0，此处应用Adam，
+     *   调用方需自行负责梯度裁剪(如有需要)。 */
     if (!skip_cell_update) {
     /* R3P3修复: 单样本路径统一使用Adam自适应学习率，消除与原批量路径的SGD/Adam分裂。
      * 原SGD路径（参数 -= lr*grad）缺少动量/偏差校正/自适应步长，
@@ -1824,8 +1861,25 @@ int cfc_continuous_rhs(float t, const float* y, float* dydt, void* ctx) {
                 input_gate_sum += cell->hidden_to_input_gate_weights[i * layer_size + k] * layer_y[k];
                 forget_gate_sum += cell->hidden_to_forget_gate_weights[i * layer_size + k] * layer_y[k];
             }
-            float input_gate = 1.0f / (1.0f + expf(-input_gate_sum));
-            float forget_gate = 1.0f / (1.0f + expf(-forget_gate_sum));
+            /* P2修复: 在sigmoid前检查输入NaN/Inf，防止NaN传播到整个隐藏状态。
+             * 统一门控钳位阈值: 预sigmoid限幅到[-10,10]防止expf溢出，
+             * 后sigmoid钳位到[0,1]确保门控输出在sigmoid有效范围内。
+             * 原问题: 此处门控无任何钳位，与cfc_cell.c中的钳位阈值不一致。 */
+            float input_gate_sum_safe = isfinite(input_gate_sum) ? input_gate_sum : 0.0f;
+            if (input_gate_sum_safe > 10.0f) input_gate_sum_safe = 10.0f;
+            else if (input_gate_sum_safe < -10.0f) input_gate_sum_safe = -10.0f;
+            float input_gate = 1.0f / (1.0f + expf(-input_gate_sum_safe));
+            /* 门控输出钳位到[0,1]（sigmoid输出范围） */
+            if (input_gate < 0.0f) input_gate = 0.0f;
+            else if (input_gate > 1.0f) input_gate = 1.0f;
+
+            float forget_gate_sum_safe = isfinite(forget_gate_sum) ? forget_gate_sum : 0.0f;
+            if (forget_gate_sum_safe > 10.0f) forget_gate_sum_safe = 10.0f;
+            else if (forget_gate_sum_safe < -10.0f) forget_gate_sum_safe = -10.0f;
+            float forget_gate = 1.0f / (1.0f + expf(-forget_gate_sum_safe));
+            /* 门控输出钳位到[0,1]（sigmoid输出范围） */
+            if (forget_gate < 0.0f) forget_gate = 0.0f;
+            else if (forget_gate > 1.0f) forget_gate = 1.0f;
 
             /* 激活: tanh(W_a·x + U_a·h + b_a) */
             float act_sum = cell->bias_vector[i];
@@ -1835,7 +1889,11 @@ int cfc_continuous_rhs(float t, const float* y, float* dydt, void* ctx) {
             for (size_t k = 0; k < layer_size; k++) {
                 act_sum += cell->hidden_to_activation_weights[i * layer_size + k] * layer_y[k];
             }
-            float act = tanhf(act_sum);
+            /* P2修复: tanh前检查NaN/Inf，并限幅防止饱和溢出 */
+            float act_sum_safe = isfinite(act_sum) ? act_sum : 0.0f;
+            float act = tanhf(act_sum_safe);
+            if (act > 1.0f) act = 1.0f;
+            else if (act < -1.0f) act = -1.0f;
 
             /* CfC RHS: dh/dt = (-forget_gate·h + input_gate·act) / τ - ZSF-009修复：NULL安全 */
             float rh_tau = (tau) ? ((tau[i] > 0.001f) ? tau[i] : 0.001f) : default_tau_value;

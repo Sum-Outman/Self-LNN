@@ -308,7 +308,15 @@ int safety_circuit_breaker_close(SafetyMonitor* monitor) {
 /* 获取熔断器状态 */
 int safety_circuit_breaker_get_state(const SafetyMonitor* monitor) {
     if (!monitor) return 0;
-    return monitor->cb_state;
+    /* S-P2-05修复: 加锁保护cb_state读取，防止与safety_circuit_breaker_record_failure/
+     * safety_circuit_breaker_record_success/safety_circuit_breaker_force_reset等
+     * 写线程并发导致的竞态读取。
+     * SAFETY_LOCK宏展开为mutex_lock((m)->lock)，mutex_lock按值(MutexHandle=void*)传递，
+     * const结构体下monitor->lock为void* const，按值传入无const违例，可安全加锁。 */
+    SAFETY_LOCK(monitor);
+    int state = monitor->cb_state;
+    SAFETY_UNLOCK(monitor);
+    return state;
 }
 
 void safety_monitor_free(SafetyMonitor* monitor) {
@@ -353,6 +361,12 @@ int safety_add_rule(SafetyMonitor* monitor, const SafetyRule* rule) {
 
 int safety_report_event(SafetyMonitor* monitor, const SafetyEvent* event) {
     if (!monitor || !event) return -1;
+
+    /* P0修复: 延迟紧急停止调用到锁外，避免持锁重入死锁。
+     * safety_emergency_stop内部会再次获取SAFETY_LOCK，若在此处持锁调用，
+     * Linux非递归互斥锁会死锁，Windows CRITICAL_SECTION虽递归但有重入式双重处理。 */
+    int need_emergency_stop = 0;
+
     SAFETY_LOCK(monitor);
 
     /* 存储事件 */
@@ -391,7 +405,8 @@ int safety_report_event(SafetyMonitor* monitor, const SafetyEvent* event) {
                         break;
                     case 3: /* 紧急停止 */
                         monitor->current_level = SAFETY_LEVEL_EMERGENCY;
-                        safety_emergency_stop(monitor);
+                        /* P0修复: 标记而非直接调用，避免持锁重入死锁 */
+                        need_emergency_stop = 1;
                         break;
                 }
             }
@@ -445,6 +460,15 @@ int safety_report_event(SafetyMonitor* monitor, const SafetyEvent* event) {
     monitor->violation_history[minute_idx]++;
 
     SAFETY_UNLOCK(monitor);
+
+    /* P0修复: 在锁外调用紧急停止，避免重入死锁。
+     * safety_emergency_stop内部会获取SAFETY_LOCK，此处已释放锁，不会死锁。
+     * safety_emergency_stop内部有重入保护(emergency_stop_active)，
+     * 若其内部调用safety_report_event再次触发紧急停止，重入保护会直接返回0。 */
+    if (need_emergency_stop) {
+        safety_emergency_stop(monitor);
+    }
+
     return 0;
 }
 
@@ -478,21 +502,27 @@ int safety_approve_action(SafetyMonitor* monitor, const char* action_type, const
     if (!monitor || !action_type) return -1;
     /* M-026修复: 检查params缓冲区大小，防止越界读取 */
     /* R5-002修复: 使用params验证动作参数合理性，而非丢弃 */
+    /* S-P2-06修复: physical_boundaries.max_acceleration 与 stats.current_safety_score 均为
+     * 跨线程共享字段，原实现在SAFETY_LOCK(第495行)之前直接读取，存在TOCTOU竞态。
+     * 现将total_magnitude(仅依赖params,非共享)的计算保留在锁外，
+     * 把对共享字段的判定与读取统一纳入锁保护。 */
+    float total_magnitude = 0.0f;
     if (params) {
         const float* param_floats = (const float*)params;
-        float total_magnitude = 0.0f;
         for (int i = 0; i < 4 && i < 16; i++) total_magnitude += fabsf(param_floats[i]);  /* M-026: 最多读取16个float */
-        /* 动作幅值超过上界且安全评分低时拒绝 */
-        if (total_magnitude > monitor->physical_boundaries.max_acceleration) {
-            if (monitor->stats.current_safety_score < 0.6f) {
-                log_warning("[安全] 动作审批拒绝: %s幅值过大=%.3f", action_type, total_magnitude);
-                return -1;
-            }
-        }
     }
 
     /* K-修复: 双缓冲预检查 — 先在锁内获取快照，再验证，消除TOCTOU窗口 */
+    /* S-P2-06修复: 动作幅值/安全评分检查一并纳入锁保护 */
     SAFETY_LOCK(monitor);
+    /* 动作幅值超过上界且安全评分低时拒绝 */
+    if (total_magnitude > 0.0f && total_magnitude > monitor->physical_boundaries.max_acceleration) {
+        if (monitor->stats.current_safety_score < 0.6f) {
+            SAFETY_UNLOCK(monitor);
+            log_warning("[安全] 动作审批拒绝: %s幅值过大=%.3f", action_type, total_magnitude);
+            return -1;
+        }
+    }
     int emergency_stop_pre = monitor->emergency_stop_active;
     if (emergency_stop_pre) {
         SAFETY_UNLOCK(monitor);
@@ -553,6 +583,14 @@ int safety_monitor_set_emergency_stop(SafetyMonitor* monitor, EmergencyStopSyste
 int safety_emergency_stop(SafetyMonitor* monitor) {
     if (!monitor) return -1;
     SAFETY_LOCK(monitor);
+    /* P0修复: 防止重入递归。
+     * safety_report_event在锁外调用本函数，本函数又在锁外调用safety_report_event，
+     * 若safety_report_event再次触发紧急停止(action_type=3)，会再次调用本函数。
+     * 通过emergency_stop_active标志阻止递归进入，避免无限递归。 */
+    if (monitor->emergency_stop_active) {
+        SAFETY_UNLOCK(monitor);
+        return 0;
+    }
     monitor->emergency_stop_active = 1;
     monitor->current_level = SAFETY_LEVEL_EMERGENCY;
     monitor->stats.current_safety_score = 0.0f;
@@ -560,9 +598,18 @@ int safety_emergency_stop(SafetyMonitor* monitor) {
     SAFETY_UNLOCK(monitor);
 
     /* 同时触发紧急停止系统 */
+    /* P1修复(修复6): emergency_stop_system_trigger 可能失败(返回-1，如系统被禁用)，
+     * 原实现忽略返回值始终返回0。此处检查返回值，失败时记录错误日志并返回-1，
+     * 使调用方可知晓外部紧急停止系统未成功激活。 */
+    int trigger_failed = 0;
     if (es) {
-        emergency_stop_system_trigger(es, EMERGENCY_SOURCE_SAFETY_MONITOR,
-                                      EMERGENCY_LEVEL_HARD_STOP, NULL, 0);
+        int trigger_ret = emergency_stop_system_trigger(es, EMERGENCY_SOURCE_SAFETY_MONITOR,
+                                                        EMERGENCY_LEVEL_HARD_STOP, NULL, 0);
+        if (trigger_ret != 0) {
+            log_error("[安全] 紧急停止系统触发失败(返回%d), 外部设备可能未收到停止信号",
+                      trigger_ret);
+            trigger_failed = 1;
+        }
     }
 
     SafetyEvent stop_event;
@@ -574,7 +621,7 @@ int safety_emergency_stop(SafetyMonitor* monitor) {
     stop_event.handled = 1;
     safety_report_event(monitor, &stop_event);
 
-    return 0;
+    return trigger_failed ? -1 : 0;
 }
 
 int safety_soft_stop(SafetyMonitor* monitor) {
@@ -627,6 +674,18 @@ int safety_get_audit_log(const SafetyMonitor* monitor, AuditLogEntry* entries, i
 int safety_validate_decision(SafetyMonitor* monitor, const char* decision_type,
                             const float* decision_params, int param_count) {
     if (!monitor || !decision_type) return -1;
+
+    /* C-022修复: 锁设计意图说明。
+     * 此处加锁仅用于原子读取emergency_stop_active标志位。
+     * 紧急停止是最高优先级的安全机制，必须快速检查并返回。
+     * 加锁后立即解锁的设计是故意的：
+     * 1. emergency_stop_active是原子布尔值，读取后立即解锁最小化锁持有时间
+     * 2. 如果紧急停止已激活，直接返回-1拒绝所有决策，无需继续检查参数
+     * 3. 后续的decision_params NaN/Inf检查在锁外进行，因为：
+     *    a) decision_params是调用者传入的栈/堆数据，不共享
+     *    b) NaN/Inf检查是纯计算，不访问monitor的共享状态
+     *    c) 仅在发现异常时通过safety_report_event写入monitor，该函数内部自行加锁
+     * 4. 这种"锁-检查-解锁-处理"模式避免了长时间持锁，提高了并发性能 */
 
     SAFETY_LOCK(monitor);
     if (monitor->emergency_stop_active) {
@@ -762,13 +821,19 @@ int safety_dynamic_adjust_thresholds(SafetyMonitor* monitor) {
     if (!monitor) return -1;
 
     time_t now_t = time(NULL);
-    double elapsed = difftime(now_t, monitor->last_dynamic_adjust_time);
-    if (elapsed < 30.0) return 0;
-
     float cpu_usage = get_cpu_usage_local();
     float memory_usage = get_memory_usage_local();
 
+    /* S-P2-07修复: last_dynamic_adjust_time为跨线程共享字段，原实现在SAFETY_LOCK(第771行)
+     * 之前读取并据此提前return，导致并发线程可同时绕过节流窗口(30秒)重复调整阈值。
+     * 现将elapsed计算与节流判定纳入锁保护。time/get_cpu_usage_local/get_memory_usage_local
+     * 不访问monitor共享状态，可在锁外预先采集。 */
     SAFETY_LOCK(monitor);
+    double elapsed = difftime(now_t, monitor->last_dynamic_adjust_time);
+    if (elapsed < 30.0) {
+        SAFETY_UNLOCK(monitor);
+        return 0;
+    }
 
     int total_violations = 0;
     int window_used = monitor->violation_window_count > 0 ? monitor->violation_window_count : 1;

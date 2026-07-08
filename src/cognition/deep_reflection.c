@@ -303,7 +303,7 @@ static float dr_cross_contradiction_check(DeepReflectionEngine* engine,
              * 然后用预热后的网络检测矛盾。预热在首次调用时自动触发。 */
             if (!engine->conflict_net_warmed && engine->lnn_conflict_epochs < 3) {
                 /* 自蒸馏预热：让网络输出接近余弦距离，提供合理的初始嵌入 */
-                float* temp_out = (float*)calloc(edim * 2, sizeof(float));
+                float* temp_out = (float*)safe_calloc(edim * 2, sizeof(float));
                 if (temp_out) {
                     for (size_t j = 0; j < edim; j++) {
                         temp_out[j] = layer_embedding[j];
@@ -321,7 +321,7 @@ static float dr_cross_contradiction_check(DeepReflectionEngine* engine,
                     }
                     engine->lnn_conflict_epochs++;
                     if (engine->lnn_conflict_epochs >= 3) engine->conflict_net_warmed = 1;
-                    free(temp_out);
+                    safe_free((void**)&temp_out);
                 }
             }
             lnn_forward(engine->conflict_net, con_input, con_out);

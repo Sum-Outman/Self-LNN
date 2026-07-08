@@ -68,9 +68,8 @@ void slam_quaternion_to_rotation_matrix(const float* q, float* R) {
     R[8] = 1.0f - 2.0f*(xx + yy);
 }
 
-#ifdef _MSC_VER
-/* MSVC: 与slam.c重复定义, 该函数已由slam.c提供 */
-#else
+/* slam_rotation_matrix_to_quaternion: 外部链接定义，供slam.c等调用。
+ * slam.c中另有static inline副本供自身使用，两者不冲突。 */
 void slam_rotation_matrix_to_quaternion(const float* R, float* q) {
     float trace = R[0] + R[4] + R[8];
     if (trace > 0.0f) {
@@ -103,7 +102,6 @@ void slam_rotation_matrix_to_quaternion(const float* R, float* q) {
         q[0] /= norm; q[1] /= norm; q[2] /= norm; q[3] /= norm;
     }
 }
-#endif /* _MSC_VER */
 
 void slam_project_point(const float* point3d, const float* R, const float* t,
                         const float* camera_params, float* u, float* v) {
@@ -681,6 +679,101 @@ int slam_match_features(const FeaturePoint* features1, int num_features1,
 
 /* ==================== 2D-2D运动估计（8点法 + SVD） ==================== */
 
+/**
+ * @brief 9x9对称矩阵的雅可比特征值分解，提取最小特征值对应的特征向量
+ *
+ * P0修复: 原代码对9x9矩阵AtA[81]错误调用slam_svd_3x3（仅处理3x3），
+ * 且V[9-1+i]当i>=1时越界读取V[8+i]。此函数使用经典的Jacobi旋转方法
+ * 对称化9x9矩阵，迭代消去非对角线元素，最终对角线即为特征值，
+ * U的列即为对应特征向量。返回最小特征值对应的特征向量（基础矩阵的零空间）。
+ *
+ * @param AtA 9x9对称矩阵（81个元素，行主序）
+ * @param eigenvector 输出：最小特征值对应的特征向量（9个元素）
+ * @return 0成功，-1失败
+ */
+static int slam_jacobi_eigen_9x9(const float* AtA, float* eigenvector) {
+    if (!AtA || !eigenvector) return -1;
+
+    float S[81];  /* 工作矩阵，迭代过程中逐步对角化 */
+    float U[81];  /* 特征向量矩阵 */
+    memcpy(S, AtA, 81 * sizeof(float));
+
+    /* 初始化U为单位矩阵 */
+    for (int i = 0; i < 9; i++) {
+        for (int j = 0; j < 9; j++) {
+            U[i * 9 + j] = (i == j) ? 1.0f : 0.0f;
+        }
+    }
+
+    /* Jacobi迭代：循环消去非对角线元素 */
+    for (int iter = 0; iter < 200; iter++) {
+        /* 计算非对角线元素平方和，判断是否已收敛 */
+        float off = 0.0f;
+        for (int i = 0; i < 9; i++) {
+            for (int j = 0; j < 9; j++) {
+                if (i != j) off += S[i * 9 + j] * S[i * 9 + j];
+            }
+        }
+        if (off < 1e-12f) break;
+
+        /* 遍历所有上三角非对角线元素(p,q)进行Jacobi旋转 */
+        for (int p = 0; p < 8; p++) {
+            for (int q = p + 1; q < 9; q++) {
+                float app = S[p * 9 + p];
+                float aqq = S[q * 9 + q];
+                float apq = S[p * 9 + q];
+                if (fabsf(apq) < 1e-14f) continue;
+
+                /* 计算旋转角度 */
+                float tau = aqq - app;
+                float hyp = sqrtf(tau * tau + 4.0f * apq * apq);
+                float tan_2theta = (tau >= 0.0f) ? (2.0f * apq) / (tau + hyp)
+                                                 : (2.0f * apq) / (tau - hyp);
+                float c = 1.0f / sqrtf(1.0f + tan_2theta * tan_2theta);
+                float sv = tan_2theta * c;  /* sin(theta) */
+
+                /* 列变换：S[:,p]和S[:,q] */
+                for (int i = 0; i < 9; i++) {
+                    float sip = S[i * 9 + p];
+                    float siq = S[i * 9 + q];
+                    S[i * 9 + p] =  c * sip + sv * siq;
+                    S[i * 9 + q] = -sv * sip + c * siq;
+                    /* 同步更新特征向量矩阵U */
+                    float uip = U[i * 9 + p];
+                    float uiq = U[i * 9 + q];
+                    U[i * 9 + p] =  c * uip + sv * uiq;
+                    U[i * 9 + q] = -sv * uip + c * uiq;
+                }
+                /* 行变换：S[p,:]和S[q,:] */
+                for (int i = 0; i < 9; i++) {
+                    float spi = S[p * 9 + i];
+                    float sqi = S[q * 9 + i];
+                    S[p * 9 + i] =  c * spi + sv * sqi;
+                    S[q * 9 + i] = -sv * spi + c * sqi;
+                }
+            }
+        }
+    }
+
+    /* 找到最小特征值对应的对角线元素索引 */
+    int min_idx = 0;
+    float min_val = fabsf(S[0]);
+    for (int i = 1; i < 9; i++) {
+        float val = fabsf(S[i * 9 + i]);
+        if (val < min_val) {
+            min_val = val;
+            min_idx = i;
+        }
+    }
+
+    /* 提取最小特征值对应的特征向量（U的第min_idx列） */
+    for (int i = 0; i < 9; i++) {
+        eigenvector[i] = U[i * 9 + min_idx];
+    }
+
+    return 0;
+}
+
 static int slam_compute_fundamental_linear(const float* pts1, const float* pts2,
                                            int num_points, float* F) {
     if (!pts1 || !pts2 || !F || num_points < 8) return -1;
@@ -727,11 +820,11 @@ static int slam_compute_fundamental_linear(const float* pts1, const float* pts2,
         }
     }
 
-    float U[9], S[9], V[9];
-    slam_svd_3x3(AtA, U, S, V);
-
+    /* P0修复: 原代码对9x9矩阵AtA错误调用slam_svd_3x3（仅处理3x3），
+     * 且V[9-1+i]当i>=1时越界读取V[8+i]。改用9x9 Jacobi特征值分解
+     * 提取最小特征值对应的特征向量（即AtA的零空间，基础矩阵F）。 */
     float f_norm[9];
-    for (int i = 0; i < 9; i++) f_norm[i] = V[9-1 + i];
+    slam_jacobi_eigen_9x9(AtA, f_norm);
     memcpy(F, f_norm, 9 * sizeof(float));
 
     float Uf[9], Sf[3], Vf[9];
@@ -1128,7 +1221,11 @@ int slam_estimate_motion_3d2d(const FeaturePoint* features2d,
 
     slam_free(alphas);
     slam_free(M_mat);
-    return 1;
+    /* P1修复: 成功路径返回0而非1。
+     * 调用方slam.c以"motion_result == 0"判定成功，原返回1导致PnP成功路径
+     * （含R10的R_rel修复）永远不执行，有效EPnP结果被当作失败丢弃。
+     * 此处与slam_estimate_motion_2d2d的成功返回约定保持一致。 */
+    return 0;
 }
 
 /* ==================== DLT三角化 ==================== */

@@ -10,6 +10,7 @@
   "websocket_port": 8081,
   "distributed_port": 8765,
   "model_path": "",
+  "mixed_precision_mode": 1,
   "training": {
     "epochs": 100,
     "batch_size": 32,
@@ -17,7 +18,8 @@
     "validation_split": 0.1,
     "early_stopping_patience": 10,
     "mixed_precision": "auto",
-    "distributed_enabled": false
+    "distributed_enabled": false,
+    "_comment_parsed": "training子对象中仅mixed_precision字段被config_loader.c解析（映射为SystemConfig.mixed_precision_mode int枚举）。epochs/batch_size/learning_rate/validation_split/early_stopping_patience/distributed_enabled字段未在代码中解析，需通过Web控制台或API动态配置。"
   },
   "safety": {
     "content_filter_enabled": true,
@@ -67,5 +69,5 @@
     "log_level": "info",
     "web_ui_enabled": true
   },
-  "_comment": "L-002修复: 已补全agi/self_cognition/system配置段。所有值已与代码默认值对齐。M-006验证: training.mixed_precision为字符串格式(由config_loader.c映射为SystemConfig.mixed_precision_mode int枚举)，这是正确的设计。"
+  "_comment": "L-002修复: 已补全agi/self_cognition/system配置段。所有值已与代码默认值对齐。M-006验证: training.mixed_precision为字符串格式(由config_loader.c映射为SystemConfig.mixed_precision_mode int枚举)，这是正确的设计。BLD-008修复: training子对象字段添加注释说明哪些被解析。BLD-016修复: 添加mixed_precision_mode顶层字段（0=关闭, 1=auto, 2=FP16, 3=BF16）。"
 }

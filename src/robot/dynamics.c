@@ -987,10 +987,16 @@ int dynamics_rnea(const DynamicsModel* model,
             }
         }
         {
-            float r_com[3], w_x_r[3], w_x_wxr[3], a_x_r[3];
-            r_com[0] = model->config.link_com[i * 3 + 0];
-            r_com[1] = model->config.link_com[i * 3 + 1];
-            r_com[2] = model->config.link_com[i * 3 + 2];
+            float r_local[3], r_com[3], w_x_r[3], w_x_wxr[3], a_x_r[3];
+            r_local[0] = model->config.link_com[i * 3 + 0];
+            r_local[1] = model->config.link_com[i * 3 + 1];
+            r_local[2] = model->config.link_com[i * 3 + 2];
+            /* P1修复: link_com存储在局部(连杆)坐标系,必须用世界旋转矩阵
+             * world_R[i]旋转到世界坐标系后,才能与世界系omega/alpha做叉乘。
+             * 原代码直接用局部系r_com与世界系omega叉乘,数学非法,
+             * 导致质心加速度和力/力矩计算完全错误。
+             * 同文件dynamics_potential_energy(line 1526)已正确执行此变换。 */
+            mat3_vec3_mul(&world_R[i * 9], r_local, r_com);
             dvec3_cross(&omega[i * 3], r_com, w_x_r);
             dvec3_cross(&omega[i * 3], w_x_r, w_x_wxr);
             dvec3_cross(&alpha[i * 3], r_com, a_x_r);
@@ -1087,42 +1093,61 @@ int dynamics_mass_matrix(const DynamicsModel* model, const float* q, float* mass
     float* qd_zero;
     float* qdd_ej;
     float* torques_j;
+    float* gravity_terms;
     if (!model || !q || !mass_matrix) return -1;
     n = model->config.num_joints;
     if (n <= 0 || n > DYNAMICS_MAX_JOINTS) return -1;
     qd_zero = (float*)safe_malloc((size_t)n * 3 * sizeof(float));
     qdd_ej = (float*)safe_malloc((size_t)n * sizeof(float));
     torques_j = (float*)safe_malloc((size_t)n * sizeof(float));
-    if (!qd_zero || !qdd_ej || !torques_j) {
+    gravity_terms = (float*)safe_malloc((size_t)n * sizeof(float));
+    if (!qd_zero || !qdd_ej || !torques_j || !gravity_terms) {
         safe_free((void**)&qd_zero);
         safe_free((void**)&qdd_ej);
         safe_free((void**)&torques_j);
+        safe_free((void**)&gravity_terms);
         return -1;
     }
     memset(qd_zero, 0, (size_t)n * sizeof(float));
-/* 临时清零重力计算纯质量矩阵M(q)
-     * RNEA(q,0,ej) = M(q)·ej + G(q), 必须排除G(q)才能得到M(q)的准确列 */
-    float saved_gravity[3];
-    memcpy(saved_gravity, model->config.gravity, sizeof(saved_gravity));
-    memset(model->config.gravity, 0, sizeof(model->config.gravity));
+    memset(qdd_ej, 0, (size_t)n * sizeof(float));
+
+    /* P1修复: 不再通过修改const对象model->config.gravity来排除重力项。
+     * 原代码memset(model->config.gravity,0,...)写入const对象是未定义行为(UB),
+     * 且在多线程并发调用时会造成数据竞争。
+     *
+     * 正确方法(数学等价,线程安全,无UB):
+     *   RNEA(q, 0, ej) = M(q)·ej + G(q)   (qd=0时无科氏力/摩擦/阻尼)
+     *   RNEA(q, 0,  0) = G(q)
+     *   => M(q)·ej = RNEA(q, 0, ej) - RNEA(q, 0, 0) = RNEA(q,0,ej) - G(q)
+     *
+     * 先用真实重力计算G(q),再从每列RNEA结果中减去G(q),完全避免修改const对象。 */
+    if (dynamics_rnea(model, q, qd_zero, qdd_ej, gravity_terms) != 0) {
+        safe_free((void**)&qd_zero);
+        safe_free((void**)&qdd_ej);
+        safe_free((void**)&torques_j);
+        safe_free((void**)&gravity_terms);
+        return -1;
+    }
+
     for (i = 0; i < n; i++) {
         memset(qdd_ej, 0, (size_t)n * sizeof(float));
         qdd_ej[i] = 1.0f;
         if (dynamics_rnea(model, q, qd_zero, qdd_ej, torques_j) != 0) {
-            memcpy(model->config.gravity, saved_gravity, sizeof(saved_gravity));
             safe_free((void**)&qd_zero);
             safe_free((void**)&qdd_ej);
             safe_free((void**)&torques_j);
+            safe_free((void**)&gravity_terms);
             return -1;
         }
         for (j = 0; j < n; j++) {
-            mass_matrix[j * n + i] = torques_j[j];
+            /* M(q)[:,i] = RNEA(q,0,ei) - G(q) */
+            mass_matrix[j * n + i] = torques_j[j] - gravity_terms[j];
         }
     }
-    memcpy(model->config.gravity, saved_gravity, sizeof(saved_gravity));
     safe_free((void**)&qd_zero);
     safe_free((void**)&qdd_ej);
     safe_free((void**)&torques_j);
+    safe_free((void**)&gravity_terms);
     return 0;
 }
 
@@ -1163,7 +1188,16 @@ int dynamics_coriolis(const DynamicsModel* model,
             return -1;
         }
         memset(qd_zero2, 0, (size_t)n * sizeof(float));
-        dynamics_rnea(model, q, qd_zero2, qdd_zero, tau_gravity);
+        /* P2修复: 检查第二次RNEA调用的返回值。
+         * 原代码未检查返回值，若RNEA失败则tau_gravity为未初始化值，
+         * coriolis[i] = tau[i] - tau_gravity[i] 将产生垃圾数据。 */
+        if (dynamics_rnea(model, q, qd_zero2, qdd_zero, tau_gravity) != 0) {
+            safe_free((void**)&qd_zero2);
+            safe_free((void**)&tau_gravity);
+            safe_free((void**)&qdd_zero);
+            safe_free((void**)&tau);
+            return -1;
+        }
         for (i = 0; i < n; i++) {
             coriolis[i] = tau[i] - tau_gravity[i];
         }
@@ -1428,10 +1462,11 @@ int dynamics_compute_contact_forces(const DynamicsModel* model,
             dvec3_cross(cp->normal, t1, t2);
             vt1 = dvec3_dot(v_rel, t1);
             vt2 = dvec3_dot(v_rel, t2);
-            ft_max = model->config.friction_coefficient * fn;
-            if (cp->friction_coeff > 0) {
-                ft_max *= cp->friction_coeff / model->config.friction_coefficient;
-            }
+            /* P2修复: 当全局friction_coefficient=0且cp->friction_coeff>0时，
+             * 原代码计算0*(cp->friction_coeff/0)=NaN，导致摩擦力全NaN。
+             * 直接使用cp的摩擦系数（若有），否则用全局系数。 */
+            ft_max = (cp->friction_coeff > 0) ? (cp->friction_coeff * fn)
+                                              : (model->config.friction_coefficient * fn);
             if (model->config.friction_model == FRICTION_CONE_PYRAMID) {
                 float ft1, ft2;
                 ft1 = -model->config.contact_stiffness * vt1 * 0.01f;

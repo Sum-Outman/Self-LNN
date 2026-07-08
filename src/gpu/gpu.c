@@ -864,7 +864,8 @@ static void gpu_cpu_memory_free(GpuMemory* memory) {
 static int gpu_cpu_memory_copy_to_device(GpuMemory* dst, const void* src, size_t size) {
     struct GpuMemory* dmem = (struct GpuMemory*)dst;
     if (!dmem || !src || size == 0) return -1;
-    if (size > dmem->size) size = dmem->size;
+    /* 修复10(P1): 复制大小超过设备内存时返回错误，而非静默截断并返回成功 */
+    if (size > dmem->size) return -1;
     memcpy(dmem->data, src, size);
     return 0;
 }
@@ -872,7 +873,8 @@ static int gpu_cpu_memory_copy_to_device(GpuMemory* dst, const void* src, size_t
 static int gpu_cpu_memory_copy_from_device(void* dst, GpuMemory* src, size_t size) {
     struct GpuMemory* smem = (struct GpuMemory*)src;
     if (!dst || !smem || size == 0) return -1;
-    if (size > smem->size) size = smem->size;
+    /* 修复10(P1): 复制大小超过设备内存时返回错误，而非静默截断并返回成功 */
+    if (size > smem->size) return -1;
     memcpy(dst, smem->data, size);
     return 0;
 }
@@ -1349,14 +1351,22 @@ static void gpu_set_error_string(const char* format, ...) {
  * =========================================================================== */
 
 /**
- * @brief DJB2哈希算法-从内核源码生成64位哈希值
+ * @brief DJB2哈希算法-从内核源码和内核名生成64位哈希值
+ *
+ * 修复9(P1): 哈希合并源码+内核名，避免同一源码含多个入口函数时缓存碰撞返回错误内核。
  */
-static uint64_t kernel_source_hash(const char* source) {
+static uint64_t kernel_source_hash(const char* source, const char* name) {
     if (!source) return 0;
     uint64_t hash = 5381;
     int c;
     while ((c = (unsigned char)*source++)) {
         hash = ((hash << 5) + hash) + (uint64_t)c;
+    }
+    /* 合并内核名到哈希，区分同一源码中的不同入口函数 */
+    if (name) {
+        while ((c = (unsigned char)*name++)) {
+            hash = ((hash << 5) + hash) + (uint64_t)c;
+        }
     }
     return hash;
 }
@@ -1408,13 +1418,22 @@ static void kernel_cache_destroy(struct GpuContext* ctx) {
 
 /**
  * @brief 查找缓存条目（线性扫描，更新LRU时间戳）
+ *
+ * 修复9(P1): 额外比较kernel_name，避免同一源码不同入口函数哈希碰撞时返回错误内核。
  */
-static struct GpuKernel* kernel_cache_lookup(struct GpuContext* ctx, uint64_t hash) {
+static struct GpuKernel* kernel_cache_lookup(struct GpuContext* ctx, uint64_t hash, const char* kernel_name) {
     if (!ctx || !ctx->kernel_cache) return NULL;
     for (int i = 0; i < ctx->kernel_cache_capacity; i++) {
         if (ctx->kernel_cache[i].is_valid && ctx->kernel_cache[i].source_hash == hash) {
+            /* 额外比较kernel_name，确保源码+名称完全匹配 */
+            if (kernel_name && ctx->kernel_cache[i].kernel && ctx->kernel_cache[i].kernel->kernel_name &&
+                strcmp(ctx->kernel_cache[i].kernel->kernel_name, kernel_name) != 0) {
+                continue;
+            }
             ctx->kernel_cache[i].last_access_time = ++ctx->cache_timestamp;
             ctx->kernel_cache[i].use_count++;
+            /* 修复8(P0): 命中缓存时递增引用计数，防止LRU淘汰仍在使用中的内核导致use-after-free */
+            ctx->kernel_cache[i].refcount++;
             ctx->kernel_cache_hits++;
             return ctx->kernel_cache[i].kernel;
         }
@@ -1433,6 +1452,8 @@ static int kernel_cache_evict_one_lru(struct GpuContext* ctx) {
     int lowest_use = 0;
     for (int i = 0; i < ctx->kernel_cache_capacity; i++) {
         if (!ctx->kernel_cache[i].is_valid) continue;
+        /* 修复8(P0): 跳过仍在使用中的内核（refcount > 0），防止淘汰导致use-after-free */
+        if (ctx->kernel_cache[i].refcount > 0) continue;
         if (oldest_idx < 0 ||
             ctx->kernel_cache[i].last_access_time < oldest_time ||
             (ctx->kernel_cache[i].last_access_time == oldest_time &&
@@ -1844,8 +1865,16 @@ int gpu_init(GpuBackend backend) {
             GPU_STATE_LOCK();
             if (init_ret == 0) {
                 if (!g_gpu_global_initialized) {
+                    /* P-AUDIT修复(G-9): 原代码在此处成功初始化但另一线程可能已抢先初始化,
+                     * 当前线程的已初始化后端不会被cleanup,造成资源泄漏。
+                     * 修复:若已被其他线程抢先初始化,调用当前后端的cleanup释放资源。 */
                     g_active_backend = kDetectionOrder[i];
                     g_gpu_global_initialized = 1;
+                } else {
+                    /* 另一线程已抢先初始化了不同后端,清理当前后端避免泄漏 */
+                    GPU_STATE_UNLOCK();
+                    iface->cleanup();
+                    GPU_STATE_LOCK();
                 }
                 GPU_STATE_UNLOCK();
                 return 0;
@@ -2047,9 +2076,9 @@ int gpu_memory_copy_from_device_async(void* dst, GpuMemory* src, size_t size, Gp
 GpuKernel* gpu_kernel_create(GpuContext* context, const char* kernel_source, const char* kernel_name) {
     if (!context || !kernel_source || !kernel_name) return NULL;
     struct GpuContext* ctx = GPU_TO_INTERNAL(context);
-    uint64_t hash = kernel_source_hash(kernel_source);
+    uint64_t hash = kernel_source_hash(kernel_source, kernel_name);
     if (ctx->kernel_cache) {
-        struct GpuKernel* cached = kernel_cache_lookup(ctx, hash);
+        struct GpuKernel* cached = kernel_cache_lookup(ctx, hash, kernel_name);
         if (cached) {
             return (GpuKernel*)cached;
         }
@@ -2075,10 +2104,16 @@ void gpu_kernel_free(GpuKernel* kernel) {
     }
     struct GpuContext* gctx = GPU_TO_INTERNAL(ctx);
     if (gctx->kernel_cache) {
-        uint64_t khash = kernel_source_hash(kern->kernel_source);
+        uint64_t khash = kernel_source_hash(kern->kernel_source, kern->kernel_name);
         for (int i = 0; i < gctx->kernel_cache_capacity; i++) {
             if (gctx->kernel_cache[i].is_valid &&
+                gctx->kernel_cache[i].source_hash == khash &&
                 gctx->kernel_cache[i].kernel == kern) {
+                /* 修复8(P0): 递减引用计数，仅当refcount==0时才允许LRU淘汰。
+                 * 内核本身由缓存管理生命周期，此处不释放。 */
+                if (gctx->kernel_cache[i].refcount > 0) {
+                    gctx->kernel_cache[i].refcount--;
+                }
                 return;
             }
         }
@@ -3985,8 +4020,8 @@ int gpu_batch_norm_backward(GpuContext* context, const float* input,
             if (metal_batch_norm_backward != NULL) {
                 /* R10修复: 调用参数与metal_batch_norm_backward实际签名对齐
                  * 需要预先计算mean/var作为额外参数，使用结构体聚合式 */
-                float* c_mean = (float*)malloc(channels * sizeof(float));
-                float* c_var  = (float*)malloc(channels * sizeof(float));
+                float* c_mean = (float*)safe_malloc(channels * sizeof(float));
+                float* c_var  = (float*)safe_malloc(channels * sizeof(float));
                 if (c_mean && c_var) {
                     for (size_t c = 0; c < channels; c++) {
                         c_mean[c] = 0.0f; c_var[c] = 0.0f;
@@ -4000,17 +4035,17 @@ int gpu_batch_norm_backward(GpuContext* context, const float* input,
                         grad_input, grad_gamma, grad_beta,
                         c_mean, c_var, gamma,
                         num_elements, channels, &bn_cfg);
-                    free(c_mean); free(c_var);
+                    safe_free((void**)&c_mean); safe_free((void**)&c_var);
                     return ret;
                 }
-                free(c_mean); free(c_var);
+                safe_free((void**)&c_mean); safe_free((void**)&c_var);
             }
             break; /* 防止Metal分支fall-through到Vulkan */
         case GPU_BACKEND_VULKAN:
             if (vulkan_batch_norm_backward != NULL) {
                 /* Vulkan接口差异：需要预先计算mean/var */
-                float* c_mean = (float*)malloc(channels * sizeof(float));
-                float* c_var = (float*)malloc(channels * sizeof(float));
+                float* c_mean = (float*)safe_malloc(channels * sizeof(float));
+                float* c_var  = (float*)safe_malloc(channels * sizeof(float));
                 if (c_mean && c_var) {
                     for (size_t c = 0; c < channels; c++) {
                         size_t count = batch_size * spatial_size;
@@ -4032,10 +4067,10 @@ int gpu_batch_norm_backward(GpuContext* context, const float* input,
                     int ret = vulkan_batch_norm_backward(context, input, grad_output,
                         c_mean, c_var, gamma, grad_input, grad_gamma, grad_beta,
                         channels, spatial_size, epsilon);
-                    free(c_mean); free(c_var);
+                    safe_free((void**)&c_mean); safe_free((void**)&c_var);
                     return ret;
                 }
-                free(c_mean); free(c_var);
+                safe_free((void**)&c_mean); safe_free((void**)&c_var);
             }
             break;
         case GPU_BACKEND_CUDA:
@@ -4056,8 +4091,8 @@ int gpu_batch_norm_backward(GpuContext* context, const float* input,
             break;
         case GPU_BACKEND_ROCM:
             if (rocm_batch_norm_backward != NULL) {
-                float* c_mean = (float*)malloc(channels * sizeof(float));
-                float* c_var  = (float*)malloc(channels * sizeof(float));
+                float* c_mean = (float*)safe_malloc(channels * sizeof(float));
+                float* c_var  = (float*)safe_malloc(channels * sizeof(float));
                 if (c_mean && c_var) {
                     for (size_t c = 0; c < channels; c++) {
                         c_mean[c] = 0.0f; c_var[c] = 0.0f;
@@ -4071,10 +4106,10 @@ int gpu_batch_norm_backward(GpuContext* context, const float* input,
                         grad_input, grad_gamma, grad_beta,
                         c_mean, c_var, gamma,
                         num_elements, channels, &bn_cfg);
-                    free(c_mean); free(c_var);
+                    safe_free((void**)&c_mean); safe_free((void**)&c_var);
                     return ret;
                 }
-                free(c_mean); free(c_var);
+                safe_free((void**)&c_mean); safe_free((void**)&c_var);
             }
             break;
         case GPU_BACKEND_OPENCL:

@@ -281,6 +281,24 @@
 
 /* 处理DOMContentLoaded竞态条件 */
     function _pwInit() {
+        /* FE-016修复: 初始化时检查API是否就绪，若未就绪则延迟初始化以避免API调用失败 */
+        if (!window.SelfLnnApi || !window.SelfLnnApi.connected) {
+            var retryCount = 0;
+            var maxRetries = 10;
+            var retryInterval = setInterval(function() {
+                retryCount++;
+                if (window.SelfLnnApi && window.SelfLnnApi.connected) {
+                    clearInterval(retryInterval);
+                    switchTab('editor');
+                    checkProgrammingStatus();
+                } else if (retryCount >= maxRetries) {
+                    clearInterval(retryInterval);
+                    console.warn('[编程工作台] API在' + maxRetries + '次尝试后仍未就绪，跳过初始化');
+                    switchTab('editor');
+                }
+            }, 1000);
+            return;
+        }
         switchTab('editor');
         checkProgrammingStatus();
     }

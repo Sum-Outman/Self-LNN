@@ -30,8 +30,13 @@ typedef enum {
     // 通用错误代码 (1-99)
     SELFLNN_ERROR_GENERIC = -1,             /**< 通用错误 */
     SELFLNN_ERROR_INVALID_ARGUMENT = -2,    /**< 无效参数 */
-    SELFLNN_ERROR_INVALID_DIMENSION = -2,   /**< 无效维度（无效参数别名） */
-    SELFLNN_ERROR_INVALID_PARAMETER = -2,   /**< 无效参数（DEEP-005: 跨模块兼容别名） */
+    /* P0修复(错误码共享值): 原 INVALID_DIMENSION/INVALID_PARAMETER 均为 -2, 与
+     * INVALID_ARGUMENT 共享同一数值, 调用方无法区分错误类型。现为二者分配独立数值。
+     * 注意: 不能使用 -3/-4(已被 NULL_POINTER/OUT_OF_MEMORY 占用), 故使用通用错误码
+     * 区间(1-99)内尚未占用的 -18/-19。全项目经核查无 switch/case 或数值字面量依赖
+     * 这三个码的相等关系(均按枚举名引用), 故此修改安全。 */
+    SELFLNN_ERROR_INVALID_DIMENSION = -18,  /**< 无效维度（独立错误码，原与INVALID_ARGUMENT共享-2） */
+    SELFLNN_ERROR_INVALID_PARAMETER = -19,  /**< 无效参数（独立错误码，原与INVALID_ARGUMENT共享-2） */
     SELFLNN_ERROR_NULL_POINTER = -3,        /**< 空指针 */
     SELFLNN_ERROR_OUT_OF_MEMORY = -4,       /**< 内存不足 */
     SELFLNN_ERROR_NOT_INITIALIZED = -5,     /**< 未初始化 */
@@ -215,6 +220,16 @@ SELFLNN_API void selflnn_set_last_error(SelfLNNErrorCode error_code,
  * @return const SelfLNNErrorContext* 错误上下文指针
  */
 SELFLNN_API const SelfLNNErrorContext* selflnn_get_last_error_context(void);
+
+/**
+ * @brief 安全获取当前线程的最后错误消息字符串（C-016修复）
+ * 
+ * 对s_last_error.message进行NULL检查，当错误上下文尚未初始化
+ * 时返回默认消息，永不返回NULL，避免调用者空指针解引用。
+ * 
+ * @return 错误消息字符串，如果未设置则返回默认消息，永不返回NULL
+ */
+SELFLNN_API const char* selflnn_get_last_error_message(void);
 
 /**
  * @brief 清除当前线程的最后一个错误

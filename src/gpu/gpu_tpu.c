@@ -228,7 +228,11 @@ static int tpu_backend_get_device_info(int device_index, GpuDeviceInfo* info) {
 }
 
 static GpuContext* tpu_backend_context_create(int device_index) {
-    if (!g_tpu_state.initialized && tpu_backend_init != 0) return NULL;
+    /* P-AUDIT修复(G-1): 原代码 tpu_backend_init != 0 是将函数名(函数指针,恒非零)与0比较,
+     * 应调用函数 tpu_backend_init() 并检查返回值。原逻辑在未初始化时直接返回NULL而不尝试初始化。 */
+    if (!g_tpu_state.initialized) {
+        if (tpu_backend_init() != 0) return NULL;
+    }
     struct GpuContext* ctx = (struct GpuContext*)safe_calloc(1, sizeof(struct GpuContext));
     if (!ctx) return NULL;
     ctx->backend = GPU_BACKEND_TPU;

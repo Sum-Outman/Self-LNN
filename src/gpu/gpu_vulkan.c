@@ -1458,8 +1458,21 @@ static GpuContext* vulkan_backend_context_create(int device_id) {
     instance_info.pApplicationInfo = &app_info;
     
     // 创建Vulkan实例
+    // P-AUDIT修复(G-3): 添加SEH保护,与vulkan_backend_init等函数一致。
+    // 原代码无SEH保护,Vulkan驱动在实例创建时触发访问冲突会导致整个程序崩溃。
     VkInstance instance = VK_NULL_HANDLE;
-    unsigned int result = vkCreateInstance(&instance_info, NULL, &instance);
+    unsigned int result = VK_ERROR_INITIALIZATION_FAILED;
+#ifdef _WIN32
+    __try {
+        result = vkCreateInstance(&instance_info, NULL, &instance);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        snprintf(g_vulkan_error_string, sizeof(g_vulkan_error_string),
+                "Vulkan实例创建触发异常(0x%x)", GetExceptionCode());
+        return NULL;
+    }
+#else
+    result = vkCreateInstance(&instance_info, NULL, &instance);
+#endif
     if (result != VK_SUCCESS || instance == VK_NULL_HANDLE) {
         snprintf(g_vulkan_error_string, sizeof(g_vulkan_error_string),
                 "Vulkan实例创建失败: %u", result);

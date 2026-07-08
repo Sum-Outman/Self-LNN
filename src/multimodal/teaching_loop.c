@@ -154,17 +154,21 @@ int tl_cross_modal_associate(TeachingLoopSystem* tls, TeachingSession* session, 
         }
 
         /* 执行LNN前向传播：通过CfC ODE动态系统融合跨模态特征 */
-        float lnn_output[64];
-        memset(lnn_output, 0, sizeof(lnn_output));
+        /* P2修复: 使用lnn_get_output_size()动态获取输出维度，替代硬编码256 */
+        size_t lnn_out_size = lnn_get_output_size(tls->lnn);
+        if (lnn_out_size == 0) lnn_out_size = 256; /* 安全回退 */
+        float* lnn_output = (float*)safe_malloc(lnn_out_size * sizeof(float));
+        if (!lnn_output) return -1;
+        memset(lnn_output, 0, lnn_out_size * sizeof(float));
         int result = lnn_forward(tls->lnn, fused_input, lnn_output);
-        
+
         if (result == 0) {
             /* LNN成功融合，计算输出激活强度 */
             float activation_sum = 0.0f;
-            for (int i = 0; i < 64; i++) {
+            for (size_t i = 0; i < lnn_out_size; i++) {
                 activation_sum += fabsf(lnn_output[i]);
             }
-            float lnn_activation = activation_sum / 64.0f;
+            float lnn_activation = activation_sum / (float)lnn_out_size;
 
             /* LNN激活度贡献到掌握度（0-1映射） */
             float lnn_gain = tanhf(lnn_activation) * 0.3f;
@@ -181,6 +185,8 @@ int tl_cross_modal_associate(TeachingLoopSystem* tls, TeachingSession* session, 
             /* LNN不可用时使用基础增益 */
             c->mastery_level += 0.10f;
         }
+        /* P2修复: 释放动态分配的LNN输出缓冲区 */
+        safe_free((void**)&lnn_output);
     } else {
         /* 无LNN时使用基础增益（向后兼容） */
         c->mastery_level += 0.10f;

@@ -298,19 +298,39 @@ int dm_load_session(DialogueMemoryManager* dmm, const char* filepath) {
     FILE* fp = fopen(filepath, "rb");
     if (!fp) return -1;
     uint32_t magic;
-    fread(&magic, sizeof(uint32_t), 1, fp);
+    /* P0修复: 检查fread返回值，防止读取失败后使用未初始化数据 */
+    if (fread(&magic, sizeof(uint32_t), 1, fp) != 1) { fclose(fp); return -1; }
     if (magic != 0x444D454D) { fclose(fp); return -1; }
-    int session_id, turn_count;
-    fread(&session_id, sizeof(int), 1, fp);
-    fread(&turn_count, sizeof(int), 1, fp);
+    int session_id = 0, turn_count = 0;
+    /* P0修复: 检查fread返回值 */
+    if (fread(&session_id, sizeof(int), 1, fp) != 1) { fclose(fp); return -1; }
+    if (fread(&turn_count, sizeof(int), 1, fp) != 1) { fclose(fp); return -1; }
+
+    /* P0修复: 验证turn_count有效性，防止负数转为size_t后变成巨大值导致缓冲区溢出 */
+    if (turn_count < 0 || turn_count > 100000) { fclose(fp); return -1; }
+
     if (turn_count > (int)dmm->session.turn_capacity) {
         safe_free((void**)&dmm->session.turns);
-        dmm->session.turns = (DialogueTurn*)safe_calloc(turn_count, sizeof(DialogueTurn));
+        dmm->session.turns = (DialogueTurn*)safe_calloc((size_t)turn_count, sizeof(DialogueTurn));
+        if (!dmm->session.turns) {
+            /* P0修复: calloc失败时不设置capacity，避免后续fread写入NULL指针 */
+            dmm->session.turn_capacity = 0;
+            dmm->session.turn_count = 0;
+            fclose(fp);
+            return -1;
+        }
         dmm->session.turn_capacity = turn_count;
     }
     dmm->session.turn_count = turn_count;
     dmm->session.session_id = session_id;
-    fread(dmm->session.turns, sizeof(DialogueTurn), turn_count, fp);
+
+    if (turn_count > 0 && dmm->session.turns) {
+        /* P0修复: 确保turns非NULL后再读取，并检查fread返回值 */
+        if (fread(dmm->session.turns, sizeof(DialogueTurn), (size_t)turn_count, fp) != (size_t)turn_count) {
+            fclose(fp);
+            return -1;
+        }
+    }
     fclose(fp);
     dm_detect_topics(dmm);
     dm_resolve_references(dmm);

@@ -1594,7 +1594,8 @@ TopologyOptimizationState* topology_optimization_create(int nelx, int nely,
                                                          double volfrac,
                                                          double penal,
                                                          double rmin) {
-    if (nelx <= 0 || nely <= 0 || volfrac <= 0.0 || volfrac > 1.0 || penal <= 0.0 || rmin <= 0.0) {
+    /* P2修复: 添加上限检查，防止nelx*nely整数溢出导致分配极小内存 */
+    if (nelx <= 0 || nely <= 0 || nelx > 10000 || nely > 10000 || volfrac <= 0.0 || volfrac > 1.0 || penal <= 0.0 || rmin <= 0.0) {
         return NULL;
     }
     

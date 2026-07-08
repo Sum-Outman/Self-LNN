@@ -593,6 +593,8 @@ static ArchitectureEvaluation* population_nas_evaluator(
     inp[0] -= 0.01f; /* 恢复 */
 
     /* 计算输出幅度和方差 */
+    /* P3-04修复: out_dim==0零保护，防止后续除法除零 */
+    if (out_dim == 0) out_dim = 1;
     float amp = 0.0f, var = 0.0f, cons = 0.0f;
     for (size_t i = 0; i < out_dim; i++) { amp += fabsf(out1[i]); var += out1[i] * out1[i]; }
     amp /= (float)out_dim; var = var/(float)out_dim - amp*amp;
@@ -833,7 +835,8 @@ int population_evaluate(Population* pop, FitnessFunction fitness_func, void* use
     
     // 更新种群统计
     pop->best_fitness = best_fitness;
-    pop->average_fitness = total_fitness / pop->population_size;
+    /* P3-04修复: population_size==0零保护，防止除零 */
+    pop->average_fitness = (pop->population_size > 0) ? (total_fitness / (float)pop->population_size) : 0.0f;
     pop->best_individual = best_individual;
     
     // 计算适应度标准差
@@ -842,7 +845,8 @@ int population_evaluate(Population* pop, FitnessFunction fitness_func, void* use
         float diff = pop->individuals[i]->fitness - pop->average_fitness;
         variance += diff * diff;
     }
-    pop->fitness_stddev = sqrtf(variance / pop->population_size);
+    /* P3-04修复: population_size==0零保护，防止除零 */
+    pop->fitness_stddev = (pop->population_size > 0) ? sqrtf(variance / (float)pop->population_size) : 0.0f;
     
     // 计算多样性
     population_compute_diversity(pop);
@@ -1815,6 +1819,15 @@ int population_nsga2_evolve(Population* pop, MultiObjectiveFunction obj_func,
                 c_nodes[i].dominated_count = 0;
                 c_nodes[i].dominated_capacity = 16;
                 c_nodes[i].dominated_set = (int*)safe_malloc(16 * sizeof(int));
+                /* P1修复: 检查dominated_set分配是否成功，防止空指针解引用 */
+                if (!c_nodes[i].dominated_set) {
+                    /* 清理已分配的资源 */
+                    for (size_t k = 0; k < i; k++) {
+                        safe_free((void**)&c_nodes[k].dominated_set);
+                    }
+                    safe_free((void**)&c_nodes);
+                    return -1;
+                }
             }
             
             for (size_t i = 0; i < combined_size; i++) {
@@ -1836,9 +1849,14 @@ int population_nsga2_evolve(Population* pop, MultiObjectiveFunction obj_func,
             
             int** c_fronts = (int**)safe_calloc(combined_size, sizeof(int*));
             int* c_front_sizes = (int*)safe_calloc(combined_size, sizeof(int));
+            /* C-017修复: 记录实际成功分配的前沿数量，防止分配失败后
+             * 清理代码遍历未初始化的c_fronts条目导致空指针解引用。
+             * fronts_allocated仅追踪c_fronts[i]已成功分配的数量。 */
+            int fronts_allocated = 0;
             if (c_fronts && c_front_sizes) {
                 c_fronts[0] = (int*)safe_malloc((int)combined_size * sizeof(int));
                 if (c_fronts[0]) {
+                    fronts_allocated = 1; /* C-017修复: 记录第0个前沿已分配 */
                     for (size_t i = 0; i < combined_size; i++) {
                         if (c_nodes[i].domination_count == 0) {
                             c_fronts[0][c_front_sizes[0]++] = (int)i;
@@ -1851,6 +1869,7 @@ int population_nsga2_evolve(Population* pop, MultiObjectiveFunction obj_func,
                         c_front_sizes[cf + 1] = 0;
                         c_fronts[cf + 1] = (int*)safe_malloc((int)combined_size * sizeof(int));
                         if (!c_fronts[cf + 1]) break;
+                        fronts_allocated++; /* C-017修复: 记录新前沿已成功分配 */
                         
                         for (int fi = 0; fi < c_front_sizes[cf]; fi++) {
                             int p_idx = c_fronts[cf][fi];
@@ -1872,7 +1891,8 @@ int population_nsga2_evolve(Population* pop, MultiObjectiveFunction obj_func,
                                                               c_fronts[fi], c_front_sizes[fi], num_obj);
                     }
                     
-                    for (int fi = 0; fi < combined_fronts; fi++) {
+                    /* C-017修复: 仅释放实际已分配的前沿，使用fronts_allocated而非combined_fronts */
+                    for (int fi = 0; fi < fronts_allocated; fi++) {
                         if (c_fronts[fi]) safe_free((void**)&c_fronts[fi]);
                     }
                 }

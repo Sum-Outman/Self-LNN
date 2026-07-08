@@ -426,7 +426,7 @@
     {"s":"SELF-LNN","p":"工作模式","o":"训练、推理、自主学习、自我演化、自我修正","t":"FACT","c":"HIGH","w":1.0},
     {"s":"SELF-LNN","p":"能力","o":"对话、图像识别、语音识别、语音合成、空间感知、机器人控制、知识推理、自我认知","t":"FACT","c":"HIGH","w":1.0},
     {"s":"SELF-LNN","p":"开源协议","o":"Apache 2.0","t":"FACT","c":"HIGH","w":1.0},
-    {"s":"SELF-LNN","p":"开发者邮箱","o":"silenceceowtom@qq.com","t":"FACT","c":"HIGH","w":1.0},
+    {"s":"SELF-LNN","p":"开发者邮箱","o":"silencecrowtom@qq.com","t":"FACT","c":"HIGH","w":1.0},
     {"s":"SELF-LNN","p":"操作系统支持","o":"Windows、Linux、macOS、嵌入式(ESP32/STM32)","t":"FACT","c":"HIGH","w":1.0},
     {"s":"SELF-LNN","p":"GPU后端","o":"CUDA、OpenCL、Vulkan、Metal、ROCm、Intel oneAPI、寒武纪、昇腾、TPU","t":"FACT","c":"HIGH","w":1.0},
     {"s":"ODE求解器","p":"类型","o":"Euler、RK2、RK4、DP5(4)、Rosenbrock、辛、Verlet、BDF2、Forest-Ruth","t":"FACT","c":"HIGH","w":0.9},

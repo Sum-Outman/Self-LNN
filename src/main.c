@@ -93,6 +93,37 @@
 #pragma warning(disable:4100 4189 4244 4267 4701)
 #endif
 
+/* === P1-3修复: 跨平台原子操作封装 ===
+ * 保护多线程共享的全局变量,防止竞态条件。
+ * Windows使用Interlocked系列原子操作, Linux使用GCC内置__atomic系列。
+ * 32位类型用于计数器和间隔变量, 64位类型用于时间戳(保持time_t精度不降级)。 */
+#ifndef _WIN32
+/* 非Windows平台: 定义与Windows兼容的整数类型(Windows在windows.h中已定义) */
+typedef int32_t  LONG;
+typedef int64_t  LONG64;
+#endif
+
+#ifdef _WIN32
+/* Windows平台: Interlocked系列原子操作(windows.h已包含) */
+/* 32位原子读取(用CompareExchange实现无副作用读取) */
+#define ATOMIC_LOAD_32(pvar)    ((long)InterlockedCompareExchange((volatile LONG*)(pvar), 0, 0))
+/* 32位原子写入 */
+#define ATOMIC_STORE_32(pvar, val)  (void)InterlockedExchange((volatile LONG*)(pvar), (LONG)(val))
+/* 32位原子递增, 返回递增后的值 */
+#define ATOMIC_INC_32(pvar)     ((long)InterlockedIncrement((volatile LONG*)(pvar)))
+/* 64位原子读取(用于时间戳, 保持64位精度) */
+#define ATOMIC_LOAD_64(pvar)    ((long long)InterlockedCompareExchange64((volatile LONG64*)(pvar), 0, 0))
+/* 64位原子写入 */
+#define ATOMIC_STORE_64(pvar, val)  (void)InterlockedExchange64((volatile LONG64*)(pvar), (LONG64)(val))
+#else
+/* Linux平台: GCC/Clang __atomic内置原子操作(兼容GCC 4.1+) */
+#define ATOMIC_LOAD_32(pvar)    __atomic_load_n((pvar), __ATOMIC_SEQ_CST)
+#define ATOMIC_STORE_32(pvar, val)  __atomic_store_n((pvar), (val), __ATOMIC_SEQ_CST)
+#define ATOMIC_INC_32(pvar)     __atomic_add_fetch((pvar), 1, __ATOMIC_SEQ_CST)
+#define ATOMIC_LOAD_64(pvar)    __atomic_load_n((pvar), __ATOMIC_SEQ_CST)
+#define ATOMIC_STORE_64(pvar, val)  __atomic_store_n((pvar), (val), __ATOMIC_SEQ_CST)
+#endif
+
 /* 静态函数前向声明 */
 /* DEEP-005: compat_link_stubs 外部声明 — 匹配修正后的签名 */
 extern int teaching_get_pending_demonstrations(void* ts);
@@ -132,11 +163,12 @@ static void kb_update_nofify_callback(void* user_data) {
 #define COGNITION_UPDATE_INTERVAL 300  /* P38修复: 认知更新每5分钟 */
 
 /* 当前运行动态间隔(由认知更新根据负载自适应调整) */
-static int g_online_learn_interval_sec = 300;
-static int g_reflection_interval_sec   = 1800;
-static int g_consolidate_interval_sec  = 600;
-static int g_evolution_interval_sec    = 600;
-static int g_training_interval_sec     = 300;
+/* P1-3修复: 改为volatile LONG并用原子操作保护跨线程读写 */
+static volatile LONG g_online_learn_interval_sec = 300;
+static volatile LONG g_reflection_interval_sec   = 1800;
+static volatile LONG g_consolidate_interval_sec  = 600;
+static volatile LONG g_evolution_interval_sec    = 600;
+static volatile LONG g_training_interval_sec     = 300;
 
 /* M-001修复: 版本号统一从CMake生成的version.h获取，不再硬编码
  * 构建时 CMake 从 project(selflnn VERSION 1.5.0) 自动填充 version.h.in → version.h
@@ -160,16 +192,18 @@ static void* g_online_learner_handle = NULL;
 static void* g_evolution_engine_handle = NULL;
 static void* g_unified_lnn_state = NULL;
 static volatile sig_atomic_t g_agi_running = 1;
-static time_t g_start_time = 0;
-static time_t g_last_online_learn = 0;
-static time_t g_last_reflection = 0;
-static time_t g_last_consolidate = 0;
-static time_t g_last_evolution = 0;
-static time_t g_last_cognition = 0;
-static time_t g_last_safety = 0;
-static int g_bg_task_error_count = 0;
+static time_t g_start_time = 0;  /* 仅启动时写入一次,无需原子保护 */
+/* P1-3修复: 时间戳改为volatile LONG64并用原子操作保护跨线程读写(保持64位精度) */
+static volatile LONG64 g_last_online_learn = 0;
+static volatile LONG64 g_last_reflection = 0;
+static volatile LONG64 g_last_consolidate = 0;
+static volatile LONG64 g_last_evolution = 0;
+static volatile LONG64 g_last_cognition = 0;
+static volatile LONG64 g_last_safety = 0;
+/* P1-3修复: 使用原子操作保护跨线程计数器 */
+static volatile LONG g_bg_task_error_count = 0;
 static TrainingPipeline* g_training_pipeline = NULL; /* 训练管线 */
-static time_t g_last_training_step = 0; /* 上次训练步时间 */
+static volatile LONG64 g_last_training_step = 0; /* P1-3修复: 上次训练步时间, 原子保护 */
 static GazeboBridge* g_gazebo_bridge = NULL; /* Gazebo仿真桥接 */
 static ArchitectureController* g_arch_controller = NULL; /* ZSFJJJ-FIX: 动态架构控制器 */
 #define GLOBAL_LNN_LOCK()   system_mutex_lock(g_lnn_mutex)
@@ -648,11 +682,17 @@ static void agi_bg_knowledge_consolidate(void) {
         /* KG→LNN AGI后台注入 (图推理引擎全局就绪) */
         {
             void* kg_ptr = selflnn_get_knowledge_graph();
-            GLOBAL_LNN_LOCK();
-            void* shared_lnn = g_global_lnn;
-            GLOBAL_LNN_UNLOCK();
-            if (kg_ptr && shared_lnn) {
-                knowledge_graph_to_lnn_bridge(kg_ptr, shared_lnn, 0.1f);
+            if (kg_ptr) {
+                GLOBAL_LNN_LOCK();
+                void* shared_lnn = g_global_lnn;  /* P0修复: 锁内获取指针 */
+                if (shared_lnn) {
+                    /* P0修复: 在锁内使用shared_lnn，防止TOCTOU竞态。
+                     * 原实现在锁外使用shared_lnn，另一线程可能在此期间
+                     * 将g_global_lnn置NULL并释放LNN内存，导致悬空指针访问。
+                     * 现改为锁内获取并使用，确保指针生命周期与锁一致。 */
+                    knowledge_graph_to_lnn_bridge(kg_ptr, shared_lnn, 0.1f);
+                }
+                GLOBAL_LNN_UNLOCK();
             }
         }
 }
@@ -758,25 +798,26 @@ static void agi_bg_cognition_update(void) {
         float load_factor = (float)status.active_tasks / 100.0f;
         if (load_factor > 0.7f) {
             /* 高负载：延长间隔降低系统压力 */
-            g_online_learn_interval_sec = ONLINE_LEARN_INTERVAL_MAX;
-            g_reflection_interval_sec   = SELF_REFLECTION_INTERVAL_MAX;
-            g_consolidate_interval_sec  = KNOWLEDGE_CONSOLIDATE_MAX;
-            g_evolution_interval_sec    = EVOLUTION_STEP_INTERVAL_MAX;
-            g_training_interval_sec     = TRAINING_STEP_INTERVAL_MAX;
+            /* P1-3修复: 使用原子写入保护跨线程共享的间隔变量 */
+            ATOMIC_STORE_32(&g_online_learn_interval_sec, ONLINE_LEARN_INTERVAL_MAX);
+            ATOMIC_STORE_32(&g_reflection_interval_sec,   SELF_REFLECTION_INTERVAL_MAX);
+            ATOMIC_STORE_32(&g_consolidate_interval_sec,  KNOWLEDGE_CONSOLIDATE_MAX);
+            ATOMIC_STORE_32(&g_evolution_interval_sec,    EVOLUTION_STEP_INTERVAL_MAX);
+            ATOMIC_STORE_32(&g_training_interval_sec,     TRAINING_STEP_INTERVAL_MAX);
         } else if (load_factor > 0.3f) {
             /* 中等负载：温和间隔 */
-            g_online_learn_interval_sec = ONLINE_LEARN_INTERVAL_MIN * 2;
-            g_reflection_interval_sec   = SELF_REFLECTION_INTERVAL_MIN * 2;
-            g_consolidate_interval_sec  = KNOWLEDGE_CONSOLIDATE_MIN * 2;
-            g_evolution_interval_sec    = EVOLUTION_STEP_INTERVAL_MIN * 2;
-            g_training_interval_sec     = TRAINING_STEP_INTERVAL_MIN * 2;
+            ATOMIC_STORE_32(&g_online_learn_interval_sec, ONLINE_LEARN_INTERVAL_MIN * 2);
+            ATOMIC_STORE_32(&g_reflection_interval_sec,   SELF_REFLECTION_INTERVAL_MIN * 2);
+            ATOMIC_STORE_32(&g_consolidate_interval_sec,  KNOWLEDGE_CONSOLIDATE_MIN * 2);
+            ATOMIC_STORE_32(&g_evolution_interval_sec,    EVOLUTION_STEP_INTERVAL_MIN * 2);
+            ATOMIC_STORE_32(&g_training_interval_sec,     TRAINING_STEP_INTERVAL_MIN * 2);
         } else {
             /* 低负载：加速学习和迭代 */
-            g_online_learn_interval_sec = ONLINE_LEARN_INTERVAL_MIN;
-            g_reflection_interval_sec   = SELF_REFLECTION_INTERVAL_MIN;
-            g_consolidate_interval_sec  = KNOWLEDGE_CONSOLIDATE_MIN;
-            g_evolution_interval_sec    = EVOLUTION_STEP_INTERVAL_MIN;
-            g_training_interval_sec     = TRAINING_STEP_INTERVAL_MIN;
+            ATOMIC_STORE_32(&g_online_learn_interval_sec, ONLINE_LEARN_INTERVAL_MIN);
+            ATOMIC_STORE_32(&g_reflection_interval_sec,   SELF_REFLECTION_INTERVAL_MIN);
+            ATOMIC_STORE_32(&g_consolidate_interval_sec,  KNOWLEDGE_CONSOLIDATE_MIN);
+            ATOMIC_STORE_32(&g_evolution_interval_sec,    EVOLUTION_STEP_INTERVAL_MIN);
+            ATOMIC_STORE_32(&g_training_interval_sec,     TRAINING_STEP_INTERVAL_MIN);
         }
     }
     /* APP13: 群智优化 — 认知更新时触发蜂群迭代优化 */
@@ -1191,9 +1232,9 @@ static void agi_background_loop_iteration(void) {
 
     /* 在线学习（受自我学习能力开关控制） */
     if (g_online_learner_handle && capability_is_enabled(CAP_SELF_LEARNING) &&
-        (now - g_last_online_learn >= g_online_learn_interval_sec)) {
+        (now - (time_t)ATOMIC_LOAD_64(&g_last_online_learn) >= (int)ATOMIC_LOAD_32(&g_online_learn_interval_sec))) {
         agi_bg_online_learning();
-        g_last_online_learn = now;
+        ATOMIC_STORE_64(&g_last_online_learn, (LONG64)now);
         void* learner = selflnn_get_online_learner();
         if (learner) {
             OnlineLearningStatus ls;
@@ -1209,9 +1250,9 @@ static void agi_background_loop_iteration(void) {
 
     /* 知识固化（受自主执行能力开关控制） */
     if (capability_is_enabled(CAP_AUTONOMOUS_EXECUTION) &&
-        now - g_last_consolidate >= g_consolidate_interval_sec) {
+        now - (time_t)ATOMIC_LOAD_64(&g_last_consolidate) >= (int)ATOMIC_LOAD_32(&g_consolidate_interval_sec)) {
         agi_bg_knowledge_consolidate();
-        g_last_consolidate = now;
+        ATOMIC_STORE_64(&g_last_consolidate, (LONG64)now);
     }
 
 /* P24修复: 记忆睡眠巩固(NREM/REM) — 每180秒触发
@@ -1235,7 +1276,7 @@ static void agi_background_loop_iteration(void) {
 
     /* 自我反思（受自我反思能力开关控制 + LNN就绪检查） */
     if (capability_is_enabled(CAP_REFLECTION) &&
-        now - g_last_reflection >= g_reflection_interval_sec) {
+        now - (time_t)ATOMIC_LOAD_64(&g_last_reflection) >= (int)ATOMIC_LOAD_32(&g_reflection_interval_sec)) {
 /* 在发起深度自我反思前检查LNN是否已训练，
          * 避免随机权重LNN产生无意义的自我评估和错误修正决策 */
         void* scs_check = selflnn_get_self_cognition();
@@ -1243,10 +1284,10 @@ static void agi_background_loop_iteration(void) {
             log_debug("[AGI后台] LNN尚未完成训练，跳过本次深度自我反思，"
                      "等待模型检查点加载或初始训练完成后自动启用");
             /* 仍然更新反思时间戳避免频繁重试 */
-            g_last_reflection = now;
+            ATOMIC_STORE_64(&g_last_reflection, (LONG64)now);
         } else {
             agi_bg_self_reflection();
-            g_last_reflection = now;
+            ATOMIC_STORE_64(&g_last_reflection, (LONG64)now);
             g_agi_self.reflection_count++;
             SystemStatus st;
             if (selflnn_get_status(&st) == 0) {
@@ -1261,9 +1302,9 @@ static void agi_background_loop_iteration(void) {
 
     /* 演化步（受自我演化能力开关控制） */
     if (g_evolution_engine_handle && capability_is_enabled(CAP_SELF_EVOLUTION) &&
-        (now - g_last_evolution >= g_evolution_interval_sec)) {
+        (now - (time_t)ATOMIC_LOAD_64(&g_last_evolution) >= (int)ATOMIC_LOAD_32(&g_evolution_interval_sec))) {
         agi_bg_evolution_step();
-        g_last_evolution = now;
+        ATOMIC_STORE_64(&g_last_evolution, (LONG64)now);
         void* evo = selflnn_get_evolution_engine();
         if (evo) {
             EvolutionStats es;
@@ -1279,16 +1320,16 @@ static void agi_background_loop_iteration(void) {
 /* 训练步（受自我学习 + 自主执行能力开关双重控制，每5分钟执行一步） */
     if (capability_is_enabled(CAP_SELF_LEARNING) &&
         capability_is_enabled(CAP_AUTONOMOUS_EXECUTION) &&
-        now - g_last_training_step >= g_training_interval_sec) {
+        now - (time_t)ATOMIC_LOAD_64(&g_last_training_step) >= (int)ATOMIC_LOAD_32(&g_training_interval_sec)) {
         agi_bg_training_step();
-        g_last_training_step = now;
+        ATOMIC_STORE_64(&g_last_training_step, (LONG64)now);
     }
 
     /* Z8-003: 认知更新（受自我认知能力开关控制 — 之前直接执行无人检查） */
     if (capability_is_enabled(CAP_SELF_COGNITION) &&
-        now - g_last_cognition >= COGNITION_UPDATE_INTERVAL) {
+        now - (time_t)ATOMIC_LOAD_64(&g_last_cognition) >= COGNITION_UPDATE_INTERVAL) {
         agi_bg_cognition_update();
-        g_last_cognition = now;
+        ATOMIC_STORE_64(&g_last_cognition, (LONG64)now);
 /* 认知更新事件推送到WebSocket */
         if (g_ws_push_server) {
             char cbuf[512];
@@ -1307,9 +1348,9 @@ static void agi_background_loop_iteration(void) {
     }
 
     /* 安全检查 */
-    if (now - g_last_safety >= SAFETY_CHECK_INTERVAL) {
+    if (now - (time_t)ATOMIC_LOAD_64(&g_last_safety) >= SAFETY_CHECK_INTERVAL) {
         agi_bg_safety_check();
-        g_last_safety = now;
+        ATOMIC_STORE_64(&g_last_safety, (LONG64)now);
 /* 同步触发记忆衰减(与安全检查同频, 每分钟) */
         {
             void* mem_mgr = selflnn_get_memory_manager();
@@ -1755,13 +1796,15 @@ static void agi_background_loop_iteration(void) {
                         health = cfg.learning_rate > 0 ? 0.85f : 0.1f;
                     }
                 }
+                /* P1-3修复: 使用原子读取错误计数, 缓存到局部变量避免多次原子操作 */
+                int err_count = (int)ATOMIC_LOAD_32(&g_bg_task_error_count);
                 snprintf(dbuf, sizeof(dbuf),
                     "{\"type\":\"diagnostic\",\"timestamp\":%lld,"
                     "\"lnn_health\":%.3f,\"error_count\":%d,"
                     "\"uptime\":%lld,\"memory_ok\":%s}",
-                    (long long)now, health, g_bg_task_error_count,
+                    (long long)now, health, err_count,
                     (long long)(now - g_start_time),
-                    (g_bg_task_error_count < 10) ? "true" : "false");
+                    (err_count < 10) ? "true" : "false");
                 ws_push_broadcast_json(g_ws_push_server, dbuf);
             }
 
@@ -1842,7 +1885,7 @@ static void agi_background_loop_iteration(void) {
 
     /* 目标重评估（受规划能力开关控制） */
     if (capability_is_enabled(CAP_PLANNING) &&
-        now - g_agi_self.last_goal_eval >= g_reflection_interval_sec * 3) {
+        now - g_agi_self.last_goal_eval >= (int)ATOMIC_LOAD_32(&g_reflection_interval_sec) * 3) {
         agi_bg_goal_reevaluate();
         g_agi_self.last_goal_eval = now;
     }
@@ -1893,7 +1936,8 @@ static void agi_background_loop_iteration(void) {
                     log_info("[自我修正] 多维触发 id=%d, 类型=%d, 评分=%.3f, 强度=%.2f",
                             correction.correction_id, (int)correction.type,
                             correction_score, correction.correction_strength);
-                    g_bg_task_error_count = 0;
+                    /* P1-3修复: 使用原子操作重置错误计数器 */
+                    ATOMIC_STORE_32(&g_bg_task_error_count, 0);
                 }
             }
         }
@@ -1939,7 +1983,7 @@ static void agi_background_loop_iteration(void) {
      * 当无真实演示数据可用时，仅记录日志并跳过，绝不生成假数据。 */
     if (capability_is_enabled(CAP_IMITATION_LEARNING) &&
         g_agi_self.avg_reflection_score > 0.7f &&
-        (now - g_last_reflection) < g_reflection_interval_sec + 10) {
+        (now - (time_t)ATOMIC_LOAD_64(&g_last_reflection) < (int)ATOMIC_LOAD_32(&g_reflection_interval_sec) + 10)) {
         /* 尝试从示教系统获取真实演示数据 */
         void* teaching_sys = (void*)(intptr_t)selflnn_get_teaching_system();
         if (teaching_sys) {
@@ -2213,7 +2257,8 @@ static void agi_background_loop_iteration(void) {
 
     /* 错误计数 */
     if (had_error) {
-        g_bg_task_error_count++;
+        /* P1-3修复: 使用原子递增保护跨线程计数器, 缓存递增后的值供广播使用 */
+        int new_err_count = (int)ATOMIC_INC_32(&g_bg_task_error_count);
 /* 错误事件推送到WebSocket */
         if (g_ws_push_server) {
             char ebuf[256];
@@ -2221,7 +2266,7 @@ static void agi_background_loop_iteration(void) {
             snprintf(ebuf, sizeof(ebuf),
                 "{\"type\":\"error\",\"timestamp\":%lld,"
                 "\"error_count\":%d,\"message\":\"后台任务发生错误\"}",
-                (long long)now_err, g_bg_task_error_count);
+                (long long)now_err, new_err_count);
             ws_push_broadcast_json(g_ws_push_server, ebuf);
         }
     }
@@ -2313,34 +2358,34 @@ static void generate_random_key(char* key, size_t key_size)
 
 static void signal_handler(int sig)
 {
-    (void)sig;
-    /* S-001修复: SIGSEGV后从信号处理器返回是C标准未定义行为。
-     * 程序可能在已损坏的内存状态下继续执行，访问g_agi_running导致二次崩溃。
-     * 即使是第一次SIGSEGV也应立即_exit退出，不可尝试优雅关闭。
-     * 仅在真正由raise()触发的可控场景才可能安全返回。 */
-    if (sig == SIGSEGV) {
-        static volatile sig_atomic_t segv_count = 0;
-        /* 记录首次崩溃: 立即退出不返回 */
-        if (++segv_count >= 1) {
-            _exit(128 + sig);
-        }
-        _exit(128 + sig);  /* 第一次也直接退出 */
-    }
-    /* H-002修复: 信号处理中避免使用任何可能持锁的函数。
-     * Windows使用WriteFile(GetStdHandle)绕过CRT锁；
-     * POSIX使用write(STDERR_FILENO) - 信号安全。 */
-#ifdef _WIN32
-    {
-        const char* msg = "SELF-LNN: 收到终止信号，正在安全关闭...\n";
-        DWORD written;
-        WriteFile(GetStdHandle(STD_ERROR_HANDLE), msg, (DWORD)strlen(msg), &written, NULL);
-    }
-#else
-    {
-        const char* msg = "SELF-LNN: 收到终止信号，正在安全关闭...\n";
-        write(STDERR_FILENO, msg, strlen(msg));
-    }
+    /* P0修复: SIGSEGV/SIGFPE/SIGILL/SIGBUS等不可恢复的硬件异常，
+     * 从信号处理器返回是C标准未定义行为——程序会在导致异常的指令处
+     * 重新执行，导致无限循环。必须调用_exit()终止进程。
+     * 使用_exit而非exit，避免执行atexit处理函数和stdio刷新
+     * （在已损坏的内存状态下这些操作本身可能引发二次崩溃）。 */
+    if (sig == SIGSEGV || sig == SIGFPE || sig == SIGILL
+#ifndef _WIN32
+        || sig == SIGBUS   /* SIGBUS仅POSIX系统定义，Windows不存在 */
 #endif
+        ) {
+        _exit(128 + sig);  /* 不可恢复的硬件异常，立即终止进程，不返回 */
+    }
+
+    /* P1修复: 信号处理器中禁止使用非异步信号安全函数（strlen/printf/sprintf等）。
+     * 改用编译期常量长度替代strlen，确保信号安全。
+     * Windows使用WriteFile(GetStdHandle)绕过CRT锁；
+     * POSIX使用write(STDERR_FILENO) - 异步信号安全。 */
+    {
+        /* 使用static const确保字符串存储在只读段，编译期可计算长度 */
+        static const char msg[] = "SELF-LNN: 收到终止信号，正在安全关闭...\n";
+        size_t msg_len = sizeof(msg) - 1;  /* 编译期常量，不调用strlen */
+#ifdef _WIN32
+        DWORD written;
+        WriteFile(GetStdHandle(STD_ERROR_HANDLE), msg, (DWORD)msg_len, &written, NULL);
+#else
+        write(STDERR_FILENO, msg, msg_len);
+#endif
+    }
     g_agi_running = 0;
 }
 
@@ -2376,8 +2421,14 @@ int main(int argc, char** argv)
 {
 #pragma warning(push)
 #pragma warning(disable: 4024 4047)
-    /* 使用标准malloc/free (无安全header校验) */
-    memory_utils_bypass_safe_alloc(1);
+    /* M-P2-20修复: 不再全局禁用safe_alloc安全检查，确保堆溢出/double-free/UAF检测全程生效
+     * 原代码全局旁路safe_alloc，使所有分配绕过安全头部校验，丧失内存安全防护能力。 */
+    /* memory_utils_bypass_safe_alloc(1); */  /* 已禁用: safe_alloc安全检查现在全程生效 */
+    /* P0修复: 禁用stdout缓冲，确保printf输出在重定向到文件时立即可见。
+     * 原因: Windows下stdout默认为全缓冲模式，重定向到文件时printf输出
+     * 不会刷新直到缓冲区满或程序退出，导致初始化进度不可见、误判为挂起。 */
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
     g_lnn_mutex = system_mutex_create();  /* P1: g_global_lnn线程安全 */
     print_banner();
 
@@ -2465,9 +2516,18 @@ int main(int argc, char** argv)
         printf("未找到持久化配置文件 %s，使用默认配置\n", SELFLNN_CONFIG_FILE);
     }
 
-/* 升级信号处理 — Linux/macOS使用sigaction替代signal;
+/* DEP-002: 升级信号处理 — Linux/macOS使用sigaction替代signal;
      * sigaction提供一致的跨平台行为、信号阻塞、发送方信息。
-     * Windows上使用signal（sigaction不可用）。 */
+     * Windows上使用signal（sigaction不可用）。
+     * 
+     * 优雅关闭机制说明：
+     * 1. SIGINT(CTRL+C)/SIGTERM → signal_handler → 设置g_agi_running=0
+     * 2. 主循环检测到g_agi_running=0后退出循环
+     * 3. 退出后执行清理序列：停止服务器 → 释放WebSocket → 释放AGI系统
+     *    → 释放任务调度器 → 释放SLAM/摄像头 → 释放架构控制器
+     *    → 调用selflnn_shutdown()统一释放所有子系统
+     * 4. 主循环中每次100ms短睡眠检查g_agi_running，确保信号响应延迟<100ms
+     * 5. 不可恢复信号(SIGSEGV/SIGFPE/SIGILL/SIGBUS)直接_exit()终止 */
 #ifdef _WIN32
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
@@ -3126,12 +3186,13 @@ skip_agi_injection:
 #endif
 
     g_start_time = time(NULL);
-    g_last_online_learn = g_start_time;
-    g_last_reflection = g_start_time;
-    g_last_consolidate = g_start_time;
-    g_last_evolution = g_start_time;
-    g_last_cognition = g_start_time;
-    g_last_safety = g_start_time;
+    /* P1-3修复: 初始化时间戳使用原子写入(后台线程启动前,但仍保持一致性) */
+    ATOMIC_STORE_64(&g_last_online_learn, (LONG64)g_start_time);
+    ATOMIC_STORE_64(&g_last_reflection, (LONG64)g_start_time);
+    ATOMIC_STORE_64(&g_last_consolidate, (LONG64)g_start_time);
+    ATOMIC_STORE_64(&g_last_evolution, (LONG64)g_start_time);
+    ATOMIC_STORE_64(&g_last_cognition, (LONG64)g_start_time);
+    ATOMIC_STORE_64(&g_last_safety, (LONG64)g_start_time);
 
 #if 0 /* L-010修复：main_loop_restart 为死代码标签，永远无法被goto跳转到，已移除 */
 #ifndef _MSC_VER

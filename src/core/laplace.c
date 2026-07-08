@@ -106,8 +106,8 @@ Complex complex_mul(Complex a, Complex b) {
 Complex complex_div(Complex a, Complex b) {
     float denominator = b.real * b.real + b.imag * b.imag;
     if (denominator == 0.0f) {
-        // 除以零，返回NaN或极大值
-        return complex_create(FLT_MAX, FLT_MAX);
+        /* P2-07修复: 除以零返回NaN而非FLT_MAX，避免后续运算误用极大值 */
+        return complex_create(NAN, NAN);
     }
     return complex_create((a.real * b.real + a.imag * b.imag) / denominator,
                           (a.imag * b.real - a.real * b.imag) / denominator);

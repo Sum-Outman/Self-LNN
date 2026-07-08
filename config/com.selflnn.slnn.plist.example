@@ -9,9 +9,12 @@
     <!-- 程序参数 -->
     <key>ProgramArguments</key>
     <array>
-        <string>/opt/slnn/bin/backend_server</string>
-        <string>--config</string>
-        <string>/opt/slnn/config/backend_config.json</string>
+        <!-- P-AUDIT修复: 原引用 backend_server,实际编译产物为 selflnn -->
+        <string>/opt/slnn/bin/selflnn</string>
+        <string>--port</string>
+        <string>8080</string>
+        <string>--log-file</string>
+        <string>/opt/slnn/logs/slnn.log</string>
     </array>
     
     <!-- 工作目录 -->
@@ -28,7 +31,8 @@
         <key>SLNN_HOME</key>
         <string>/opt/slnn</string>
         <key>SLNN_CONFIG</key>
-        <string>/opt/slnn/config/backend_config.json</string>
+        <!-- P-AUDIT修复: 原引用 backend_config.json,实际配置文件为 system_config.json -->
+        <string>/opt/slnn/config/system_config.json</string>
         <key>SLNN_DATA</key>
         <string>/opt/slnn/data</string>
         <key>SLNN_MODELS</key>

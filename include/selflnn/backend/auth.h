@@ -80,6 +80,7 @@ typedef struct {
     int rule_count;
     int auth_required;
     int initialized;
+    void* auth_lock;                    /**< P1修复: 互斥锁句柄（MutexHandle），保护keys/令牌桶等共享状态 */
 } AuthSystem;
 
 AuthSystem* auth_system_create(int require_auth);

@@ -1205,6 +1205,22 @@ int gpu_benchmark_all_backends(const GpuBenchmarkConfig* config,
     return tested_count;
 }
 
+/* P0修复: 安全格式化追加宏。
+   原代码使用 pos += snprintf(buffer + pos, buffer_size - (size_t)pos, ...) 链式调用，
+   当 snprintf 输出被截断时，其返回值(本应写入的长度)会大于剩余可用空间，导致 pos 超过
+   buffer_size；随后 buffer_size - (size_t)pos 发生 size_t 下溢为巨大值，引发缓冲区溢出。
+   本宏在每次写入后立即将 pos 钳制到 buffer_size-1，从根本上杜绝 size_t 下溢与越界写入。
+   适用于本文件中以 buffer/buffer_size/pos 为局部变量的格式化函数。 */
+#define BENCH_SNPRINTF(fmt, ...) do { \
+    if ((size_t)(pos) < (buffer_size)) { \
+        int _bw = snprintf((buffer) + (pos), (buffer_size) - (size_t)(pos), (fmt), ##__VA_ARGS__); \
+        if (_bw > 0) { \
+            (pos) += _bw; \
+            if ((size_t)(pos) >= (buffer_size)) (pos) = (int)(buffer_size) - 1; \
+        } \
+    } \
+} while (0)
+
 int gpu_benchmark_format_report(const GpuBenchmarkResult* result,
                                 char* buffer, size_t buffer_size)
 {
@@ -1212,104 +1228,74 @@ int gpu_benchmark_format_report(const GpuBenchmarkResult* result,
 
     int pos = 0;
 
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "================================================================================\n");
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "                    GPU 基准测试报告\n");
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "================================================================================\n\n");
+    BENCH_SNPRINTF("================================================================================\n");
+    BENCH_SNPRINTF("                    GPU 基准测试报告\n");
+    BENCH_SNPRINTF("================================================================================\n\n");
 
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "【设备信息】\n");
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "  设备名称:     %s\n", result->device_info.name[0] ? result->device_info.name : "未知");
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "  后端类型:     %s\n", result->backend_name);
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "  设备类型:     %s\n",
+    BENCH_SNPRINTF("【设备信息】\n");
+    BENCH_SNPRINTF("  设备名称:     %s\n", result->device_info.name[0] ? result->device_info.name : "未知");
+    BENCH_SNPRINTF("  后端类型:     %s\n", result->backend_name);
+    BENCH_SNPRINTF("  设备类型:     %s\n",
         result->device_info.type == GPU_DEVICE_TYPE_DISCRETE ? "独立GPU" :
         result->device_info.type == GPU_DEVICE_TYPE_INTEGRATED ? "集成GPU" :
         result->device_info.type == GPU_DEVICE_TYPE_CPU ? "CPU" : "未知");
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "  计算单元数:   %d\n", result->device_info.compute_units);
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "  时钟频率:     %.0f MHz\n", result->device_info.clock_speed);
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "  总显存:       %.1f MB\n", (double)result->device_info.total_memory / (1024.0 * 1024.0));
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "  供应商:       %s\n", result->device_info.vendor[0] ? result->device_info.vendor : "未知");
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "  架构:         %s\n\n", result->device_info.architecture[0] ? result->device_info.architecture : "未知");
+    BENCH_SNPRINTF("  计算单元数:   %d\n", result->device_info.compute_units);
+    BENCH_SNPRINTF("  时钟频率:     %.0f MHz\n", result->device_info.clock_speed);
+    BENCH_SNPRINTF("  总显存:       %.1f MB\n", (double)result->device_info.total_memory / (1024.0 * 1024.0));
+    BENCH_SNPRINTF("  供应商:       %s\n", result->device_info.vendor[0] ? result->device_info.vendor : "未知");
+    BENCH_SNPRINTF("  架构:         %s\n\n", result->device_info.architecture[0] ? result->device_info.architecture : "未知");
 
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "【内存压力测试】\n");
+    BENCH_SNPRINTF("【内存压力测试】\n");
     if (result->memory_pressure.peak_allocated > 0) {
-        pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-            "  峰值分配量:       %.1f MB (利用率 %.1f%%)\n",
+        BENCH_SNPRINTF("  峰值分配量:       %.1f MB (利用率 %.1f%%)\n",
             (double)result->memory_pressure.peak_allocated / (1024.0 * 1024.0),
             result->memory_pressure.peak_utilization_ratio * 100.0);
-        pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-            "  最大单次分配:     %.1f MB\n",
+        BENCH_SNPRINTF("  最大单次分配:     %.1f MB\n",
             (double)result->memory_pressure.max_single_allocation / (1024.0 * 1024.0));
-        pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-            "  分配成功率:       %.1f%%\n",
+        BENCH_SNPRINTF("  分配成功率:       %.1f%%\n",
             result->memory_pressure.allocation_success_rate * 100.0);
-        pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-            "  平均分配耗时:     %.2f ms\n",
+        BENCH_SNPRINTF("  平均分配耗时:     %.2f ms\n",
             result->memory_pressure.average_allocation_time_ms);
     } else {
-        pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-            "  (测试未执行或失败)\n");
+        BENCH_SNPRINTF("  (测试未执行或失败)\n");
     }
 
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "\n【计算性能测试】\n");
+    BENCH_SNPRINTF("\n【计算性能测试】\n");
     if (result->compute_result.average_gflops > 0) {
-        pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-            "  矩阵乘法:         %.1f GFLOPS (耗时 %.2f ms)\n",
+        BENCH_SNPRINTF("  矩阵乘法:         %.1f GFLOPS (耗时 %.2f ms)\n",
             result->compute_result.matrix_mul_gflops,
             result->compute_result.matrix_mul_time_ms);
-        pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-            "  卷积:             %.1f GFLOPS (耗时 %.2f ms)\n",
+        BENCH_SNPRINTF("  卷积:             %.1f GFLOPS (耗时 %.2f ms)\n",
             result->compute_result.convolution_gflops,
             result->compute_result.convolution_time_ms);
-        pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-            "  逐元素操作:       %.1f GFLOPS (耗时 %.2f ms)\n",
+        BENCH_SNPRINTF("  逐元素操作:       %.1f GFLOPS (耗时 %.2f ms)\n",
             result->compute_result.elementwise_gflops,
             result->compute_result.elementwise_time_ms);
-        pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-            "  平均 GFLOPS:      %.1f GFLOPS\n",
+        BENCH_SNPRINTF("  平均 GFLOPS:      %.1f GFLOPS\n",
             result->compute_result.average_gflops);
         {
             double theory = gpu_estimate_theoretical_gflops(&result->device_info, 32);
             if (theory > 0) {
-                pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-                    "  理论峰值:         %.1f GFLOPS\n", theory);
-                pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-                    "  利用率:           %.1f%%\n",
+                BENCH_SNPRINTF("  理论峰值:         %.1f GFLOPS\n", theory);
+                BENCH_SNPRINTF("  利用率:           %.1f%%\n",
                     (result->compute_result.average_gflops / theory) * 100.0);
             }
         }
     } else {
-        pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-            "  (测试未执行或失败)\n");
+        BENCH_SNPRINTF("  (测试未执行或失败)\n");
     }
 
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "\n【带宽测试】\n");
+    BENCH_SNPRINTF("\n【带宽测试】\n");
     if (result->bandwidth_result.host_to_device_bandwidth_gbps > 0 ||
         result->bandwidth_result.device_to_host_bandwidth_gbps > 0) {
-        pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-            "  主机→设备:        %.2f GB/s (平均 %.2f ms)\n",
+        BENCH_SNPRINTF("  主机→设备:        %.2f GB/s (平均 %.2f ms)\n",
             result->bandwidth_result.host_to_device_bandwidth_gbps,
             result->bandwidth_result.host_to_device_time_ms);
-        pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-            "  设备→主机:        %.2f GB/s (平均 %.2f ms)\n",
+        BENCH_SNPRINTF("  设备→主机:        %.2f GB/s (平均 %.2f ms)\n",
             result->bandwidth_result.device_to_host_bandwidth_gbps,
             result->bandwidth_result.device_to_host_time_ms);
         if (result->bandwidth_result.device_to_device_bandwidth_gbps > 0) {
-            pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-                "  设备→设备:        %.2f GB/s (平均 %.2f ms)\n",
+            BENCH_SNPRINTF("  设备→设备:        %.2f GB/s (平均 %.2f ms)\n",
                 result->bandwidth_result.device_to_device_bandwidth_gbps,
                 result->bandwidth_result.device_to_device_time_ms);
         }
@@ -1319,55 +1305,37 @@ int gpu_benchmark_format_report(const GpuBenchmarkResult* result,
                 double best_bw = result->bandwidth_result.host_to_device_bandwidth_gbps;
                 if (result->bandwidth_result.device_to_host_bandwidth_gbps > best_bw)
                     best_bw = result->bandwidth_result.device_to_host_bandwidth_gbps;
-                pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-                    "  理论带宽:         %.1f GB/s\n", theory);
-                pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-                    "  带宽利用率:       %.1f%%\n",
+                BENCH_SNPRINTF("  理论带宽:         %.1f GB/s\n", theory);
+                BENCH_SNPRINTF("  带宽利用率:       %.1f%%\n",
                     (best_bw / theory) * 100.0);
             }
         }
     } else {
-        pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-            "  (测试未执行或失败)\n");
+        BENCH_SNPRINTF("  (测试未执行或失败)\n");
     }
 
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "\n【延迟测试】\n");
+    BENCH_SNPRINTF("\n【延迟测试】\n");
     if (result->kernel_launch_latency_us >= 0) {
-        pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-            "  内核启动延迟:     %.2f us\n", result->kernel_launch_latency_us);
+        BENCH_SNPRINTF("  内核启动延迟:     %.2f us\n", result->kernel_launch_latency_us);
     } else {
-        pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-            "  (测试未执行)\n");
+        BENCH_SNPRINTF("  (测试未执行)\n");
     }
     if (result->memory_copy_latency_us >= 0) {
-        pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-            "  小数据拷贝延迟:   %.2f us\n", result->memory_copy_latency_us);
+        BENCH_SNPRINTF("  小数据拷贝延迟:   %.2f us\n", result->memory_copy_latency_us);
     } else {
-        pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-            "  (测试未执行)\n");
+        BENCH_SNPRINTF("  (测试未执行)\n");
     }
 
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "\n================================================================================\n");
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "【综合评分】\n");
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "  内存性能评分:     %.0f / 1000\n", result->memory_score);
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "  计算性能评分:     %.0f / 1000\n", result->compute_score);
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "  带宽性能评分:     %.0f / 1000\n", result->bandwidth_score);
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "  综合评分:         %.0f / 1000\n", result->overall_score);
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "================================================================================\n");
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "测试耗时: %s\n", result->test_duration_str);
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "引擎版本: %s\n", GPU_BENCHMARK_VERSION);
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "================================================================================\n");
+    BENCH_SNPRINTF("\n================================================================================\n");
+    BENCH_SNPRINTF("【综合评分】\n");
+    BENCH_SNPRINTF("  内存性能评分:     %.0f / 1000\n", result->memory_score);
+    BENCH_SNPRINTF("  计算性能评分:     %.0f / 1000\n", result->compute_score);
+    BENCH_SNPRINTF("  带宽性能评分:     %.0f / 1000\n", result->bandwidth_score);
+    BENCH_SNPRINTF("  综合评分:         %.0f / 1000\n", result->overall_score);
+    BENCH_SNPRINTF("================================================================================\n");
+    BENCH_SNPRINTF("测试耗时: %s\n", result->test_duration_str);
+    BENCH_SNPRINTF("引擎版本: %s\n", GPU_BENCHMARK_VERSION);
+    BENCH_SNPRINTF("================================================================================\n");
 
     return pos;
 }
@@ -1379,90 +1347,62 @@ int gpu_benchmark_format_json(const GpuBenchmarkResult* result,
 
     int pos = 0;
 
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos, "{\n");
+    BENCH_SNPRINTF("{\n");
 
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "  \"backend\": \"%s\",\n", result->backend_name);
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "  \"device_index\": %d,\n", result->device_index);
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "  \"device_name\": \"%s\",\n", result->device_info.name);
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "  \"device_type\": %d,\n", (int)result->device_info.type);
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "  \"compute_units\": %d,\n", result->device_info.compute_units);
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "  \"clock_speed_mhz\": %.0f,\n", result->device_info.clock_speed);
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "  \"total_memory_mb\": %.1f,\n",
+    BENCH_SNPRINTF("  \"backend\": \"%s\",\n", result->backend_name);
+    BENCH_SNPRINTF("  \"device_index\": %d,\n", result->device_index);
+    BENCH_SNPRINTF("  \"device_name\": \"%s\",\n", result->device_info.name);
+    BENCH_SNPRINTF("  \"device_type\": %d,\n", (int)result->device_info.type);
+    BENCH_SNPRINTF("  \"compute_units\": %d,\n", result->device_info.compute_units);
+    BENCH_SNPRINTF("  \"clock_speed_mhz\": %.0f,\n", result->device_info.clock_speed);
+    BENCH_SNPRINTF("  \"total_memory_mb\": %.1f,\n",
         (double)result->device_info.total_memory / (1024.0 * 1024.0));
 
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "  \"memory_pressure\": {\n");
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "    \"peak_allocated_mb\": %.1f,\n",
+    BENCH_SNPRINTF("  \"memory_pressure\": {\n");
+    BENCH_SNPRINTF("    \"peak_allocated_mb\": %.1f,\n",
         (double)result->memory_pressure.peak_allocated / (1024.0 * 1024.0));
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "    \"peak_utilization_pct\": %.1f,\n",
+    BENCH_SNPRINTF("    \"peak_utilization_pct\": %.1f,\n",
         result->memory_pressure.peak_utilization_ratio * 100.0);
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "    \"max_single_allocation_mb\": %.1f\n",
+    BENCH_SNPRINTF("    \"max_single_allocation_mb\": %.1f\n",
         (double)result->memory_pressure.max_single_allocation / (1024.0 * 1024.0));
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos, "  },\n");
+    BENCH_SNPRINTF("  },\n");
 
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "  \"compute_benchmark\": {\n");
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "    \"matrix_mul_gflops\": %.1f,\n", result->compute_result.matrix_mul_gflops);
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "    \"convolution_gflops\": %.1f,\n", result->compute_result.convolution_gflops);
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "    \"elementwise_gflops\": %.1f,\n", result->compute_result.elementwise_gflops);
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "    \"average_gflops\": %.1f\n", result->compute_result.average_gflops);
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos, "  },\n");
+    BENCH_SNPRINTF("  \"compute_benchmark\": {\n");
+    BENCH_SNPRINTF("    \"matrix_mul_gflops\": %.1f,\n", result->compute_result.matrix_mul_gflops);
+    BENCH_SNPRINTF("    \"convolution_gflops\": %.1f,\n", result->compute_result.convolution_gflops);
+    BENCH_SNPRINTF("    \"elementwise_gflops\": %.1f,\n", result->compute_result.elementwise_gflops);
+    BENCH_SNPRINTF("    \"average_gflops\": %.1f\n", result->compute_result.average_gflops);
+    BENCH_SNPRINTF("  },\n");
 
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "  \"bandwidth_benchmark\": {\n");
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "    \"host_to_device_gbps\": %.2f,\n",
+    BENCH_SNPRINTF("  \"bandwidth_benchmark\": {\n");
+    BENCH_SNPRINTF("    \"host_to_device_gbps\": %.2f,\n",
         result->bandwidth_result.host_to_device_bandwidth_gbps);
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "    \"device_to_host_gbps\": %.2f,\n",
+    BENCH_SNPRINTF("    \"device_to_host_gbps\": %.2f,\n",
         result->bandwidth_result.device_to_host_bandwidth_gbps);
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "    \"device_to_device_gbps\": %.2f\n",
+    BENCH_SNPRINTF("    \"device_to_device_gbps\": %.2f\n",
         result->bandwidth_result.device_to_device_bandwidth_gbps);
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos, "  },\n");
+    BENCH_SNPRINTF("  },\n");
 
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "  \"latency\": {\n");
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "    \"kernel_launch_us\": %.2f,\n", result->kernel_launch_latency_us);
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "    \"memory_copy_us\": %.2f\n", result->memory_copy_latency_us);
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos, "  },\n");
+    BENCH_SNPRINTF("  \"latency\": {\n");
+    BENCH_SNPRINTF("    \"kernel_launch_us\": %.2f,\n", result->kernel_launch_latency_us);
+    BENCH_SNPRINTF("    \"memory_copy_us\": %.2f\n", result->memory_copy_latency_us);
+    BENCH_SNPRINTF("  },\n");
 
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "  \"scores\": {\n");
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "    \"memory_score\": %.0f,\n", result->memory_score);
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "    \"compute_score\": %.0f,\n", result->compute_score);
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "    \"bandwidth_score\": %.0f,\n", result->bandwidth_score);
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "    \"overall_score\": %.0f\n", result->overall_score);
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos, "  },\n");
+    BENCH_SNPRINTF("  \"scores\": {\n");
+    BENCH_SNPRINTF("    \"memory_score\": %.0f,\n", result->memory_score);
+    BENCH_SNPRINTF("    \"compute_score\": %.0f,\n", result->compute_score);
+    BENCH_SNPRINTF("    \"bandwidth_score\": %.0f,\n", result->bandwidth_score);
+    BENCH_SNPRINTF("    \"overall_score\": %.0f\n", result->overall_score);
+    BENCH_SNPRINTF("  },\n");
 
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "  \"test_duration_s\": %.2f,\n", result->total_test_time_s);
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "  \"version\": \"%s\",\n", GPU_BENCHMARK_VERSION);
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos,
-        "  \"summary\": \"%s\"\n", result->summary);
+    BENCH_SNPRINTF("  \"test_duration_s\": %.2f,\n", result->total_test_time_s);
+    BENCH_SNPRINTF("  \"version\": \"%s\",\n", GPU_BENCHMARK_VERSION);
+    BENCH_SNPRINTF("  \"summary\": \"%s\"\n", result->summary);
 
-    pos += snprintf(buffer + pos, buffer_size - (size_t)pos, "}\n");
+    BENCH_SNPRINTF("}\n");
 
     return pos;
 }
+
+/* P0修复: 安全宏仅在本文件上述两个格式化函数内使用，此处取消定义以保持作用域干净 */
+#undef BENCH_SNPRINTF

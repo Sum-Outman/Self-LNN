@@ -49,7 +49,11 @@ class BrowserCompat {
             canvas: !!document.createElement('canvas').getContext,
             webGL: this._checkWebGL(),
             sharedWorker: !!window.SharedWorker,
-            serviceWorker: 'serviceWorker' in navigator
+            serviceWorker: 'serviceWorker' in navigator,
+            /* FE-022修复: 添加ResizeObserver、IntersectionObserver、AbortController检测 */
+            resizeObserver: !!window.ResizeObserver,
+            intersectionObserver: !!window.IntersectionObserver,
+            abortController: !!window.AbortController
         };
     }
 

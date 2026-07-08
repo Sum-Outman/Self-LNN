@@ -9,6 +9,7 @@
 #include "selflnn/reasoning/causal_reasoning.h"
 #include "selflnn/knowledge/knowledge.h"
 #include "selflnn/programming/programming_bridge.h" /* 推理→编程闭环: 推理结论委托代码生成 */
+#include "selflnn/utils/platform.h" /* P1修复: 互斥锁支持 */
 #pragma warning(disable: 4702)  /* ZSFOOO-E002 */
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/string_utils.h"
@@ -60,6 +61,12 @@ struct ReasoningStats {
 struct ReasoningEngine {
     ReasoningConfig config;       /**< 引擎配置 */
     int is_initialized;           /**< 是否已初始化 */
+
+    /* P1修复: 互斥锁——保护推理缓存、统计信息和历史的并发访问 */
+    MutexHandle lock;             /**< 推理引擎互斥锁 */
+    /* P2修复: 编程引擎生命周期管理——替代static cached_prog，避免泄漏与初始化竞态 */
+    SelfProgrammingEngine* prog_engine; /**< 自我编程引擎（推理→编程闭环） */
+
     float* rule_base;             /**< 规则库 */
     size_t rule_base_size;        /**< 规则库大小 */
     float* knowledge_base;        /**< 知识库 */
@@ -131,6 +138,16 @@ ReasoningEngine* reasoning_engine_create(const ReasoningConfig* config) {
     memset(engine, 0, sizeof(ReasoningEngine));
     engine->config = *config;
     engine->is_initialized = 1;
+
+    /* P1修复: 创建互斥锁用于线程安全 */
+    engine->lock = mutex_create();
+    if (!engine->lock) {
+        safe_free((void**)&engine);
+        return NULL;
+    }
+
+    /* P2修复: 编程引擎随推理引擎生命周期创建，避免static缓存泄漏与竞态 */
+    engine->prog_engine = self_programming_engine_create(LANG_C);
     
     /* ZSF-072说明：规则库使用浮点数组编码（rule_base_size=1024）。
      * 浮点编码适用于CFC神经网络推理，非符号逻辑规则。符号规则推理使用knowledge模块。 */
@@ -240,7 +257,19 @@ void reasoning_engine_free(ReasoningEngine* engine) {
     safe_free((void**)&engine->history_inputs);
     safe_free((void**)&engine->history_outputs);
     safe_free((void**)&engine->history_file_path);
-    
+
+    /* P2修复: 销毁编程引擎 */
+    if (engine->prog_engine) {
+        self_programming_engine_destroy(engine->prog_engine);
+        engine->prog_engine = NULL;
+    }
+
+    /* P1修复: 销毁互斥锁 */
+    if (engine->lock) {
+        mutex_destroy(engine->lock);
+        engine->lock = NULL;
+    }
+
     safe_free((void**)&engine);
 }
 
@@ -251,6 +280,9 @@ int reasoning_record_history(ReasoningEngine* engine, const float* input, size_t
                               const float* output, size_t output_size) {
     if (!engine || !input || !output) return -1;
     size_t total = input_size + output_size;
+
+    /* P1修复: 加锁保护推理历史的并发写入 */
+    mutex_lock(engine->lock);
     /* S-031修复: 记录实际的输入输出维度 */
     engine->history_input_dim = input_size;
     engine->history_output_dim = output_size;
@@ -258,14 +290,18 @@ int reasoning_record_history(ReasoningEngine* engine, const float* input, size_t
         engine->history_capacity = 256;
         engine->history_inputs = (float*)safe_malloc(engine->history_capacity * total * sizeof(float));
         engine->history_outputs = (float*)safe_malloc(engine->history_capacity * output_size * sizeof(float));
-        if (!engine->history_inputs || !engine->history_outputs) { engine->history_capacity = 0; return -1; }
+        if (!engine->history_inputs || !engine->history_outputs) {
+            engine->history_capacity = 0;
+            mutex_unlock(engine->lock);
+            return -1;
+        }
     }
     if (engine->history_size >= engine->history_capacity) {
         size_t new_cap = engine->history_capacity * 2;
-        if (new_cap > 65536) return -1;
+        if (new_cap > 65536) { mutex_unlock(engine->lock); return -1; }
         float* new_in = (float*)safe_realloc(engine->history_inputs, new_cap * total * sizeof(float));
         float* new_out = (float*)safe_realloc(engine->history_outputs, new_cap * output_size * sizeof(float));
-        if (!new_in || !new_out) return -1;
+        if (!new_in || !new_out) { mutex_unlock(engine->lock); return -1; }
         engine->history_inputs = new_in;
         engine->history_outputs = new_out;
         engine->history_capacity = new_cap;
@@ -274,6 +310,7 @@ int reasoning_record_history(ReasoningEngine* engine, const float* input, size_t
     memcpy(engine->history_outputs + engine->history_size * output_size, output, output_size * sizeof(float));
     engine->history_size++;
     engine->inference_count++;
+    mutex_unlock(engine->lock);
     return 0;
 }
 
@@ -428,7 +465,9 @@ static int find_in_cache(ReasoningEngine* engine, float premises_hash,
     if (!engine || !engine->inference_cache || engine->cache_size == 0) {
         return 0;
     }
-    
+
+    /* P1修复: 加锁保护推理缓存的并发读取 */
+    mutex_lock(engine->lock);
     for (size_t i = 0; i < engine->cache_size; i++) {
         CacheItem* item = &engine->inference_cache[i];
         if (item->is_valid && fabsf(item->premises_hash - premises_hash) < 0.0001f) {
@@ -441,11 +480,13 @@ static int find_in_cache(ReasoningEngine* engine, float premises_hash,
             // 更新最后使用时间戳（LRU策略）
             item->last_used = engine->cache_counter++;
             engine->cache_hits++;
+            mutex_unlock(engine->lock);
             return 1;
         }
     }
-    
+
     engine->cache_misses++;
+    mutex_unlock(engine->lock);
     return 0;
 }
 
@@ -1443,7 +1484,9 @@ static void add_to_cache(ReasoningEngine* engine, float premises_hash,
     if (!engine || !engine->inference_cache || engine->cache_size == 0) {
         return;
     }
-    
+
+    /* P1修复: 加锁保护推理缓存的并发写入 */
+    mutex_lock(engine->lock);
     // 查找第一个无效的缓存项
     for (size_t i = 0; i < engine->cache_size; i++) {
         CacheItem* item = &engine->inference_cache[i];
@@ -1453,26 +1496,28 @@ static void add_to_cache(ReasoningEngine* engine, float premises_hash,
             item->confidence = confidence;
             item->is_valid = 1;
             item->last_used = engine->cache_counter++;
+            mutex_unlock(engine->lock);
             return;
         }
     }
-    
+
     // 如果缓存已满，使用LRU策略替换最近最少使用的项
     size_t lru_index = 0;
     uint64_t min_last_used = engine->inference_cache[0].last_used;
-    
+
     for (size_t i = 1; i < engine->cache_size; i++) {
         if (engine->inference_cache[i].last_used < min_last_used) {
             min_last_used = engine->inference_cache[i].last_used;
             lru_index = i;
         }
     }
-    
+
     engine->inference_cache[lru_index].premises_hash = premises_hash;
     engine->inference_cache[lru_index].conclusion = conclusion;
     engine->inference_cache[lru_index].confidence = confidence;
     engine->inference_cache[lru_index].is_valid = 1;
     engine->inference_cache[lru_index].last_used = engine->cache_counter++;
+    mutex_unlock(engine->lock);
 }
 
 /**
@@ -1796,30 +1841,33 @@ static int inductive_reasoning(const float* premises, size_t num_premises,
     float sum_squares = 0.0f;
     float min_val = premises[0];
     float max_val = premises[0];
-    float geometric_mean = 1.0f;
+    /* P2修复: 几何均值改用对数空间累加，避免大样本直接累乘溢出为Inf */
+    float sum_log = 0.0f;        /**< 对数累加和 */
+    float geometric_mean = 0.0f;
     int zero_count = 0;
-    
+
     for (size_t i = 0; i < num_premises; i++) {
         float val = premises[i];
         sum += val;
         sum_squares += val * val;
-        
+
         if (val < min_val) min_val = val;
         if (val > max_val) max_val = val;
-        
+
         if (fabsf(val) >= 1e-6f) {
-            geometric_mean *= fabsf(val);
+            /* 对数空间累加，防止大样本溢出 */
+            sum_log += logf(fabsf(val));
         } else {
             zero_count++;
         }
     }
-    
+
     float mean = sum / num_premises;
     float range = max_val - min_val;
-    
-    // 计算几何平均值（避免下溢）
+
+    // 计算几何平均值（对数空间，避免下溢/溢出）
     if (num_premises - zero_count > 0) {
-        geometric_mean = powf(geometric_mean, 1.0f / (num_premises - zero_count));
+        geometric_mean = expf(sum_log / (float)(num_premises - zero_count));
     } else {
         geometric_mean = 0.0f;
     }
@@ -3945,7 +3993,10 @@ int reasoning_infer(ReasoningEngine* engine,
         if (ret == 0) {
             uint64_t elapsed_ns = perf_timer_stop(&timer);
             /* MIN-003: 记录推理耗时，递增推理计数 */
+            /* P1修复: 加锁保护统计信息的并发更新 */
+            mutex_lock(engine->lock);
             engine->stats.total_inferences++;
+            mutex_unlock(engine->lock);
             (void)elapsed_ns;
             return 0;
         }
@@ -4094,10 +4145,10 @@ int reasoning_infer(ReasoningEngine* engine,
         intent.priority = 0;  /* 低优先级, 不抢占推理主流程 */
         intent.max_iterations = 2;
 
-        static SelfProgrammingEngine* cached_prog = NULL;
-        if (!cached_prog) cached_prog = self_programming_engine_create(LANG_C);
-        if (cached_prog) {
-            int bridge_ret = programming_bridge_intent_to_code(cached_prog, &intent, &closure);
+        /* P2修复: 使用引擎生命周期管理的prog_engine，替代static cached_prog
+         * 避免内存泄漏（永不释放）和多线程首次初始化竞态 */
+        if (engine->prog_engine) {
+            int bridge_ret = programming_bridge_intent_to_code(engine->prog_engine, &intent, &closure);
             if (bridge_ret == 0 && closure.learning_signal > 0.3f) {
                 log_info("推理→编程闭环: %s (quality=%d signal=%.2f)",
                         intent.function_name, closure.quality_score,
@@ -4241,11 +4292,14 @@ float reasoning_evaluate_confidence(ReasoningEngine* engine,
     }
     
     // 7. 历史性能调整（如果有历史数据）
+    /* P1修复: 加锁保护统计信息的并发读取 */
+    mutex_lock(engine->lock);
     if (engine->stats.total_inferences > 10) {
         float historical_accuracy = (float)engine->stats.successful_inferences / engine->stats.total_inferences;
         // 历史准确率影响最终置信度（权重0.1）
         final_confidence = final_confidence * 0.9f + historical_accuracy * 0.1f;
     }
+    mutex_unlock(engine->lock);
     
     // 确保置信度在0-1范围内
     if (final_confidence < 0.0f) final_confidence = 0.0f;
@@ -4254,7 +4308,10 @@ float reasoning_evaluate_confidence(ReasoningEngine* engine,
     // 停止性能计时器
     uint64_t elapsed_ns = perf_timer_stop(&timer);
     /* MIN-003修复: 记录推理到引擎统计 */
+    /* P1修复: 加锁保护统计信息的并发更新 */
+    mutex_lock(engine->lock);
     engine->stats.total_inferences++;
+    mutex_unlock(engine->lock);
     (void)elapsed_ns;
     // printf("置信度评估时间: %llu ns\n", elapsed_ns);
     
@@ -4966,24 +5023,27 @@ BayesianNetwork* bayesian_network_create(size_t max_nodes) {
 void bayesian_network_free(BayesianNetwork* bn) {
     if (!bn) return;
 
+    /* P-AUDIT修复: 全部使用safe_free释放safe_malloc/safe_calloc分配的内存
+     * 原缺陷: 使用free()释放safe_alloc带头的内存块,导致堆损坏(关闭旁路模式时触发) */
     for (size_t i = 0; i < bn->num_cpds; i++) {
-        free(bn->cpds[i].probabilities);
-        free(bn->cpds[i].parent_ids);
-        free(bn->cpds[i].parent_states);
+        safe_free((void**)&bn->cpds[i].probabilities);
+        safe_free((void**)&bn->cpds[i].parent_ids);
+        safe_free((void**)&bn->cpds[i].parent_states);
     }
 
     if (bn->adjacency_matrix) {
-        for (size_t i = 0; i < bn->node_capacity; i++) free(bn->adjacency_matrix[i]);
-        free(bn->adjacency_matrix);
+        for (size_t i = 0; i < bn->node_capacity; i++) safe_free((void**)&bn->adjacency_matrix[i]);
+        safe_free((void**)&bn->adjacency_matrix);
     }
 
-    free(bn->cpds);
-    free(bn->edges);
-    free(bn->nodes);
+    safe_free((void**)&bn->cpds);
+    safe_free((void**)&bn->edges);
+    safe_free((void**)&bn->nodes);
 
-    bn->num_nodes = 0;
-    bn->num_edges = 0;
-    bn->num_cpds = 0;
+    /* P-AUDIT修复(R-9): bn本身由safe_calloc分配,必须用safe_free释放,原代码遗漏导致内存泄漏 */
+    safe_free((void**)&bn);
+
+    /* 注意: bn已释放,调用方不应再使用该指针 */
 }
 
 int bayesian_network_add_node(BayesianNetwork* network, const char* name, int num_states) {

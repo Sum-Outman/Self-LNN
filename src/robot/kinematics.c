@@ -107,6 +107,13 @@ void collision_result_init(CollisionResult* result, int initial_capacity) {
     result->contact_count = 0;
     result->contact_capacity = initial_capacity > 0 ? initial_capacity : 8;
     result->contacts = (CollisionContact*)safe_malloc((size_t)result->contact_capacity * sizeof(CollisionContact));
+    /* P2修复: 检查safe_malloc返回值,分配失败时设置安全状态(contacts=NULL,capacity=0),
+     * 防止后续collision_result_add解引用NULL指针导致崩溃。 */
+    if (!result->contacts) {
+        result->contacts = NULL;
+        result->contact_capacity = 0;
+        result->contact_count = 0;
+    }
 }
 
 void collision_result_free(CollisionResult* result) {
@@ -675,11 +682,18 @@ int forward_kinematics_stateful(const KinematicModel* model, const float* joint_
 
     float T[16];
     float base_mat[16];
-    quat_to_matrix(model->base_orientation, base_mat);
-    base_mat[3] = model->base_position.x;
-    base_mat[7] = model->base_position.y;
+    memset(base_mat, 0, sizeof(base_mat));
+    float R[9];
+    quat_to_matrix(model->base_orientation, R);
+    /* P0: quat_to_matrix输出列主序3x3旋转矩阵，需转置为行主序后放入4x4矩阵，
+     * 否则旋转被转置、base_mat[9]/[10]未初始化、base_mat[3]/[7]被平移覆盖旋转元素 */
+    base_mat[0] = R[0]; base_mat[1] = R[3]; base_mat[2] = R[6];
+    base_mat[4] = R[1]; base_mat[5] = R[4]; base_mat[6] = R[7];
+    base_mat[8] = R[2]; base_mat[9] = R[5]; base_mat[10] = R[8];
+    base_mat[3]  = model->base_position.x;
+    base_mat[7]  = model->base_position.y;
     base_mat[11] = model->base_position.z;
-    base_mat[12] = 0; base_mat[13] = 0; base_mat[14] = 0; base_mat[15] = 1;
+    base_mat[15] = 1.0f;
     memcpy(T, base_mat, sizeof(T));
     int ee_idx = model->end_effector_joint;
     if (ee_idx < 0) ee_idx = model->joint_count - 1;
@@ -794,11 +808,18 @@ int forward_kinematics_full(const KinematicModel* model, const float* joint_angl
     if (!model || !joint_angles || !link_positions) return -1;
     float T[16];
     float base_mat[16];
-    quat_to_matrix(model->base_orientation, base_mat);
-    base_mat[3] = model->base_position.x;
-    base_mat[7] = model->base_position.y;
+    memset(base_mat, 0, sizeof(base_mat));
+    float R[9];
+    quat_to_matrix(model->base_orientation, R);
+    /* P0: quat_to_matrix输出列主序3x3旋转矩阵，需转置为行主序后放入4x4矩阵，
+     * 否则旋转被转置、base_mat[9]/[10]未初始化、base_mat[3]/[7]被平移覆盖旋转元素 */
+    base_mat[0] = R[0]; base_mat[1] = R[3]; base_mat[2] = R[6];
+    base_mat[4] = R[1]; base_mat[5] = R[4]; base_mat[6] = R[7];
+    base_mat[8] = R[2]; base_mat[9] = R[5]; base_mat[10] = R[8];
+    base_mat[3]  = model->base_position.x;
+    base_mat[7]  = model->base_position.y;
     base_mat[11] = model->base_position.z;
-    base_mat[12] = 0; base_mat[13] = 0; base_mat[14] = 0; base_mat[15] = 1;
+    base_mat[15] = 1.0f;
     memcpy(T, base_mat, sizeof(T));
     link_positions[0].x = T[3]; link_positions[0].y = T[7]; link_positions[0].z = T[11];
     if (link_orientations) {
@@ -806,6 +827,12 @@ int forward_kinematics_full(const KinematicModel* model, const float* joint_angl
     }
     for (int i = 0; i < model->joint_count; i++) {
         int idx = i + 1;
+        /* P1修复: 边界检查防止缓冲区越界写入。
+         * 当joint_count == KINEMATICS_MAX_JOINTS(32)时,
+         * idx = 32 会越界写入 link_positions[32] 和 link_orientations[32*4]。
+         * link_positions/link_orientations 数组大小为 KINEMATICS_MAX_LINKS(32),
+         * 有效索引为 0..31, idx 必须严格小于 KINEMATICS_MAX_LINKS。 */
+        if (idx >= KINEMATICS_MAX_LINKS) break;
         const KinJoint* j = &model->joints[i];
         float theta = j->dh.theta;
         if (j->joint_type == JOINT_TYPE_REVOLUTE || j->joint_type == JOINT_TYPE_CONTINUOUS) {
@@ -847,11 +874,18 @@ int compute_jacobian(const KinematicModel* model, const float* joint_angles,
     if (dof <= 0) return -1;
     float T[16];
     float base_mat[16];
-    quat_to_matrix(model->base_orientation, base_mat);
-    base_mat[3] = model->base_position.x;
-    base_mat[7] = model->base_position.y;
+    memset(base_mat, 0, sizeof(base_mat));
+    float R[9];
+    quat_to_matrix(model->base_orientation, R);
+    /* P0: quat_to_matrix输出列主序3x3旋转矩阵，需转置为行主序后放入4x4矩阵，
+     * 否则旋转被转置、base_mat[9]/[10]未初始化、base_mat[3]/[7]被平移覆盖旋转元素 */
+    base_mat[0] = R[0]; base_mat[1] = R[3]; base_mat[2] = R[6];
+    base_mat[4] = R[1]; base_mat[5] = R[4]; base_mat[6] = R[7];
+    base_mat[8] = R[2]; base_mat[9] = R[5]; base_mat[10] = R[8];
+    base_mat[3]  = model->base_position.x;
+    base_mat[7]  = model->base_position.y;
     base_mat[11] = model->base_position.z;
-    base_mat[12] = 0; base_mat[13] = 0; base_mat[14] = 0; base_mat[15] = 1;
+    base_mat[15] = 1.0f;
     memcpy(T, base_mat, sizeof(T));
     Vec3 ee_pos;
     {
@@ -953,11 +987,18 @@ int inverse_kinematics_ccd(const KinematicModel* model, const Vec3* target_pos,
             if (joint->joint_type == JOINT_TYPE_FIXED) continue;
             float T[16];
             float base_mat[16];
-            quat_to_matrix(model->base_orientation, base_mat);
-            base_mat[3] = model->base_position.x;
-            base_mat[7] = model->base_position.y;
+            memset(base_mat, 0, sizeof(base_mat));
+            float R[9];
+            quat_to_matrix(model->base_orientation, R);
+            /* P0: quat_to_matrix输出列主序3x3旋转矩阵，需转置为行主序后放入4x4矩阵，
+             * 否则旋转被转置、base_mat[9]/[10]未初始化、base_mat[3]/[7]被平移覆盖旋转元素 */
+            base_mat[0] = R[0]; base_mat[1] = R[3]; base_mat[2] = R[6];
+            base_mat[4] = R[1]; base_mat[5] = R[4]; base_mat[6] = R[7];
+            base_mat[8] = R[2]; base_mat[9] = R[5]; base_mat[10] = R[8];
+            base_mat[3]  = model->base_position.x;
+            base_mat[7]  = model->base_position.y;
             base_mat[11] = model->base_position.z;
-            base_mat[12] = 0; base_mat[13] = 0; base_mat[14] = 0; base_mat[15] = 1;
+            base_mat[15] = 1.0f;
             memcpy(T, base_mat, sizeof(T));
             for (int k = 0; k <= j; k++) {
                 const KinJoint* jk = &model->joints[k];
@@ -974,6 +1015,45 @@ int inverse_kinematics_ccd(const KinematicModel* model, const Vec3* target_pos,
                 memcpy(T, newT, sizeof(T));
             }
             Vec3 joint_pos = {T[3], T[7], T[11]};
+            /* P1修复: CCD姿态误差修正（仅在末关节ee_idx处施加）。
+             * 原代码use_orient被赋值但从未使用,target_orient参数被静默忽略。
+             * 此处计算当前末端姿态与目标姿态的误差四元数,提取旋转轴角,
+             * 投影到关节旋转轴上,按权重0.3施加旋转修正(权重<1防止过度修正)。
+             * 放置在位置修正continue之前,确保即使位置已对齐仍能修正姿态。 */
+            if (use_orient && j == ee_idx) {
+                float q_inv[4];
+                quat_conjugate(state.orientation, q_inv);
+                float q_err[4];
+                quat_multiply(target_orient, q_inv, q_err);
+                quat_normalize(q_err);
+                /* 取最短旋转路径: w<0时四元数取反 */
+                if (q_err[3] < 0.0f) {
+                    q_err[0] = -q_err[0]; q_err[1] = -q_err[1];
+                    q_err[2] = -q_err[2]; q_err[3] = -q_err[3];
+                }
+                float w_clamped = KINEMATICS_CLAMP(q_err[3], -1.0f, 1.0f);
+                float orient_angle = 2.0f * acosf(w_clamped);
+                if (orient_angle > KINEMATICS_EPSILON) {
+                    float sin_half = sinf(orient_angle * 0.5f);
+                    if (fabsf(sin_half) > KINEMATICS_EPSILON) {
+                        Vec3 err_axis = {q_err[0] / sin_half, q_err[1] / sin_half, q_err[2] / sin_half};
+                        /* 计算关节旋转轴在世界坐标系中的方向 */
+                        Vec3 o_joint_axis = {T[0]*joint->joint_axis[0] + T[4]*joint->joint_axis[1] + T[8]*joint->joint_axis[2],
+                                             T[1]*joint->joint_axis[0] + T[5]*joint->joint_axis[1] + T[9]*joint->joint_axis[2],
+                                             T[2]*joint->joint_axis[0] + T[6]*joint->joint_axis[1] + T[10]*joint->joint_axis[2]};
+                        float o_ja_len = vec3_length(&o_joint_axis);
+                        if (o_ja_len > KINEMATICS_EPSILON &&
+                            (joint->joint_type == JOINT_TYPE_REVOLUTE || joint->joint_type == JOINT_TYPE_CONTINUOUS)) {
+                            float proj = k_vec3_dot(&err_axis, &o_joint_axis);
+                            joint_angles[j] += orient_angle * KINEMATICS_CLAMP(proj / o_ja_len, -1.0f, 1.0f) * 0.3f;
+                            if (joint->joint_type != JOINT_TYPE_CONTINUOUS) {
+                                joint_angles[j] = KINEMATICS_CLAMP(joint_angles[j],
+                                    joint->joint_limit_lower, joint->joint_limit_upper);
+                            }
+                        }
+                    }
+                }
+            }
             Vec3 to_ee;
             k_vec3_sub(&to_ee, &state.position, &joint_pos);
             Vec3 to_target_local;
@@ -1020,6 +1100,10 @@ int inverse_kinematics_ccd(const KinematicModel* model, const Vec3* target_pos,
 /* ============================================================================
  * 逆运动学 — DLS（阻尼最小二乘法）
  * ============================================================================ */
+
+/* P1修复: 前向声明cholesky求解器，用于DLS逆运动学完整线性系统求解 */
+static int kin_cholesky_6x6(const float* A, float* L);
+static void kin_cholesky_solve_6x6(const float* L, const float* b, float* x);
 
 /**
  * @brief 逆运动学求解 - DLS阻尼最小二乘法（私有实现，quaternion姿态版本）
@@ -1099,11 +1183,42 @@ int inverse_kinematics_dls(const KinematicModel* model, const Vec3* target_pos,
             }
             temp[i] = sum;
         }
-        for (int i = 0; i < ncols; i++) {
-            if (fabsf(jtj[i * ncols + i]) < KINEMATICS_EPSILON) {
-                dq[i] = temp[i] / (jtj[i * ncols + i] + damping);
+        /* P1修复: 用cholesky求解完整线性系统替代对角近似 */
+        /* cholesky求解器固定为6x6,将ncols×ncols矩阵填充到6x6 */
+        {
+            float jtj_pad[36];   /* 填充到6x6的JtJ矩阵 */
+            float temp_pad[6];   /* 填充到6的J^T*e向量 */
+            float dq_pad[6];     /* 填充到6的解向量 */
+            float L_fac[36];     /* cholesky分解下三角因子 */
+            memset(jtj_pad, 0, sizeof(jtj_pad));
+            memset(temp_pad, 0, sizeof(temp_pad));
+            for (int i = 0; i < ncols; i++) {
+                for (int j = 0; j < ncols; j++) {
+                    jtj_pad[i * 6 + j] = jtj[i * ncols + j];
+                }
+                temp_pad[i] = temp[i];
+            }
+            /* 填充额外维度为单位值,保证矩阵正定可分解 */
+            for (int i = ncols; i < 6; i++) {
+                jtj_pad[i * 6 + i] = 1.0f;
+            }
+            if (kin_cholesky_6x6(jtj_pad, L_fac) == 0) {
+                /* cholesky分解成功,求解完整线性系统 */
+                kin_cholesky_solve_6x6(L_fac, temp_pad, dq_pad);
+                for (int i = 0; i < ncols; i++) {
+                    dq[i] = dq_pad[i];
+                }
             } else {
-                dq[i] = temp[i] / jtj[i * ncols + i];
+                /* cholesky求解失败（矩阵非正定），回退到对角近似 */
+                for (int i = 0; i < ncols; i++) {
+                    float diag = jtj[i * ncols + i];
+                    /* damping已在上方第1092行加入jtj对角线,此处不再重复添加 */
+                    if (fabsf(diag) < KINEMATICS_EPSILON) {
+                        dq[i] = temp[i] / (diag + KINEMATICS_EPSILON);
+                    } else {
+                        dq[i] = temp[i] / diag;
+                    }
+                }
             }
         }
         int j_idx = 0;
@@ -2595,7 +2710,7 @@ int inverse_kinematics_gradient_projection(const KinematicModel* model,
  * 
  * @param model 运动学模型
  * @param target_pos 目标末端位置
- * @param target_orient 目标姿态（欧拉角:[roll,pitch,yaw]，NULL表示忽略）
+ * @param target_orient 目标姿态（四元数[x,y,z,w]，NULL表示忽略姿态）
  * @param joint_angles [输入/输出] 关节角
  * @param max_iter 最大迭代次数
  * @param tolerance 收敛容差
@@ -2621,11 +2736,28 @@ int ik_solve_dls(const KinematicModel* model, const Vec3* target_pos,
         dx[1] = target_pos->y - current.position.y;
         dx[2] = target_pos->z - current.position.z;
 
-        float rot_err[3];
         if (target_orient) {
-            for (int i = 0; i < 3; i++)
-                rot_err[i] = target_orient[i] - current.orientation[i];
-            dx[3] = rot_err[0]; dx[4] = rot_err[1]; dx[5] = rot_err[2];
+            /* P1修复: 四元数姿态误差不能用分量直接相减。
+             * 原代码 rot_err[i] = target_orient[i] - current.orientation[i]
+             * 直接减四元数前3分量(xyz),忽略w分量,未处理双覆盖(q与-q表示同一旋转)。
+             * 当两四元数处于双覆盖半球时,误差方向完全错误。
+             *
+             * 正确方法: q_err = q_target * conj(q_current)
+             * 取四元数误差的向量部分(xyz)作为旋转误差轴角近似。
+             * 存储格式为[x,y,z,w](xyzw),与quat_multiply/quat_conjugate约定一致。
+             * 同文件inverse_kinematics_dls(line 1133)和其他IK函数已采用此方法。 */
+            float q_cur_conj[4];
+            quat_conjugate(current.orientation, q_cur_conj);
+            float q_err[4];
+            quat_multiply(target_orient, q_cur_conj, q_err);
+            /* 最短路径: 当w分量(q_err[3])<0时,取反整个四元数,
+             * 选择角度<180度的旋转表示,避免走"远路" */
+            if (q_err[3] < 0.0f) {
+                q_err[0] = -q_err[0]; q_err[1] = -q_err[1];
+                q_err[2] = -q_err[2]; q_err[3] = -q_err[3];
+            }
+            /* 向量部分(xyz)作为旋转误差 */
+            dx[3] = q_err[0]; dx[4] = q_err[1]; dx[5] = q_err[2];
         } else {
             dx[3] = dx[4] = dx[5] = 0.0f;
         }
@@ -2638,15 +2770,18 @@ int ik_solve_dls(const KinematicModel* model, const Vec3* target_pos,
         memset(J, 0, sizeof(J));
         compute_jacobian(model, joint_angles, J, model->joint_count);
 
-/*深度修复: 计算完整Yoshikawa可操作性指标 ω = sqrt(det(J·J^T))
+        /*深度修复: 计算完整Yoshikawa可操作性指标 ω = sqrt(det(J·J^T))
          * 不再使用简化的迹近似（trace(JJ^T)/N）。
-         * 对于6×n雅可比矩阵，JJ^T是6×6矩阵，直接计算其行列式。 */
+         * 对于6×n雅可比矩阵，JJ^T是6×6矩阵，直接计算其行列式。
+         * P0修复: compute_jacobian以列主序存储雅可比矩阵(col*6+row)。
+         *          i,j为行(0-5),k为列(0..n-1),正确索引应为J[k*6+i]。
+         *          原代码J[i*n+k]在n!=6时访问错误内存位置,导致JJ^T完全错误。 */
         float jj[6 * 6] = {0};
         for (int i = 0; i < 6; i++) {
             for (int j = 0; j < 6; j++) {
                 float sum = 0.0f;
                 for (int k = 0; k < n; k++) {
-                    sum += J[i * n + k] * J[j * n + k];
+                    sum += J[k * 6 + i] * J[k * 6 + j];
                 }
                 jj[i * 6 + j] = sum;
             }
@@ -2697,10 +2832,33 @@ int ik_solve_dls(const KinematicModel* model, const Vec3* target_pos,
         /* (J·J^T + λ²I)^{-1} */
         for (int i = 0; i < 6; i++) jj[i*6+i] += lambda * lambda;
 
-        /* 高斯消元求 J·J^T + λ²I 的逆 × dx */
+        /* P1修复: 高斯消元增加部分主元选择（行交换）。
+         * 原代码不进行行交换,导致:
+         *   1) 对角线元素很小但 > 1e-12 时, factor 非常大, 放大舍入误差;
+         *   2) pivot < 1e-12 时 continue 跳过该列, 回代时该行用残值做除法产生错误结果。
+         * 部分主元选择: 每次消元前在该列剩余行(i..5)中寻找绝对值最大元素作为主元,
+         * 交换两行(包括 jj 系数和 rhs 右端项), 保证数值稳定性。 */
         float rhs[6];
         memcpy(rhs, dx, sizeof(rhs));
         for (int i = 0; i < 6; i++) {
+            /* 部分主元选择: 在第i列的 i..5 行中找最大绝对值元素 */
+            int pivot_row = i;
+            float max_val = fabsf(jj[i*6+i]);
+            for (int r = i + 1; r < 6; r++) {
+                float val = fabsf(jj[r*6+i]);
+                if (val > max_val) { max_val = val; pivot_row = r; }
+            }
+            /* 交换当前行与主元行(系数矩阵 + 右端项同步交换) */
+            if (pivot_row != i) {
+                for (int c = 0; c < 6; c++) {
+                    float tmp = jj[i*6+c];
+                    jj[i*6+c] = jj[pivot_row*6+c];
+                    jj[pivot_row*6+c] = tmp;
+                }
+                float tmp_r = rhs[i];
+                rhs[i] = rhs[pivot_row];
+                rhs[pivot_row] = tmp_r;
+            }
             float pivot = jj[i*6+i];
             if (fabsf(pivot) < 1e-12f) continue;
             for (int j = i+1; j < 6; j++) {
@@ -2709,17 +2867,19 @@ int ik_solve_dls(const KinematicModel* model, const Vec3* target_pos,
                 rhs[j] -= factor * rhs[i];
             }
         }
-        float inv_dx[6];
+        /* 回代求解,初始化为0避免奇异行残留垃圾值 */
+        float inv_dx[6] = {0.0f};
         for (int i = 5; i >= 0; i--) {
             inv_dx[i] = rhs[i];
             for (int j = i+1; j < 6; j++) inv_dx[i] -= jj[i*6+j] * inv_dx[j];
             if (fabsf(jj[i*6+i]) > 1e-12f) inv_dx[i] /= jj[i*6+i];
         }
 
-        /* Δθ = J^T · inv(J·J^T+λ²I) · Δx */
+        /* Δθ = J^T · inv(J·J^T+λ²I) · Δx
+         * P0修复: 列主序索引,行i列j对应J[j*6+i],原代码J[i*n+j]在n!=6时错误。 */
         for (int j = 0; j < n; j++) {
             float dtheta = 0.0f;
-            for (int i = 0; i < 6; i++) dtheta += J[i*n+j] * inv_dx[i];
+            for (int i = 0; i < 6; i++) dtheta += J[j * 6 + i] * inv_dx[i];
             joint_angles[j] += dtheta;
         }
 

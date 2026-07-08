@@ -40,6 +40,9 @@ struct MetacognitionSystem {
     MetacognitionMonitoringConfig monitoring_config; /**< 监控配置 */
     SelfModelUpdateConfig model_update_config;       /**< 模型更新配置 */
     PredictiveSelfConfig prediction_config;          /**< 预测配置 */
+
+    /* P2修复: 内部互斥锁，保护 monitoring_history / 统计信息等共享状态的并发访问 */
+    MutexHandle lock;                                /**< 互斥锁 */
     
     /* 状态 */
     MetacognitionModelState self_model_state;                 /**< 自我模型状态 */
@@ -322,9 +325,20 @@ MetacognitionSystem* metacognition_system_create(
     system->ema_uncertainty_samples = 0;
     system->ema_uncertainty_mean = 0.0f;
     memset(system->innovation_window, 0, sizeof(system->innovation_window));
-    
+
+    /* P2修复: 最后创建内部互斥锁。放在所有子资源分配成功之后，
+     * 若创建失败则复用 metacognition_system_free 统一清理，避免在各错误
+     * 路径重复销毁锁导致遗漏泄漏。 */
+    system->lock = mutex_create();
+    if (!system->lock) {
+        metacognition_system_free(system);
+        selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
+                              "创建元认知系统：互斥锁创建失败");
+        return NULL;
+    }
+
     system->is_initialized = 1;
-    
+
     return system;
 }
 
@@ -359,7 +373,13 @@ void metacognition_system_free(MetacognitionSystem* system) {
     safe_free((void**)&system->self_model_state.prediction_errors);
     safe_free((void**)&system->monitoring_history);
     safe_free((void**)&system->prediction_model_weights);
-    
+
+    /* P2修复: 销毁内部互斥锁 */
+    if (system->lock) {
+        mutex_destroy(system->lock);
+        system->lock = NULL;
+    }
+
     safe_free((void**)&system);
 }
 
@@ -382,10 +402,14 @@ int metacognition_monitor(MetacognitionSystem* system,
                               "元认知监控：参数为空");
         return -1;
     }
-    
+
+    /* P2修复: 加锁保护监控历史与统计信息的并发读写 */
+    mutex_lock(system->lock);
+
     if (!system->is_initialized) {
         selflnn_set_last_error(SELFLNN_ERROR_NOT_INITIALIZED, __func__, __FILE__, __LINE__,
                               "元认知监控：系统未初始化");
+        mutex_unlock(system->lock);
         return -1;
     }
     
@@ -521,6 +545,7 @@ int metacognition_monitor(MetacognitionSystem* system,
         }
     }
 
+    mutex_unlock(system->lock);
     return 0;
 }
 
@@ -590,9 +615,10 @@ int meta_cognition_update_self_model(void* self_model_cfc, const float* meta_res
                                       int result_dim, float learning_rate) {
     if (!self_model_cfc || !meta_result) return -1;
 
-    float self_state[64] = {0};
-    float real_input[64] = {0};
-    int nd = result_dim < 64 ? result_dim : 64;
+    /* P0修复: 缓冲区扩大到256匹配LNN维度，防止栈溢出和越界读取 */
+    float self_state[256] = {0};
+    float real_input[256] = {0};
+    int nd = result_dim < 256 ? result_dim : 256;
     float sum = 0.0f, sum_sq = 0.0f, min_val = 1e10f, max_val = -1e10f;
     for (int i = 0; i < nd; i++) {
         float v = meta_result[i];
@@ -619,7 +645,7 @@ int meta_cognition_update_self_model(void* self_model_cfc, const float* meta_res
     for (int i = 0; i < nd; i++)
         self_state[i] = self_state[i] * (1.0f - lr) + meta_result[i] * lr;
 
-    float grad[64] = {0};
+    float grad[256] = {0};
     for (int i = 0; i < nd; i++) grad[i] = (meta_result[i] - self_state[i]) * lr;
 
     float update_sum = 0.0f;

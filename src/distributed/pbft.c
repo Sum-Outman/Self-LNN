@@ -29,6 +29,12 @@
 
 #define SAFE_FREE_ARR(p) do { if ((p)) { safe_free((void**)&(p)); (p) = NULL; } } while(0)
 
+/* P1修复: 内部无锁版本前向声明 —— 供已持锁的调用方使用，避免非递归锁死锁 */
+static int pbft_connect_all_nolock(PbftSystem* system);
+static int pbft_disconnect_all_nolock(PbftSystem* system);
+static int pbft_trigger_checkpoint_nolock(PbftSystem* system);
+static int pbft_trigger_view_change_nolock(PbftSystem* system);
+
 static uint64_t get_current_time_ms(void) {
     TimeValue tv = time_get_current();
     return (uint64_t)tv.seconds * 1000 + (uint64_t)(tv.microseconds / 1000);
@@ -100,6 +106,9 @@ struct PbftSystem {
     uint32_t new_pre_prepare_digests[PBFT_MAX_PENDING_BATCH][8];
     uint64_t last_tick_ms;
     
+    /* P1修复: PBFT系统互斥锁，保护所有公共API的并发访问 */
+    MutexHandle lock;
+    
     /* 网络套接字 */
 #ifdef _WIN32
     SOCKET listen_socket;
@@ -132,7 +141,9 @@ void pbft_default_config(PbftConfig* config) {
     config->checkpoint_interval = PBFT_CHECKPOINT_INTERVAL;
     config->view_change_timeout_ms = PBFT_VIEW_CHANGE_TIMEOUT_MS;
     config->listen_port = PBFT_DEFAULT_PORT;
-    strcpy(config->listen_host, "0.0.0.0");
+    /* P2-04修复: 使用strncpy替代strcpy，防止缓冲区溢出 */
+    strncpy(config->listen_host, "0.0.0.0", sizeof(config->listen_host) - 1);
+    config->listen_host[sizeof(config->listen_host) - 1] = '\0';
     config->enable_auto_view_change = 1;
     config->enable_checkpoint_gc = 1;
     config->verbose = 0;
@@ -157,11 +168,15 @@ static PbftLogEntry* log_create_entry(PbftSystem* system, uint32_t seq) {
     PbftLogEntry* existing = log_get_entry(system, seq);
     if (existing) return existing;
     if (system->log_count >= system->log_capacity) {
-        system->log_capacity *= 2;
+        /* P-AUDIT修复(D-1): 原代码在safe_realloc前修改log_capacity,若realloc失败
+         * capacity已翻倍但log_entries仍指向旧缓冲区,后续可能越界写入。
+         * 修复: 先用临时变量保存新capacity,realloc成功后再更新。 */
+        size_t new_capacity = system->log_capacity * 2;
         PbftLogEntry* new_log = (PbftLogEntry*)safe_realloc(system->log_entries,
-            system->log_capacity * sizeof(PbftLogEntry));
+            new_capacity * sizeof(PbftLogEntry));
         if (!new_log) return NULL;
         system->log_entries = new_log;
+        system->log_capacity = new_capacity;
     }
     PbftLogEntry* entry = &system->log_entries[system->log_count++];
     memset(entry, 0, sizeof(PbftLogEntry));
@@ -304,6 +319,12 @@ PbftSystem* pbft_system_create(const PbftConfig* config) {
     if (!config) return NULL;
     PbftSystem* system = (PbftSystem*)safe_calloc(1, sizeof(PbftSystem));
     if (!system) return NULL;
+    /* P1修复: 初始化PBFT系统互斥锁 */
+    system->lock = mutex_create();
+    if (!system->lock) {
+        safe_free((void**)&system);
+        return NULL;
+    }
     memcpy(&system->config, config, sizeof(PbftConfig));
     system->current_view = 0;
     system->primary_id = 0;
@@ -348,6 +369,7 @@ PbftSystem* pbft_system_create(const PbftConfig* config) {
         memset(&system->vc_records[i], 0, sizeof(PbftViewChangeRecord));
     }
     if (log_entry_init(system) != 0) {
+        mutex_destroy(system->lock);
         safe_free((void**)&system);
         return NULL;
     }
@@ -385,7 +407,12 @@ PbftSystem* pbft_system_create(const PbftConfig* config) {
 
 void pbft_system_destroy(PbftSystem* system) {
     if (!system) return;
-    pbft_disconnect_all(system);
+    /* P1修复: 先销毁互斥锁，确保没有其他线程在访问 */
+    if (system->lock) {
+        mutex_destroy(system->lock);
+        system->lock = NULL;
+    }
+    pbft_disconnect_all_nolock(system);
     for (int i = 0; i < PBFT_MAX_NODES; i++) {
         if (system->view_change_msgs[i]) {
             safe_free((void**)&system->view_change_msgs[i]);
@@ -410,7 +437,9 @@ void pbft_system_destroy(PbftSystem* system) {
 
 int pbft_add_node(PbftSystem* system, uint32_t node_id, const char* host, uint16_t port) {
     if (!system || !host || !host[0] || node_id >= PBFT_MAX_NODES) return PBFT_ERROR_INVALID_PARAM;
-    if (system->nodes[node_id].is_active) return PBFT_ERROR_INVALID_PARAM;
+    /* P1修复: 加锁保护节点添加 */
+    mutex_lock(system->lock);
+    if (system->nodes[node_id].is_active) { mutex_unlock(system->lock); return PBFT_ERROR_INVALID_PARAM; }
     system->nodes[node_id].node_id = node_id;
     strncpy(system->nodes[node_id].host, host, sizeof(system->nodes[node_id].host) - 1);
     system->nodes[node_id].host[sizeof(system->nodes[node_id].host) - 1] = '\0';
@@ -420,17 +449,22 @@ int pbft_add_node(PbftSystem* system, uint32_t node_id, const char* host, uint16
     system->nodes[node_id].last_heartbeat = get_current_time_ms();
     system->nodes[node_id].consecutive_timeouts = 0;
     if ((int)node_id >= system->node_count) system->node_count = (int)node_id + 1;
+    mutex_unlock(system->lock);
     return PBFT_ERROR_NONE;
 }
 
 int pbft_remove_node(PbftSystem* system, uint32_t node_id) {
     if (!system || node_id >= PBFT_MAX_NODES) return PBFT_ERROR_INVALID_PARAM;
+    /* P1修复: 加锁保护节点移除 */
+    mutex_lock(system->lock);
     system->nodes[node_id].is_active = 0;
     system->nodes[node_id].is_primary = 0;
+    mutex_unlock(system->lock);
     return PBFT_ERROR_NONE;
 }
 
-int pbft_connect_all(PbftSystem* system) {
+/* P1修复: 内部无锁版本 —— 由pbft_process_messages在持锁状态下调用 */
+static int pbft_connect_all_nolock(PbftSystem* system) {
     if (!system) return PBFT_ERROR_INVALID_PARAM;
     if (system->server_initialized) return PBFT_ERROR_NONE;
 
@@ -504,7 +538,17 @@ int pbft_connect_all(PbftSystem* system) {
     return PBFT_ERROR_NONE;
 }
 
-int pbft_disconnect_all(PbftSystem* system) {
+/* P1修复: 公共版本，加锁后委托给_nolock版本 */
+int pbft_connect_all(PbftSystem* system) {
+    if (!system) return PBFT_ERROR_INVALID_PARAM;
+    mutex_lock(system->lock);
+    int ret = pbft_connect_all_nolock(system);
+    mutex_unlock(system->lock);
+    return ret;
+}
+
+/* P1修复: 内部无锁版本 —— 由pbft_system_destroy在锁已销毁后调用 */
+static int pbft_disconnect_all_nolock(PbftSystem* system) {
     if (!system) return PBFT_ERROR_INVALID_PARAM;
     if (!system->server_initialized) return PBFT_ERROR_NONE;
 
@@ -531,22 +575,87 @@ int pbft_disconnect_all(PbftSystem* system) {
     return PBFT_ERROR_NONE;
 }
 
+/* P1修复: 公共版本，加锁后委托给_nolock版本 */
+int pbft_disconnect_all(PbftSystem* system) {
+    if (!system) return PBFT_ERROR_INVALID_PARAM;
+    mutex_lock(system->lock);
+    int ret = pbft_disconnect_all_nolock(system);
+    mutex_unlock(system->lock);
+    return ret;
+}
+
 static int pbft_execute_request(PbftSystem* system, uint32_t seq) {
     PbftLogEntry* entry = log_get_entry(system, seq);
     if (!entry || entry->executed) return -1;
     entry->executed = 1;
     if (seq > system->last_executed_seq) system->last_executed_seq = seq;
 
-    /* 请求执行: 使用per-entry负载 (避免并发提交覆盖全局pending_payload) */
+    /* P1修复: 将execute_callback调用移到锁外执行，防止回调内部调用PBFT公共API
+     * 导致非递归锁死锁（system->lock为非递归互斥锁）。
+     * 调用者(pbft_tick/pbft_handle_commit/pbft_handle_prepare)均持有system->lock，
+     * 此处在锁内快照回调所需数据，解锁后调用回调，再重新加锁回写结果。 */
     if (system->execute_callback) {
-        int ret = system->execute_callback(
-            entry->client_id, entry->request_id, entry->op_type,
-            entry->payload, entry->payload_size,
-            system->execute_callback_user_data);
+        /* 锁内：快照回调参数到局部变量，避免解锁后访问entry/system成员时发生竞争 */
+        uint32_t cb_client_id = entry->client_id;
+        uint32_t cb_request_id = entry->request_id;
+        uint32_t cb_op_type = entry->op_type;
+        uint32_t cb_payload_size = entry->payload_size;
+        int (*cb_func)(uint32_t, uint32_t, uint32_t, const void*, uint32_t, void*) =
+            system->execute_callback;
+        void* cb_user_data = system->execute_callback_user_data;
+
+        /* R10修复(P0-UAF): 深拷贝payload到局部缓冲区。
+         * 原实现仅保存entry->payload指针值便解锁，解锁期间另一线程可通过
+         * log_gc/checkpoint释放entry->payload，导致回调读取已释放内存(UAF)。
+         * 此处在持锁期间完成深拷贝，回调使用副本，重新加锁后释放副本。 */
+        void* cb_payload_buf = NULL;
+        if (entry->payload && cb_payload_size > 0) {
+            cb_payload_buf = safe_malloc(cb_payload_size);
+            if (cb_payload_buf) {
+                memcpy(cb_payload_buf, entry->payload, cb_payload_size);
+            } else {
+                /* P1修复(修复4): 分配失败时将 cb_payload_size 重置为0。
+                 * 原实现仅保持 cb_payload_buf=NULL，但 cb_payload_size 仍为非零值，
+                 * 回调收到 (NULL, 非零size) 时若内部对 payload 做 memcpy/memcmp 会
+                 * 解引用NULL导致崩溃。此处将 size 同步置0，使回调可安全跳过 payload 处理。 */
+                cb_payload_size = 0;
+            }
+        }
+        const void* cb_payload = cb_payload_buf;
+
+        /* 解锁，在锁外调用用户回调（回调可安全调用PBFT公共API） */
+        mutex_unlock(system->lock);
+        int ret = cb_func(cb_client_id, cb_request_id, cb_op_type,
+                          cb_payload, cb_payload_size, cb_user_data);
+        /* 重新加锁，继续后续处理 */
+        mutex_lock(system->lock);
+
+        /* 释放深拷贝的payload副本（已重新加锁，与entry生命周期无关，可安全释放） */
+        if (cb_payload_buf) {
+            safe_free((void**)&cb_payload_buf);
+        }
+
         if (ret != 0) {
             log_error("[PBFT] 请求执行回调失败: seq=%u client=%u req=%u ret=%d",
-                      seq, entry->client_id, entry->request_id, ret);
+                      seq, cb_client_id, cb_request_id, ret);
+            /* P1修复: 回调失败后回滚executed标志。
+             * executed在回调之前(line 590)已被设为1，若回调失败不清除，
+             * 后续重试调用pbft_execute_request会因入口处"entry->executed"检查
+             * 直接返回-1，导致请求永久丢失。
+             * 此处已持有system->lock（上方line 613重新加锁），无需再次加锁。
+             * 直接通过seq查找entry并回滚executed，随后返回-1交由调用方处理。 */
+            PbftLogEntry* rollback_entry = log_get_entry(system, seq);
+            if (rollback_entry && rollback_entry->executed) {
+                rollback_entry->executed = 0;
+            }
             return -1;
+        }
+
+        /* 重新获取entry指针（解锁期间entry可能因checkpoint等操作变化） */
+        entry = log_get_entry(system, seq);
+        if (!entry) {
+            /* entry已被清理，回调已成功执行，不影响结果 */
+            return 0;
         }
     }
 
@@ -557,7 +666,8 @@ static int pbft_execute_request(PbftSystem* system, uint32_t seq) {
     }
     system->stats.total_commits++;
     if (seq % system->config.checkpoint_interval == 0) {
-        pbft_trigger_checkpoint(system);
+        /* P1修复: 使用_nolock版本，pbft_execute_request在持锁上下文中被调用 */
+        pbft_trigger_checkpoint_nolock(system);
     }
     return 0;
 }
@@ -569,7 +679,9 @@ int pbft_submit_request(PbftSystem* system, uint32_t client_id,
     if (!system) return PBFT_ERROR_INVALID_PARAM;
     if (system->status == PBFT_NODE_STOPPED) return PBFT_ERROR_SYSTEM_STOPPED;
     if (!payload || payload_size == 0) return PBFT_ERROR_INVALID_PARAM;
-    if (system->active_request) return -1;
+    /* P1修复: 加锁保护请求提交 */
+    mutex_lock(system->lock);
+    if (system->active_request) { mutex_unlock(system->lock); return -1; }
     system->pending_client_id = client_id;
     system->pending_request_id = request_id;
     system->pending_op_type = operation_type;
@@ -579,7 +691,7 @@ int pbft_submit_request(PbftSystem* system, uint32_t client_id,
     system->pending_payload = NULL;
     if (payload && payload_size > 0) {
         system->pending_payload = (uint8_t*)safe_malloc(payload_size);
-        if (!system->pending_payload) return PBFT_ERROR_OUT_OF_MEMORY;
+        if (!system->pending_payload) { mutex_unlock(system->lock); return PBFT_ERROR_OUT_OF_MEMORY; }
         memcpy(system->pending_payload, payload, payload_size);
     }
     system->active_request = 1;
@@ -631,6 +743,7 @@ int pbft_submit_request(PbftSystem* system, uint32_t client_id,
                    system->config.node_id, system->current_view, seq);
         }
     }
+    mutex_unlock(system->lock);
     return PBFT_ERROR_NONE;
 }
 
@@ -640,6 +753,8 @@ int pbft_submit_request_async(PbftSystem* system, uint32_t client_id,
     if (!system) return PBFT_ERROR_INVALID_PARAM;
     if (system->status == PBFT_NODE_STOPPED) return PBFT_ERROR_SYSTEM_STOPPED;
     if (!payload || payload_size == 0) return PBFT_ERROR_INVALID_PARAM;
+    /* P1修复: 加锁保护异步请求提交 */
+    mutex_lock(system->lock);
     system->pending_client_id = client_id;
     system->pending_request_id = request_id;
     system->pending_op_type = operation_type;
@@ -649,7 +764,7 @@ int pbft_submit_request_async(PbftSystem* system, uint32_t client_id,
     system->pending_payload = NULL;
     if (payload && payload_size > 0) {
         system->pending_payload = (uint8_t*)safe_malloc(payload_size);
-        if (!system->pending_payload) return PBFT_ERROR_OUT_OF_MEMORY;
+        if (!system->pending_payload) { mutex_unlock(system->lock); return PBFT_ERROR_OUT_OF_MEMORY; }
         memcpy(system->pending_payload, payload, payload_size);
     }
     system->active_request = 1;
@@ -698,20 +813,30 @@ int pbft_submit_request_async(PbftSystem* system, uint32_t client_id,
                    system->config.node_id, system->current_view, seq);
         }
     }
+    mutex_unlock(system->lock);
     return PBFT_ERROR_NONE;
 }
 
 int pbft_get_current_view(const PbftSystem* system) {
     if (!system) return -1;
-    return (int)system->current_view;
+    /* P1修复: 加锁保证读取一致性 */
+    mutex_lock(((PbftSystem*)system)->lock);
+    int ret = (int)system->current_view;
+    mutex_unlock(((PbftSystem*)system)->lock);
+    return ret;
 }
 
 uint32_t pbft_get_primary_id(const PbftSystem* system) {
     if (!system) return (uint32_t)-1;
-    return system->primary_id;
+    /* P1修复: 加锁保证读取一致性 */
+    mutex_lock(((PbftSystem*)system)->lock);
+    uint32_t ret = system->primary_id;
+    mutex_unlock(((PbftSystem*)system)->lock);
+    return ret;
 }
 
-int pbft_trigger_view_change(PbftSystem* system) {
+/* P1修复: 内部无锁版本 —— 由pbft_tick在持锁状态下调用 */
+static int pbft_trigger_view_change_nolock(PbftSystem* system) {
     if (!system || system->status == PBFT_NODE_STOPPED) return -1;
 
     uint64_t now = get_current_time_ms();
@@ -773,50 +898,89 @@ int pbft_trigger_view_change(PbftSystem* system) {
     return 0;
 }
 
+/* P1修复: 公共版本，加锁后委托给_nolock版本 */
+int pbft_trigger_view_change(PbftSystem* system) {
+    if (!system) return -1;
+    mutex_lock(system->lock);
+    int ret = pbft_trigger_view_change_nolock(system);
+    mutex_unlock(system->lock);
+    return ret;
+}
+
 int pbft_is_primary(const PbftSystem* system) {
     if (!system) return 0;
-    return (int)(system->config.node_id == system->primary_id);
+    /* P1修复: 加锁保证读取一致性 */
+    mutex_lock(((PbftSystem*)system)->lock);
+    int ret = (int)(system->config.node_id == system->primary_id);
+    mutex_unlock(((PbftSystem*)system)->lock);
+    return ret;
 }
 
 PbftNodeStatus pbft_get_status(const PbftSystem* system) {
     if (!system) return PBFT_NODE_STOPPED;
-    return system->status;
+    /* P1修复: 加锁保证读取一致性 */
+    mutex_lock(((PbftSystem*)system)->lock);
+    PbftNodeStatus ret = system->status;
+    mutex_unlock(((PbftSystem*)system)->lock);
+    return ret;
 }
 
 int pbft_get_last_executed_seq(const PbftSystem* system) {
     if (!system) return -1;
-    return (int)system->last_executed_seq;
+    /* P1修复: 加锁保证读取一致性 */
+    mutex_lock(((PbftSystem*)system)->lock);
+    int ret = (int)system->last_executed_seq;
+    mutex_unlock(((PbftSystem*)system)->lock);
+    return ret;
 }
 
 int pbft_get_committed_count(const PbftSystem* system) {
     if (!system) return -1;
-    return (int)system->stats.committed_requests;
+    /* P1修复: 加锁保证读取一致性 */
+    mutex_lock(((PbftSystem*)system)->lock);
+    int ret = (int)system->stats.committed_requests;
+    mutex_unlock(((PbftSystem*)system)->lock);
+    return ret;
 }
 
 int pbft_is_fault_tolerant(const PbftSystem* system) {
     if (!system) return 0;
-    return (int)(system->config.num_nodes >= 3 * system->config.max_fault + 1);
+    /* P1修复: 加锁保证读取一致性 */
+    mutex_lock(((PbftSystem*)system)->lock);
+    int ret = (int)(system->config.num_nodes >= 3 * system->config.max_fault + 1);
+    mutex_unlock(((PbftSystem*)system)->lock);
+    return ret;
 }
 
 void pbft_get_stats(const PbftSystem* system, PbftStats* stats) {
     if (!system || !stats) return;
+    /* P1修复: 加锁保证统计快照一致性 */
+    mutex_lock(((PbftSystem*)system)->lock);
     memcpy(stats, &system->stats, sizeof(PbftStats));
+    mutex_unlock(((PbftSystem*)system)->lock);
 }
 
 void pbft_reset_stats(PbftSystem* system) {
     if (!system) return;
+    /* P1修复: 加锁保护统计重置 */
+    mutex_lock(system->lock);
     memset(&system->stats, 0, sizeof(PbftStats));
     system->stats.start_time_ms = get_current_time_ms();
+    mutex_unlock(system->lock);
 }
 
 void pbft_set_execute_callback(PbftSystem* system, PbftExecuteCallback callback, void* user_data) {
     if (!system) return;
+    /* P1修复: 加锁保护回调设置 */
+    mutex_lock(system->lock);
     system->execute_callback = callback;
     system->execute_callback_user_data = user_data;
+    mutex_unlock(system->lock);
     log_info("[PBFT] 执行回调已%s", callback ? "注册" : "注销");
 }
 
-int pbft_trigger_checkpoint(PbftSystem* system) {
+/* P1修复: 内部无锁版本 —— 由pbft_execute_request在持锁状态下调用 */
+static int pbft_trigger_checkpoint_nolock(PbftSystem* system) {
     if (!system) return -1;
     system->latest_checkpoint_seq = system->last_executed_seq;
     /* P1-020修复：检查点摘要包含完整系统状态（执行序列号、当前视图、
@@ -855,9 +1019,22 @@ int pbft_trigger_checkpoint(PbftSystem* system) {
     return 0;
 }
 
+/* P1修复: 公共版本，加锁后委托给_nolock版本 */
+int pbft_trigger_checkpoint(PbftSystem* system) {
+    if (!system) return -1;
+    mutex_lock(system->lock);
+    int ret = pbft_trigger_checkpoint_nolock(system);
+    mutex_unlock(system->lock);
+    return ret;
+}
+
 int pbft_get_stable_checkpoint(const PbftSystem* system) {
     if (!system) return -1;
-    return (int)system->latest_checkpoint_seq;
+    /* P1修复: 加锁保证读取一致性 */
+    mutex_lock(((PbftSystem*)system)->lock);
+    int ret = (int)system->latest_checkpoint_seq;
+    mutex_unlock(((PbftSystem*)system)->lock);
+    return ret;
 }
 
 static int pbft_handle_pre_prepare(PbftSystem* system, const PbftPrePrepare* msg) {
@@ -881,6 +1058,10 @@ static int pbft_handle_pre_prepare(PbftSystem* system, const PbftPrePrepare* msg
     copy_digest(prep.header.digest, msg->request_digest);
     pbft_compute_digest(&prep, sizeof(prep), prep.pre_prepare_digest);
     entry->prepared = 1;
+    /* P1修复: 记录自身prepare投票，防止后续重复消息重复计数 */
+    if (entry->prepare_voter_count < PBFT_MAX_NODES) {
+        entry->prepare_voters[entry->prepare_voter_count++] = system->config.node_id;
+    }
     entry->prepare_count++;
     pbft_broadcast(system, &prep, sizeof(prep));
     system->stats.total_prepares++;
@@ -898,6 +1079,10 @@ static int pbft_handle_pre_prepare(PbftSystem* system, const PbftPrePrepare* msg
         copy_digest(commit.header.digest, msg->request_digest);
         pbft_compute_digest(&commit, sizeof(commit), commit.prepare_digest);
         entry->committed = 1;
+        /* P1修复: 记录自身commit投票，防止后续重复消息重复计数 */
+        if (entry->commit_voter_count < PBFT_MAX_NODES) {
+            entry->commit_voters[entry->commit_voter_count++] = system->config.node_id;
+        }
         entry->commit_count++;
         pbft_broadcast(system, &commit, sizeof(commit));
         system->stats.total_commits++;
@@ -928,6 +1113,24 @@ static int pbft_handle_prepare(PbftSystem* system, const PbftPrepare* msg) {
     PbftLogEntry* entry = log_get_entry(system, seq);
     if (!entry) entry = log_create_entry(system, seq);
     if (!entry) return -1;
+    /* P1修复: 重复消息检测 —— 检查sender_id是否已投票过prepare */
+    {
+        uint32_t sender = msg->header.sender_id;
+        int already_voted = 0;
+        for (int i = 0; i < entry->prepare_voter_count; i++) {
+            if (entry->prepare_voters[i] == sender) {
+                already_voted = 1;
+                break;
+            }
+        }
+        if (already_voted) {
+            /* 同一节点重复发送prepare消息，忽略不重复计数 */
+            return 0;
+        }
+        if (entry->prepare_voter_count < PBFT_MAX_NODES) {
+            entry->prepare_voters[entry->prepare_voter_count++] = sender;
+        }
+    }
     entry->prepare_count++;
     if (entry->prepare_count <= PBFT_MAX_NODES) {
         copy_digest(entry->prepare_digests[entry->prepare_count - 1], msg->header.digest);
@@ -942,6 +1145,10 @@ static int pbft_handle_prepare(PbftSystem* system, const PbftPrepare* msg) {
         commit.header.sequence_number = seq;
         copy_digest(commit.header.digest, entry->request_digest);
         pbft_compute_digest(&commit, sizeof(commit), commit.prepare_digest);
+        /* 自身commit投票也需记录到voters数组 */
+        if (entry->commit_voter_count < PBFT_MAX_NODES) {
+            entry->commit_voters[entry->commit_voter_count++] = system->config.node_id;
+        }
         entry->commit_count++;
         pbft_broadcast(system, &commit, sizeof(commit));
         system->stats.total_commits++;
@@ -954,6 +1161,24 @@ static int pbft_handle_commit(PbftSystem* system, const PbftCommit* msg) {
     uint32_t seq = msg->header.sequence_number;
     PbftLogEntry* entry = log_get_entry(system, seq);
     if (!entry) return -1;
+    /* P1修复: 重复消息检测 —— 检查sender_id是否已投票过commit */
+    {
+        uint32_t sender = msg->header.sender_id;
+        int already_voted = 0;
+        for (int i = 0; i < entry->commit_voter_count; i++) {
+            if (entry->commit_voters[i] == sender) {
+                already_voted = 1;
+                break;
+            }
+        }
+        if (already_voted) {
+            /* 同一节点重复发送commit消息，忽略不重复计数 */
+            return 0;
+        }
+        if (entry->commit_voter_count < PBFT_MAX_NODES) {
+            entry->commit_voters[entry->commit_voter_count++] = sender;
+        }
+    }
     entry->commit_count++;
     if (entry->commit_count <= PBFT_MAX_NODES) {
         copy_digest(entry->commit_digests[entry->commit_count - 1], msg->header.digest);
@@ -1256,8 +1481,13 @@ static int pbft_handle_new_view(PbftSystem* system, const PbftNewView* msg) {
 
 int pbft_process_messages(PbftSystem* system, int timeout_ms) {
     if (!system) return PBFT_ERROR_INVALID_PARAM;
+    /* P1修复: 加锁保护整个消息处理过程 */
+    mutex_lock(system->lock);
     if (!system->server_initialized) {
-        if (pbft_connect_all(system) != PBFT_ERROR_NONE) return PBFT_ERROR_NOT_CONNECTED;
+        if (pbft_connect_all_nolock(system) != PBFT_ERROR_NONE) {
+            mutex_unlock(system->lock);
+            return PBFT_ERROR_NOT_CONNECTED;
+        }
     }
 
     uint64_t deadline = get_current_time_ms() + (timeout_ms > 0 ? (uint64_t)timeout_ms : 0);
@@ -1371,6 +1601,8 @@ int pbft_process_messages(PbftSystem* system, int timeout_ms) {
         if (timeout_ms == 0) break;
     }
 
+    /* P1修复: 解锁后返回 */
+    mutex_unlock(system->lock);
     return processed;
 }
 
@@ -1380,29 +1612,44 @@ int pbft_dispatch_message(PbftSystem* system, PbftMessageType type,
     if (system->status == PBFT_NODE_STOPPED) return PBFT_ERROR_SYSTEM_STOPPED;
     /* 验证消息大小：不能为空且不能超过最大请求大小 */
     if (msg_size == 0 || msg_size > PBFT_MAX_REQUEST_SIZE) return PBFT_ERROR_INVALID_MESSAGE;
+    /* P1修复: 加锁保护消息分发 */
+    mutex_lock(system->lock);
+    int ret = PBFT_ERROR_INVALID_MESSAGE;
     switch (type) {
         case PBFT_MSG_PRE_PREPARE:
-            return pbft_handle_pre_prepare(system, (const PbftPrePrepare*)msg);
+            ret = pbft_handle_pre_prepare(system, (const PbftPrePrepare*)msg);
+            break;
         case PBFT_MSG_PREPARE:
-            return pbft_handle_prepare(system, (const PbftPrepare*)msg);
+            ret = pbft_handle_prepare(system, (const PbftPrepare*)msg);
+            break;
         case PBFT_MSG_COMMIT:
-            return pbft_handle_commit(system, (const PbftCommit*)msg);
+            ret = pbft_handle_commit(system, (const PbftCommit*)msg);
+            break;
         case PBFT_MSG_VIEW_CHANGE:
-            return pbft_handle_view_change(system, (const PbftViewChange*)msg);
+            ret = pbft_handle_view_change(system, (const PbftViewChange*)msg);
+            break;
         case PBFT_MSG_NEW_VIEW:
-            return pbft_handle_new_view(system, (const PbftNewView*)msg);
+            ret = pbft_handle_new_view(system, (const PbftNewView*)msg);
+            break;
         case PBFT_MSG_REQUEST:
             system->stats.total_requests++;
-            return PBFT_ERROR_NONE;
+            ret = PBFT_ERROR_NONE;
+            break;
         case PBFT_MSG_CHECKPOINT:
-            return pbft_handle_checkpoint(system, (const PbftCheckpoint*)msg);
+            ret = pbft_handle_checkpoint(system, (const PbftCheckpoint*)msg);
+            break;
         default:
-            return PBFT_ERROR_INVALID_MESSAGE;
+            ret = PBFT_ERROR_INVALID_MESSAGE;
+            break;
     }
+    mutex_unlock(system->lock);
+    return ret;
 }
 
 int pbft_tick(PbftSystem* system) {
     if (!system) return PBFT_ERROR_INVALID_PARAM;
+    /* P1修复: 加锁保护tick处理 */
+    mutex_lock(system->lock);
     uint64_t now = get_current_time_ms();
     uint64_t elapsed = now - system->last_tick_ms;
     system->last_tick_ms = now;
@@ -1445,13 +1692,15 @@ int pbft_tick(PbftSystem* system) {
             }
         }
         if (should_change) {
-            pbft_trigger_view_change(system);
+            /* P1修复: 使用_nolock版本，pbft_tick已持锁 */
+            pbft_trigger_view_change_nolock(system);
         }
     }
     uint64_t total_ms = now - system->stats.start_time_ms;
     if (total_ms > 0) {
         system->stats.throughput_req_per_sec = (double)system->stats.committed_requests / (total_ms / 1000.0);
     }
+    mutex_unlock(system->lock);
     return PBFT_ERROR_NONE;
 }
 

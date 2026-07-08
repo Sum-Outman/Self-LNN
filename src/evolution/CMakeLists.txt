@@ -25,8 +25,11 @@ set_target_properties(selflnn_evolution PROPERTIES
 # C-002修复完成: 循环依赖 selflnn_evolution ↔ selflnn_cognition 已彻底打破。
 # 代码层面确认: evolution的3个.c文件零引用cognition的任何符号。
 # cognition通过回调模式调用evolution,不再编译期依赖。
+# BLD-020修复: utils依赖从PUBLIC改为PRIVATE
+# 演化模块内部使用utils工具函数，但不对其使用者暴露utils的API
+# 这是静态库，PUBLIC会不必要地传播utils头文件到依赖方
 target_link_libraries(selflnn_evolution
-    PUBLIC utils selflnn_core
+    PRIVATE utils selflnn_core
 )
 
 # 安装规则（如果需要）

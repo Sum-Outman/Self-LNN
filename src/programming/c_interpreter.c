@@ -34,6 +34,8 @@
 #define CI_MAX_FUNC_ARGS 16   /* M-026: 函数最大参数数量 */
 #define CI_MEM_POOL_SIZE (1024 * 1024)  /* M-026: 内存池1MB */
 #define CI_MAX_MEM_BLOCKS 256  /* M-026: 最大内存块数量 */
+#define CI_MAX_LOOP_ITERATIONS 100000  /* P-P1-16: 循环最大迭代次数，防止死循环挂起AGI线程 */
+#define CI_MAX_CALL_DEPTH 256  /* P-P2-17: 递归最大调用深度，防止嵌套块栈溢出 */
 
 /* 变量类型 — P2-006扩展：添加CI_VAR_BOOL支持 */
 typedef enum {
@@ -104,7 +106,10 @@ typedef enum {
     CI_TOK_STAR_ASSIGN = 19,
     CI_TOK_SLASH_ASSIGN = 20,
     CI_TOK_DOT = 21,
-    CI_TOK_ARROW = 22
+    CI_TOK_ARROW = 22,
+    CI_TOK_LBRACE = 23,   /* { 左花括号 */
+    CI_TOK_RBRACE = 24,    /* } 右花括号 */
+    CI_TOK_COMMA = 25      /* , 逗号(多参数函数参数分隔) */
 } CiTokenType;
 
 typedef struct {
@@ -128,6 +133,7 @@ typedef struct {
     int has_error;
     char error_msg[256];
     CiMemoryPool mem;         /* M-026: 解释器内存池 */
+    int call_depth;           /* P-P2-17: 当前递归调用深度(用于_parse_block嵌套保护) */
 } CiInterpreter;
 
 /* 内置数学函数（单参数float→float） */
@@ -201,71 +207,92 @@ static float _ci_builtin_printf(CiInterpreter* ci, const float* args, int arg_co
     return (float)arg_count;
 }
 
+/* P-P1-15修复: 判断float值是否为有效的"在用"内存块索引
+ * float仅24位尾数，无法无损承载64位指针地址；
+ * 改用块索引(0~CI_MAX_MEM_BLOCKS-1)标识内存块，int↔float转换无精度损失。
+ * 返回>=0为有效块索引，-1表示不是有效的在用块索引 */
+static int _ci_block_index_of(CiInterpreter* ci, float v) {
+    if (v < 0.0f) return -1;
+    int idx = (int)v;
+    /* 仅整数值才可能是块索引(非整数视为普通数值) */
+    if ((float)idx != v) return -1;
+    if (idx < 0 || idx >= CI_MAX_MEM_BLOCKS) return -1;
+    if (!ci->mem.blocks[idx].in_use) return -1;
+    return idx;
+}
+
 /* malloc实现 */
 static float _ci_builtin_malloc(CiInterpreter* ci, const float* args, int arg_count) {
-    if (arg_count < 1) return 0.0f;
+    if (arg_count < 1) return -1.0f;
     size_t size = (size_t)args[0];
-    if (size == 0 || size > CI_MEM_POOL_SIZE) return 0.0f;
-    if (ci->mem.block_count >= CI_MAX_MEM_BLOCKS) return 0.0f;
-    if (ci->mem.pool_offset + size > CI_MEM_POOL_SIZE) return 0.0f;
-
-    int idx = ci->mem.block_count++;
-    ci->mem.blocks[idx].ptr = ci->mem.pool + ci->mem.pool_offset;
-    ci->mem.blocks[idx].size = size;
+    if (size == 0 || size > CI_MEM_POOL_SIZE) return -1.0f;
+    if (ci->mem.pool_offset + size > CI_MEM_POOL_SIZE) return -1.0f;
+    /* P-P1-15修复: 返回内存块索引而非指针地址，避免float承载64位指针的精度损失 */
+    int idx = -1;
+    for (int i = 0; i < CI_MAX_MEM_BLOCKS; i++) {
+        if (!ci->mem.blocks[i].in_use) { idx = i; break; }
+    }
+    if (idx < 0) return -1.0f;
     ci->mem.blocks[idx].in_use = 1;
+    ci->mem.blocks[idx].size = size;
+    ci->mem.blocks[idx].ptr = ci->mem.pool + ci->mem.pool_offset;
     ci->mem.pool_offset += size;
-
+    if (idx >= ci->mem.block_count) ci->mem.block_count = idx + 1;  /* 维护高水位标记 */
     memset(ci->mem.blocks[idx].ptr, 0, size);
-    return (float)(uintptr_t)ci->mem.blocks[idx].ptr;
+    return (float)idx;  /* 返回块索引，int→float转换无精度损失 */
 }
 
 /* free实现 */
 static float _ci_builtin_free(CiInterpreter* ci, const float* args, int arg_count) {
     if (arg_count < 1) return -1.0f;
-    uintptr_t addr = (uintptr_t)args[0];
+    /* P-P1-15修复: 通过块索引释放，不再从float还原64位指针地址(会丢失高位) */
+    int idx = (int)args[0];
+    if (idx < 0 || idx >= CI_MAX_MEM_BLOCKS) return -1.0f;
+    if (!ci->mem.blocks[idx].in_use) return -1.0f;
+    ci->mem.blocks[idx].in_use = 0;
+    /* P2修复: 检查所有块是否已全部释放，若是则回收内存池空间，
+     * 防止pool_offset单调递增导致内存池耗尽（内存碎片化）。
+     * 当所有块均不在使用时，将pool_offset和block_count重置为0，
+     * 使后续malloc可从头复用整个内存池。 */
+    int all_free = 1;
     for (int i = 0; i < ci->mem.block_count; i++) {
-        if (ci->mem.blocks[i].in_use &&
-            (uintptr_t)ci->mem.blocks[i].ptr == addr) {
-            ci->mem.blocks[i].in_use = 0;
-            return 0.0f;
-        }
+        if (ci->mem.blocks[i].in_use) { all_free = 0; break; }
     }
-    return -1.0f;
+    if (all_free) {
+        ci->mem.pool_offset = 0;
+        ci->mem.block_count = 0;
+    }
+    return 0.0f;
 }
 
 /* strcpy实现 */
 static float _ci_builtin_strcpy(CiInterpreter* ci, const float* args, int arg_count) {
     if (arg_count < 2) return -1.0f;
-    /* P0-003修复: 检查第一个参数是否为内存池地址(字符串指针)
-     * 若为地址则目标指针指向内存池地址，否则将参数转为字符串存储 */
-    uintptr_t dst_addr = 0;
-    int dst_is_pool = 0;
-    /* 检测目标是否为内存池内的有效地址 */
-    float dst_val = args[0];
-    if (dst_val >= (float)(uintptr_t)ci->mem.pool &&
-        dst_val < (float)(uintptr_t)(ci->mem.pool + CI_MEM_POOL_SIZE)) {
-        dst_addr = (uintptr_t)dst_val;
-        dst_is_pool = 1;
-    }
-    /* 将src参数转为字符串并拷贝 */
+    /* P-P1-15修复: 通过块索引定位目标与源，不再用float承载64位指针地址
+     * 原实现以float保存指针地址，float仅24位尾数，指针↔float双向转换会丢失高位字节，
+     * 导致写入错误地址。现统一用块索引(0~CI_MAX_MEM_BLOCKS-1)标识内存块。 */
+
+    /* 将src参数(从args[1]起)拼接为字符串缓冲区 */
     char src_buf[512];
     src_buf[0] = '\0';
     size_t total_len = 0;
     for (int i = 1; i < arg_count; i++) {
-        char buf[64];
-        /* 检测src参数是否为内存池地址(字符串指针) */
-        float src_val = args[i];
-        if (src_val >= (float)(uintptr_t)ci->mem.pool &&
-            src_val < (float)(uintptr_t)(ci->mem.pool + CI_MEM_POOL_SIZE)) {
-            const char* pool_str = (const char*)(uintptr_t)src_val;
-            size_t slen = strlen(pool_str);
+        /* 检测src参数是否为有效的在用块索引(字符串指针) */
+        int src_idx = _ci_block_index_of(ci, args[i]);
+        if (src_idx >= 0 && ci->mem.blocks[src_idx].ptr) {
+            const char* block_str = (const char*)ci->mem.blocks[src_idx].ptr;
+            size_t cap = ci->mem.blocks[src_idx].size;
+            size_t slen = 0;
+            while (slen < cap && block_str[slen] != '\0') slen++;  /* 带容量上限的strlen */
             if (total_len + slen < sizeof(src_buf) - 1) {
-                memcpy(src_buf + total_len, pool_str, slen);
+                memcpy(src_buf + total_len, block_str, slen);
                 total_len += slen;
                 src_buf[total_len] = '\0';
             }
             continue;
         }
+        /* 非块索引，按数值格式化为字符串 */
+        char buf[64];
         int len = snprintf(buf, sizeof(buf), "%g", (double)args[i]);
         if (total_len + (size_t)len < sizeof(src_buf) - 1) {
             memcpy(src_buf + total_len, buf, (size_t)len);
@@ -273,47 +300,78 @@ static float _ci_builtin_strcpy(CiInterpreter* ci, const float* args, int arg_co
             src_buf[total_len] = '\0';
         }
     }
+
     size_t copy_len = strlen(src_buf);
-    if (dst_is_pool) {
-        /* 目标为内存池地址，直接拷贝 */
-        size_t pool_off = dst_addr - (uintptr_t)ci->mem.pool;
-        if (pool_off + copy_len + 1 <= CI_MEM_POOL_SIZE) {
-            memcpy(ci->mem.pool + pool_off, src_buf, copy_len + 1);
-            return (float)dst_addr;
-        }
-        return -1.0f;
+    /* 检测目标(args[0])是否为有效的在用块索引 */
+    int dst_idx = _ci_block_index_of(ci, args[0]);
+    if (dst_idx >= 0) {
+        /* 目标为已分配块，直接拷贝到该块 */
+        unsigned char* dst_ptr = ci->mem.blocks[dst_idx].ptr;
+        size_t dst_capacity = ci->mem.blocks[dst_idx].size;
+        if (!dst_ptr) return -1.0f;
+        /* 拷贝长度不超过目标块容量(保留1字节给终止符) */
+        if (copy_len >= dst_capacity) copy_len = (dst_capacity > 0) ? dst_capacity - 1 : 0;
+        memcpy(dst_ptr, src_buf, copy_len);
+        dst_ptr[copy_len] = '\0';
+        return args[0];  /* 返回目标块索引 */
     }
-    /* 目标非内存池地址，分配到内存池并返回地址 */
-    if (ci->mem.pool_offset + copy_len + 1 > CI_MEM_POOL_SIZE) return -1.0f;
-    memcpy(ci->mem.pool + ci->mem.pool_offset, src_buf, copy_len + 1);
-    float ret_addr = (float)(uintptr_t)(ci->mem.pool + ci->mem.pool_offset);
-    ci->mem.pool_offset += copy_len + 1;
-    return ret_addr;
+
+    /* 目标非有效块索引：分配新块存放字符串并返回新块索引 */
+    size_t need = copy_len + 1;
+    if (ci->mem.pool_offset + need > CI_MEM_POOL_SIZE) return -1.0f;
+    int new_idx = -1;
+    for (int i = 0; i < CI_MAX_MEM_BLOCKS; i++) {
+        if (!ci->mem.blocks[i].in_use) { new_idx = i; break; }
+    }
+    if (new_idx < 0) return -1.0f;
+    ci->mem.blocks[new_idx].in_use = 1;
+    ci->mem.blocks[new_idx].size = need;
+    ci->mem.blocks[new_idx].ptr = ci->mem.pool + ci->mem.pool_offset;
+    if (new_idx >= ci->mem.block_count) ci->mem.block_count = new_idx + 1;
+    memcpy(ci->mem.blocks[new_idx].ptr, src_buf, copy_len + 1);
+    ci->mem.pool_offset += need;
+    return (float)new_idx;
 }
 
 /* memset实现 */
 static float _ci_builtin_memset(CiInterpreter* ci, const float* args, int arg_count) {
-    (void)ci;
     if (arg_count < 3) return -1.0f;
-    /* args[0]=目标地址, args[1]=值, args[2]=字节数 */
-    uintptr_t addr = (uintptr_t)args[0];
+    /* args[0]=块索引, args[1]=值, args[2]=字节数 */
+    /* P-P1-15修复: 通过块索引获取目标指针，不再从float还原指针地址(高位丢失) */
+    int idx = (int)args[0];
+    if (idx < 0 || idx >= CI_MAX_MEM_BLOCKS) return -1.0f;
+    if (!ci->mem.blocks[idx].in_use) return -1.0f;
+    void* addr = ci->mem.blocks[idx].ptr;
+    size_t block_size = ci->mem.blocks[idx].size;
     int value = (int)args[1];
     size_t n = (size_t)args[2];
-    if (addr == 0 || n == 0) return 0.0f;
-    memset((void*)addr, value, n);
+    if (addr == NULL || n == 0) return 0.0f;
+    /* 边界校验: 字节数不得超过该块分配大小，防止越界写入内存池 */
+    if (n > block_size) n = block_size;
+    memset(addr, value, n);
     return args[0];
 }
 
 /* memcpy实现 */
 static float _ci_builtin_memcpy(CiInterpreter* ci, const float* args, int arg_count) {
-    (void)ci;
     if (arg_count < 3) return -1.0f;
-    /* args[0]=目标地址(DST), args[1]=源地址(SRC), args[2]=字节数 */
-    uintptr_t dst = (uintptr_t)args[0];
-    uintptr_t src = (uintptr_t)args[1];
+    /* args[0]=目标块索引(DST), args[1]=源块索引(SRC), args[2]=字节数 */
+    /* P-P1-15修复: 通过块索引获取src和dst指针，不再从float还原指针地址(高位丢失) */
+    int dst_idx = (int)args[0];
+    int src_idx = (int)args[1];
+    if (dst_idx < 0 || dst_idx >= CI_MAX_MEM_BLOCKS) return -1.0f;
+    if (src_idx < 0 || src_idx >= CI_MAX_MEM_BLOCKS) return -1.0f;
+    if (!ci->mem.blocks[dst_idx].in_use || !ci->mem.blocks[src_idx].in_use) return -1.0f;
+    void* dst = ci->mem.blocks[dst_idx].ptr;
+    const void* src = ci->mem.blocks[src_idx].ptr;
+    size_t dst_size = ci->mem.blocks[dst_idx].size;
+    size_t src_size = ci->mem.blocks[src_idx].size;
     size_t n = (size_t)args[2];
-    if (dst == 0 || src == 0 || n == 0) return 0.0f;
-    memcpy((void*)dst, (const void*)src, n);
+    if (dst == NULL || src == NULL || n == 0) return 0.0f;
+    /* 边界校验: 字节数不得超过源块和目标块大小，防止越界读写内存池 */
+    if (n > dst_size) n = dst_size;
+    if (n > src_size) n = src_size;
+    memcpy(dst, src, n);
     return args[0];
 }
 
@@ -360,6 +418,12 @@ static int _ci_tokenize(CiInterpreter* ci) {
             ci->lineno++;
             continue;
         }
+
+        /* P-P0-14修复: 在token创建前检查边界，防止越界写
+         * 原检查位于循环末尾(仅对运算符生效)，数字/标识符分支
+         * 使用continue跳过末尾检查，导致token_count==CI_MAX_TOKENS时
+         * 写入tokens[256]越界。此处前移检查，并预留EOF槽位。 */
+        if (ci->token_count >= CI_MAX_TOKENS - 1) break;
 
         /* 数字 */
         if (_ci_is_digit(ci->source[ci->pos]) || ci->source[ci->pos] == '.') {
@@ -441,15 +505,18 @@ static int _ci_tokenize(CiInterpreter* ci) {
             case '<': ci->tokens[ci->token_count++].type = CI_TOK_LT; ci->pos++; break;
             case '>': ci->tokens[ci->token_count++].type = CI_TOK_GT; ci->pos++; break;
             case ';': ci->tokens[ci->token_count++].type = CI_TOK_SEMI; ci->pos++; break;
+            case '{': ci->tokens[ci->token_count++].type = CI_TOK_LBRACE; ci->pos++; break;
+            case '}': ci->tokens[ci->token_count++].type = CI_TOK_RBRACE; ci->pos++; break;
+            case ',': ci->tokens[ci->token_count++].type = CI_TOK_COMMA; ci->pos++; break;
             default:
                 ci->has_error = 1;
                 snprintf(ci->error_msg, sizeof(ci->error_msg), "行%d: 不支持的字符 '%c'", ci->lineno, c);
                 return -1;
         }
-
-        if (ci->token_count >= CI_MAX_TOKENS) break;
     }
 
+    /* 写入EOF标记(token_count已被前置检查限制在CI_MAX_TOKENS-1内，
+     * 故tokens[token_count]始终在有效索引[0,CI_MAX_TOKENS-1]范围内) */
     ci->tokens[ci->token_count].type = CI_TOK_EOF;
     ci->token_pos = 0;
     return 0;
@@ -522,6 +589,20 @@ static CiToken* _ci_next(CiInterpreter* ci) {
     return _ci_current(ci);
 }
 
+/* P1修复: token-based的期望匹配函数，匹配并消费指定类型的token
+ * 与char-based的_ci_expect不同，此函数操作token_pos而非source[pos]，
+ * 确保控制流解析与表达式解析使用同一套token游标，消除位置不同步问题。
+ * @param ci 解释器状态
+ * @param type 期望的token类型
+ * @return 1=匹配成功并已消费, 0=不匹配 */
+static int _ci_expect_tok(CiInterpreter* ci, CiTokenType type) {
+    if (_ci_current(ci)->type == type) {
+        _ci_next(ci);
+        return 1;
+    }
+    return 0;
+}
+
 static float _ci_expr(CiInterpreter* ci);
 
 /* 基本单元: 数字 | 标识符[可能带下标] | ( 表达式 ) */
@@ -584,78 +665,36 @@ static float _ci_primary(CiInterpreter* ci) {
             }
 
             if (is_multi) {
-                /* 从源文本中收集逗号分隔的参数表达式 */
+                /* P1修复4: 在当前解释器上下文中求值参数，不创建新实例。
+                 * 原实现通过self_programming_interpret_expr(arg_expr, ...)为每个参数
+                 * 创建全新的CiInterpreter实例，新实例拥有独立的变量表，
+                 * 外部作用域中定义的变量在新实例中不可见。
+                 * 现改为在当前ci中通过token-based方式逐个求值参数表达式，
+                 * 用CI_TOK_COMMA分隔参数，CI_TOK_RPAREN结束参数列表。 */
                 float args[CI_MAX_FUNC_ARGS];
                 int arg_count = 0;
-                int paren_depth = 0;
 
-                /* 收集括号内每个逗号分隔的表达式为字符串，然后逐个求值 */
-                /* 保存当前源码位置，手动解析参数 */
-                int saved_pos = ci->pos;
-                int arg_start = ci->pos;
-
-                while (ci->source[ci->pos] && arg_count < CI_MAX_FUNC_ARGS) {
-                    char c = ci->source[ci->pos];
-                    if (c == '(') paren_depth++;
-                    else if (c == ')') {
-                        if (paren_depth == 0) break;
-                        paren_depth--;
-                    }
-                    else if (c == ',' && paren_depth == 0) {
-                        /* 找到一个参数结束 */
-                        char arg_expr[512];
-                        int alen = ci->pos - arg_start;
-                        if (alen > 511) alen = 511;
-                        if (alen > 0) {
-                            memcpy(arg_expr, ci->source + arg_start, (size_t)alen);
-                            arg_expr[alen] = '\0';
-                            float val = 0.0f;
-                            char err[256] = {0};
-                            if (self_programming_interpret_expr(arg_expr, &val, err) == 0)
-                                args[arg_count++] = val;
-                        }
-                        ci->pos++;
-                        /* 跳过逗号后的空格 */
-                        while (ci->source[ci->pos] == ' ') ci->pos++;
-                        arg_start = ci->pos;
-                        continue;
-                    }
-                    ci->pos++;
-                }
-
-                /* 最后一个参数（在)之前） */
-                {
-                    int alen = ci->pos - arg_start;
-                    if (alen > 511) alen = 511;
-                    if (alen > 0) {
-                        char arg_expr[512];
-                        memcpy(arg_expr, ci->source + arg_start, (size_t)alen);
-                        arg_expr[alen] = '\0';
-                        /* 去除尾部空格 */
-                        while (alen > 0 && arg_expr[alen-1] == ' ') arg_expr[--alen] = '\0';
-                        if (alen > 0) {
-                            float val = 0.0f;
-                            char err[256] = {0};
-                            if (self_programming_interpret_expr(arg_expr, &val, err) == 0)
-                                args[arg_count++] = val;
-                        }
+                /* 解析参数列表: arg1, arg2, ..., argN) */
+                if (_ci_current(ci)->type != CI_TOK_RPAREN) {
+                    args[arg_count++] = _ci_expr(ci);
+                    while (_ci_current(ci)->type == CI_TOK_COMMA &&
+                           arg_count < CI_MAX_FUNC_ARGS) {
+                        _ci_next(ci);  /* 跳过逗号 */
+                        args[arg_count++] = _ci_expr(ci);
                     }
                 }
+                if (_ci_current(ci)->type == CI_TOK_RPAREN)
+                    _ci_next(ci);  /* 跳过')' */
 
-                if (ci->source[ci->pos] == ')') ci->pos++;
-
+                /* 调用多参数内置函数 */
                 float result = 0.0f;
                 for (int k = 0; !g_ci_builtins_multi[k].is_sentinel; k++) {
                     if (strcmp(name, g_ci_builtins_multi[k].name) == 0) {
-                        result = g_ci_builtins_multi[k].func((struct CiInterpreter_s*)ci, args, arg_count);
+                        result = g_ci_builtins_multi[k].func(
+                            (struct CiInterpreter_s*)ci, args, arg_count);
                         break;
                     }
                 }
-                ci->pos = saved_pos;
-                _ci_skip_spaces(ci);
-                /* 快进到')'之后 */
-                while (ci->source[ci->pos] && ci->source[ci->pos] != ')') ci->pos++;
-                if (ci->source[ci->pos] == ')') ci->pos++;
                 return result;
             }
 
@@ -724,8 +763,20 @@ static float _ci_primary(CiInterpreter* ci) {
 /* *ptr指针解引用 */
     if (tok->type == CI_TOK_STAR) {
         _ci_next(ci);
-        float val = _ci_primary(ci);
-        return val;
+        float addr = _ci_primary(ci);
+        /* P1修复: *addr应返回addr指向的变量值，而非addr本身。
+         * &x返回合成地址(268435456.0f + var_index*4096 + name_hash)，
+         * 存储在v->address中。*addr需要反查该地址对应的变量并返回其值。
+         * 遍历变量表查找address匹配的变量，返回值逻辑与_ci_get_var_value一致：
+         * float/array类型返回fval，int类型返回ival。 */
+        for (int i = 0; i < ci->var_count; i++) {
+            if (ci->vars[i].has_address && ci->vars[i].address == addr) {
+                if (ci->vars[i].type == CI_VAR_FLOAT || ci->vars[i].type == CI_VAR_ARRAY)
+                    return ci->vars[i].fval;
+                return (float)ci->vars[i].ival;
+            }
+        }
+        return 0.0f;
     }
     /* 一元负号 */
     if (tok->type == CI_TOK_MINUS) {
@@ -797,10 +848,25 @@ static float _ci_expr(CiInterpreter* ci) { return _ci_compare(ci); }
 
 /* ---- 语句执行 ---- */
 
+/* P1修复1: 前向声明，使_ci_exec_statement能委托控制流给_ci_statement */
+static float _ci_statement(CiInterpreter* ci);
+
 /* 执行表达式语句: expr ;  支持简单赋值、复合赋值和数组下标赋值 */
 static float _ci_exec_statement(CiInterpreter* ci) {
     CiToken* tok = _ci_current(ci);
     float result = 0.0f;
+
+    /* P1修复1: 检测控制流关键字和代码块，委托给_ci_statement处理
+     * 原实现仅处理赋值和表达式语句，从不进入if/for/while/{块路径，
+     * 导致从公共API self_programming_interpret_expr()无法执行控制流语句。
+     * 此处在入口处增加对{块和if/for/while关键字的检测（基于token，带词边界）。 */
+    if (tok->type == CI_TOK_LBRACE ||
+        (tok->type == CI_TOK_IDENT &&
+         (strcmp(tok->ident, "if") == 0 ||
+          strcmp(tok->ident, "for") == 0 ||
+          strcmp(tok->ident, "while") == 0))) {
+        return _ci_statement(ci);
+    }
 
     if (tok->type == CI_TOK_IDENT) {
         int pos = ci->token_pos;
@@ -860,122 +926,252 @@ static float _ci_exec_statement(CiInterpreter* ci) {
     return result;
 }
 
-static int _ci_expect(CiInterpreter* ci, char c) {
-    if (ci->source[ci->pos] == c) { ci->pos++; return 1; }
-    return 0;
-}
-static int _ci_match(CiInterpreter* ci, char c) {
-    int saved = ci->pos;
-    _ci_skip_spaces(ci);
-    if (ci->source[ci->pos] == c) { ci->pos++; return 1; }
-    ci->pos = saved;
-    return 0;
-}
-static float _ci_statement(CiInterpreter* ci);
+/* P1修复: 前向声明 — 跳过语句和跳过括号的辅助函数需要相互引用 */
+static void _ci_skip_statement(CiInterpreter* ci);
+static void _ci_skip_paren(CiInterpreter* ci);
+
 static int _ci_parse_block(CiInterpreter* ci);
 static float _ci_if_statement(CiInterpreter* ci);
 static float _ci_for_loop(CiInterpreter* ci);
 static float _ci_while_loop(CiInterpreter* ci);
 
-/* ---- 控制流 区块/语句/if/for/while ---- */
+/* P1修复1/2/3/5: 跳过一个语句的token序列（不执行），用于if条件为false时跳过then分支。
+ * 通过推进token_pos跳过token序列，确保后续的else检测定位正确。
+ * 支持: {块}, if/for/while嵌套控制流, 单语句(到';')。 */
+static void _ci_skip_statement(CiInterpreter* ci) {
+    CiToken* tok = _ci_current(ci);
+    if (tok->type == CI_TOK_LBRACE) {
+        /* 跳过{...}块: 匹配花括号对 */
+        int depth = 0;
+        do {
+            if (tok->type == CI_TOK_LBRACE) depth++;
+            else if (tok->type == CI_TOK_RBRACE) depth--;
+            _ci_next(ci);
+            tok = _ci_current(ci);
+        } while (depth > 0 && tok->type != CI_TOK_EOF);
+    } else if (tok->type == CI_TOK_IDENT && strcmp(tok->ident, "if") == 0) {
+        /* 跳过嵌套if语句: if (cond) stmt [else stmt] */
+        _ci_next(ci);             /* 消费if */
+        _ci_skip_paren(ci);      /* 跳过(cond) */
+        _ci_skip_statement(ci);  /* 跳过then分支 */
+        tok = _ci_current(ci);
+        if (tok->type == CI_TOK_IDENT && strcmp(tok->ident, "else") == 0) {
+            _ci_next(ci);             /* 消费else */
+            _ci_skip_statement(ci);   /* 跳过else分支 */
+        }
+    } else if (tok->type == CI_TOK_IDENT &&
+               (strcmp(tok->ident, "for") == 0 || strcmp(tok->ident, "while") == 0)) {
+        /* 跳过for/while循环: for/while (...) body */
+        _ci_next(ci);             /* 消费for/while */
+        _ci_skip_paren(ci);      /* 跳过(...) */
+        _ci_skip_statement(ci);  /* 跳过循环体 */
+    } else {
+        /* 跳过单语句到分号 */
+        while (tok->type != CI_TOK_SEMI && tok->type != CI_TOK_EOF) {
+            _ci_next(ci);
+            tok = _ci_current(ci);
+        }
+        if (tok->type == CI_TOK_SEMI) _ci_next(ci);  /* 消费分号 */
+    }
+}
+
+/* P1修复: 跳过匹配的圆括号(...)，用于跳过if/for/while的条件表达式 */
+static void _ci_skip_paren(CiInterpreter* ci) {
+    if (_ci_current(ci)->type != CI_TOK_LPAREN) return;
+    int depth = 0;
+    do {
+        if (_ci_current(ci)->type == CI_TOK_LPAREN) depth++;
+        else if (_ci_current(ci)->type == CI_TOK_RPAREN) depth--;
+        _ci_next(ci);
+    } while (depth > 0 && _ci_current(ci)->type != CI_TOK_EOF);
+}
+
+/* ---- 控制流 区块/语句/if/for/while ----
+ * P1修复1/2/5: 全部改为token-based解析，消除source[pos]与token_pos不同步问题。
+ * 关键字检测通过token的ident字段精确匹配（tokenizer已处理词边界），
+ * 检测到关键字后通过_ci_next(ci)消费关键字token，再委托给对应处理函数。 */
 static float _ci_statement(CiInterpreter* ci) {
-    _ci_skip_spaces(ci);
-    if (ci->source[ci->pos] == 'i' && ci->source[ci->pos+1] == 'f')
-        return _ci_if_statement(ci);
-    if (ci->source[ci->pos] == 'f' && ci->source[ci->pos+1] == 'o')
-        return _ci_for_loop(ci);
-    if (ci->source[ci->pos] == 'w' && ci->source[ci->pos+1] == 'h')
-        return _ci_while_loop(ci);
-    return _ci_expr(ci);
+    CiToken* tok = _ci_current(ci);
+
+    /* {代码块} */
+    if (tok->type == CI_TOK_LBRACE) {
+        return (float)_ci_parse_block(ci);
+    }
+
+    /* 控制流关键字检测（token精确匹配，自带词边界） */
+    if (tok->type == CI_TOK_IDENT) {
+        if (strcmp(tok->ident, "if") == 0) {
+            _ci_next(ci);  /* P1修复2: 消费"if"关键字token */
+            return _ci_if_statement(ci);
+        }
+        if (strcmp(tok->ident, "for") == 0) {
+            _ci_next(ci);  /* P1修复2: 消费"for"关键字token */
+            return _ci_for_loop(ci);
+        }
+        if (strcmp(tok->ident, "while") == 0) {
+            _ci_next(ci);  /* P1修复2: 消费"while"关键字token */
+            return _ci_while_loop(ci);
+        }
+    }
+
+    /* 赋值/表达式语句 */
+    return _ci_exec_statement(ci);
 }
 
 static int _ci_parse_block(CiInterpreter* ci) {
-    if (!_ci_expect(ci, '{')) return 0;
+    /* P1修复: 使用token匹配'{'，替代char-based的_ci_expect */
+    if (!_ci_expect_tok(ci, CI_TOK_LBRACE)) return 0;
+    /* P-P2-17修复: 递归深度保护，防止恶意/失控嵌套块导致栈溢出
+     * _ci_parse_block → _ci_statement → if/for/while → _ci_parse_block 形成递归 */
+    if (++ci->call_depth > CI_MAX_CALL_DEPTH) {
+        --ci->call_depth;
+        ci->has_error = 1;
+        snprintf(ci->error_msg, sizeof(ci->error_msg),
+                 "递归深度超过上限%d", CI_MAX_CALL_DEPTH);
+        return 0;
+    }
     int count = 0;
-    while (ci->source[ci->pos] && _ci_current(ci)->type != CI_TOK_EOF) {
-        if (_ci_match(ci, '}')) return count;
+    /* P1修复: 使用token检测EOF和'}'，替代char-based的_ci_match和source[pos] */
+    while (_ci_current(ci)->type != CI_TOK_EOF &&
+           _ci_current(ci)->type != CI_TOK_RBRACE) {
+        /* P1修复4: 推进保护。当语句起始token是_ci_statement/_ci_primary均不消费的类型
+         * (如COMMA等)时，_ci_statement内部无法推进token_pos，while条件永真→无限循环。
+         * 记录执行前位置，若未推进则强制前进一步，防止卡死。 */
+        int prev_pos = ci->token_pos;
         _ci_statement(ci);
+        if (ci->token_pos == prev_pos) {
+            _ci_next(ci);  /* 防止卡死：强制推进一个token */
+        }
         count++;
     }
+    _ci_expect_tok(ci, CI_TOK_RBRACE);  /* 消费'}' */
+    --ci->call_depth;
     return count;
 }
 
 static float _ci_if_statement(CiInterpreter* ci) {
-    float result = 0.0f;
-    if (!_ci_expect(ci, '(')) return 0.0f;
+    /* P1修复: 使用token匹配'('和')'，替代char-based的_ci_expect */
+    if (!_ci_expect_tok(ci, CI_TOK_LPAREN)) return 0.0f;
     float cond = _ci_expr(ci);
-    _ci_expect(ci, ')');
-    float truth = (cond > 0.01f || cond < -0.01f) ? 1.0f : 0.0f;
+    _ci_expect_tok(ci, CI_TOK_RPAREN);
+    float result = 0.0f;
+    float truth = (fabsf(cond) > 0.01f) ? 1.0f : 0.0f;
     if (truth > 0.5f) {
-        result = _ci_parse_block(ci);
+        /* 条件为真: 执行then分支 */
+        result = _ci_statement(ci);
+        /* 检查是否有else分支，如有则跳过（不执行） */
+        CiToken* tok = _ci_current(ci);
+        if (tok->type == CI_TOK_IDENT && strcmp(tok->ident, "else") == 0) {
+            _ci_next(ci);  /* 消费else */
+            _ci_skip_statement(ci);  /* 跳过else分支 */
+        }
     } else {
-/* 健壮else检测。
-         * 跳过条件表达式后的可能多余分号、空白和注释，
-         * 确保能正确识别各种格式的else分句。
-         * 例如: if(x){} else{}  或  if(x){}; else{}  都能正确匹配 */
-        while (_ci_current(ci) && _ci_current(ci)->type == ';') {
+        /* 条件为假: 跳过then分支，执行else分支（如有） */
+        _ci_skip_statement(ci);
+        /* 跳过then分支后可能有多余分号 */
+        while (_ci_current(ci)->type == CI_TOK_SEMI) {
             _ci_next(ci);
         }
-        if (_ci_current(ci) && _ci_current(ci)->type == CI_TOK_IDENT &&
-            strcmp(_ci_current(ci)->ident, "else") == 0) {
-            _ci_next(ci);
-            result = _ci_parse_block(ci);
+        CiToken* tok = _ci_current(ci);
+        if (tok->type == CI_TOK_IDENT && strcmp(tok->ident, "else") == 0) {
+            _ci_next(ci);  /* 消费else */
+            result = _ci_statement(ci);
         }
     }
     return result;
 }
 
 static float _ci_for_loop(CiInterpreter* ci) {
-    if (!_ci_expect(ci, '(')) return 0.0f;
+    /* P1修复: 使用token匹配，替代char-based的_ci_expect */
+    if (!_ci_expect_tok(ci, CI_TOK_LPAREN)) return 0.0f;
+    /* 初始化语句 */
     _ci_statement(ci);
-    _ci_expect(ci, ';');
+    _ci_expect_tok(ci, CI_TOK_SEMI);
     float result = 0.0f;
-    /* PF-007修复: for循环位置恢复逻辑重整
-     * saved_pos = 条件位置（';'之后、条件表达式之前）
-     * inc_pos = 增量表达式后的位置（循环体之前）
-     */
-    int cond_pos = ci->pos;
+    /* P1修复3: 保存token_pos（而非source pos）用于循环条件重新求值。
+     * 原实现仅保存/恢复ci->pos(source位置)，从不保存/恢复ci->token_pos，
+     * 导致_ci_expr()在后续迭代中从EOF token读取返回0.0f。 */
+    int cond_tok_pos = ci->token_pos;
     float cond = _ci_expr(ci);
-    _ci_expect(ci, ';');
-    if (cond > 0.01f || cond < -0.01f) {
-        int inc_pos = ci->pos;
-        _ci_expr(ci);  /* 解析增量表达式，ci->pos前进到')'或循环体 */
-        int body_start = ci->pos;
-        ci->pos = inc_pos;  /* 回到增量表达式位置 */
-        while (cond > 0.01f || cond < -0.01f) {
-            /* 执行循环体 */
-            ci->pos = body_start;
-            result = _ci_parse_block(ci);
-            /* 执行增量表达式 */
-            ci->pos = inc_pos;
-            _ci_expr(ci);
-            /* 重新求值条件 */
-            ci->pos = cond_pos;
-            cond = _ci_expr(ci);
+    _ci_expect_tok(ci, CI_TOK_SEMI);
+    /* 增量表达式位置（保存用于循环内重新执行） */
+    int inc_tok_pos = ci->token_pos;
+    /* P1修复3: 首次仅跳过增量表达式(不执行)，定位到for的')'。
+     * 原实现调用_ci_expr()解析增量，但_ci_expr不处理赋值类运算符(=,+=,-=等)，
+     * i+=1 / i=i+1 的增量被完全跳过，且因')'未被消费导致循环体定位错误。
+     * 现改为扫描token到匹配的')'(处理嵌套括号如 i=f(x))，由后续_ci_expect_tok消费。
+     * 真正执行放在循环体内通过_ci_exec_statement完成。 */
+    {
+        int inc_depth = 0;
+        while (ci->token_pos < ci->token_count) {
+            CiTokenType tt = _ci_current(ci)->type;
+            if (tt == CI_TOK_LPAREN) {
+                inc_depth++;
+            } else if (tt == CI_TOK_RPAREN) {
+                if (inc_depth == 0) break;  /* 到达for循环的')' */
+                inc_depth--;
+            } else if (tt == CI_TOK_EOF) {
+                break;  /* 防御: 增量缺少')'时不越界 */
+            }
+            _ci_next(ci);
         }
     }
+    _ci_expect_tok(ci, CI_TOK_RPAREN);  /* 消费')' */
+    /* 循环体位置 */
+    int body_tok_pos = ci->token_pos;
+    int iter_count = 0;  /* P-P1-16修复: 迭代计数器，防止死循环挂起AGI线程 */
+    int after_body_tok_pos = -1;  /* 循环体结束位置(首次执行后记录) */
+    while (cond > 0.01f || cond < -0.01f) {
+        if (++iter_count > CI_MAX_LOOP_ITERATIONS) {
+            log_warn("[C解释器] for循环超过最大迭代上限%d，强制终止", CI_MAX_LOOP_ITERATIONS);
+            break;
+        }
+        /* P1修复3: 同步恢复token_pos到循环体起始位置 */
+        ci->token_pos = body_tok_pos;
+        result = _ci_statement(ci);  /* 执行循环体 */
+        if (after_body_tok_pos < 0) after_body_tok_pos = ci->token_pos;
+        /* 执行增量表达式 */
+        ci->token_pos = inc_tok_pos;
+        /* P1修复3: 增量通过语句执行器执行，正确处理赋值类运算符(=,+=,-=,*=,/=)。
+         * 原实现用_ci_expr()无法执行 i+=1 / i=i+1，导致循环变量永不更新→死循环。
+         * _ci_exec_statement在赋值后仅消费分号(此处无分号)，token_pos停在')'，
+         * 随后由条件重定位覆盖，不影响后续流程。 */
+        _ci_exec_statement(ci);
+        /* 重新求值条件 */
+        ci->token_pos = cond_tok_pos;
+        cond = _ci_expr(ci);
+    }
+    /* P1修复3: 循环结束后，将token_pos恢复到循环体之后 */
+    if (after_body_tok_pos >= 0) ci->token_pos = after_body_tok_pos;
     return result;
 }
 
 /* while循环实现 */
 static float _ci_while_loop(CiInterpreter* ci) {
-    if (!_ci_expect(ci, '(')) return 0.0f;
-    /* 保存条件表达式位置用于循环重新求值 */
-    int cond_pos = ci->pos;
+    /* P1修复: 使用token匹配 */
+    if (!_ci_expect_tok(ci, CI_TOK_LPAREN)) return 0.0f;
+    /* P1修复3: 保存token_pos用于循环条件重新求值 */
+    int cond_tok_pos = ci->token_pos;
     float cond = _ci_expr(ci);
-    _ci_expect(ci, ')');
+    _ci_expect_tok(ci, CI_TOK_RPAREN);
     float result = 0.0f;
+    int body_tok_pos = ci->token_pos;
+    int iter_count = 0;  /* P-P1-16修复: 迭代计数器，防止死循环挂起AGI线程 */
+    int after_body_tok_pos = -1;
     while (cond > 0.01f || cond < -0.01f) {
-        /* 保存块位置用于重新执行 */
-        int block_start = ci->pos;
-        result = _ci_parse_block(ci);
-        int block_end = ci->pos;
+        if (++iter_count > CI_MAX_LOOP_ITERATIONS) {
+            log_warn("[C解释器] while循环超过最大迭代上限%d，强制终止", CI_MAX_LOOP_ITERATIONS);
+            break;
+        }
+        /* P1修复3: 同步恢复token_pos到循环体起始位置 */
+        ci->token_pos = body_tok_pos;
+        result = _ci_statement(ci);  /* 执行循环体 */
+        if (after_body_tok_pos < 0) after_body_tok_pos = ci->token_pos;
         /* 重新求值条件 */
-        ci->pos = cond_pos;
+        ci->token_pos = cond_tok_pos;
         cond = _ci_expr(ci);
-        /* 恢复条件位置和块入口，准备下一次迭代 */
-        ci->pos = block_end;
     }
+    if (after_body_tok_pos >= 0) ci->token_pos = after_body_tok_pos;
     return result;
 }
 
@@ -1003,25 +1199,32 @@ static float _ci_call_builtin(const char* name, float arg) {
 int self_programming_interpret_expr(const char* code, float* result, char* error_msg) {
     if (!code || !result) return -1;
 
-    CiInterpreter ci;
-    memset(&ci, 0, sizeof(CiInterpreter));
-    ci.source = code;
-    ci.has_error = 0;
-    /* M-026: 初始化内存池 */
-    memset(&ci.mem, 0, sizeof(CiMemoryPool));
+    /* P-P0-13修复: 改为堆分配，避免1.2MB栈帧导致栈溢出
+     * CiInterpreter含1MB内存池+大量数组，总计约1.2MB，
+     * Windows默认线程栈1MB，栈上分配必定栈溢出。
+     * 改用safe_calloc堆分配，safe_calloc已清零，无需再memset。 */
+    CiInterpreter* ci = (CiInterpreter*)safe_calloc(1, sizeof(CiInterpreter));
+    if (!ci) return -1;
+    ci->source = code;
+    ci->has_error = 0;
+    /* M-026: 初始化内存池(safe_calloc已清零，此处保留以保持语义清晰) */
+    memset(&ci->mem, 0, sizeof(CiMemoryPool));
 
-    if (_ci_tokenize(&ci) < 0) {
-        if (error_msg) strncpy(error_msg, ci.error_msg, 255);
+    if (_ci_tokenize(ci) < 0) {
+        if (error_msg) strncpy(error_msg, ci->error_msg, 255);
+        safe_free((void**)&ci);
         return -1;
     }
 
-    *result = _ci_exec_statement(&ci);
+    *result = _ci_exec_statement(ci);
 
-    if (ci.has_error) {
-        if (error_msg) strncpy(error_msg, ci.error_msg, 255);
+    if (ci->has_error) {
+        if (error_msg) strncpy(error_msg, ci->error_msg, 255);
+        safe_free((void**)&ci);
         return -1;
     }
 
+    safe_free((void**)&ci);
     return 0;
 }
 
@@ -1041,24 +1244,18 @@ int self_programming_interpreter_available(void) {
     if (!g_ci_builtins || !g_ci_builtins_multi) return 0;
     if (g_ci_builtins[0].func == NULL && g_ci_builtins_multi[0].func == NULL) return 0;
 
-    /* 检查内存池所需的内存区域可用性（通过尝试栈上创建验证） */
+    /* 检查内存池所需的内存区域可用性 */
     if (g_ci_core_verified) return 1;
 
-    /* 首次调用时执行核心验证 */
-    {
-        CiInterpreter ci_check;
-        memset(&ci_check, 0, sizeof(CiInterpreter));
+    /* P2修复6: 原实现在栈上创建CiInterpreter ci_check（含1MB内存池，总计约1.2MB），
+     * Windows默认线程栈仅1MB，栈上分配必定栈溢出。
+     * 改为仅用sizeof在编译期检查结构体成员大小是否满足要求，
+     * sizeof是编译期常量表达式，不实际分配任何内存。 */
+    if (sizeof(((CiInterpreter*)0)->mem.pool) < CI_MEM_POOL_SIZE) return 0;
+    if (sizeof(((CiInterpreter*)0)->mem.blocks) < CI_MAX_MEM_BLOCKS * sizeof(CiMemBlock)) return 0;
+    if (sizeof(((CiInterpreter*)0)->vars) < CI_MAX_VARS * sizeof(CiVariable)) return 0;
 
-        /* 检查内存池能否正确初始化 */
-        memset(&ci_check.mem, 0, sizeof(CiMemoryPool));
-        if (sizeof(ci_check.mem.pool) < CI_MEM_POOL_SIZE) return 0;
-        if (sizeof(ci_check.mem.blocks) < CI_MAX_MEM_BLOCKS * sizeof(CiMemBlock)) return 0;
-
-        /* 检查变量表容量 */
-        if (sizeof(ci_check.vars) < CI_MAX_VARS * sizeof(CiVariable)) return 0;
-
-        g_ci_core_verified = 1;
-    }
+    g_ci_core_verified = 1;
 
     return 1;
 }

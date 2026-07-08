@@ -24,6 +24,9 @@ if(MSVC)
 endif()
 
 # 设置目标属性
+# BLD-014修复: SOVERSION/VERSION对静态库无意义，静态库在编译时链接，不涉及运行时版本解析
+# 保留VERSION和SOVERSION仅为元数据记录，实际链接时CMake会忽略这些属性
+# 如需动态库版本，需将add_library的STATIC改为SHARED
 set_target_properties(selflnn_cognition PROPERTIES
     OUTPUT_NAME "selflnn_cognition"
     VERSION 1.0.0

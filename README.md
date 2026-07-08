@@ -128,6 +128,18 @@ bash build.sh
   "mixed_precision_mode": 1,
   "training": {
     "mixed_precision": "auto"
+  },
+  "safety": {
+    "content_filter_enabled": true,
+    "audit_logging_enabled": true,
+    "emergency_stop_enabled": true
+  },
+  "agi": {
+    "self_evolution_enabled": false,
+    "self_learning_enabled": true,
+    "self_decision_enabled": true,
+    "self_execution_enabled": true,
+    "self_correction_enabled": true
   }
 }
 ```
@@ -135,6 +147,7 @@ bash build.sh
 > **gpu_backend可选值：** `"auto"`/`"cpu"`/`"cuda"`/`"rocm"`/`"opencl"`/`"vulkan"`/`"metal"`
 > **mixed_precision_mode：** `0`=关闭、`1`=auto、`2`=FP16、`3`=BF16
 > **注：** `training`子对象中仅有`mixed_precision`字段被系统解析；其他training参数（epochs/batch_size等）需通过Web控制台或API动态配置。
+> **完整配置参考：** 请查看 `config/system_config.json` 获取所有可配置字段的完整示例。
 
 ### 前端访问
 启动服务器后，在浏览器中访问：
@@ -178,17 +191,22 @@ bash build.sh
 ### 后端配置示例
 ```json
 {
-    "server": {
-        "port": 8080,
-        "max_connections": 100,
-        "log_level": "info"
+    "http_port": 8080,
+    "websocket_port": 8081,
+    "gpu_backend": "auto",
+    "safety": {
+        "content_filter_enabled": true,
+        "audit_logging_enabled": true,
+        "emergency_stop_enabled": true
     },
-    "modules": {
-        "multimodal": true,
-        "reasoning": true,
-        "learning": true,
-        "self_evolution": true,
-        "robotics": false
+    "agi": {
+        "self_learning_enabled": true,
+        "self_decision_enabled": true,
+        "self_execution_enabled": true
+    },
+    "system": {
+        "log_level": "info",
+        "web_ui_enabled": true
     }
 }
 ```
@@ -462,20 +480,28 @@ sudo cp config/*.json.example /opt/slnn/config/
 主要配置项 / Main configuration items：
 ```json
 {
-    "server": {
-        "port": 8080,
-        "max_connections": 100,
-        "log_level": "info"
+    "http_port": 8080,
+    "websocket_port": 8081,
+    "gpu_backend": "auto",
+    "power_mode": "balanced",
+    "safety": {
+        "content_filter_enabled": true,
+        "audit_logging_enabled": true,
+        "emergency_stop_enabled": true
     },
-    "modules": {
-        "multimodal": true,
-        "reasoning": true,
-        "learning": true,
-        "self_evolution": true,
-        "robotics": false
+    "agi": {
+        "self_learning_enabled": true,
+        "self_decision_enabled": true,
+        "self_execution_enabled": true,
+        "self_correction_enabled": true
+    },
+    "system": {
+        "log_level": "info",
+        "web_ui_enabled": true
     }
 }
 ```
+> **注：** 完整配置项说明请参考 `config/system_config.json` 文件。
 
 ### 安装为系统服务
 项目提供服务配置文件模板，位于 `config/` 目录：

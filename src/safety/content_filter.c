@@ -14,11 +14,37 @@
 #include "selflnn/core/lnn.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/logging.h"
+/* P0修复: 引入selflnn.h以获取selflnn_lock_lnn/selflnn_unlock_lnn线程安全接口，
+ * 防止content_filter内部lnn_forward与AGI后台线程竞态崩溃 */
+#include "selflnn/selflnn.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
 #include <ctype.h>
+
+/* S-P2-08修复: 引入平台原子原语，对total_checked/total_flagged/total_blocked等
+ * size_t计数器进行无锁原子递增，消除并发竞态。
+ * 采用与thread_pool.c/lock_free.c一致的原子策略：
+ *   - Windows: Interlocked系列(按size_t宽度选择32/64位原语)
+ *   - GCC/Clang: __sync_fetch_and_add(自动适配size_t宽度) */
+#ifdef _WIN32
+#include <windows.h>
+/* size_t在64位Windows为8字节，需用64位原子原语；32位Windows为4字节用32位原语 */
+static __inline void cf_atomic_inc_size(size_t* p) {
+#if defined(_WIN64)
+    InterlockedIncrement64((LONG64*)p);
+#else
+    InterlockedIncrement((LONG*)p);
+#endif
+}
+#else
+static __inline void cf_atomic_inc_size(size_t* p) {
+    __sync_fetch_and_add(p, (size_t)1);
+}
+#endif
+/* 原子递增size_t计数器宏 */
+#define CF_ATOMIC_INC(ptr) cf_atomic_inc_size((ptr))
 
 #define CONTENT_FILTER_EMBED_DIM  128
 
@@ -244,12 +270,38 @@ void content_filter_destroy(ContentFilter* filter) {
  * L-021修复: 外部LNN绑定/解绑时，若内部CfC分类器存在则保持语义层可用 */
 int content_filter_set_lnn(ContentFilter* filter, void* lnn_instance) {
     if (!filter) return -1;
+    /* P0修复: 维度安全检查 —— 拒绝绑定output_size≠CONTENT_FILTER_EMBED_DIM的LNN。
+     * 如果外部LNN的输出维度与content_filter内部的lnn_output[128]不匹配，
+     * lnn_forward会写入越界，导致栈溢出崩溃。 */
+    if (lnn_instance) {
+        LNN* lnn = (LNN*)lnn_instance;
+        int lnn_out = lnn_get_output_size(lnn);
+        if (lnn_out != CONTENT_FILTER_EMBED_DIM) {
+            log_warning("[内容过滤] 拒绝绑定外部LNN(output_size=%d)——维度与内部缓冲区(%d)不匹配，"
+                       "将使用内部CfC分类器", lnn_out, CONTENT_FILTER_EMBED_DIM);
+            return -1;
+        }
+    }
+    /* S-P2-11修复: lnn_instance/enable_semantic/internal_cfc均为跨线程共享字段，
+     * content_filter_check在并发读取这些字段(第376行)，若本函数无锁写入，
+     * 可能导致检测线程读到半写状态或enable_semantic与lnn_instance不一致。
+     * 维度检查(lnn_get_output_size)不访问filter共享状态，可在锁外执行。 */
+    mutex_lock(filter->lock);
     filter->lnn_instance = lnn_instance;
     if (lnn_instance || filter->internal_cfc) {
         filter->enable_semantic = 1;
     } else {
         filter->enable_semantic = 0;
     }
+    mutex_unlock(filter->lock);
+    return 0;
+}
+
+/* P0修复: 启用/禁用LNN语义评分层 */
+int content_filter_set_enable_semantic(ContentFilter* filter, int enable) {
+    if (!filter) return -1;
+    filter->enable_semantic = enable ? 1 : 0;
+    log_info("[内容过滤] 语义评分层已%s", enable ? "启用" : "禁用");
     return 0;
 }
 
@@ -269,17 +321,28 @@ int content_filter_add_rule(ContentFilter* filter, const ContentFilterRule* rule
 int content_filter_add_pattern(ContentFilter* filter, ContentCategory category,
                                 const char* pattern) {
     if (!filter || !pattern) return -1;
-
+    /* S-P2-09修复: 添加锁保护，防止rules数组遍历与patterns写入的并发竞态。
+     * content_filter_check在持锁期间遍历rules，若本函数无锁并发写入patterns，
+     * 可能导致遍历线程读到半写状态或pattern_count撕裂。与content_filter_add_rule
+     * 保持一致的加锁策略（均使用filter->lock）。 */
+    mutex_lock(filter->lock);
     for (int i = 0; i < filter->rule_count; i++) {
         if (filter->rules[i].category == category) {
             ContentFilterRule* r = &filter->rules[i];
-            if (r->pattern_count >= CONTENT_FILTER_MAX_PATTERNS) return -1;
+            if (r->pattern_count >= CONTENT_FILTER_MAX_PATTERNS) {
+                mutex_unlock(filter->lock);
+                return -1;
+            }
             strncpy(r->patterns[r->pattern_count], pattern,
                     CONTENT_FILTER_PATTERN_LEN - 1);
+            r->patterns[r->pattern_count][CONTENT_FILTER_PATTERN_LEN - 1] = '\0';
             r->pattern_count++;
-            return r->pattern_count - 1;
+            int result = r->pattern_count - 1;
+            mutex_unlock(filter->lock);
+            return result;
         }
     }
+    mutex_unlock(filter->lock);
     return -1;
 }
 
@@ -288,7 +351,8 @@ int content_filter_check(ContentFilter* filter, const char* content,
 {
     if (!filter || !content || !result) return -1;
 
-    filter->total_checked++;
+    /* S-P2-08修复: total_checked使用原子递增，防止并发检查线程计数丢失 */
+    CF_ATOMIC_INC(&filter->total_checked);
     memset(result, 0, sizeof(ContentFilterResult));
     result->timestamp = time(NULL);
 
@@ -343,14 +407,25 @@ int content_filter_check(ContentFilter* filter, const char* content,
             }
         }
     }
+    /* P2修复: 在锁内缓存共享字段的值，避免锁外无锁读取lnn_instance/enable_semantic竞态。
+     * lnn_instance/enable_semantic/internal_cfc均为跨线程共享字段，
+     * content_filter_set_lnn/content_filter_set_enable_semantic可能并发写入，
+     * 锁外读取可能导致读到半写状态或enable_semantic与lnn_instance不一致。 */
+    void* cached_lnn_instance = filter->lnn_instance;
+    void* cached_internal_cfc = filter->internal_cfc;
+    int cached_enable_semantic = filter->enable_semantic;
     mutex_unlock(filter->lock);  /* FIX-007: 释放读锁 */
 
     /* ===== 第二层：LNN语义评估（补充过滤维度） =====
      * 在关键词匹配之后，使用LNN对完整文本进行语义级安全评估。
      * L-021修复: 优先使用外部绑定的LNN实例；若未绑定则使用内部独立的2层CfC分类器。
      * 语义评分作为补充维度：与关键词分数加权融合，提升对隐晦违规内容的检测能力。 */
-    void* lnn_for_semantic = filter->lnn_instance ? filter->lnn_instance : filter->internal_cfc;
-    if (lnn_for_semantic && filter->enable_semantic) {
+    void* lnn_for_semantic = cached_lnn_instance ? cached_lnn_instance : cached_internal_cfc;
+    /* P0修复: 如果使用外部共享LNN，需要加锁防止与AGI后台线程竞态崩溃。
+     * internal_cfc是filter私有的，无需加锁。 */
+    int use_shared_lnn = (cached_lnn_instance != NULL);
+    if (use_shared_lnn) selflnn_lock_lnn();
+    if (lnn_for_semantic && cached_enable_semantic) {
         float input_embed[CONTENT_FILTER_EMBED_DIM];
         memset(input_embed, 0, sizeof(input_embed));
         size_t text_len = strlen(content);
@@ -420,6 +495,8 @@ int content_filter_check(ContentFilter* filter, const char* content,
             }
         }
     }
+    /* P0修复: 释放共享LNN锁 */
+    if (use_shared_lnn) selflnn_unlock_lnn();
 
     safe_free((void**)&content_lower);
 
@@ -428,10 +505,12 @@ int content_filter_check(ContentFilter* filter, const char* content,
     result->match_score = highest_score;
 
     if (highest_score > 0.0f) {
-        filter->total_flagged++;
+        /* S-P2-08修复: total_flagged使用原子递增 */
+        CF_ATOMIC_INC(&filter->total_flagged);
         if (highest_score >= 0.5f) {
             result->blocked = 1;
-            filter->total_blocked++;
+            /* S-P2-08修复: total_blocked使用原子递增 */
+            CF_ATOMIC_INC(&filter->total_blocked);
             snprintf(result->action_taken, sizeof(result->action_taken),
                      "已拦截[%s]: 匹配度%.2f, 触发模式'%s'",
                      content_category_default_name(highest_category),
@@ -456,7 +535,8 @@ int content_filter_check_batch(ContentFilter* filter, const char* content,
 {
     if (!filter || !content || !results || max_results < 1) return 0;
 
-    filter->total_checked++;
+    /* S-P2-08修复: total_checked使用原子递增，防止并发批量检查线程计数丢失 */
+    CF_ATOMIC_INC(&filter->total_checked);
     int result_count = 0;
 
     if (content_length == 0) return 0;
@@ -466,7 +546,11 @@ int content_filter_check_batch(ContentFilter* filter, const char* content,
 
     content_to_lower(content, content_lower, content_length + 1);
 
-    for (int i = 0; i < filter->rule_count && result_count < max_results; i++) {
+    /* S-P2-10修复: 加锁保护rules数组遍历，与content_filter_check保持一致(FIX-007)。
+     * 快照rule_count后持锁遍历，防止遍历期间rule_count/rules被并发写入导致越界或撕裂。 */
+    mutex_lock(filter->lock);
+    int snapshot_rule_count = filter->rule_count;
+    for (int i = 0; i < snapshot_rule_count && result_count < max_results; i++) {
         const ContentFilterRule* r = &filter->rules[i];
         if (!r->enabled || r->pattern_count == 0) continue;
 
@@ -495,16 +579,19 @@ int content_filter_check_batch(ContentFilter* filter, const char* content,
             res->timestamp = time(NULL);
 
             if (res->blocked) {
-                filter->total_blocked++;
+                /* S-P2-08修复: total_blocked使用原子递增 */
+                CF_ATOMIC_INC(&filter->total_blocked);
                 snprintf(res->action_taken, sizeof(res->action_taken),
                          "已拦截: %s", content_category_default_name(r->category));
             } else {
-                filter->total_flagged++;
+                /* S-P2-08修复: total_flagged使用原子递增 */
+                CF_ATOMIC_INC(&filter->total_flagged);
                 snprintf(res->action_taken, sizeof(res->action_taken),
                          "已标记: %s", content_category_default_name(r->category));
             }
         }
     }
+    mutex_unlock(filter->lock);  /* S-P2-10修复: 释放规则遍历锁 */
 
     safe_free((void**)&content_lower);
     return result_count;
@@ -515,17 +602,25 @@ int content_filter_get_stats(const ContentFilter* filter,
                               size_t* out_flagged)
 {
     if (!filter) return -1;
+    /* S-P2-11修复: 加锁读取计数器，防止与原子递增线程竞态读到撕裂值。
+     * const指针下filter->lock为void* const，mutex_lock按值(MutexHandle=void*)
+     * 传递，const仅作用于指针本身(顶层)，按值传入无const违例。 */
+    mutex_lock(filter->lock);
     if (out_checked) *out_checked = filter->total_checked;
     if (out_blocked) *out_blocked = filter->total_blocked;
     if (out_flagged) *out_flagged = filter->total_flagged;
+    mutex_unlock(filter->lock);
     return 0;
 }
 
 int content_filter_reset_stats(ContentFilter* filter) {
     if (!filter) return -1;
+    /* S-P2-11修复: 加锁重置计数器，防止与递增线程竞态 */
+    mutex_lock(filter->lock);
     filter->total_checked = 0;
     filter->total_blocked = 0;
     filter->total_flagged = 0;
+    mutex_unlock(filter->lock);
     return 0;
 }
 

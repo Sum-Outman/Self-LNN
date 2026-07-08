@@ -108,7 +108,10 @@ static int trigger_deep_reflection_if_needed(SelfCognitionSystem* system, float 
  */
 struct SelfCognitionSystem {
     SelfCognitionConfig config;            /**< 系统配置 */
-    
+
+    /* P1修复: 线程安全互斥锁——保护所有可变状态的并发访问 */
+    MutexHandle lock;                     /**< 系统互斥锁（保护reflection/execution/correction等历史记录） */
+
     /* 状态数据 */
     CognitionSystemStatus system_status;            /**< 系统状态 */
     CapabilityAssessment capability;       /**< 能力评估 */
@@ -314,6 +317,15 @@ SelfCognitionSystem* self_cognition_create(const SelfCognitionConfig* config) {
     system->last_update_time = time(NULL);
     system->is_monitoring = 0;
     system->update_count = 0;
+
+    /* P1修复: 创建互斥锁用于线程安全 */
+    system->lock = mutex_create();
+    if (!system->lock) {
+        selflnn_set_last_error(SELFLNN_ERROR_INITIALIZATION_FAILED, __func__, __FILE__, __LINE__,
+                              "创建自我认知系统：互斥锁创建失败");
+        safe_free((void**)&system);
+        return NULL;
+    }
     
     // 初始化性能历史
     system->performance_history_capacity = 100;
@@ -694,6 +706,9 @@ int self_cognition_iterative_reflection(SelfCognitionSystem* system, int max_ite
                 }
                 system->reflection_history[system->reflection_history_size] = saved;
                 system->reflection_history_size++;
+            } else {
+                /* P1修复: 反思历史已满时释放已分配的内存，避免泄漏 */
+                safe_free((void**)&saved);
             }
         }
         
@@ -782,48 +797,58 @@ void self_cognition_free(SelfCognitionSystem* system) {
         system->laplace_analyzer = NULL;
     }
     safe_free((void**)&system->laplace_spectrum_buffer);
-    
+
+    /* P1修复: 销毁互斥锁 */
+    if (system->lock) {
+        mutex_destroy(system->lock);
+        system->lock = NULL;
+    }
+
     safe_free((void**)&system);
 }
 
 /**
- * @brief 更新自我认知状态
+ * @brief 更新自我认知状态（内部无锁版本）
+ *
+ * P1修复: 提取为内部函数，供已持有锁的调用者使用，
+ * 避免get_status->update嵌套调用导致的死锁。
+ * 调用者必须在外部持有system->lock。
  */
-int self_cognition_update(SelfCognitionSystem* system, SelfCognitionDimension dimension) {
+static int self_cognition_update_nolock(SelfCognitionSystem* system, SelfCognitionDimension dimension) {
     if (!system) {
         return -1;
     }
-    
+
     time_t current_time = time(NULL);
-    
+
     // 检查是否需要更新（基于时间间隔）
     if (system->config.enable_continuous_monitoring &&
         difftime(current_time, system->last_update_time) < system->config.update_interval_sec) {
         return -2; /* P2-002修复：未到更新时间，返回-2与成功(0)明确区分 */
     }
-    
+
     // 根据维度更新相应数据
     switch (dimension) {
         case SELF_COGNITION_STATE:
             update_system_status(system);
             break;
-            
+
         case SELF_COGNITION_CAPABILITY:
             update_capability_assessment(system);
             break;
-            
+
         case SELF_COGNITION_KNOWLEDGE:
             update_knowledge_metacognition(system);
             break;
-            
+
         case SELF_COGNITION_GOAL:
             update_goal_introspection(system);
             break;
-            
+
         case SELF_COGNITION_LEARNING:
             update_learning_progress(system);
             break;
-            
+
         case SELF_COGNITION_PERFORMANCE:
             /* 更新所有维度 */
             update_system_status(system);
@@ -836,33 +861,33 @@ int self_cognition_update(SelfCognitionSystem* system, SelfCognitionDimension di
                 perform_deep_self_analysis(system);
             }
             break;
-            
+
         default:
             return -1;
     }
-    
+
     system->last_update_time = current_time;
     system->update_count++;
-    
+
     /* 自动自我模型训练循环 */
     if (system->self_model_lnn && system->update_count % 50 == 0) {
         float state_buf[64];
         memset(state_buf, 0, sizeof(state_buf));
         collect_system_state(system, state_buf, 64);
-        
+
         size_t state_dim = 32;
         if (!system->state_history) {
             system->state_history_capacity = 128;
             system->state_history = (float*)safe_calloc(
                 system->state_history_capacity * state_dim, sizeof(float));
         }
-        
+
         if (system->state_history && system->state_history_size < system->state_history_capacity) {
             memcpy(&system->state_history[system->state_history_size * state_dim],
                    state_buf, state_dim * sizeof(float));
             system->state_history_size++;
         }
-        
+
         if (system->state_history_size >= 30 && system->state_history_size % 10 == 0) {
             int epochs = 3;
             train_self_model_internal(system, epochs);
@@ -872,8 +897,23 @@ int self_cognition_update(SelfCognitionSystem* system, SelfCognitionDimension di
             system->last_model_update = time(NULL);
         }
     }
-    
+
     return 0;
+}
+
+/**
+ * @brief 更新自我认知状态
+ */
+int self_cognition_update(SelfCognitionSystem* system, SelfCognitionDimension dimension) {
+    if (!system) {
+        return -1;
+    }
+
+    /* P1修复: 加锁保护所有可变状态的并发访问 */
+    mutex_lock(system->lock);
+    int ret = self_cognition_update_nolock(system, dimension);
+    mutex_unlock(system->lock);
+    return ret;
 }
 
 // ==================== 元认知系统集成接口 ====================
@@ -902,17 +942,20 @@ int self_cognition_metacognition_monitor(SelfCognitionSystem* system,
     }
     
     int ret = metacognition_monitor(system->metacognition_system, input_data, data_size, result);
-    
+
     /* M-020修复: 元认知监控结果反馈到决策引擎的桥接
      * 将监控结果缓存到SelfCognitionSystem中，供AGI认知循环通过
      * self_cognition_get_metacognition_assessment()获取后传入决策引擎。
      * 决策引擎可利用元认知的confidence/trend/requires_action等指标
      * 调整决策权重、风险偏好和行动优先级。 */
     if (ret == 0) {
+        /* P1修复: 加锁保护监控结果缓存的并发写入 */
+        mutex_lock(system->lock);
         memcpy(&system->last_monitoring_result, result, sizeof(MetacognitionMonitoringResult));
         system->has_monitoring_result = 1;
+        mutex_unlock(system->lock);
     }
-    
+
     return ret;
 }
 
@@ -929,11 +972,15 @@ int self_cognition_get_metacognition_assessment(SelfCognitionSystem* system,
     if (!system || !result) {
         return -1;
     }
+    /* P1修复: 加锁保护监控结果缓存的并发读取 */
+    mutex_lock(system->lock);
     if (!system->has_monitoring_result) {
         memset(result, 0, sizeof(MetacognitionMonitoringResult));
+        mutex_unlock(system->lock);
         return -1;
     }
     memcpy(result, &system->last_monitoring_result, sizeof(MetacognitionMonitoringResult));
+    mutex_unlock(system->lock);
     return 0;
 }
 
@@ -1155,11 +1202,13 @@ int self_cognition_get_status(SelfCognitionSystem* system, CognitionSystemStatus
     if (!system || !status) {
         return -1;
     }
-    
+
+    /* P1修复: 加锁后调用无锁版本更新，避免与update产生嵌套死锁 */
+    mutex_lock(system->lock);
     // 确保状态是最新的
-    self_cognition_update(system, SELF_COGNITION_STATE);
-    
+    self_cognition_update_nolock(system, SELF_COGNITION_STATE);
     *status = system->system_status;
+    mutex_unlock(system->lock);
     return 0;
 }
 
@@ -1170,11 +1219,13 @@ int self_cognition_get_capability(SelfCognitionSystem* system, CapabilityAssessm
     if (!system || !assessment) {
         return -1;
     }
-    
+
+    /* P1修复: 加锁后调用无锁版本更新，避免嵌套死锁 */
+    mutex_lock(system->lock);
     // 确保评估是最新的
-    self_cognition_update(system, SELF_COGNITION_CAPABILITY);
-    
+    self_cognition_update_nolock(system, SELF_COGNITION_CAPABILITY);
     *assessment = system->capability;
+    mutex_unlock(system->lock);
     return 0;
 }
 
@@ -1185,13 +1236,16 @@ int self_cognition_get_knowledge(SelfCognitionSystem* system, KnowledgeMetacogni
     if (!system || !metacognition) {
         return -1;
     }
-    
-    // 确保元认知是最新的
-    self_cognition_update(system, SELF_COGNITION_KNOWLEDGE);
-    
-    *metacognition = system->knowledge;
 
-    /* R003: KG自我知识查询 —— 用知识图谱信息增强元认知 */
+    /* P1修复: 加锁后调用无锁版本更新，避免嵌套死锁 */
+    mutex_lock(system->lock);
+    // 确保元认知是最新的
+    self_cognition_update_nolock(system, SELF_COGNITION_KNOWLEDGE);
+    *metacognition = system->knowledge;
+    mutex_unlock(system->lock);
+
+    /* R003: KG自我知识查询 —— 用知识图谱信息增强元认知
+     * 注意：知识图谱有独立的graph_lock，不依赖自我认知系统的锁 */
     {
         void* kg = selflnn_get_knowledge_graph();
         if (kg) {
@@ -1253,10 +1307,15 @@ int self_cognition_reflect(SelfCognitionSystem* system, char* reflection, size_t
     if (!system || !reflection || max_reflection_size == 0) {
         return -1;
     }
-    
+
+    /* P1修复: 加锁保护反思过程中对 system 状态的读取与 reflection_history 的写入。
+     * 调用 self_cognition_update_nolock(而非 self_cognition_update)以避免
+     * 持 system->lock 后再次获取同一非递归锁导致嵌套死锁。 */
+    mutex_lock(system->lock);
+
     // 更新所有状态以获取最新数据
-    self_cognition_update(system, SELF_COGNITION_PERFORMANCE);
-    
+    self_cognition_update_nolock(system, SELF_COGNITION_PERFORMANCE);
+
     // 生成反思文本
     char buffer[1024];
     int len = snprintf(buffer, sizeof(buffer),
@@ -1283,9 +1342,10 @@ int self_cognition_reflect(SelfCognitionSystem* system, char* reflection, size_t
                       system->capability.perception_ability);
     
     if (len < 0) {
+        mutex_unlock(system->lock);
         return -1;
     }
-    
+
     size_t copy_len = (size_t)len;
     if (copy_len >= max_reflection_size) {
         copy_len = max_reflection_size - 1;
@@ -1301,7 +1361,8 @@ int self_cognition_reflect(SelfCognitionSystem* system, char* reflection, size_t
             system->reflection_history_size++;
         }
     }
-    
+
+    mutex_unlock(system->lock);
     return (int)copy_len;
 }
 
@@ -2617,6 +2678,9 @@ int self_cognition_make_decision(SelfCognitionSystem* system,
     return 0;
 }
 
+/* P2修复: stop_execution内部无锁版本的前向声明，供持锁上下文（execute_decision）调用 */
+static int self_cognition_stop_execution_nolock(SelfCognitionSystem* system);
+
 /**
  * @brief 执行决策
  * 
@@ -2629,10 +2693,16 @@ int self_cognition_execute_decision(SelfCognitionSystem* system,
     if (!system || !decision || !execution_state) {
         return -1;
     }
-    
+
+    /* P1修复: 加锁保护 current_decision/current_execution/execution_history 等
+     * 共享可变状态的并发访问。决策分发调用的 online_learner_update/planning_generate 等
+     * 亦不持 system->lock，可安全在锁内调用，不会产生嵌套死锁。
+     * P2修复: stop_execution现为公共API自带锁，此处已持锁，调用_nolock版本避免嵌套死锁。 */
+    mutex_lock(system->lock);
+
     // 如果已经有执行在进行中，先停止它
     if (system->is_executing) {
-        self_cognition_stop_execution(system);
+        self_cognition_stop_execution_nolock(system);
     }
     
     // 保存决策
@@ -2754,7 +2824,8 @@ int self_cognition_execute_decision(SelfCognitionSystem* system,
                 (system->execution_history_capacity - 1) * sizeof(ExecutionState));
         system->execution_history[system->execution_history_capacity - 1] = system->current_execution;
     }
-    
+
+    mutex_unlock(system->lock);
     return 0;
 }
 
@@ -2821,9 +2892,12 @@ int self_cognition_monitor_execution(SelfCognitionSystem* system,
 }
 
 /**
- * @brief 停止当前执行
+ * @brief 停止当前执行（无锁内部版本）
+ * 
+ * P2修复: 调用者必须已持有 system->lock。供 execute_decision 等持锁上下文调用，
+ * 避免嵌套死锁。公共API self_cognition_stop_execution 会加锁后调用本函数。
  */
-int self_cognition_stop_execution(SelfCognitionSystem* system) {
+static int self_cognition_stop_execution_nolock(SelfCognitionSystem* system) {
     if (!system) {
         return -1;
     }
@@ -2852,6 +2926,23 @@ int self_cognition_stop_execution(SelfCognitionSystem* system) {
     system->is_executing = 0;
     
     return 0;
+}
+
+/**
+ * @brief 停止当前执行（公共API，线程安全）
+ * 
+ * P2修复: 此前修改共享状态时不持锁。现在加锁保护，内部调用_nolock版本。
+ * 持锁上下文（如execute_decision）应直接调用_nolock版本以避免嵌套死锁。
+ */
+int self_cognition_stop_execution(SelfCognitionSystem* system) {
+    if (!system) {
+        return -1;
+    }
+
+    mutex_lock(system->lock);
+    int ret = self_cognition_stop_execution_nolock(system);
+    mutex_unlock(system->lock);
+    return ret;
 }
 
 /**
@@ -3131,12 +3222,14 @@ CognitionPlanResult* self_awareness_plan_goal(SelfAwarenessSystem* system, const
             lnn_computation_load = (float)max_activations / 1000.0f;
             if (lnn_computation_load > 1.0f) lnn_computation_load = 1.0f;
             
-            float test_input[16] = {0};
-            float test_output[16] = {0};
+            /* P0修复: 缓冲区大小必须匹配共享LNN的output_size(256)，
+             * 原float[16]导致lnn_forward写入越界栈溢出 */
+            float test_input[256] = {0};
+            float test_output[256] = {0};
             if (lnn_forward(lnn_instance, test_input, test_output) == 0) {
                 float output_mean = 0.0f;
                 float output_var = 0.0f;
-                size_t output_size = lnn_config.output_size < 16 ? lnn_config.output_size : 16;
+                size_t output_size = lnn_config.output_size < 256 ? lnn_config.output_size : 256;
                 for (size_t i = 0; i < output_size; i++) {
                     output_mean += test_output[i];
                 }
@@ -3380,12 +3473,13 @@ ErrorAnalysisResult* self_awareness_analyze_error(SelfAwarenessSystem* system, c
             lnn_computation_load = (float)max_activations / 1000.0f;
             if (lnn_computation_load > 1.0f) lnn_computation_load = 1.0f;
             
-            float test_input[16] = {0};
-            float test_output[16] = {0};
+            /* P0修复: 缓冲区大小必须匹配共享LNN的output_size(256) */
+            float test_input[256] = {0};
+            float test_output[256] = {0};
             if (lnn_forward(lnn_instance, test_input, test_output) == 0) {
                 float output_mean = 0.0f;
                 float output_var = 0.0f;
-                size_t output_size = lnn_config.output_size < 16 ? lnn_config.output_size : 16;
+                size_t output_size = lnn_config.output_size < 256 ? lnn_config.output_size : 256;
                 for (size_t i = 0; i < output_size; i++) {
                     output_mean += test_output[i];
                 }
@@ -4628,7 +4722,19 @@ static int initialize_self_model(SelfCognitionSystem* system, const SelfModelCon
     // 输入维度：系统状态维度（CPU、内存、能力评估等）
     // 输出维度：编码状态维度 + 预测维度
     lnn_config.input_size = 32;  // 系统状态特征数
-    lnn_config.output_size = (size_t)(model_config->state_encoding_size + model_config->prediction_horizon);
+    /* P0/P1修复(修复9/修复10): 输出维度必须与训练/评估读取布局严格一致。
+     * 训练(train_self_model_internal)与评估(assess_model_accuracy_internal)
+     * 的读取循环按 lnn_output[encoding_dim + j*state_dim + k] 索引
+     * (j∈[0,prediction_horizon), k∈[0,state_dim=32))，因此LNN需输出
+     * encoding_dim + prediction_horizon * state_dim 个值，lnn_forward 才会
+     * 写满后续读取的全部区域。
+     * 原值 encoding_dim + prediction_horizon 仅为所需总量的 1/state_dim，导致：
+     *   - train: j>=1 区域读取从未被 lnn_forward 写入的未初始化堆内存(修复10)；
+     *   - assess: 缓冲区更小(encoding_dim+prediction_steps)，越界读取(修复9)。
+     * 这里以 input_size 作为 state_dim（系统状态特征数=32），与 train/assess
+     * 中硬编码的 state_dim=32 保持一致。 */
+    lnn_config.output_size = (size_t)(model_config->state_encoding_size
+                                    + (size_t)model_config->prediction_horizon * lnn_config.input_size);
     lnn_config.hidden_size = 64;  // 隐藏状态大小
     lnn_config.learning_rate = model_config->learning_rate;
     lnn_config.time_constant = 0.1f;  // 时间常数
@@ -4829,7 +4935,20 @@ static int train_self_model_internal(SelfCognitionSystem* system, int epochs) {
         if (target_buffer) safe_free((void**)&target_buffer);
         return -1;
     }
-    
+
+    /* P1修复(下溢守卫): state_history_size 为 size_t，state_history_size - prediction_horizon
+     * 在 prediction_horizon > state_history_size 时会下溢为巨大无符号值，导致训练循环
+     * (本函数 4909 行)与验证循环(5018 行)越界读 state_history。
+     * 训练过程中 state_history_size 不变，故此处一道守卫同时保护两处循环。 */
+    if (system->state_history_size <= (size_t)prediction_horizon) {
+        safe_free((void**)&lnn_input);
+        safe_free((void**)&lnn_output);
+        safe_free((void**)&target_buffer);
+        log_error("自我模型训练数据不足：state_history_size(%zu) <= prediction_horizon(%d)\n",
+                  system->state_history_size, prediction_horizon);
+        return -1;
+    }
+
     // 准备训练数据：使用状态历史进行自监督学习
     // 目标：从当前状态预测未来状态
     for (int epoch = 0; epoch < epochs; epoch++) {
@@ -5016,13 +5135,16 @@ static int encode_state_internal(SelfCognitionSystem* system, float* encoded_sta
     
     // 前向传播获取编码
     int prediction_horizon = (int)system->self_model_config.prediction_horizon;
-    float* lnn_output = (float*)safe_malloc((encoding_dim + prediction_horizon) * sizeof(float));
+    /* P0修复(修复9/10连带): output_size 现为 encoding_dim + prediction_horizon*state_dim，
+     * lnn_forward 会写入该数量的值，缓冲区必须与之等大，否则堆缓冲区溢出。
+     * 此处仅读取前 encoding_dim 个值，放大缓冲区不影响逻辑。 */
+    float* lnn_output = (float*)safe_malloc((encoding_dim + prediction_horizon * state_dim) * sizeof(float));
     if (!lnn_output) {
         safe_free((void**)&lnn_input);
         return -1;
     }
     lnn_forward(system->self_model_lnn, lnn_input, lnn_output);
-    
+
     // 提取编码部分（前encoding_dim个值）
     memcpy(encoded_state, lnn_output, encoding_dim * sizeof(float));
     
@@ -5105,20 +5227,28 @@ static int predict_future_internal(SelfCognitionSystem* system, int steps,
     
     // 前向传播获取预测
     int prediction_horizon = (int)system->self_model_config.prediction_horizon;
-    float* lnn_output = (float*)safe_malloc((encoding_dim + prediction_horizon) * sizeof(float));
+    /* P0修复(修复9/10连带): output_size 现为 encoding_dim + prediction_horizon*state_dim，
+     * lnn_forward 会写入该数量的值，缓冲区必须与之等大，否则堆缓冲区溢出。
+     * 此处仅读取 [encoding_dim, encoding_dim+steps) 区间(steps<=prediction_horizon)，
+     * 放大缓冲区后该区间仍完全位于已写入范围内。 */
+    float* lnn_output = (float*)safe_malloc((encoding_dim + prediction_horizon * state_dim) * sizeof(float));
     if (!lnn_output) {
         safe_free((void**)&encoded_state);
         safe_free((void**)&lnn_input);
         return -1;
     }
     lnn_forward(system->self_model_lnn, lnn_input, lnn_output);
-    
-    // 提取预测部分（后prediction_horizon个值）
-    float* prediction_output = &lnn_output[encoding_dim];
-    
-    // 复制预测结果
+
+    // 提取预测部分：output布局为 [encoding_dim, encoding_dim + prediction_horizon*state_dim)
+    // 每步占 state_dim 个连续分量，取其平均值作为该步的标量预测
+    // 守卫：防止 steps 超过 prediction_horizon 导致越界读
+    if (steps > prediction_horizon) steps = prediction_horizon;
     for (int i = 0; i < steps; i++) {
-        predictions[i] = prediction_output[i];
+        float acc = 0.0f;
+        for (int k = 0; k < state_dim; k++) {
+            acc += lnn_output[encoding_dim + i * state_dim + k];
+        }
+        predictions[i] = acc / (float)state_dim;
     }
     
     // 清理临时内存
@@ -5722,6 +5852,9 @@ static int perform_deep_reflection_internal(SelfCognitionSystem* system,
             pos += snprintf(insights_buf + pos, sizeof(insights_buf) - pos,
                     "[引擎标记] 反思链洞见(%zu层, 深度=%.2f): ",
                     chain.num_layers, (double)chain.overall_depth);
+            /* P0修复: snprintf 截断时返回值会令 pos 超过 sizeof(insights_buf)，
+               钳制 pos 防止后续 sizeof(insights_buf)-pos 发生 size_t 下溢与越界写入 */
+            if (pos >= sizeof(insights_buf)) pos = sizeof(insights_buf) - 1;
             
             /* 提取每层关键信息 */
             int extracted = 0;
@@ -5735,6 +5868,8 @@ static int perform_deep_reflection_internal(SelfCognitionSystem* system,
                     pos += snprintf(insights_buf + pos, sizeof(insights_buf) - pos,
                             "L%zu[%s:%.2f] ", i, layer_names[li],
                             (double)chain.layers[i].depth_score);
+                    /* P0修复: 截断时钳制 pos，防止 sizeof(insights_buf)-pos 下溢与越界写入 */
+                    if (pos >= sizeof(insights_buf)) pos = sizeof(insights_buf) - 1;
                     extracted++;
                 }
             }
@@ -5746,6 +5881,8 @@ static int perform_deep_reflection_internal(SelfCognitionSystem* system,
                     has_status ? st.total_memories : -1,
                     has_status ? st.active_tasks : -1,
                     has_status ? st.uptime : -1.0);
+            /* P0修复: 截断时钳制 pos，防止 sizeof(insights_buf)-pos 下溢与越界写入 */
+            if (pos >= sizeof(insights_buf)) pos = sizeof(insights_buf) - 1;
             
             strncpy(result->insights_gained, insights_buf, sizeof(result->insights_gained) - 1);
             result->insights_gained[sizeof(result->insights_gained) - 1] = '\0';
@@ -6118,6 +6255,9 @@ static int generate_improvement_plan_internal(SelfCognitionSystem* system,
                         has_status ? st.uptime : -1.0,
                         (has_status && st.hardware_available) ? "可用" : "未检测",
                         num_actions);
+                /* P0修复: snprintf 截断时返回值会令 ptr 越过 plan_buf 末端，
+                   钳制 ptr 防止后续 sizeof(plan_buf)-(ptr-plan_buf) 发生 size_t 下溢与越界写入 */
+                if ((size_t)(ptr - plan_buf) >= sizeof(plan_buf)) ptr = plan_buf + sizeof(plan_buf) - 1;
                 
                 for (size_t i = 0; i < num_actions && (size_t)(ptr - plan_buf) < sizeof(plan_buf) - 128; i++) {
                     float* action = plan_actions + i * 5;
@@ -6130,6 +6270,8 @@ static int generate_improvement_plan_internal(SelfCognitionSystem* system,
                             (double)action[2],
                             (double)action[3],
                             impact_label);
+                    /* P0修复: 截断时钳制 ptr，防止 sizeof(plan_buf)-(ptr-plan_buf) 下溢与越界写入 */
+                    if ((size_t)(ptr - plan_buf) >= sizeof(plan_buf)) ptr = plan_buf + sizeof(plan_buf) - 1;
                 }
                 
                 /* 补充基于真实指标的实施建议 */
@@ -6148,6 +6290,8 @@ static int generate_improvement_plan_internal(SelfCognitionSystem* system,
                         chain.self_consistency > 0.7f ? "计划逻辑自洽" : "部分矛盾需调和",
                         (double)chain.transformative_potential,
                         chain.transformative_potential > 0.5f ? "建议推进深层变革" : "建议渐进式改进");
+                /* P0修复: 截断时钳制 ptr，防止 sizeof(plan_buf)-(ptr-plan_buf) 下溢与越界写入 */
+                if ((size_t)(ptr - plan_buf) >= sizeof(plan_buf)) ptr = plan_buf + sizeof(plan_buf) - 1;
                 
                 /* 保存关键值（释放后chain字段会被清零） */
                 float saved_overall_depth = chain.overall_depth;
@@ -6335,7 +6479,15 @@ static float assess_model_accuracy_internal(SelfCognitionSystem* system) {
     int state_dim = 32;
     int encoding_dim = (int)system->self_model_config.state_encoding_size;
     int prediction_steps = (int)system->self_model_config.prediction_horizon;
-    
+
+    /* P1修复(下溢守卫): state_history_size - prediction_steps 在
+     * prediction_steps > state_history_size 时下溢为巨大无符号值，
+     * 导致 test_start 计算(6431/6432 行)与测试循环(6442 行)越界读。
+     * 数据不足以构造预测目标时直接返回默认准确率。 */
+    if (system->state_history_size <= (size_t)prediction_steps) {
+        return 0.0f;  // 数据不足以构造预测目标
+    }
+
     // 使用最后20%的数据作为测试集
     size_t test_start = system->state_history_size * 4 / 5;
     if (test_start >= system->state_history_size - prediction_steps) {
@@ -6378,7 +6530,15 @@ static float assess_model_accuracy_internal(SelfCognitionSystem* system) {
         memcpy(&lnn_input[state_dim], system->encoded_state_buffer, encoding_dim * sizeof(float));
         
         // 前向传播（动态分配输出）
-        float* lnn_output = (float*)safe_malloc((encoding_dim + prediction_steps) * sizeof(float));
+        /* P0修复(修复9): 原缓冲区按 (encoding_dim + prediction_steps) 分配，
+         * 但读取循环按 lnn_output[encoding_dim + j*state_dim + k] 索引
+         * (j∈[0,prediction_steps), k∈[0,state_dim=32))，最大读索引为
+         * encoding_dim + (prediction_steps-1)*state_dim + 31，远超原缓冲区容量
+         * 约32倍，构成堆缓冲区越界读取。
+         * 现 output_size 已修正为 encoding_dim + prediction_horizon*state_dim，
+         * lnn_forward 会写入该数量的值，此处缓冲区必须与读取布局等大：
+         * encoding_dim + prediction_steps * state_dim。 */
+        float* lnn_output = (float*)safe_malloc((encoding_dim + prediction_steps * state_dim) * sizeof(float));
         if (!lnn_output) {
             safe_free((void**)&lnn_input);
             continue;  // 内存分配失败，跳过此样本
@@ -6470,11 +6630,17 @@ int self_cognition_train_model(SelfCognitionSystem* system,
                               "训练自我模型：系统为空");
         return -1;
     }
-    
+
+    /* P1修复: 加锁保护训练过程对 system 共享状态（state_history/模型字段等）的并发访问。
+     * train_self_model_internal 调用 lnn_forward/lnn_backward，均不持 system->lock，
+     * 可安全在锁内调用，不会产生嵌套死锁。 */
+    mutex_lock(system->lock);
+
     // 检查自我模型是否已初始化
     if (!system->self_model_lnn) {
         selflnn_set_last_error(SELFLNN_ERROR_NOT_INITIALIZED, __func__, __FILE__, __LINE__,
                               "训练自我模型：自我模型未初始化");
+        mutex_unlock(system->lock);
         return -1;
     }
     
@@ -6495,6 +6661,7 @@ int self_cognition_train_model(SelfCognitionSystem* system,
             } else {
                 selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
                                       "训练自我模型：扩展状态历史容量失败");
+                mutex_unlock(system->lock);
                 return -1;
             }
         }
@@ -6513,19 +6680,22 @@ int self_cognition_train_model(SelfCognitionSystem* system,
     if (system->state_history_size < 20) {
         selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
                               "训练自我模型：状态历史数据不足（至少需要20个样本）");
+        mutex_unlock(system->lock);
         return -1;
     }
-    
+
     // 训练模型
     if (train_self_model_internal(system, epochs) != 0) {
         selflnn_set_last_error(SELFLNN_ERROR_COMPUTATION, __func__, __FILE__, __LINE__,
                               "训练自我模型：内部训练失败");
+        mutex_unlock(system->lock);
         return -1;
     }
-    
+
     log_info("自我模型训练完成，训练轮次：%d，损失：%.6f，准确性：%.4f",
             system->model_training_epochs, system->model_training_loss, system->model_accuracy);
-    
+
+    mutex_unlock(system->lock);
     return 0;
 }
 
@@ -6539,32 +6709,41 @@ int self_cognition_encode_state(SelfCognitionSystem* system,
                               "编码系统状态：参数为空");
         return -1;
     }
-    
+
+    /* P1修复: 加锁保护自我模型编码过程对 system 共享状态的并发访问。
+     * encode_state_internal 及 collect_system_state 均不持 system->lock，
+     * 可安全在锁内调用，不会产生嵌套死锁。 */
+    mutex_lock(system->lock);
+
     // 检查自我模型是否已初始化
     if (!system->self_model_lnn) {
         selflnn_set_last_error(SELFLNN_ERROR_NOT_INITIALIZED, __func__, __FILE__, __LINE__,
                               "编码系统状态：自我模型未初始化");
+        mutex_unlock(system->lock);
         return -1;
     }
-    
+
     // 检查encoded_state缓冲区
     if (!encoded_state->encoded_state || encoded_state->state_size < (size_t)system->self_model_config.state_encoding_size) {
         selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
                               "编码系统状态：编码状态缓冲区大小不足");
+        mutex_unlock(system->lock);
         return -1;
     }
-    
+
     // 执行编码
     if (encode_state_internal(system, encoded_state->encoded_state, encoded_state->state_size) != 0) {
         selflnn_set_last_error(SELFLNN_ERROR_COMPUTATION, __func__, __FILE__, __LINE__,
                               "编码系统状态：内部编码失败");
+        mutex_unlock(system->lock);
         return -1;
     }
-    
+
     // 设置编码置信度和时间
     encoded_state->encoding_confidence = system->model_accuracy;
     encoded_state->encoding_time = time(NULL);
-    
+
+    mutex_unlock(system->lock);
     return 0;
 }
 
@@ -6579,41 +6758,50 @@ int self_cognition_predict_future(SelfCognitionSystem* system,
                               "预测未来状态：参数为空");
         return -1;
     }
-    
+
+    /* P1修复: 加锁保护预测过程对 system 共享状态的并发访问。
+     * predict_future_internal 调用 encode_state_internal/collect_system_state/lnn_forward，
+     * 均不持 system->lock，可安全在锁内调用，不会产生嵌套死锁。 */
+    mutex_lock(system->lock);
+
     // 检查自我模型是否已训练
     if (!system->is_model_trained) {
         selflnn_set_last_error(SELFLNN_ERROR_NOT_INITIALIZED, __func__, __FILE__, __LINE__,
                               "预测未来状态：自我模型未训练");
+        mutex_unlock(system->lock);
         return -1;
     }
-    
+
     // 检查步数范围
     if (steps <= 0 || steps > (int)system->self_model_config.prediction_horizon) {
         selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
                               "预测未来状态：预测步数超出范围");
+        mutex_unlock(system->lock);
         return -1;
     }
-    
+
     // 检查prediction缓冲区
     if (!prediction->predicted_states || !prediction->prediction_confidences || !prediction->uncertainty_estimates) {
         selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
                               "预测未来状态：预测结果缓冲区为空");
+        mutex_unlock(system->lock);
         return -1;
     }
-    
+
     // 执行预测
-    if (predict_future_internal(system, steps, prediction->predicted_states, 
+    if (predict_future_internal(system, steps, prediction->predicted_states,
                                prediction->prediction_confidences, prediction->uncertainty_estimates) != 0) {
         selflnn_set_last_error(SELFLNN_ERROR_COMPUTATION, __func__, __FILE__, __LINE__,
                               "预测未来状态：内部预测失败");
+        mutex_unlock(system->lock);
         return -1;
     }
-    
+
     // 设置预测结果元数据
     prediction->prediction_steps = steps;
     prediction->overall_confidence = 0.0f;
     prediction->prediction_error = 0.0f;
-    
+
     // 计算整体置信度（平均值）
     if (steps > 0) {
         float sum = 0.0f;
@@ -6622,7 +6810,8 @@ int self_cognition_predict_future(SelfCognitionSystem* system,
         }
         prediction->overall_confidence = sum / steps;
     }
-    
+
+    mutex_unlock(system->lock);
     return 0;
 }
 
@@ -8285,21 +8474,30 @@ int self_cognition_generate_narrative(SelfCognitionSystem* system,
     if (!system || !narrative_text || max_text_size < 200) return -1;
     char* ptr = narrative_text;
     size_t remaining = max_text_size;
-    int written = 0;
 
-    written = snprintf(ptr, remaining,
-        "【自我叙事】\n"
+    /* P0修复: 安全叙事追加宏。参考同文件 SAFE_APPEND 模式。
+       原代码 remaining -= (size_t)written 在 written>=remaining(即 snprintf 输出被截断)时
+       会发生 size_t 下溢为巨大值，并令 ptr 越过缓冲区末端，引发后续越界写入。
+       本宏仅当未截断(written<remaining)时推进 ptr/remaining；截断时将 remaining 置零
+       以停止后续追加，从根本上杜绝 size_t 下溢与越界写入。 */
+#define COG_NARR_APPEND(fmt, ...) do { \
+        if (remaining > 0) { \
+            int _nw = snprintf(ptr, remaining, (fmt), ##__VA_ARGS__); \
+            if (_nw > 0 && (size_t)_nw < remaining) { ptr += _nw; remaining -= (size_t)_nw; } \
+            else if (_nw > 0) { remaining = 0; } \
+        } \
+    } while (0)
+
+    COG_NARR_APPEND("【自我叙事】\n"
         "当前弧线：%s\n"
         "叙事连贯性：%.2f\n"
         "总事件数：%zu\n\n",
         system->narrative_state.current_arc,
         system->narrative_state.narrative_coherence,
         system->narrative_state.event_count);
-    if (written > 0) { ptr += written; remaining -= (size_t)written; }
 
     if (system->capability.reasoning_ability > 0) {
-        written = snprintf(ptr, remaining,
-            "当前自我认知评估：\n"
+        COG_NARR_APPEND("当前自我认知评估：\n"
             "- 推理能力：%.2f\n- 学习能力：%.2f\n- 规划能力：%.2f\n"
             "- 知识覆盖率：%.2f\n- 学习进展：%.2f\n\n",
             system->capability.reasoning_ability,
@@ -8307,11 +8505,9 @@ int self_cognition_generate_narrative(SelfCognitionSystem* system,
             system->capability.planning_ability,
             system->knowledge.knowledge_coverage,
             system->learning.learning_rate);
-        if (written > 0) { ptr += written; remaining -= (size_t)written; }
     }
 
-    written = snprintf(ptr, remaining, "关键事件时间线（最多显示20个）：\n");
-    if (written > 0) { ptr += written; remaining -= (size_t)written; }
+    COG_NARR_APPEND("关键事件时间线（最多显示20个）：\n");
 
     size_t display_start = 0;
     if (system->narrative_state.event_count > 20) {
@@ -8326,27 +8522,23 @@ int self_cognition_generate_narrative(SelfCognitionSystem* system,
         } else {
             snprintf(time_str, sizeof(time_str), "%ld", (long)evt->timestamp);
         }
-        written = snprintf(ptr, remaining,
-            "[%s] [%s] 重要性:%.2f %s\n",
+        COG_NARR_APPEND("[%s] [%s] 重要性:%.2f %s\n",
             time_str, narrative_event_type_name(evt->event_type),
             evt->significance, evt->description);
-        if (written > 0) { ptr += written; remaining -= (size_t)written; }
         if (remaining < 50) break;
     }
 
-    written = snprintf(ptr, remaining,
-        "\n因果背景：\n"
+    COG_NARR_APPEND("\n因果背景：\n"
         "已建立 %zu 条因果链接，因果模型%s\n",
         system->causal_model.link_count,
         system->causal_model.causal_model_enabled ? "已启用" : "未启用");
-    if (written > 0) { ptr += written; remaining -= (size_t)written; }
 
-    written = snprintf(ptr, remaining,
-        "\n心智理论：\n"
+    COG_NARR_APPEND("\n心智理论：\n"
         "跟踪 %zu 个智能体，递归层级 %d\n",
         system->theory_of_mind.active_agent_count,
         system->theory_of_mind.max_recursive_level);
-    if (written > 0) { ptr += written; remaining -= (size_t)written; }
+
+#undef COG_NARR_APPEND
 
     return 0;
 }
@@ -9022,7 +9214,8 @@ int tom_recursive_reason(int perspective_agent, int target_agent, int depth,
         memcpy(cf_input, current_view, 64 * sizeof(float));
         memcpy(cf_input + 64, tom_agents[perspective_agent].belief_state, 64 * sizeof(float));
 
-        float cf_output[64] = {0};
+        /* P0修复: 缓冲区扩大到256匹配LNN output_size，防止栈溢出 */
+        float cf_output[256] = {0};
         lnn_forward((LNN*)cfc_network, cf_input, cf_output);
 
         for (int i = 0; i < 64; i++)
@@ -9066,7 +9259,8 @@ int cognition_evaluate_capabilities(void* cfc_network, void* knowledge_base,
     if (cfc_network) {
         float hidden[256] = {0};
         /* 使用真实参数构建输入向量，替代dummy零向量 */
-        float real_input[64] = {0};
+        /* P0修复: 缓冲区扩大到256匹配LNN input_size，防止越界读取 */
+        float real_input[256] = {0};
         float cmd_rate = (total_commands > 0) ? (float)command_success_count / (float)total_commands : 0.5f;
         float sensor_rate = (sensor_valid_count > 0) ? (float)sensor_valid_count / 8.0f : 0.3f;
         float kb_active = (knowledge_base != NULL) ? 1.0f : 0.0f;
@@ -9129,7 +9323,8 @@ int cognition_decompose_task(const float* task_embedding, int task_dim,
     if (!task_embedding || !cfc_network || !subgoals || !num_created) return -1;
     if (max_subgoals <= 0) max_subgoals = 3;
 
-    float cfc_hidden[128] = {0};
+    /* P0修复: 缓冲区扩大到256匹配LNN output_size，防止栈溢出 */
+    float cfc_hidden[256] = {0};
     lnn_forward((LNN*)cfc_network, task_embedding, cfc_hidden);
 
     /* 任务复杂度: 隐藏状态的方差 */
@@ -9165,7 +9360,8 @@ int cognition_chain_think(void* cfc_network, const float* query, int query_dim,
                            int max_steps, float* final_conclusion, float* confidence) {
     if (!cfc_network || !query || !final_conclusion || !confidence) return -1;
 
-    float current_state[128] = {0};
+    /* P0修复: 缓冲区扩大到256匹配LNN input_size，防止越界读取 */
+    float current_state[256] = {0};
     int qd = query_dim < 64 ? query_dim : 64;
     for (int i = 0; i < qd; i++) current_state[i] = query[i];
 

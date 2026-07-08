@@ -855,7 +855,10 @@ static void npu_common_gpu_kernel_free(GpuKernel* kernel) {
     if (kernel->kernel_source) safe_free((void**)&kernel->kernel_source);
     if (kernel->arg_values)    safe_free((void**)&kernel->arg_values);
     if (kernel->arg_sizes)     safe_free((void**)&kernel->arg_sizes);
-    if (kernel->user_data)     safe_free((void**)&kernel->user_data);
+    /* P-AUDIT修复(G-8b): user_data可能不是独立分配的堆指针(如CPU后端设为枚举值),
+     * gpu.c明确注释"禁止safe_free,防止double-free堆损坏"。仅当user_data非空且
+     * 看起来是堆指针时才释放。为安全起见,这里不做释放,由各后端自己管理user_data生命周期。 */
+    /* if (kernel->user_data) safe_free((void**)&kernel->user_data); — 已移除 */
     memset(kernel, 0, sizeof(GpuKernel));
     safe_free((void**)&kernel);
 }
@@ -933,7 +936,7 @@ typedef struct {
 
 int npu_common_kernel_create(void** handle, const char* name) {
     if (!handle) return -1;
-    NpuCommonKernel* kernel = (NpuCommonKernel*)calloc(1, sizeof(NpuCommonKernel));
+    NpuCommonKernel* kernel = (NpuCommonKernel*)safe_calloc(1, sizeof(NpuCommonKernel));
     if (!kernel) {
         log_error("[NPU公共] 内核创建失败: 内存不足");
         *handle = NULL;
@@ -962,13 +965,13 @@ int npu_common_kernel_set_arg(void* handle, int index, size_t size, const void* 
         return -1;
     }
     if (size > 0 && value) {
-        void* buf = realloc(kernel->arg_buffer[index], size);
+        void* buf = safe_realloc(kernel->arg_buffer[index], size);
         if (!buf) return -1;
         kernel->arg_buffer[index] = buf;
         memcpy(buf, value, size);
         kernel->arg_sizes[index] = size;
     } else {
-        free(kernel->arg_buffer[index]);
+        safe_free((void**)&kernel->arg_buffer[index]);
         kernel->arg_buffer[index] = NULL;
         kernel->arg_sizes[index] = 0;
     }
@@ -980,10 +983,10 @@ int npu_common_kernel_free(void* handle) {
     if (!handle) return 0;
     NpuCommonKernel* kernel = (NpuCommonKernel*)handle;
     for (int i = 0; i < 32; i++) {
-        free(kernel->arg_buffer[i]);
+        safe_free((void**)&kernel->arg_buffer[i]);
         kernel->arg_buffer[i] = NULL;
     }
-    free(kernel);
+    safe_free((void**)&kernel);
     return 0;
 }
 
@@ -1059,7 +1062,7 @@ static int npu_common_device_reset_fallback(GpuContext* ctx) {
     ctx->free_memory = 0;
     /* 如果后端私有数据存在（例如部分初始化场景），释放它 */
     if (ctx->backend_data) {
-        free(ctx->backend_data);
+        safe_free((void**)&ctx->backend_data);
         ctx->backend_data = NULL;
     }
     return 0;

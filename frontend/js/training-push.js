@@ -316,26 +316,10 @@ class TrainingPushManager {
             this._appendLearningRateData(data.learning_rate);
         }
 
+        /* FE-005修复: training-push.js 职责为数据缓存（trainingState + dataBuffers），
+         * visualizationManager 更新由 main.js 的 connectVisualizationWebSocket() 统一负责，
+         * 移除以下重复的 visualizationManager 调用以避免事件冲突和双重更新 */
         this._updateTrainingUI();
-
-        if (window.visualizationManager) {
-            if (data.loss !== undefined) {
-                window.visualizationManager.updateLossData(data.loss, data.val_loss);
-            }
-            if (data.accuracy !== undefined) {
-                window.visualizationManager.updateAccuracyData(data.accuracy, data.val_accuracy);
-            }
-            if (data.learning_rate !== undefined) {
-                window.visualizationManager.updateLearningRateData(data.learning_rate);
-            }
-            if (data.gradient_mean !== undefined) {
-                window.visualizationManager.updateGradientData(
-                    data.gradient_mean || 0,
-                    data.gradient_max || 0,
-                    data.gradient_norm || 0
-                );
-            }
-        }
     }
 
     _handleSystemStatus(data) {

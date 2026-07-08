@@ -3664,7 +3664,8 @@ InferenceResult* knowledge_query(KnowledgeBase* kb, const char* query_text,
                         token_count++;
                     }
                 }
-                token = strtok(NULL, " \t\n\r.,;:!?，。；：！？、");
+                /* P0修复: 使用线程安全的strtok_s替代strtok（与上方第3649行保持一致） */
+                token = strtok_s(NULL, " \t\n\r.,;:!?，。；：！？、", &saveptr);
             }
             
             if (token_count > 0) {
@@ -4080,7 +4081,7 @@ EvolutionResult* knowledge_self_evolve(KnowledgeBase* kb, const void* config, co
                     } else {
                         /* FIX-RACE4修复: TLS替代文件级static PRNG状态消除竞态 */
                         /* DEEP-005修复: MSVC不支持函数内__declspec(thread)，改用calloc */
-                        XorshiftPrng* micro_prng = (XorshiftPrng*)calloc(1, sizeof(XorshiftPrng));
+                        XorshiftPrng* micro_prng = (XorshiftPrng*)safe_calloc(1, sizeof(XorshiftPrng));
                         if (!micro_prng) { entry->weight *= 0.95f; continue; }
                         xorshift_prng_seed_secure(micro_prng);
                         if (xorshift_prng_next_float(micro_prng) < 0.5f) {
@@ -4090,7 +4091,7 @@ EvolutionResult* knowledge_self_evolve(KnowledgeBase* kb, const void* config, co
                             entry->weight -= mutation_strength * 0.3f; // 更小幅减少
                             if (entry->weight < 0.3f) entry->weight = 0.3f;
                         }
-                        free(micro_prng);
+                        safe_free((void**)&micro_prng);
                     }
                     
                     // 置信度提升：基于知识年龄和使用情况

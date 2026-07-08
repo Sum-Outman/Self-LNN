@@ -25,6 +25,11 @@
 #include <float.h>
 #include <time.h>
 
+/* P0修复: 线程安全strtok宏定义，Windows使用strtok_s，POSIX使用strtok_r */
+#ifdef _WIN32
+#define strtok_r strtok_s
+#endif
+
 /* 内部常量定义 */
 #define AUDIO_SEMANTIC_MAX_FEATURES 1000
 #define AUDIO_SEMANTIC_MAX_TEXT_LENGTH 4096
@@ -1558,7 +1563,9 @@ int audio_semantic_process_text(AudioSemanticProcessor* processor,
             }
             
             // 完整分词算法：支持中文和英文
-            char* token = strtok(text_copy, " .,!?;:，。！？；：");
+            /* P0修复: 使用线程安全的strtok_r替代strtok */
+            char* strtok_saveptr = NULL;
+            char* token = strtok_r(text_copy, " .,!?;:，。！？；：", &strtok_saveptr);
             while (token) {
                 total_words++;
                 sentence_length += (int)strlen(token);
@@ -1578,7 +1585,7 @@ int audio_semantic_process_text(AudioSemanticProcessor* processor,
                     }
                 }
                 
-                token = strtok(NULL, " .,!?;:，。！？；：");
+                token = strtok_r(NULL, " .,!?;:，。！？；：", &strtok_saveptr);
             }
             
             audio_semantic_free(text_copy);
@@ -2044,7 +2051,9 @@ int audio_semantic_process_text(AudioSemanticProcessor* processor,
                 
                 // 完整实现：中文文本分词（支持中英文标点）
                 // 使用扩展标点集合进行分词，包含中英文标点和空白字符
-                char* token = strtok(text_copy, " ,.!?;:\n\t，。！？；：、．・・");
+                /* P0修复: 使用线程安全的strtok_r替代strtok */
+                char* strtok_saveptr2 = NULL;
+                char* token = strtok_r(text_copy, " ,.!?;:\n\t，。！？；：、．・・", &strtok_saveptr2);
                 while (token && total_words < MAX_WORDS) {
                     // 检查是否为停用词
                     int is_stop_word = 0;
@@ -2078,7 +2087,7 @@ int audio_semantic_process_text(AudioSemanticProcessor* processor,
                     }
                     
                     total_words++;
-                    token = strtok(NULL, " ,.!?;:\n\t");
+                    token = strtok_r(NULL, " ,.!?;:\n\t", &strtok_saveptr2);
                 }
                 
                 // 完整TF-IDF计算：词频(TF) × 逆文档频率(IDF) × 词长因子 × 位置因子
@@ -2475,20 +2484,31 @@ int audio_semantic_load_model(AudioSemanticProcessor* processor,
                 fclose(fp);
                 return -1;
             }
-            
+            /* P1修复: 验证维度有效性，防止恶意模型文件导致后续计算异常 */
+            if (input_dim <= 0 || hidden_dim <= 0 || output_dim <= 0) {
+                fclose(fp);
+                return -1;
+            }
+
             // 为模型分配内存
             EmotionModel* model = &processor->emotion_model;
             model->input_dim = input_dim;
             model->hidden_dim = hidden_dim;
             model->output_dim = output_dim;
-            
+
             // 读取权重矩阵大小
             int weights_size;
             if (fread(&weights_size, sizeof(int), 1, fp) != 1) {
                 fclose(fp);
                 return -1;
             }
-            
+            /* P1修复: 验证权重矩阵维度一致性，防止恶意模型文件导致缓冲区溢出 */
+            if (weights_size <= 0 ||
+                (long long)weights_size != (long long)input_dim * (long long)hidden_dim) {
+                fclose(fp);
+                return -1;
+            }
+
             // 分配并读取权重矩阵
             model->weights_input_hidden = (float*)safe_malloc(weights_size * sizeof(float));
             if (!model->weights_input_hidden) {
@@ -2525,7 +2545,15 @@ int audio_semantic_load_model(AudioSemanticProcessor* processor,
                 fclose(fp);
                 return -1;
             }
-            
+            /* P1修复: 验证输出层权重维度一致性，防止恶意模型文件导致缓冲区溢出 */
+            if (output_weights_size <= 0 ||
+                (long long)output_weights_size != (long long)hidden_dim * (long long)output_dim) {
+                safe_free((void**)&model->weights_input_hidden);
+                safe_free((void**)&model->bias_hidden);
+                fclose(fp);
+                return -1;
+            }
+
             // 分配并读取输出层权重
             model->weights_hidden_output = (float*)safe_malloc(output_weights_size * sizeof(float));
             if (!model->weights_hidden_output) {
@@ -2587,20 +2615,31 @@ int audio_semantic_load_model(AudioSemanticProcessor* processor,
                 fclose(fp);
                 return -1;
             }
-            
+            /* P1修复: 验证维度有效性，防止恶意模型文件导致后续计算异常 */
+            if (input_dim <= 0 || hidden_dim <= 0 || output_dim <= 0) {
+                fclose(fp);
+                return -1;
+            }
+
             // 为模型分配内存
             IntentModel* model = &processor->intent_model;
             model->input_dim = input_dim;
             model->hidden_dim = hidden_dim;
             model->output_dim = output_dim;
-            
+
             // 读取权重矩阵大小
             int weights_size;
             if (fread(&weights_size, sizeof(int), 1, fp) != 1) {
                 fclose(fp);
                 return -1;
             }
-            
+            /* P1修复: 验证权重矩阵维度一致性，防止恶意模型文件导致缓冲区溢出 */
+            if (weights_size <= 0 ||
+                (long long)weights_size != (long long)input_dim * (long long)hidden_dim) {
+                fclose(fp);
+                return -1;
+            }
+
             // 分配并读取权重矩阵
             model->weights_input_hidden = (float*)safe_malloc(weights_size * sizeof(float));
             if (!model->weights_input_hidden) {
@@ -2637,7 +2676,15 @@ int audio_semantic_load_model(AudioSemanticProcessor* processor,
                 fclose(fp);
                 return -1;
             }
-            
+            /* P1修复: 验证输出层权重维度一致性，防止恶意模型文件导致缓冲区溢出 */
+            if (output_weights_size <= 0 ||
+                (long long)output_weights_size != (long long)hidden_dim * (long long)output_dim) {
+                safe_free((void**)&model->weights_input_hidden);
+                safe_free((void**)&model->bias_hidden);
+                fclose(fp);
+                return -1;
+            }
+
             // 分配并读取输出层权重
             model->weights_hidden_output = (float*)safe_malloc(output_weights_size * sizeof(float));
             if (!model->weights_hidden_output) {
@@ -2698,18 +2745,29 @@ int audio_semantic_load_model(AudioSemanticProcessor* processor,
                 fclose(fp);
                 return -1;
             }
-            
+            /* P1修复: 验证词汇表与嵌入维度有效性 */
+            if (vocab_size <= 0 || embedding_size <= 0) {
+                fclose(fp);
+                return -1;
+            }
+
             // 为模型分配内存
             KeywordModel* model = &processor->keyword_model;
             model->vocab_size = vocab_size;
             model->embedding_size = embedding_size;
-            
+
             // 读取嵌入矩阵大小
             if (fread(&embedding_size, sizeof(int), 1, fp) != 1) {
                 fclose(fp);
                 return -1;
             }
-            
+            /* P1修复: 验证嵌入矩阵维度一致性，防止恶意模型文件导致缓冲区溢出 */
+            if (embedding_size <= 0 ||
+                (long long)embedding_size != (long long)vocab_size * (long long)model->embedding_size) {
+                fclose(fp);
+                return -1;
+            }
+
             // 分配并读取嵌入矩阵
             model->embeddings = (float*)safe_malloc(embedding_size * sizeof(float));
             if (!model->embeddings) {
@@ -4560,13 +4618,17 @@ static int audio_semantic_analyze_emotion_simplified(AudioSemanticProcessor* pro
     emotion_out->intensity = (intensity_base + intensity_variance) / 2.0f;
     
     // 计算所有情感的概率（softmax风格）
+    /* P0修复: softmax数值稳定化，先减去最大值防止expf溢出，复用已有max_score */
+    /* max_score已在上方argmax循环中求得，直接用于数值稳定化 */
     float total_score = 0.0f;
+    float exp_scores[10];
     for (int i = 0; i < 10; i++) {
-        total_score += expf(scores[i]);
+        exp_scores[i] = expf(scores[i] - max_score);
+        total_score += exp_scores[i];
     }
-    
+    if (total_score < 1e-6f) total_score = 1.0f;  /* 防止除零 */
     for (int i = 0; i < 10; i++) {
-        emotion_out->probabilities[i] = expf(scores[i]) / total_score;
+        emotion_out->probabilities[i] = exp_scores[i] / total_score;
     }
     
     // 计算情感维度（效价、唤醒度、支配度）
@@ -4993,13 +5055,17 @@ static int audio_semantic_recognize_intent_simplified(AudioSemanticProcessor* pr
     }
     
     // 计算所有意图的概率（softmax风格）
+    /* P0修复: softmax数值稳定化，先减去最大值防止expf溢出，复用已有max_score */
+    /* max_score已在上方argmax循环中求得，直接用于数值稳定化 */
     float total_score = 0.0f;
+    float exp_scores[13];
     for (int i = 0; i < 13; i++) {
-        total_score += expf(scores[i]);
+        exp_scores[i] = expf(scores[i] - max_score);
+        total_score += exp_scores[i];
     }
-    
+    if (total_score < 1e-6f) total_score = 1.0f;  /* 防止除零 */
     for (int i = 0; i < 13; i++) {
-        intent_out->probabilities[i] = expf(scores[i]) / total_score;
+        intent_out->probabilities[i] = exp_scores[i] / total_score;
     }
     
     // 清理
@@ -5065,7 +5131,9 @@ static int audio_semantic_extract_keywords(AudioSemanticProcessor* processor,
     int token_count = 0;
     int frequencies[MAX_TOKENS] = {0};
     
-    char* token = strtok(text_copy, " ,.!?;:\n\t\r");
+    /* P0修复: 使用线程安全的strtok_r替代strtok */
+    char* strtok_saveptr3 = NULL;
+    char* token = strtok_r(text_copy, " ,.!?;:\n\t\r", &strtok_saveptr3);
     while (token && token_count < MAX_TOKENS) {
         /* 检查token长度（至少2个字符） */
         if (strlen(token) > 1) {
@@ -5108,7 +5176,7 @@ static int audio_semantic_extract_keywords(AudioSemanticProcessor* processor,
             }
         }
         
-        token = strtok(NULL, " ,.!?;:\n\t\r");
+        token = strtok_r(NULL, " ,.!?;:\n\t\r", &strtok_saveptr3);
     }
     
     audio_semantic_free(text_copy);
@@ -5482,7 +5550,9 @@ static int audio_semantic_link_concepts(AudioSemanticProcessor* processor,
         if (text_copy) {
             // 分词：使用常见分隔符
             const char* delimiters = " ,.!?;:\n\t，。！？；：、．・・";
-            char* token = strtok(text_copy, delimiters);
+            /* P0修复: 使用线程安全的strtok_r替代strtok */
+            char* strtok_saveptr4 = NULL;
+            char* token = strtok_r(text_copy, delimiters, &strtok_saveptr4);
             int token_count = 0;
             
             while (token && concept_count < max_concepts && token_count < 20) { // 限制token数量
@@ -5505,7 +5575,7 @@ static int audio_semantic_link_concepts(AudioSemanticProcessor* processor,
                     }
                 }
                 
-                token = strtok(NULL, delimiters);
+                token = strtok_r(NULL, delimiters, &strtok_saveptr4);
                 token_count++;
             }
             
@@ -6159,7 +6229,9 @@ static float audio_semantic_calculate_contextual_fit(const AudioSemanticResult* 
         int curr_freq[MAX_WORDS];
         int curr_word_count = 0;
         
-        char* curr_word = strtok(curr_copy, " .,;!?。，；！？、：""''（）()【】《》");
+        /* P0修复: 使用线程安全的strtok_r替代strtok */
+        char* curr_saveptr = NULL;
+        char* curr_word = strtok_r(curr_copy, " .,;!?。，；！？、：""''（）()【】《》", &curr_saveptr);
         while (curr_word && curr_word_count < MAX_WORDS) {
             // 检查是否已存在
             int found = 0;
@@ -6175,7 +6247,7 @@ static float audio_semantic_calculate_contextual_fit(const AudioSemanticResult* 
                 curr_freq[curr_word_count] = 1;
                 curr_word_count++;
             }
-            curr_word = strtok(NULL, " .,;!?。，；！？、：""''（）()【】《》");
+            curr_word = strtok_r(NULL, " .,;!?。，；！？、：""''（）()【】《》", &curr_saveptr);
         }
         
         // 提取前一个文本的词频向量
@@ -6183,7 +6255,9 @@ static float audio_semantic_calculate_contextual_fit(const AudioSemanticResult* 
         int prev_freq[MAX_WORDS];
         int prev_word_count = 0;
         
-        char* prev_word = strtok(prev_copy, " .,;!?。，；！？、：""''（）()【】《》");
+        /* P0修复: 使用线程安全的strtok_r替代strtok */
+        char* prev_saveptr = NULL;
+        char* prev_word = strtok_r(prev_copy, " .,;!?。，；！？、：""''（）()【】《》", &prev_saveptr);
         while (prev_word && prev_word_count < MAX_WORDS) {
             int found = 0;
             for (int wi = 0; wi < prev_word_count; wi++) {
@@ -6198,7 +6272,7 @@ static float audio_semantic_calculate_contextual_fit(const AudioSemanticResult* 
                 prev_freq[prev_word_count] = 1;
                 prev_word_count++;
             }
-            prev_word = strtok(NULL, " .,;!?。，；！？、：""''（）()【】《》");
+            prev_word = strtok_r(NULL, " .,;!?。，；！？、：""''（）()【】《》", &prev_saveptr);
         }
         
         // 计算余弦相似度：sim = Σ(Ai*Bi) / sqrt(ΣAi² * ΣBi²)

@@ -129,7 +129,9 @@ body {
     padding: 0.5rem 1.5rem;
     margin-top: 0;
     background: rgba(0, 0, 0, 0.85);
+    /* FE-012修复: backdrop-filter缺乏Firefox旧版兼容，使用更深的背景色作为fallback */
     backdrop-filter: blur(12px);
+    -moz-backdrop-filter: blur(12px); /* Firefox 103+ */
     border-bottom: 1px solid var(--theme-border);
     position: sticky;
     top: 0;
@@ -158,6 +160,8 @@ body {
 .logo h1 {
     font-size: 1.2rem;
     font-weight: 700;
+    /* FE-013修复: 为-webkit-text-fill-color添加标准fallback */
+    color: transparent; /* 标准fallback，配合background-clip显示渐变文字 */
     background: linear-gradient(90deg, #00ff88, #00cc6a);
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
@@ -214,7 +218,9 @@ body {
     left: 0;
     min-width: 180px;
     background: rgba(10, 10, 20, 0.97);
+    /* FE-012修复: Firefox旧版兼容 */
     backdrop-filter: blur(20px);
+    -moz-backdrop-filter: blur(20px);
     border: 1px solid rgba(0, 255, 136, 0.15);
     border-radius: 8px;
     padding: 6px 0;
@@ -232,7 +238,8 @@ body {
     display: block;
 }
 
-@media (min-width: 769px) {
+/* FE-021修复: 统一响应式断点为768px，与移动端断点保持一致 */
+@media (min-width: 768px) {
     .nav-dropdown:hover .dropdown-menu {
         display: block;
     }
@@ -892,6 +899,7 @@ body {
 .footer {
     background: rgba(0, 0, 0, 0.7);
     backdrop-filter: blur(10px);
+    -moz-backdrop-filter: blur(10px); /* FE-012: Firefox兼容 */
     border-top: 1px solid rgba(255, 255, 255, 0.1);
     padding: 1rem 2rem;
 }
@@ -3474,6 +3482,7 @@ body {
     font-family: 'Microsoft YaHei', 'PingFang SC', 'Noto Sans SC', sans-serif;
     font-size: 14px;
     backdrop-filter: blur(10px);
+    -moz-backdrop-filter: blur(10px); /* FE-012: Firefox兼容 */
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
     animation: toastSlideIn 0.3s ease;
     min-width: 280px;
@@ -5748,6 +5757,7 @@ body {
     animation: slideIn 0.3s ease;
     max-width: 400px;
     backdrop-filter: blur(8px);
+    -moz-backdrop-filter: blur(8px); /* FE-012: Firefox兼容 */
 }
 
 .notification-success {
@@ -7465,7 +7475,8 @@ body {
     .nav.visible a { display: block; padding: 0.7rem 1rem; border-radius: 6px; background: rgba(255,255,255,0.03); }
 }
 
-@media screen and (max-width: 480px) {
+/* FE-021修复: 统一使用576px作为最小移动端断点 */
+@media screen and (max-width: 576px) {
     header h1, .section-header h1 { font-size: 1.2rem; }
     .btn { padding: 0.4rem 0.8rem; font-size: 0.75rem; }
     .form-input { padding: 0.4rem 0.6rem; font-size: 0.8rem; }
@@ -7550,6 +7561,7 @@ body {
     animation: notifySlideIn 0.3s ease;
     transition: opacity 0.3s, transform 0.3s;
     backdrop-filter: blur(12px);
+    -moz-backdrop-filter: blur(12px); /* FE-012: Firefox兼容 */
 }
 .selflnn-notify-success { border-left: 3px solid #00e676; }
 .selflnn-notify-error { border-left: 3px solid #ff5252; }
@@ -7588,6 +7600,7 @@ body {
     margin: 20px;
     box-shadow: 0 8px 40px rgba(0, 120, 255, 0.2);
     backdrop-filter: blur(16px);
+    -moz-backdrop-filter: blur(16px); /* FE-012: Firefox兼容 */
 }
 .confirm-msg {
     color: #d0d8e8;
@@ -7933,4 +7946,76 @@ body {
 @keyframes placeholderSpin {
     from { transform: rotate(0deg); }
     to   { transform: rotate(360deg); }
+}
+
+/* ================================================================
+ * FE-024修复: 添加打印样式，隐藏导航、背景等非内容元素
+ * ================================================================ */
+@media print {
+    /* 隐藏导航和非内容元素 */
+    .header, .nav, .footer, .connection-banner,
+    .notification-area, .loading-overlay, .btn,
+    .hamburger-menu, .sidebar, .action-buttons,
+    .metric-fill, .progress-fill, .type-fill {
+        display: none !important;
+    }
+    /* 移除背景色和阴影，节省墨水 */
+    body {
+        background: #fff !important;
+        color: #000 !important;
+        font-size: 12pt;
+    }
+    .container {
+        display: block;
+        max-width: 100%;
+    }
+    /* 确保内容区域可见 */
+    .section.active {
+        display: block !important;
+        page-break-inside: avoid;
+    }
+    .main-content {
+        padding: 0;
+        margin: 0;
+    }
+    /* 表格和卡片在打印时保持清晰 */
+    table, .card, .panel {
+        border: 1px solid #ccc;
+        page-break-inside: avoid;
+    }
+    /* 链接显示URL */
+    a[href]:after {
+        content: " (" attr(href) ")";
+        font-size: 0.8em;
+    }
+}
+
+/* ================================================================
+ * FE-025修复: CSS Grid的IE11 Flexbox fallback
+ * IE11不支持CSS Grid，使用@supports检测并提供Flexbox回退
+ * ================================================================ */
+/* 对于使用display:grid的容器，IE11自动忽略grid属性，降级为block */
+/* 以下为关键grid布局提供flexbox fallback */
+@supports not (display: grid) {
+    /* 仪表盘卡片网格 → flexbox fallback */
+    .model-stats, .reasoning-stats, .learning-metrics,
+    .training-details, .cognition-grid, .sensor-grid,
+    .device-cards-grid, .robot-status-grid, .monitor-grid,
+    .safety-grid, .tom-agent-container {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+    }
+    .model-stats > *, .reasoning-stats > *,
+    .learning-metrics > *, .cognition-grid > *,
+    .sensor-grid > *, .device-cards-grid > *,
+    .robot-status-grid > *, .monitor-grid > *,
+    .safety-grid > *, .tom-agent-container > * {
+        flex: 1 1 280px;
+        min-width: 200px;
+    }
+    /* 训练详情布局 */
+    .training-details > * {
+        flex: 1 1 100%;
+    }
 }

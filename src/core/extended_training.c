@@ -1174,11 +1174,11 @@ SELFLNN_API int lnn_self_supervised_pretrain(LNN* network,
     int total_count = 0;
 
 /* 动态分配替代硬编码512维上限 */
-    float* anchor_emb = (float*)malloc((size_t)hidden_size * sizeof(float));
-    float* pos_emb = (float*)malloc((size_t)hidden_size * sizeof(float));
+    float* anchor_emb = (float*)safe_malloc((size_t)hidden_size * sizeof(float));
+    float* pos_emb = (float*)safe_malloc((size_t)hidden_size * sizeof(float));
     if (!anchor_emb || !pos_emb) {
-        if (anchor_emb) free(anchor_emb);
-        if (pos_emb) free(pos_emb);
+        if (anchor_emb) safe_free((void**)&anchor_emb);
+        if (pos_emb) safe_free((void**)&pos_emb);
         if (opt) optimizer_free(opt);
         ET_LNN_UNLOCK(network);
         return -3;
@@ -1290,8 +1290,8 @@ SELFLNN_API int lnn_self_supervised_pretrain(LNN* network,
     }
 
     if (opt) optimizer_free(opt);
-    free(anchor_emb);
-    free(pos_emb);
+    safe_free((void**)&anchor_emb);
+    safe_free((void**)&pos_emb);
     ET_LNN_UNLOCK(network);
     return 0;
 }
@@ -1336,15 +1336,15 @@ SELFLNN_API int lnn_knowledge_distill(LNN* teacher, LNN* student,
 /* 动态分配替代硬编码256维上限 */
             size_t out_dim = teacher->config.output_size;
             if (out_dim == 0) out_dim = 128;
-            float* t_output = (float*)malloc((size_t)out_dim * sizeof(float));
-            float* s_output = (float*)malloc((size_t)out_dim * sizeof(float));
-            float* t_prob = (float*)malloc((size_t)out_dim * sizeof(float));
-            float* s_prob = (float*)malloc((size_t)out_dim * sizeof(float));
+            float* t_output = (float*)safe_malloc((size_t)out_dim * sizeof(float));
+            float* s_output = (float*)safe_malloc((size_t)out_dim * sizeof(float));
+            float* t_prob = (float*)safe_malloc((size_t)out_dim * sizeof(float));
+            float* s_prob = (float*)safe_malloc((size_t)out_dim * sizeof(float));
             if (!t_output || !s_output || !t_prob || !s_prob) {
-                if (t_output) free(t_output);
-                if (s_output) free(s_output);
-                if (t_prob) free(t_prob);
-                if (s_prob) free(s_prob);
+                if (t_output) safe_free((void**)&t_output);
+                if (s_output) safe_free((void**)&s_output);
+                if (t_prob) safe_free((void**)&t_prob);
+                if (s_prob) safe_free((void**)&s_prob);
                 continue;
             }
             memset(t_output, 0, out_dim * sizeof(float));
@@ -1368,7 +1368,8 @@ SELFLNN_API int lnn_knowledge_distill(LNN* teacher, LNN* student,
             for (size_t d = 0; d < out_dim; d++) {
                 float tp = t_prob[d] / t_sum;
                 float sp = s_prob[d] / s_sum;
-                if (tp > 1e-10f && sp > 1e-10f) {
+                /* P2-08修复: 补充isfinite检查，防止NaN/Inf污染KL散度累加 */
+                if (tp > 1e-10f && sp > 1e-10f && isfinite(tp) && isfinite(sp)) {
                     kl_div += tp * logf(tp / sp);
                 }
             }
@@ -1387,10 +1388,10 @@ SELFLNN_API int lnn_knowledge_distill(LNN* teacher, LNN* student,
             _lnn_backward_internal(student, t_output, &loss_val);
 /* 获取反向传播后的梯度，传入优化器以正确累积动量/Adam状态 */
             float* grads = lnn_get_gradients(student);
-            free(t_output);
-            free(s_output);
-            free(t_prob);
-            free(s_prob);
+            safe_free((void**)&t_output);
+            safe_free((void**)&s_output);
+            safe_free((void**)&t_prob);
+            safe_free((void**)&s_prob);
         }
 
         if (count > 0) {

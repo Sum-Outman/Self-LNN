@@ -364,7 +364,12 @@ int cfc_embed_get_relation_embedding(const CfCEmbedState* state, int relation_id
 
 float cfc_embed_score_triple(CfCEmbedState* state, int head_id, int rel_id, int tail_id) {
     if (!state) return 1e10f;
-    if (head_id < 0 || rel_id < 0 || tail_id < 0) return 1e10f;
+    /* P2修复: 添加上界校验，防止head_id/tail_id/rel_id越界访问
+     * entity_embeddings/relation_embeddings数组导致内存越界 */
+    if (head_id < 0 || head_id >= state->entity_count ||
+        rel_id < 0 || rel_id >= state->relation_count ||
+        tail_id < 0 || tail_id >= state->entity_count)
+        return 1e10f;
 
     int dim = state->config.embedding_dim;
     CfCEmbedType type = state->config.embed_type;
@@ -768,13 +773,58 @@ CfCEmbedState* cfc_embed_load(const char* filepath) {
     CfCEmbedState* state = cfc_embed_create(&config);
     if (!state) { fclose(f); return NULL; }
 
-    fread(&state->entity_count, sizeof(int), 1, f);
-    fread(&state->relation_count, sizeof(int), 1, f);
-    fread(&state->triple_count, sizeof(int), 1, f);
-    fread(state->entity_embeddings, sizeof(float),
-          CFC_EMBED_MAX_ENTITIES * config.embedding_dim, f);
-    fread(state->relation_embeddings, sizeof(float),
-          CFC_EMBED_MAX_RELATIONS * config.embedding_dim, f);
+    /* P2修复: 检查每个fread返回值，文件截断时返回NULL而非使用垃圾数据。
+     * 若不检查，entity_count/relation_count/triple_count可能包含未初始化的垃圾值，
+     * 导致后续按这些计数访问数组时越界。 */
+    if (fread(&state->entity_count, sizeof(int), 1, f) != 1) {
+        cfc_embed_destroy(state);
+        fclose(f);
+        return NULL;
+    }
+    if (fread(&state->relation_count, sizeof(int), 1, f) != 1) {
+        cfc_embed_destroy(state);
+        fclose(f);
+        return NULL;
+    }
+    if (fread(&state->triple_count, sizeof(int), 1, f) != 1) {
+        cfc_embed_destroy(state);
+        fclose(f);
+        return NULL;
+    }
+
+    /* P0修复(修复2): 校验从文件读取的计数不超过已分配的容量。
+     * entity_count/relation_count/triple_count 用于索引 state->entities /
+     * state->relations / state->triples 数组，这些数组在 cfc_embed_create 中按
+     * entity_capacity(1024)/relation_capacity(256)/triple_capacity(4096) 分配。
+     * 若文件中被篡改为超大值(如 entity_count=5000)，后续遍历访问会越界导致堆溢出。
+     * 超过容量则视为损坏文件，释放资源并返回NULL。 */
+    if (state->entity_count < 0 || state->entity_count > state->entity_capacity ||
+        state->relation_count < 0 || state->relation_count > state->relation_capacity ||
+        state->triple_count < 0 || state->triple_count > state->triple_capacity) {
+        cfc_embed_destroy(state);
+        fclose(f);
+        return NULL;
+    }
+
+    /* P0修复(修复1): 使用 state->config.embedding_dim（已由 cfc_embed_create 限制为
+     * CFC_EMBED_MAX_DIM<=1024），而非原始 config.embedding_dim。
+     * entity_embeddings 缓冲区按 CFC_EMBED_MAX_ENTITIES * dim 分配，dim 最大1024，
+     * 总计约 262144*1024*4 ≈ 1GB。若文件中 config.embedding_dim=2048，fread 会读取
+     * 2GB 数据写入仅 1GB 的缓冲区造成堆溢出。此处使用已限制后的维度值确保不越界。 */
+    if (fread(state->entity_embeddings, sizeof(float),
+              CFC_EMBED_MAX_ENTITIES * state->config.embedding_dim, f)
+        != (size_t)(CFC_EMBED_MAX_ENTITIES * state->config.embedding_dim)) {
+        cfc_embed_destroy(state);
+        fclose(f);
+        return NULL;
+    }
+    if (fread(state->relation_embeddings, sizeof(float),
+              CFC_EMBED_MAX_RELATIONS * state->config.embedding_dim, f)
+        != (size_t)(CFC_EMBED_MAX_RELATIONS * state->config.embedding_dim)) {
+        cfc_embed_destroy(state);
+        fclose(f);
+        return NULL;
+    }
 
     fclose(f);
     return state;

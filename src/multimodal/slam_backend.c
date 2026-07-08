@@ -147,6 +147,15 @@ int slam_build_optimization_problem(SlamSystem* system, OptimizationProblem* pro
     int num_landmarks = 0;
     int num_observations = 0;
 
+    /* P0修复: 统计有效地标数量（descriptor非NULL的地标）。
+     * 原代码在统计循环中从未递增num_landmarks，导致problem->num_landmarks=0，
+     * 分配0字节缓冲区后后续写入越界堆溢出。 */
+    for (int k = 0; k < system->local_map.num_landmarks; k++) {
+        if (system->local_map.landmarks[k].descriptor) {
+            num_landmarks++;
+        }
+    }
+
     for (int i = 0; i < system->local_map.num_keyframes; i++) {
         num_keyframes++;
         for (int j = 0; j < system->local_map.keyframes[i].num_features; j++) {
@@ -419,17 +428,23 @@ int slam_solve_optimization_problem(OptimizationProblem* problem, int max_iterat
             delta[i] = sum / H[i*num_params + i];
         }
 
+        /* P1修复: 两阶段更新 — 先应用全部delta，再统一归一化四元数。
+         * 原代码在逐参数应用delta的同时归一化四元数，当i%7==3时对poses[i..i+3]
+         * 归一化，但此时poses[i+1..i+3]（qx/qy/qz）的delta尚未应用，导致归一化
+         * 使用了混合的新旧值。改为两阶段循环确保正确性。 */
+        /* 第一阶段：对所有参数应用delta */
         for (int i = 0; i < num_params; i++) {
             if (i < problem->num_poses) {
                 problem->poses[i] += delta[i];
-                if (i % 7 == 3) {
-                    float* q = &problem->poses[i];
-                    float norm = sqrtf(q[0]*q[0] + q[1]*q[1] + q[2]*q[2] + q[3]*q[3]);
-                    if (norm > 1e-6f) { q[0]/=norm; q[1]/=norm; q[2]/=norm; q[3]/=norm; }
-                }
             } else {
                 problem->landmarks[i - problem->num_poses] += delta[i];
             }
+        }
+        /* 第二阶段：对每个7参数位姿的[3:7]做四元数归一化 */
+        for (int i = 0; i + 6 < problem->num_poses; i += 7) {
+            float* q = &problem->poses[i + 3];
+            float norm = sqrtf(q[0]*q[0] + q[1]*q[1] + q[2]*q[2] + q[3]*q[3]);
+            if (norm > 1e-6f) { q[0]/=norm; q[1]/=norm; q[2]/=norm; q[3]/=norm; }
         }
     }
 
@@ -642,18 +657,18 @@ int slam_solve_gauss_newton(OptimizationProblem* problem, int max_iterations) {
         }
         slam_free(L);
 
-        /* 更新参数 */
+        /* P1修复: 两阶段更新 — 先应用全部delta，再统一归一化四元数（与LM法一致） */
         for (int i = 0; i < num_params; i++) {
             if (i < problem->num_poses) {
                 problem->poses[i] += delta[i];
-                if (i % 7 == 3) {
-                    float* q = &problem->poses[i];
-                    float norm = sqrtf(q[0]*q[0] + q[1]*q[1] + q[2]*q[2] + q[3]*q[3]);
-                    if (norm > 1e-6f) { q[0]/=norm; q[1]/=norm; q[2]/=norm; q[3]/=norm; }
-                }
             } else {
                 problem->landmarks[i - problem->num_poses] += delta[i];
             }
+        }
+        for (int i = 0; i + 6 < problem->num_poses; i += 7) {
+            float* q = &problem->poses[i + 3];
+            float norm = sqrtf(q[0]*q[0] + q[1]*q[1] + q[2]*q[2] + q[3]*q[3]);
+            if (norm > 1e-6f) { q[0]/=norm; q[1]/=norm; q[2]/=norm; q[3]/=norm; }
         }
     }
 

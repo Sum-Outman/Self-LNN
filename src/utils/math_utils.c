@@ -1083,6 +1083,8 @@ float rng_normal(float mean, float stddev) {
     // Box-Muller变换
     float u1 = rng_uniform(0.0f, 1.0f);
     float u2 = rng_uniform(0.0f, 1.0f);
+    /* P1修复: 防止u1为零导致logf(-inf)，使sqrtf(inf)=inf */
+    if (u1 < 1e-10f) u1 = 1e-10f;
     
     float z0 = sqrtf(-2.0f * logf(u1)) * cosf(2.0f * MATH_PI * u2);
     return mean + stddev * z0;

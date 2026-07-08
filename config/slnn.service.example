@@ -16,12 +16,17 @@ WorkingDirectory=/opt/slnn
 Environment="PATH=/opt/slnn/bin:/usr/local/bin:/usr/bin:/bin"
 Environment="LD_LIBRARY_PATH=/opt/slnn/lib"
 Environment="SLNN_HOME=/opt/slnn"
-Environment="SLNN_CONFIG=/opt/slnn/config/selflnn_config.json"
+Environment="SLNN_CONFIG=/opt/slnn/config/system_config.json"
 Environment="SLNN_DATA=/opt/slnn/data"
 Environment="SLNN_MODELS=/opt/slnn/models"
 Environment="SLNN_LOGS=/opt/slnn/logs"
 # 主服务命令（默认端口8080，可通过--port修改）
-ExecStart=/opt/slnn/bin/selflnn --port 8080 --config /opt/slnn/config/selflnn_config.json
+# P-AUDIT修复: 原引用 --config 参数,但 main.c 不支持该参数(仅支持 --port/--api-key/--log-file/--no-* 等)
+# 配置文件由 backend_load_config() 自动从 SELFLNN_CONFIG_FILE 宏(selflnn_config.json)加载
+# 如需指定端口,使用 --port 参数;如需指定日志文件,使用 --log-file 参数
+# BLD-019修复: --log-file参数已确认在main.c中存在（line 248: 处理"--log-file"选项），
+# 将日志输出到指定文件路径，与StandardOutput/StandardError的append配置协同工作
+ExecStart=/opt/slnn/bin/selflnn --port 8080 --log-file /opt/slnn/logs/slnn.log
 # 重新加载命令
 ExecReload=/bin/kill -HUP $MAINPID
 # 重启策略

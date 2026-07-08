@@ -13,6 +13,7 @@
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/string_utils.h"
 #include "selflnn/utils/perf.h"
+#include "selflnn/utils/platform.h"  /* P1修复: MutexHandle互斥锁API */
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -63,6 +64,8 @@ struct DecisionEngine {
     // 性能统计
     uint64_t total_computation_time_ns;    /**< 总计算时间（纳秒） */
     size_t total_decisions_made;           /**< 总决策次数 */
+
+    void* lock;                            /**< P1修复: 互斥锁句柄（MutexHandle），保护所有共享状态 */
 };
 
 /* 内部辅助函数声明 */
@@ -78,9 +81,15 @@ static float compute_constraint_violation(const DecisionEngine* engine,
 static int is_pareto_dominant(const DecisionAlternative* a, 
                               const DecisionAlternative* b,
                               size_t num_objectives);
-static int allocate_alternative_copy(DecisionAlternative* dest, 
+static int allocate_alternative_copy(DecisionAlternative* dest,
                                      const DecisionAlternative* src);
 static void free_alternative_internal(DecisionAlternative* alternative);
+/* P1修复: 内部无锁版本，供decision_engine_analyze在已持锁状态下调用，避免递归锁死锁 */
+static int compute_pareto_front_unlocked(DecisionEngine* engine,
+                                          const DecisionAlternative* alternatives,
+                                          size_t num_alternatives,
+                                          DecisionAlternative* pareto_front,
+                                          size_t max_pareto_size);
 
 /**
  * @brief 创建决策引擎
@@ -198,7 +207,22 @@ DecisionEngine* decision_engine_create(const DecisionEngineConfig* config) {
     engine->objective_weights = NULL;
     engine->objective_weights_rows = 0;
     engine->objective_weights_cols = 0;
-    
+
+    /* P1修复: 创建互斥锁保护引擎共享状态的并发访问 */
+    engine->lock = (void*)mutex_create();
+    if (!engine->lock) {
+        safe_free((void**)&engine->objective_weights);
+        safe_free((void**)&engine->constraint_penalties);
+        safe_free((void**)&engine->weight_normalization);
+        safe_free((void**)&engine->alternatives);
+        safe_free((void**)&engine->constraints);
+        safe_free((void**)&engine->objectives);
+        safe_free((void**)&engine);
+        selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
+                              "创建决策引擎：互斥锁创建失败");
+        return NULL;
+    }
+
     return engine;
 }
 
@@ -209,7 +233,13 @@ void decision_engine_destroy(DecisionEngine* engine) {
     if (!engine) {
         return;
     }
-    
+
+    /* P1修复: 先销毁互斥锁，确保没有其他线程持有锁时再清理数据 */
+    if (engine->lock) {
+        mutex_destroy((MutexHandle)engine->lock);
+        engine->lock = NULL;
+    }
+
     // 释放目标数组
     if (engine->objectives) {
         for (size_t i = 0; i < engine->num_objectives; i++) {
@@ -263,12 +293,15 @@ void decision_engine_destroy(DecisionEngine* engine) {
  */
 void decision_engine_clear_alternatives(DecisionEngine* engine) {
     if (!engine) return;
+    /* P1修复: 加锁保护alternatives数组的并发修改 */
+    mutex_lock((MutexHandle)engine->lock);
     if (engine->alternatives) {
         for (size_t i = 0; i < engine->num_alternatives; i++) {
             free_alternative_internal(&engine->alternatives[i]);
         }
         engine->num_alternatives = 0;
     }
+    mutex_unlock((MutexHandle)engine->lock);
 }
 
 /**
@@ -282,21 +315,26 @@ int decision_engine_set_objectives(DecisionEngine* engine,
                               "设置决策目标：参数无效");
         return -1;
     }
+    /* P1修复: 加锁保护objectives数组的并发修改 */
+    mutex_lock((MutexHandle)engine->lock);
     if (!engine->enabled) {
+        mutex_unlock((MutexHandle)engine->lock);
         selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
                               "设置决策目标：决策引擎已禁用");
         return -1;
     }
-    
+
     if (num_objectives > engine->config.max_objectives) {
+        mutex_unlock((MutexHandle)engine->lock);
         selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
                               "设置决策目标：目标数量超过最大限制");
         return -1;
     }
-    
+
     // 验证每个目标
     for (size_t i = 0; i < num_objectives; i++) {
         if (!validate_objective(&objectives[i])) {
+            mutex_unlock((MutexHandle)engine->lock);
             selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
                                   "设置决策目标：目标验证失败");
             return -1;
@@ -324,6 +362,7 @@ int decision_engine_set_objectives(DecisionEngine* engine,
         // 复制名称
         dest->name = string_duplicate_nullable(src->name);
         if (!dest->name && src->name) {
+            mutex_unlock((MutexHandle)engine->lock);
             selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
                                   "设置决策目标：复制目标名称内存分配失败");
             return -1;
@@ -344,6 +383,7 @@ int decision_engine_set_objectives(DecisionEngine* engine,
             dest->utility_params = (float*)safe_malloc(src->params_size * sizeof(float));
             if (!dest->utility_params) {
                 safe_free((void**)&dest->name);
+                mutex_unlock((MutexHandle)engine->lock);
                 selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
                                       "设置决策目标：复制效用函数参数内存分配失败");
                 return -1;
@@ -371,6 +411,7 @@ int decision_engine_set_objectives(DecisionEngine* engine,
     }
     
     engine->objectives_set = 1;
+    mutex_unlock((MutexHandle)engine->lock);
     return 0;
 }
 
@@ -385,21 +426,26 @@ int decision_engine_set_constraints(DecisionEngine* engine,
                               "设置决策约束：参数无效");
         return -1;
     }
+    /* P1修复: 加锁保护constraints数组的并发修改 */
+    mutex_lock((MutexHandle)engine->lock);
     if (!engine->enabled) {
+        mutex_unlock((MutexHandle)engine->lock);
         selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
                               "设置决策约束：决策引擎已禁用");
         return -1;
     }
-    
+
     if (num_constraints > engine->config.max_constraints) {
+        mutex_unlock((MutexHandle)engine->lock);
         selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
                               "设置决策约束：约束数量超过最大限制");
         return -1;
     }
-    
+
     // 验证每个约束
     for (size_t i = 0; i < num_constraints; i++) {
         if (!validate_constraint(&constraints[i])) {
+            mutex_unlock((MutexHandle)engine->lock);
             selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
                                   "设置决策约束：约束验证失败");
             return -1;
@@ -423,6 +469,7 @@ int decision_engine_set_constraints(DecisionEngine* engine,
         // 复制名称
         dest->name = string_duplicate_nullable(src->name);
         if (!dest->name && src->name) {
+            mutex_unlock((MutexHandle)engine->lock);
             selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
                                   "设置决策约束：复制约束名称内存分配失败");
             return -1;
@@ -444,6 +491,7 @@ int decision_engine_set_constraints(DecisionEngine* engine,
     }
     
     engine->constraints_set = 1;
+    mutex_unlock((MutexHandle)engine->lock);
     return 0;
 }
 
@@ -458,41 +506,48 @@ int decision_engine_add_alternatives(DecisionEngine* engine,
                               "添加决策备选方案：参数无效");
         return -1;
     }
+    /* P1修复: 加锁保护alternatives数组的并发修改 */
+    mutex_lock((MutexHandle)engine->lock);
     if (!engine->enabled) {
+        mutex_unlock((MutexHandle)engine->lock);
         selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
                               "添加决策备选方案：决策引擎已禁用");
         return -1;
     }
-    
+
     if (engine->num_alternatives + num_alternatives > engine->config.max_alternatives) {
+        mutex_unlock((MutexHandle)engine->lock);
         selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
                               "添加决策备选方案：方案数量超过最大限制");
         return -1;
     }
-    
+
     // 验证每个方案
     for (size_t i = 0; i < num_alternatives; i++) {
         if (!validate_alternative(&alternatives[i])) {
+            mutex_unlock((MutexHandle)engine->lock);
             selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
                                   "添加决策备选方案：方案验证失败");
             return -1;
         }
     }
-    
+
     // 复制方案
     for (size_t i = 0; i < num_alternatives; i++) {
         DecisionAlternative* dest = &engine->alternatives[engine->num_alternatives];
         const DecisionAlternative* src = &alternatives[i];
-        
+
         if (allocate_alternative_copy(dest, src) != 0) {
+            mutex_unlock((MutexHandle)engine->lock);
             selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
                                   "添加决策备选方案：复制方案内存分配失败");
             return -1;
         }
-        
+
         engine->num_alternatives++;
     }
-    
+
+    mutex_unlock((MutexHandle)engine->lock);
     return 0;
 }
 
@@ -505,19 +560,24 @@ int decision_engine_analyze(DecisionEngine* engine, DecisionResult* result) {
                               "执行决策分析：参数无效");
         return -1;
     }
+    /* P1修复: 加锁保护整个决策分析过程，防止并发修改objectives/constraints/alternatives */
+    mutex_lock((MutexHandle)engine->lock);
     if (!engine->enabled) {
+        mutex_unlock((MutexHandle)engine->lock);
         selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
                               "执行决策分析：决策引擎已禁用");
         return -1;
     }
-    
+
     if (!engine->objectives_set) {
+        mutex_unlock((MutexHandle)engine->lock);
         selflnn_set_last_error(SELFLNN_ERROR_NOT_INITIALIZED, __func__, __FILE__, __LINE__,
                               "执行决策分析：决策目标未设置");
         return -1;
     }
-    
+
     if (engine->num_alternatives == 0) {
+        mutex_unlock((MutexHandle)engine->lock);
         selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
                               "执行决策分析：无备选方案");
         return -1;
@@ -538,6 +598,7 @@ int decision_engine_analyze(DecisionEngine* engine, DecisionResult* result) {
         if (!alt->objective_values) {
             alt->objective_values = (float*)safe_malloc(engine->num_objectives * sizeof(float));
             if (!alt->objective_values) {
+                mutex_unlock((MutexHandle)engine->lock);
                 selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
                                       "执行决策分析：分配目标值数组内存失败");
                 return -1;
@@ -612,13 +673,14 @@ int decision_engine_analyze(DecisionEngine* engine, DecisionResult* result) {
             DecisionAlternative* pareto_front = (DecisionAlternative*)safe_malloc(
                 max_pareto * sizeof(DecisionAlternative));
             if (!pareto_front) {
+                mutex_unlock((MutexHandle)engine->lock);
                 selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
                                       "执行决策分析：分配帕累托前沿数组内存失败");
                 return -1;
             }
             
-            // 计算帕累托前沿
-            result->pareto_size = decision_engine_compute_pareto_front(
+            // 计算帕累托前沿（P1修复: 调用内部无锁版本，避免递归锁死锁）
+            result->pareto_size = compute_pareto_front_unlocked(
                 engine, engine->alternatives, engine->num_alternatives,
                 pareto_front, max_pareto);
             
@@ -626,6 +688,7 @@ int decision_engine_analyze(DecisionEngine* engine, DecisionResult* result) {
                 result->pareto_front = (float*)safe_malloc(result->pareto_size * sizeof(float));
                 if (!result->pareto_front) {
                     safe_free((void**)&pareto_front);
+                    mutex_unlock((MutexHandle)engine->lock);
                     selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
                                           "执行决策分析：分配帕累托前沿值数组内存失败");
                     return -1;
@@ -707,6 +770,7 @@ int decision_engine_analyze(DecisionEngine* engine, DecisionResult* result) {
         
         size_t num_alts = engine->num_alternatives;
         if (num_alts == 0) {
+            mutex_unlock((MutexHandle)engine->lock);
             selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
                                   "序列决策：无可选方案");
             return -1;
@@ -718,6 +782,7 @@ int decision_engine_analyze(DecisionEngine* engine, DecisionResult* result) {
         // 为每个方案计算累积折扣效用
         float* cumulative_utilities = (float*)safe_malloc(num_alts * sizeof(float));
         if (!cumulative_utilities) {
+            mutex_unlock((MutexHandle)engine->lock);
             selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
                                   "序列决策：分配累积效用数组失败");
             return -1;
@@ -766,6 +831,7 @@ int decision_engine_analyze(DecisionEngine* engine, DecisionResult* result) {
         
         size_t num_alts = engine->num_alternatives;
         if (num_alts < 2) {
+            mutex_unlock((MutexHandle)engine->lock);
             selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
                                   "博弈论决策：至少需要2个方案");
             return -1;
@@ -773,6 +839,7 @@ int decision_engine_analyze(DecisionEngine* engine, DecisionResult* result) {
         
         float* payoff_matrix = (float*)safe_malloc(num_alts * num_alts * sizeof(float));
         if (!payoff_matrix) {
+            mutex_unlock((MutexHandle)engine->lock);
             selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
                                   "博弈论决策：分配效用矩阵失败");
             return -1;
@@ -802,6 +869,7 @@ int decision_engine_analyze(DecisionEngine* engine, DecisionResult* result) {
             safe_free((void**)&payoff_matrix);
             safe_free((void**)&strategy_profile);
             safe_free((void**)&best_responses);
+            mutex_unlock((MutexHandle)engine->lock);
             selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
                                   "博弈论决策：分配策略数组失败");
             return -1;
@@ -845,7 +913,8 @@ int decision_engine_analyze(DecisionEngine* engine, DecisionResult* result) {
                                 opponent_strategy = (int)a;
                             }
                         }
-                        free(freq);
+                        /* P-AUDIT修复: freq由safe_calloc分配,必须用safe_free释放 */
+                        safe_free((void**)&freq);
                     }
                 }
                 
@@ -903,14 +972,16 @@ int decision_engine_analyze(DecisionEngine* engine, DecisionResult* result) {
         // 复制最佳方案
         result->best_alternative = (DecisionAlternative*)safe_malloc(sizeof(DecisionAlternative));
         if (!result->best_alternative) {
+            mutex_unlock((MutexHandle)engine->lock);
             selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
                                   "执行决策分析：分配最佳方案内存失败");
             return -1;
         }
-        
-        if (allocate_alternative_copy(result->best_alternative, 
+
+        if (allocate_alternative_copy(result->best_alternative,
                                      &engine->alternatives[best_index]) != 0) {
             safe_free((void**)&result->best_alternative);
+            mutex_unlock((MutexHandle)engine->lock);
             selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
                                   "执行决策分析：复制最佳方案内存失败");
             return -1;
@@ -924,6 +995,7 @@ int decision_engine_analyze(DecisionEngine* engine, DecisionResult* result) {
         if (result->best_alternative) {
             decision_alternative_free(result->best_alternative);
         }
+        mutex_unlock((MutexHandle)engine->lock);
         selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
                               "执行决策分析：分配方案数组内存失败");
         return -1;
@@ -941,6 +1013,7 @@ int decision_engine_analyze(DecisionEngine* engine, DecisionResult* result) {
             if (result->best_alternative) {
                 decision_alternative_free(result->best_alternative);
             }
+            mutex_unlock((MutexHandle)engine->lock);
             selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
                                   "执行决策分析：复制方案数组内存失败");
             return -1;
@@ -978,12 +1051,61 @@ int decision_engine_analyze(DecisionEngine* engine, DecisionResult* result) {
     // 更新引擎统计
     engine->total_computation_time_ns += elapsed_ns;
     engine->total_decisions_made++;
-    
+
+    mutex_unlock((MutexHandle)engine->lock);
     return 0;
 }
 
 /**
- * @brief 计算多目标帕累托前沿
+ * @brief 计算多目标帕累托前沿（内部无锁版本）
+ * P1修复: 供decision_engine_analyze在已持锁状态下调用，避免递归锁死锁
+ */
+static int compute_pareto_front_unlocked(DecisionEngine* engine,
+                                          const DecisionAlternative* alternatives,
+                                          size_t num_alternatives,
+                                          DecisionAlternative* pareto_front,
+                                          size_t max_pareto_size) {
+    if (!engine || !alternatives || !pareto_front || num_alternatives == 0 || max_pareto_size == 0) {
+        return -1;
+    }
+    if (!engine->enabled) {
+        return -1;
+    }
+
+    size_t pareto_count = 0;
+
+    // 遍历所有方案
+    for (size_t i = 0; i < num_alternatives; i++) {
+        const DecisionAlternative* current = &alternatives[i];
+        int is_pareto_efficient = 1;
+
+        // 检查当前方案是否被其他方案支配
+        for (size_t j = 0; j < num_alternatives; j++) {
+            if (i == j) continue;
+
+            const DecisionAlternative* other = &alternatives[j];
+
+            // 检查other是否支配current
+            if (is_pareto_dominant(other, current, engine->num_objectives)) {
+                is_pareto_efficient = 0;
+                break;
+            }
+        }
+
+        // 如果是帕累托有效方案，添加到前沿
+        if (is_pareto_efficient && pareto_count < max_pareto_size) {
+            // 复制方案到帕累托前沿
+            if (allocate_alternative_copy(&pareto_front[pareto_count], current) == 0) {
+                pareto_count++;
+            }
+        }
+    }
+
+    return (int)pareto_count;
+}
+
+/**
+ * @brief 计算多目标帕累托前沿（公共API，加锁版本）
  */
 int decision_engine_compute_pareto_front(DecisionEngine* engine,
                                          const DecisionAlternative* alternatives,
@@ -993,40 +1115,12 @@ int decision_engine_compute_pareto_front(DecisionEngine* engine,
     if (!engine || !alternatives || !pareto_front || num_alternatives == 0 || max_pareto_size == 0) {
         return -1;
     }
-    if (!engine->enabled) {
-        return -1;
-    }
-    
-    size_t pareto_count = 0;
-    
-    // 遍历所有方案
-    for (size_t i = 0; i < num_alternatives; i++) {
-        const DecisionAlternative* current = &alternatives[i];
-        int is_pareto_efficient = 1;
-        
-        // 检查当前方案是否被其他方案支配
-        for (size_t j = 0; j < num_alternatives; j++) {
-            if (i == j) continue;
-            
-            const DecisionAlternative* other = &alternatives[j];
-            
-            // 检查other是否支配current
-            if (is_pareto_dominant(other, current, engine->num_objectives)) {
-                is_pareto_efficient = 0;
-                break;
-            }
-        }
-        
-        // 如果是帕累托有效方案，添加到前沿
-        if (is_pareto_efficient && pareto_count < max_pareto_size) {
-            // 复制方案到帕累托前沿
-            if (allocate_alternative_copy(&pareto_front[pareto_count], current) == 0) {
-                pareto_count++;
-            }
-        }
-    }
-    
-    return (int)pareto_count;
+    /* P1修复: 加锁保护帕累托前沿计算过程中的共享状态读取 */
+    mutex_lock((MutexHandle)engine->lock);
+    int result = compute_pareto_front_unlocked(engine, alternatives,
+                                                 num_alternatives, pareto_front, max_pareto_size);
+    mutex_unlock((MutexHandle)engine->lock);
+    return result;
 }
 
 /**
@@ -1573,17 +1667,31 @@ void decision_audit_log_clear(DecisionAuditLog* log) {
  * ============================ */
 
 void decision_engine_enable(DecisionEngine* engine) {
-    if (engine) {
+    if (engine && engine->lock) {
+        /* P1修复: 加锁保护enabled标志的并发修改 */
+        mutex_lock((MutexHandle)engine->lock);
         engine->enabled = 1;
+        mutex_unlock((MutexHandle)engine->lock);
     }
 }
 
 void decision_engine_disable(DecisionEngine* engine) {
-    if (engine) {
+    if (engine && engine->lock) {
+        /* P1修复: 加锁保护enabled标志的并发修改 */
+        mutex_lock((MutexHandle)engine->lock);
         engine->enabled = 0;
+        mutex_unlock((MutexHandle)engine->lock);
     }
 }
 
 int decision_engine_is_enabled(const DecisionEngine* engine) {
-    return (engine && engine->enabled) ? 1 : 0;
+    if (!engine) return 0;
+    /* P1修复: 加锁读取enabled标志，确保读到一致的值 */
+    if (engine->lock) {
+        mutex_lock((MutexHandle)engine->lock);
+        int result = engine->enabled ? 1 : 0;
+        mutex_unlock((MutexHandle)engine->lock);
+        return result;
+    }
+    return engine->enabled ? 1 : 0;
 }

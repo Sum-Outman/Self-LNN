@@ -345,6 +345,11 @@ static double calculate_assignment_score(const DeviceInfo* device,
 /**
  * @brief 查找备选设备
  */
+/* P2修复: 所有权说明 —— 返回的char**数组及其每个字符串元素均由调用方负责释放。
+ * 数组中每个元素由string_duplicate_nullable分配（独立堆内存），调用方需先逐个
+ * free(strings[i])，再free(strings)本身。
+ * 典型用法参见assign_task_to_device函数（结果存入TaskAssignment.alternative_devices），
+ * 对应的释放函数为destroy_task_assignment（会逐个释放字符串后释放数组）。 */
 static char** find_alternative_devices(const DeviceInfo** available_devices,
                                        size_t device_count,
                                        const Task* task,
@@ -868,6 +873,17 @@ MultiSystemControlEngine* multisystem_control_engine_create(void) {
         engine->discovery_enabled = 1;
         engine->discovered_capacity = 32;
         engine->discovered_devices = (DeviceInfo**)safe_calloc(engine->discovered_capacity, sizeof(DeviceInfo*));
+        /* P0修复(修复3): discovered_devices 分配失败时必须检查NULL。
+         * 原实现未检查返回值，若 safe_calloc 失败返回NULL，discovery 线程会通过
+         * engine->discovered_devices[i] 解引用NULL指针导致崩溃。
+         * 参照 registered_devices/active_tasks 的错误处理模式：释放已分配资源并返回NULL。 */
+        if (!engine->discovered_devices) {
+            safe_free((void**)&engine->registered_devices);
+            safe_free((void**)&engine->active_tasks);
+            multi_system_log(MULTI_LOG_LEVEL_ERROR, "发现设备列表分配失败, 多系统控制引擎创建失败");
+            safe_free((void**)&engine);
+            return NULL;
+        }
 #ifdef _WIN32
         InitializeCriticalSection(&engine->discovery_lock);
 #else
@@ -1256,8 +1272,13 @@ void destroy_task_assignment(TaskAssignment* assignment) {
     }
     
     if (assignment->alternative_devices) {
-        // 注意：这里只释放数组本身，不释放设备对象
-        // 设备对象由调用者管理
+        /* P2修复: 逐个释放备选设备ID字符串（由string_duplicate_nullable分配），
+         * 再释放数组本身，避免内存泄漏。原实现仅释放数组而泄漏每个字符串。 */
+        for (size_t i = 0; i < assignment->alternative_count; i++) {
+            if (assignment->alternative_devices[i]) {
+                safe_free((void**)&assignment->alternative_devices[i]);
+            }
+        }
         safe_free((void**)&assignment->alternative_devices);
     }
     
@@ -1677,7 +1698,8 @@ static int raft_append_log(DistributedCoordinator* coord, int term, const char* 
     coord->log_terms[idx] = term;
     coord->log_proposals[idx] = (char*)safe_malloc(strlen(proposal) + 1);
     if (!coord->log_proposals[idx]) return -1;
-    strcpy(coord->log_proposals[idx], proposal);
+    strncpy(coord->log_proposals[idx], proposal, strlen(proposal));
+    coord->log_proposals[idx][strlen(proposal)] = '\0';
     coord->ack_counts[idx] = 1; /* 领导者自己的确认 */
     coord->log_count++;
     

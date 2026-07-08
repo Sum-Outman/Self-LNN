@@ -10,6 +10,8 @@
 #include "selflnn/safety/audit_logger.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/memory_utils.h"
+/* P1修复: 引入platform.h获取MutexHandle类型和mutex系列函数 */
+#include "selflnn/utils/platform.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -51,6 +53,11 @@ struct AuditLogger {
     int log_count;
     int max_logs;
     int logs_next_id;
+
+    /* P1修复: 线程安全锁，保护环形缓冲区写入和next_id读-改-写操作，
+     * 防止并发线程导致operation_next_id/decision_next_id/change_next_id
+     * 竞态越界写入和环形缓冲区数据损坏 */
+    MutexHandle lock;
 };
 
 /* ============================================================================
@@ -284,6 +291,18 @@ AuditLogger* audit_logger_create(void) {
         r->criticality = 4;
     }
 
+    /* P1修复: 初始化线程安全锁 */
+    logger->lock = mutex_create();
+    if (!logger->lock) {
+        safe_free((void**)&logger->operation_log);
+        safe_free((void**)&logger->decision_log);
+        safe_free((void**)&logger->change_log);
+        safe_free((void**)&logger->compliance_rules);
+        safe_free((void**)&logger->logs);
+        safe_free((void**)&logger);
+        return NULL;
+    }
+
     logger->operation_seq = 1;
     logger->decision_seq = 1;
     logger->change_seq = 1;
@@ -293,6 +312,8 @@ AuditLogger* audit_logger_create(void) {
 
 void audit_logger_free(AuditLogger* logger) {
     if (!logger) return;
+    /* P1修复: 先销毁锁，确保不会有线程在释放内存期间持锁访问 */
+    if (logger->lock) mutex_destroy(logger->lock);
     safe_free((void**)&logger->operation_log);
     safe_free((void**)&logger->decision_log);
     safe_free((void**)&logger->change_log);
@@ -312,6 +333,9 @@ long audit_log_operation(AuditLogger* logger, AuditOperationType op_type,
                           int success, float duration_ms, const char* detail)
 {
     if (!logger) return -1;
+
+    /* P1修复: 加锁保护operation_next_id的读-改-写操作，防止并发写入导致越界 */
+    mutex_lock(logger->lock);
 
     size_t idx = logger->operation_next_id;
     AuditOperationEntry* entry = &logger->operation_log[idx];
@@ -378,7 +402,10 @@ long audit_log_operation(AuditLogger* logger, AuditOperationType op_type,
                           detail ? detail : (success ? "操作成功" : "操作失败"));
     }
 
-    return entry->log_id;
+    /* P1修复: 在锁内保存返回值，释放锁后返回 */
+    long ret_log_id = entry->log_id;
+    mutex_unlock(logger->lock);
+    return ret_log_id;
 }
 
 int audit_query_operations(const AuditLogger* logger, time_t start, time_t end,
@@ -456,6 +483,9 @@ long audit_log_decision(AuditLogger* logger,
 {
     if (!logger) return -1;
 
+    /* P1修复: 加锁保护decision_next_id的读-改-写操作，防止并发写入导致越界 */
+    mutex_lock(logger->lock);
+
     size_t idx = logger->decision_next_id;
     AuditDecisionEntry* entry = &logger->decision_log[idx];
 
@@ -520,7 +550,10 @@ long audit_log_decision(AuditLogger* logger,
         }
     }
 
-    return entry->decision_id;
+    /* P1修复: 在锁内保存返回值，释放锁后返回 */
+    long ret_decision_id = entry->decision_id;
+    mutex_unlock(logger->lock);
+    return ret_decision_id;
 }
 
 int audit_query_decisions(const AuditLogger* logger, time_t start, time_t end,
@@ -555,6 +588,9 @@ long audit_log_change(AuditLogger* logger, AuditChangeType change_type,
                        int rollback_possible, const char* rollback_instruction)
 {
     if (!logger) return -1;
+
+    /* P1修复: 加锁保护change_next_id的读-改-写操作，防止并发写入导致越界 */
+    mutex_lock(logger->lock);
 
     size_t idx = logger->change_next_id;
     AuditChangeEntry* entry = &logger->change_log[idx];
@@ -606,7 +642,10 @@ long audit_log_change(AuditLogger* logger, AuditChangeType change_type,
                           detail_buf);
     }
 
-    return entry->change_id;
+    /* P1修复: 在锁内保存返回值，释放锁后返回 */
+    long ret_change_id = entry->change_id;
+    mutex_unlock(logger->lock);
+    return ret_change_id;
 }
 
 int audit_query_changes_by_component(const AuditLogger* logger, const char* component,

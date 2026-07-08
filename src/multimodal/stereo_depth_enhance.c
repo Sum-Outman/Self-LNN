@@ -511,14 +511,14 @@ int sde_compute_disparity(SDEHandler* handler,
     float* right_grad = NULL;
 
     if (channels >= 3) {
-        left_gray_buf = (float*)safe_malloc(width * height * sizeof(float));
-        right_gray_buf = (float*)safe_malloc(width * height * sizeof(float));
+        left_gray_buf = (float*)safe_malloc((size_t)width * (size_t)height * sizeof(float));
+        right_gray_buf = (float*)safe_malloc((size_t)width * (size_t)height * sizeof(float));
         if (!left_gray_buf || !right_gray_buf) {
             safe_free((void**)&left_gray_buf);
             safe_free((void**)&right_gray_buf);
             return -1;
         }
-        for (int i = 0; i < width * height; i++) {
+        for (int i = 0; i < (size_t)width * (size_t)height; i++) {
             left_gray_buf[i] = 0.299f * left_image[i * 3] +
                                0.587f * left_image[i * 3 + 1] +
                                0.114f * left_image[i * 3 + 2];
@@ -542,8 +542,8 @@ int sde_compute_disparity(SDEHandler* handler,
     float p2 = cfg->p2;
 
     if (cfg->cost_type == SDE_COST_GRADIENT_CENSUS) {
-        left_grad = (float*)safe_malloc(width * height * sizeof(float));
-        right_grad = (float*)safe_malloc(width * height * sizeof(float));
+        left_grad = (float*)safe_malloc((size_t)width * (size_t)height * sizeof(float));
+        right_grad = (float*)safe_malloc((size_t)width * (size_t)height * sizeof(float));
         if (left_grad && right_grad) {
             _compute_sobel_x(left_gray, width, height, left_grad);
             _compute_sobel_x(right_gray, width, height, right_grad);
@@ -629,8 +629,8 @@ int sde_compute_disparity(SDEHandler* handler,
     }
     safe_free((void**)&path_costs);
 
-    float* left_disparity = (float*)safe_calloc(width * height, sizeof(float));
-    float* left_confidence = (float*)safe_calloc(width * height, sizeof(float));
+    float* left_disparity = (float*)safe_calloc((size_t)width * (size_t)height, sizeof(float));
+    float* left_confidence = (float*)safe_calloc((size_t)width * (size_t)height, sizeof(float));
     if (!left_disparity || !left_confidence) {
         safe_free((void**)&left_disparity);
         safe_free((void**)&left_confidence);
@@ -684,7 +684,7 @@ int sde_compute_disparity(SDEHandler* handler,
     }
 
     if (cfg->enable_lr_check) {
-        float* right_disparity = (float*)safe_calloc(width * height, sizeof(float));
+        float* right_disparity = (float*)safe_calloc((size_t)width * (size_t)height, sizeof(float));
         if (right_disparity) {
             for (int y = 0; y < height; y++) {
                 for (int x = 0; x < width; x++) {
@@ -726,10 +726,10 @@ int sde_compute_disparity(SDEHandler* handler,
     safe_free((void**)&cost_volume);
 
     if (cfg->enable_speckle_filter && cfg->speckle_window_size > 0) {
-        int* visited = (int*)safe_calloc(width * height, sizeof(int));
+        int* visited = (int*)safe_calloc((size_t)width * (size_t)height, sizeof(int));
         if (visited) {
-            int* region_stack_x = (int*)safe_malloc(width * height * sizeof(int));
-            int* region_stack_y = (int*)safe_malloc(width * height * sizeof(int));
+            int* region_stack_x = (int*)safe_malloc((size_t)width * (size_t)height * sizeof(int));
+            int* region_stack_y = (int*)safe_malloc((size_t)width * (size_t)height * sizeof(int));
             if (region_stack_x && region_stack_y) {
                 for (int y = 0; y < height; y++) {
                     for (int x = 0; x < width; x++) {
@@ -801,20 +801,20 @@ int sde_compute_disparity(SDEHandler* handler,
     }
 
     if (cfg->enable_median_filter && cfg->median_filter_size >= 3) {
-        float* filtered = (float*)safe_malloc(width * height * sizeof(float));
+        float* filtered = (float*)safe_malloc((size_t)width * (size_t)height * sizeof(float));
         if (filtered) {
             _median_filter_2d(left_disparity, width, height,
                               cfg->median_filter_size, filtered);
-            memcpy(left_disparity, filtered, width * height * sizeof(float));
+            memcpy(left_disparity, filtered, (size_t)width * (size_t)height * sizeof(float));
         }
         safe_free((void**)&filtered);
     }
 
     _interpolate_invalid_disparity(left_disparity, width, height);
 
-    memcpy(disparity_out, left_disparity, width * height * sizeof(float));
+    memcpy(disparity_out, left_disparity, (size_t)width * (size_t)height * sizeof(float));
     if (confidence_out) {
-        memcpy(confidence_out, left_confidence, width * height * sizeof(float));
+        memcpy(confidence_out, left_confidence, (size_t)width * (size_t)height * sizeof(float));
     }
 
     safe_free((void**)&left_disparity);
@@ -837,7 +837,7 @@ int sde_compute_depth(SDEHandler* handler,
 
     if (fx < 1.0f || baseline < 0.001f) return -1;
 
-    for (int i = 0; i < width * height; i++) {
+    for (int i = 0; i < (size_t)width * (size_t)height; i++) {
         float d = disparity[i];
         if (d > 0.5f) {
             depth_out[i] = fx * baseline / d;
@@ -847,7 +847,7 @@ int sde_compute_depth(SDEHandler* handler,
     }
 
     if (confidence_out) {
-        for (int i = 0; i < width * height; i++) {
+        for (int i = 0; i < (size_t)width * (size_t)height; i++) {
             float d = disparity[i];
             if (d > 0.5f) {
                 float depth = depth_out[i];
@@ -1007,8 +1007,8 @@ int sde_fusion_add_depth(SDEFusionHandler* fh,
     if (!fh || !depth_map || width <= 0 || height <= 0) return -1;
 
     if (!fh->accum_initialized) {
-        fh->accumulated_depth = (float*)safe_calloc(width * height, sizeof(float));
-        fh->accumulated_weight = (float*)safe_calloc(width * height, sizeof(float));
+        fh->accumulated_depth = (float*)safe_calloc((size_t)width * (size_t)height, sizeof(float));
+        fh->accumulated_weight = (float*)safe_calloc((size_t)width * (size_t)height, sizeof(float));
         if (!fh->accumulated_depth || !fh->accumulated_weight) {
             safe_free((void**)&fh->accumulated_depth);
             safe_free((void**)&fh->accumulated_weight);
@@ -1021,7 +1021,7 @@ int sde_fusion_add_depth(SDEFusionHandler* fh,
 
     if (width != fh->accum_width || height != fh->accum_height) return -1;
 
-    for (int i = 0; i < width * height; i++) {
+    for (int i = 0; i < (size_t)width * (size_t)height; i++) {
         float w = confidence ? confidence[i] : 0.5f;
         if (w > fh->config.confidence_threshold && depth_map[i] > 0.001f) {
             fh->accumulated_depth[i] += depth_map[i] * w;
@@ -1034,20 +1034,20 @@ int sde_fusion_add_depth(SDEFusionHandler* fh,
         if (fh->temporal_buffer[idx]) {
             if (fh->temporal_buffer[idx] &&
                 fh->temporal_conf_buffer[idx]) {
-                memcpy(fh->temporal_buffer[idx], depth_map, width * height * sizeof(float));
+                memcpy(fh->temporal_buffer[idx], depth_map, (size_t)width * (size_t)height * sizeof(float));
                 if (confidence) {
-                    memcpy(fh->temporal_conf_buffer[idx], confidence, width * height * sizeof(float));
+                    memcpy(fh->temporal_conf_buffer[idx], confidence, (size_t)width * (size_t)height * sizeof(float));
                 }
             }
         } else {
-            fh->temporal_buffer[idx] = (float*)safe_malloc(width * height * sizeof(float));
-            fh->temporal_conf_buffer[idx] = (float*)safe_malloc(width * height * sizeof(float));
+            fh->temporal_buffer[idx] = (float*)safe_malloc((size_t)width * (size_t)height * sizeof(float));
+            fh->temporal_conf_buffer[idx] = (float*)safe_malloc((size_t)width * (size_t)height * sizeof(float));
             if (fh->temporal_buffer[idx] && fh->temporal_conf_buffer[idx]) {
-                memcpy(fh->temporal_buffer[idx], depth_map, width * height * sizeof(float));
+                memcpy(fh->temporal_buffer[idx], depth_map, (size_t)width * (size_t)height * sizeof(float));
                 if (confidence) {
-                    memcpy(fh->temporal_conf_buffer[idx], confidence, width * height * sizeof(float));
+                    memcpy(fh->temporal_conf_buffer[idx], confidence, (size_t)width * (size_t)height * sizeof(float));
                 } else {
-                    memset(fh->temporal_conf_buffer[idx], 0, width * height * sizeof(float));
+                    memset(fh->temporal_conf_buffer[idx], 0, (size_t)width * (size_t)height * sizeof(float));
                 }
             }
         }
@@ -1102,15 +1102,15 @@ int sde_fusion_fuse_multi_view(SDEFusionHandler* fh,
     if (!fh || !depth_maps || !fused_out || num_views <= 0 ||
         num_views > SDE_MAX_FUSION_VIEWS || width <= 0 || height <= 0) return -1;
 
-    memset(fused_out, 0, width * height * sizeof(float));
-    float* weight_sum = (float*)safe_calloc(width * height, sizeof(float));
+    memset(fused_out, 0, (size_t)width * (size_t)height * sizeof(float));
+    float* weight_sum = (float*)safe_calloc((size_t)width * (size_t)height, sizeof(float));
     if (!weight_sum) return -1;
 
     for (int v = 0; v < num_views; v++) {
         if (!depth_maps[v]) continue;
         const float* conf = confidence_maps ? confidence_maps[v] : NULL;
 
-        for (int i = 0; i < width * height; i++) {
+        for (int i = 0; i < (size_t)width * (size_t)height; i++) {
             float d = depth_maps[v][i];
             if (d < 0.001f) continue;
 
@@ -1122,7 +1122,7 @@ int sde_fusion_fuse_multi_view(SDEFusionHandler* fh,
         }
     }
 
-    for (int i = 0; i < width * height; i++) {
+    for (int i = 0; i < (size_t)width * (size_t)height; i++) {
         if (weight_sum[i] > 1e-10f) {
             fused_out[i] /= weight_sum[i];
             if (confidence_out) {
@@ -1150,36 +1150,36 @@ int sde_fusion_temporal(SDEFusionHandler* fh,
 {
     if (!fh || !current_depth || !smoothed_out || width <= 0 || height <= 0) return -1;
 
-    if (width * height <= 0) return -1;
+    if ((size_t)width * (size_t)height == 0) return -1;
 
     if (fh->temporal_count == 0) {
-        memcpy(smoothed_out, current_depth, width * height * sizeof(float));
+        memcpy(smoothed_out, current_depth, (size_t)width * (size_t)height * sizeof(float));
         if (confidence_out && current_confidence) {
-            memcpy(confidence_out, current_confidence, width * height * sizeof(float));
+            memcpy(confidence_out, current_confidence, (size_t)width * (size_t)height * sizeof(float));
         } else if (confidence_out) {
-            memset(confidence_out, 0, width * height * sizeof(float));
+            memset(confidence_out, 0, (size_t)width * (size_t)height * sizeof(float));
         }
 
         int idx = fh->temporal_idx;
         if (!fh->temporal_buffer[idx]) {
-            fh->temporal_buffer[idx] = (float*)safe_malloc(width * height * sizeof(float));
+            fh->temporal_buffer[idx] = (float*)safe_malloc((size_t)width * (size_t)height * sizeof(float));
         }
         if (fh->temporal_buffer[idx]) {
-            memcpy(fh->temporal_buffer[idx], current_depth, width * height * sizeof(float));
+            memcpy(fh->temporal_buffer[idx], current_depth, (size_t)width * (size_t)height * sizeof(float));
         }
         if (!fh->temporal_conf_buffer[idx]) {
-            fh->temporal_conf_buffer[idx] = (float*)safe_malloc(width * height * sizeof(float));
+            fh->temporal_conf_buffer[idx] = (float*)safe_malloc((size_t)width * (size_t)height * sizeof(float));
         }
         if (fh->temporal_conf_buffer[idx] && current_confidence) {
-            memcpy(fh->temporal_conf_buffer[idx], current_confidence, width * height * sizeof(float));
+            memcpy(fh->temporal_conf_buffer[idx], current_confidence, (size_t)width * (size_t)height * sizeof(float));
         }
         fh->temporal_idx = (fh->temporal_idx + 1) % SDE_TEMPORAL_BUFFER_SIZE;
         fh->temporal_count = 1;
         return 0;
     }
 
-    float* accum = (float*)safe_calloc(width * height, sizeof(float));
-    float* weights = (float*)safe_calloc(width * height, sizeof(float));
+    float* accum = (float*)safe_calloc((size_t)width * (size_t)height, sizeof(float));
+    float* weights = (float*)safe_calloc((size_t)width * (size_t)height, sizeof(float));
     if (!accum || !weights) {
         safe_free((void**)&accum);
         safe_free((void**)&weights);
@@ -1189,7 +1189,7 @@ int sde_fusion_temporal(SDEFusionHandler* fh,
     float alpha = fh->config.temporal_smoothing_factor;
     float beta = 1.0f - alpha;
 
-    for (int i = 0; i < width * height; i++) {
+    for (int i = 0; i < (size_t)width * (size_t)height; i++) {
         float cur_w = current_confidence ? current_confidence[i] : 0.5f;
         if (cur_w > fh->config.confidence_threshold && current_depth[i] > 0.001f) {
             accum[i] += current_depth[i] * cur_w * beta;
@@ -1202,7 +1202,7 @@ int sde_fusion_temporal(SDEFusionHandler* fh,
     for (int t = 0; t < count; t++) {
         if (!fh->temporal_buffer[t]) continue;
         float decay = powf(alpha, (float)(t + 1));
-        for (int i = 0; i < width * height; i++) {
+        for (int i = 0; i < (size_t)width * (size_t)height; i++) {
             float d = fh->temporal_buffer[t][i];
             float c = fh->temporal_conf_buffer[t] ? fh->temporal_conf_buffer[t][i] : 0.3f;
             if (d > 0.001f && c > fh->config.confidence_threshold) {
@@ -1212,7 +1212,7 @@ int sde_fusion_temporal(SDEFusionHandler* fh,
         }
     }
 
-    for (int i = 0; i < width * height; i++) {
+    for (int i = 0; i < (size_t)width * (size_t)height; i++) {
         if (weights[i] > 1e-10f) {
             smoothed_out[i] = accum[i] / weights[i];
             if (confidence_out) {
@@ -1226,19 +1226,19 @@ int sde_fusion_temporal(SDEFusionHandler* fh,
 
     int idx = fh->temporal_idx;
     if (!fh->temporal_buffer[idx]) {
-        fh->temporal_buffer[idx] = (float*)safe_malloc(width * height * sizeof(float));
+        fh->temporal_buffer[idx] = (float*)safe_malloc((size_t)width * (size_t)height * sizeof(float));
     }
     if (fh->temporal_buffer[idx]) {
-        memcpy(fh->temporal_buffer[idx], smoothed_out, width * height * sizeof(float));
+        memcpy(fh->temporal_buffer[idx], smoothed_out, (size_t)width * (size_t)height * sizeof(float));
     }
     if (!fh->temporal_conf_buffer[idx]) {
-        fh->temporal_conf_buffer[idx] = (float*)safe_malloc(width * height * sizeof(float));
+        fh->temporal_conf_buffer[idx] = (float*)safe_malloc((size_t)width * (size_t)height * sizeof(float));
     }
     if (fh->temporal_conf_buffer[idx]) {
         if (confidence_out) {
-            memcpy(fh->temporal_conf_buffer[idx], confidence_out, width * height * sizeof(float));
+            memcpy(fh->temporal_conf_buffer[idx], confidence_out, (size_t)width * (size_t)height * sizeof(float));
         } else if (current_confidence) {
-            memcpy(fh->temporal_conf_buffer[idx], current_confidence, width * height * sizeof(float));
+            memcpy(fh->temporal_conf_buffer[idx], current_confidence, (size_t)width * (size_t)height * sizeof(float));
         }
     }
 
@@ -1256,12 +1256,12 @@ int sde_fusion_hole_fill(const float* depth_map, const float* confidence,
 {
     if (!depth_map || !filled_out || width <= 0 || height <= 0 || radius <= 0) return -1;
 
-    memcpy(filled_out, depth_map, width * height * sizeof(float));
-    float* temp = (float*)safe_malloc(width * height * sizeof(float));
+    memcpy(filled_out, depth_map, (size_t)width * (size_t)height * sizeof(float));
+    float* temp = (float*)safe_malloc((size_t)width * (size_t)height * sizeof(float));
     if (!temp) return -1;
 
     for (int iter = 0; iter < 3; iter++) {
-        memcpy(temp, filled_out, width * height * sizeof(float));
+        memcpy(temp, filled_out, (size_t)width * (size_t)height * sizeof(float));
         int changed = 0;
 
         for (int y = 0; y < height; y++) {

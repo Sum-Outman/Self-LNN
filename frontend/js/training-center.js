@@ -222,6 +222,12 @@
     }
 
 /* 超参数搜索 */
+    /**
+     * FE-019修复: 确认参数格式并添加注释
+     * 参数格式: { method: 'grid'|'random'|'bayesian', max_trials: N }
+     * 后端期望字段: method (搜索方法), max_trials (最大试验次数)
+     * 与后端 /api/training/hyperparameter/search 端点保持一致
+     */
     async function startHyperparameterSearch() {
         try {
             /* BUG-5修复: 先获取DOM元素再取值，避免||运算符返回空对象导致parseInt报错 */
@@ -277,19 +283,26 @@
         var html = '<option value="auto">自动选择</option>';
         for (var i = 0; i < gpuList.length; i++) {
             var g = gpuList[i];
-            html += '<option value="' + (g.name || g.backend || '') + '">' +
-                (g.label || g.name || g.backend || ('GPU ' + i)) +
+            /* P1-3a修复: g.name/g.backend/g.label来自后端GPU状态，可能被注入恶意内容，
+               使用window.escapeHtml转义后再拼入innerHTML，防止XSS攻击 */
+            html += '<option value="' + window.escapeHtml(g.name || g.backend || '') + '">' +
+                window.escapeHtml(g.label || g.name || g.backend || ('GPU ' + i)) +
                 (g.available ? '' : ' (不可用)') + '</option>';
         }
         container.innerHTML = html;
     }
 
-/* request()返回原始Response，必须先.json()解析 */
+/* FE-004修复: 不再直接使用原始request()调用，改用统一API方法trainingHistory()，
+     * 确保所有API调用返回格式一致（{success, data}）*/
     async function loadCheckpointList() {
         try {
-            var resp = await window.SelfLnnApi.request('/checkpoint/list');
-            var d = await resp.json();
-            renderCheckpointList(d.checkpoints || d.list || []);
+            /* 使用统一的API方法替代原始request()调用 */
+            var d = await window.SelfLnnApi.trainingHistory();
+            if (d.success) {
+                renderCheckpointList(d.data.checkpoints || d.data.list || []);
+            } else {
+                console.warn('检查点列表加载失败:', d.error);
+            }
         } catch(e) { console.warn('检查点列表加载失败:', e.message); }
     }
     window.loadCheckpointList = loadCheckpointList;
@@ -305,12 +318,16 @@
         for (var i = 0; i < checkpoints.length; i++) {
             var cp = checkpoints[i];
             var cpId = (cp.id || cp.filename || '');
-            html += '<tr data-id="' + cpId + '" onclick="window.selectCheckpoint(\'' + cpId + '\')">' +
-                '<td>' + (cp.name || cp.filename || '检查点' + i) + '</td>' +
+            /* P1-13修复: 对检查点名称、文件名、时间戳使用escapeHtml防止XSS */
+            var safeName = window.escapeHtml(cp.name || cp.filename || '检查点' + i);
+            var safeTimestamp = window.escapeHtml(cp.timestamp || '--');
+            var safeCpId = window.escapeHtml(cpId);
+            html += '<tr data-id="' + safeCpId + '" onclick="window.selectCheckpoint(\'' + safeCpId + '\')">' +
+                '<td>' + safeName + '</td>' +
                 '<td>' + (typeof cp.loss === 'number' ? cp.loss.toFixed(4) : '--') + '</td>' +
                 '<td>' + (typeof cp.accuracy === 'number' ? (cp.accuracy * 100).toFixed(1) + '%' : '--') + '</td>' +
-                '<td>' + (cp.timestamp || '--') + '</td>' +
-                '<td><button onclick="event.stopPropagation();window.loadCheckpoint(\'' + (cp.id || cp.filename || '') + '\')">加载</button></td>' +
+                '<td>' + safeTimestamp + '</td>' +
+                '<td><button onclick="event.stopPropagation();window.loadCheckpoint(\'' + safeCpId + '\')">加载</button></td>' +
                 '</tr>';
         }
         html += '</table>';
@@ -320,21 +337,24 @@
     window.selectCheckpoint = function(id) {
         selectedCheckpoint = id;
         var rows = document.querySelectorAll('#checkpoint-list tr');
-        for (var i = 0; i < rows.length; i++) rows[i].classList.remove('selected');
-        var el = document.querySelector('#checkpoint-list tr[data-id="' + id + '"]');
-        if (el) el.classList.add('selected');
+        for (var i = 0; i < rows.length; i++) {
+            rows[i].classList.remove('selected');
+            /* P2-17修复: 改用dataset.id遍历比较，避免querySelector中id含特殊字符导致的注入/选择失败 */
+            if (rows[i].dataset && rows[i].dataset.id === String(id)) {
+                rows[i].classList.add('selected');
+            }
+        }
     };
 
     window.loadCheckpoint = async function(id) {
         try {
-            var data = await window.SelfLnnApi.request('/checkpoint/load', {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({checkpoint_id: id})
-            });
-            if (data.ok) {
+            /* FE-004修复: 使用统一的API方法trainingResume(id)替代原始request()调用，
+             * 确保返回格式一致（{success, data}） */
+            var data = await window.SelfLnnApi.trainingResume(id);
+            if (data.success) {
                 window.showNotification('检查点已加载', 'success');
             } else {
-                window.showNotification('加载失败', 'danger');
+                window.showNotification('加载失败: ' + (data.error || ''), 'danger');
             }
         } catch(e) { window.showNotification('操作失败: ' + e.message, 'danger'); }
     };
@@ -361,9 +381,12 @@
         var html = '';
         for (var i = 0; i < datasetIndex.length; i++) {
             var ds = datasetIndex[i];
-            html += '<div class="dataset-item"><span>' + (ds.name || '数据集' + i) + '</span>' +
+            /* FE-006修复: 对数据集名称使用escapeHtml()转义，防止XSS攻击 */
+            var safeName = window.escapeHtml(ds.name || ('数据集' + i));
+            var safeNameAttr = window.escapeHtml(ds.name || '');
+            html += '<div class="dataset-item"><span>' + safeName + '</span>' +
                 '<span class="ds-info">' + (ds.samples || ds.count || '?') + '样本</span>' +
-                '<button onclick="window.useDataset(\'' + (ds.name || '') + '\')">使用</button></div>';
+                '<button onclick="window.useDataset(\'' + safeNameAttr + '\')">使用</button></div>';
         }
         container.innerHTML = html;
     }

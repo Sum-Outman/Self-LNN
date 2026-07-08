@@ -81,6 +81,9 @@ static const struct {
     // 通用错误
     {SELFLNN_ERROR_GENERIC, "通用错误"},
     {SELFLNN_ERROR_INVALID_ARGUMENT, "无效参数"},
+    /* P0修复配套: 新增独立错误码描述(原与INVALID_ARGUMENT共享-2无独立描述) */
+    {SELFLNN_ERROR_INVALID_DIMENSION, "无效维度"},
+    {SELFLNN_ERROR_INVALID_PARAMETER, "无效参数（跨模块）"},
     {SELFLNN_ERROR_NULL_POINTER, "空指针"},
     {SELFLNN_ERROR_OUT_OF_MEMORY, "内存不足"},
     {SELFLNN_ERROR_NOT_INITIALIZED, "未初始化"},
@@ -267,7 +270,27 @@ void selflnn_set_last_error(SelfLNNErrorCode error_code,
 }
 
 const SelfLNNErrorContext* selflnn_get_last_error_context(void) {
+    /* C-016修复: 返回线程局部错误上下文指针。
+     * 注意：s_last_error使用{0}初始化，首次调用时message为NULL属正常状态。
+     * 调用者应通过selflnn_get_last_error_message()安全获取消息字符串。 */
     return &s_last_error;
+}
+
+/**
+ * @brief 安全获取最后错误消息字符串
+ * 
+ * C-016修复: 本函数对s_last_error.message进行NULL检查，
+ * 当错误上下文尚未初始化（message为NULL）时返回默认消息，
+ * 避免调用者直接访问s_last_error.message导致NULL指针解引用。
+ * 
+ * @return 错误消息字符串，如果未设置则返回默认消息，永不返回NULL
+ */
+const char* selflnn_get_last_error_message(void) {
+    /* C-016修复: NULL检查，返回默认消息避免空指针 */
+    if (s_last_error.message == NULL) {
+        return "(无错误消息: 错误上下文尚未初始化)";
+    }
+    return s_last_error.message;
 }
 
 void selflnn_clear_last_error(void) {
@@ -394,6 +417,17 @@ typedef struct {
 static RecoveryStrategy g_recovery_strategies[16];
 static int g_recovery_strategy_count = 0;
 
+/* P1-06修复: 全局恢复策略表的自旋锁保护，防止多线程并发访问g_recovery_strategies */
+#ifdef _WIN32
+static volatile LONG g_recovery_lock = 0;
+#define RECOVERY_SPIN_LOCK()    while (InterlockedExchange(&g_recovery_lock, 1) == 1) { /* 自旋等待获取锁 */ }
+#define RECOVERY_SPIN_UNLOCK()  InterlockedExchange(&g_recovery_lock, 0)
+#else
+static volatile int g_recovery_lock = 0;
+#define RECOVERY_SPIN_LOCK()    while (__sync_lock_test_and_set(&g_recovery_lock, 1) == 1) { /* 自旋等待获取锁 */ }
+#define RECOVERY_SPIN_UNLOCK()  __sync_lock_release(&g_recovery_lock)
+#endif
+
 int selflnn_recovery_retry(SelfLNNErrorCode error_type, int (*retry_func)(void*), void* user_data) {
     int delay_ms = BASE_RETRY_DELAY_MS;
     int last_result = -1;
@@ -420,6 +454,8 @@ int selflnn_recovery_retry(SelfLNNErrorCode error_type, int (*retry_func)(void*)
 }
 
 int selflnn_recovery_isolate(SelfLNNErrorCode error_type) {
+    /* P1-06修复: 加自旋锁保护全局恢复策略表的并发访问 */
+    RECOVERY_SPIN_LOCK();
     int idx = -1;
     for (int i = 0; i < g_recovery_strategy_count; i++) {
         if (g_recovery_strategies[i].error_type == error_type) {
@@ -438,25 +474,34 @@ int selflnn_recovery_isolate(SelfLNNErrorCode error_type) {
             g_recovery_strategies[idx].first_failure_time = time(NULL);
         }
     }
+    RECOVERY_SPIN_UNLOCK();
     return 0;
 }
 
 int selflnn_is_component_isolated(SelfLNNErrorCode error_type) {
+    /* P1-06修复: 加自旋锁保护全局恢复策略表的并发读取 */
+    RECOVERY_SPIN_LOCK();
     for (int i = 0; i < g_recovery_strategy_count; i++) {
         if (g_recovery_strategies[i].error_type == error_type &&
             g_recovery_strategies[i].isolated) {
+            RECOVERY_SPIN_UNLOCK();
             return 1;
         }
     }
+    RECOVERY_SPIN_UNLOCK();
     return 0;
 }
 
 int selflnn_recovery_reset(SelfLNNErrorCode error_type) {
+    /* P1-06修复: 加自旋锁保护全局恢复策略表的并发访问 */
+    RECOVERY_SPIN_LOCK();
     for (int i = 0; i < g_recovery_strategy_count; i++) {
         if (g_recovery_strategies[i].error_type == error_type) {
             memset(&g_recovery_strategies[i], 0, sizeof(RecoveryStrategy));
+            RECOVERY_SPIN_UNLOCK();
             return 0;
         }
     }
+    RECOVERY_SPIN_UNLOCK();
     return -1;
 }

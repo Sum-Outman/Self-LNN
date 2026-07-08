@@ -134,6 +134,18 @@ static int copy_individual(EvolutionIndividual* dst, const EvolutionIndividual* 
     dst->id = src->id;
     dst->pareto_rank = src->pareto_rank;
     dst->crowding_distance = src->crowding_distance;
+    /* P2修复: 深拷贝objectives多目标向量，否则精英个体的多目标信息丢失 */
+    dst->objective_count = src->objective_count;
+    if (src->objectives && src->objective_count > 0) {
+        dst->objectives = (float*)safe_malloc(src->objective_count * sizeof(float));
+        if (!dst->objectives) {
+            safe_free((void**)&dst->chromosome);
+            return -1;
+        }
+        memcpy(dst->objectives, src->objectives, src->objective_count * sizeof(float));
+    } else {
+        dst->objectives = NULL;
+    }
     return 0;
 }
 
@@ -304,27 +316,45 @@ static int boltzmann_selection(const EvolutionPopulation* pop, float temperature
     }
     
     double sum_exp = 0.0;
-    double probs[256]; /* 最大种群256 */
+    /* P2修复7: 动态分配probs数组，支持任意种群大小，不再静默截断到256 */
     size_t n = pop->size;
-    if (n > 256) n = 256;
-    
+    double* probs = (double*)safe_malloc(n * sizeof(double));
+    if (!probs) {
+        /* 内存分配失败时回退到锦标赛选择 */
+        int best = 0;
+        float best_fit = pop->individuals[0].fitness;
+        for (size_t i = 1; i < n; i++) {
+            if (pop->individuals[i].fitness > best_fit) {
+                best_fit = pop->individuals[i].fitness;
+                best = (int)i;
+            }
+        }
+        return best;
+    }
+
     for (size_t i = 0; i < n; i++) {
         double scaled = (double)(pop->individuals[i].fitness - max_fit) / (double)temperature;
         probs[i] = exp(scaled);
         sum_exp += probs[i];
     }
-    
+
     if (sum_exp < 1e-15) {
-        return (int)(rand_float(rng) * (float)n);
+        int ret = (int)(rand_float(rng) * (float)n);
+        safe_free((void**)&probs);
+        return ret;
     }
-    
+
     /* 轮盘赌选择 */
     double roll = (double)rand_float(rng) * sum_exp;
     double cumulative = 0.0;
     for (size_t i = 0; i < n; i++) {
         cumulative += probs[i];
-        if (roll <= cumulative) return (int)i;
+        if (roll <= cumulative) {
+            safe_free((void**)&probs);
+            return (int)i;
+        }
     }
+    safe_free((void**)&probs);
     return (int)(n - 1);
 }
 
@@ -348,6 +378,9 @@ static int tournament_selection(const EvolutionPopulation* pop, float ratio, uns
 
 /* 轮盘赌选择 */
 static int roulette_selection(const EvolutionPopulation* pop, unsigned int* rng) {
+    /* P1修复: 空种群保护，防止pop->size为0时越界访问individuals[0] */
+    if (!pop || pop->size == 0) return -1;
+
     float min_fit = pop->individuals[0].fitness;
     for (size_t i = 1; i < pop->size; i++) {
         if (pop->individuals[i].fitness < min_fit) min_fit = pop->individuals[i].fitness;
@@ -440,13 +473,19 @@ static void sbx_crossover(const float* p1, const float* p2, float* c1, float* c2
 }
 
 static void blend_crossover(const float* p1, const float* p2, float* c1, float* c2,
-                            size_t size, unsigned int* rng) {
+                            size_t size, float min_val, float max_val,
+                            unsigned int* rng) {
     for (size_t i = 0; i < size; i++) {
         float min_v = p1[i] < p2[i] ? p1[i] : p2[i];
         float max_v = p1[i] > p2[i] ? p1[i] : p2[i];
         float range = max_v - min_v;
         c1[i] = min_v - range * 0.2f + rand_float(rng) * range * 1.4f;
         c2[i] = min_v - range * 0.2f + rand_float(rng) * range * 1.4f;
+        /* P1修复: 添加边界裁剪，防止染色体值超出合法范围 */
+        if (c1[i] < min_val) c1[i] = min_val;
+        if (c1[i] > max_val) c1[i] = max_val;
+        if (c2[i] < min_val) c2[i] = min_val;
+        if (c2[i] > max_val) c2[i] = max_val;
     }
 }
 
@@ -465,7 +504,8 @@ static void crossover(const EvolutionEngine* engine, const float* p1, const floa
                          engine->config.chromosome_min, engine->config.chromosome_max, rng);
             break;
         case EVO_CROSSOVER_BLEND:
-            blend_crossover(p1, p2, c1, c2, size, rng);
+            blend_crossover(p1, p2, c1, c2, size,
+                           engine->config.chromosome_min, engine->config.chromosome_max, rng);
             break;
         default: { /* 单点交叉 */
             int point = (int)(rand_float(rng) * size);
@@ -480,9 +520,13 @@ static void crossover(const EvolutionEngine* engine, const float* p1, const floa
 
 /* 变异操作 */
 
-static void gaussian_mutation(float* chromosome, size_t size, float sigma, unsigned int* rng) {
+static void gaussian_mutation(float* chromosome, size_t size, float sigma,
+                              float min_val, float max_val, unsigned int* rng) {
     for (size_t i = 0; i < size; i++) {
         chromosome[i] += rand_gaussian(rng, 0.0f, sigma);
+        /* P1修复: 添加边界裁剪，防止染色体值超出合法范围 */
+        if (chromosome[i] < min_val) chromosome[i] = min_val;
+        if (chromosome[i] > max_val) chromosome[i] = max_val;
     }
 }
 
@@ -520,7 +564,8 @@ static void mutate(const EvolutionEngine* engine, float* chromosome, size_t size
 
     switch (engine->config.mutation) {
         case EVO_MUTATION_GAUSSIAN:
-            gaussian_mutation(chromosome, size, engine->config.gaussian_sigma, rng);
+            gaussian_mutation(chromosome, size, engine->config.gaussian_sigma,
+                             engine->config.chromosome_min, engine->config.chromosome_max, rng);
             break;
         case EVO_MUTATION_POLYNOMIAL:
             polynomial_mutation(chromosome, size, engine->config.polynomial_eta,
@@ -532,7 +577,8 @@ static void mutate(const EvolutionEngine* engine, float* chromosome, size_t size
         case EVO_MUTATION_ADAPTIVE: {
             float effective_sigma = engine->config.gaussian_sigma * 
                 (1.0f - (float)engine->population.generation / (float)engine->config.max_generations);
-            gaussian_mutation(chromosome, size, effective_sigma, rng);
+            gaussian_mutation(chromosome, size, effective_sigma,
+                             engine->config.chromosome_min, engine->config.chromosome_max, rng);
             break;
         }
         case EVO_MUTATION_UNIFORM:
@@ -552,6 +598,11 @@ static void mutate(const EvolutionEngine* engine, float* chromosome, size_t size
 
 /* 计算种群多样性 */
 static float compute_diversity(EvolutionPopulation* pop) {
+    /* P2修复8: 空种群保护，防止pop->size为0时越界访问individuals[0] */
+    if (!pop || pop->size == 0) return 0.0f;
+    if (!pop->individuals || !pop->individuals[0].chromosome || pop->individuals[0].chromosome_size == 0)
+        return 0.0f;
+
     float* center = (float*)safe_calloc(pop->individuals[0].chromosome_size, sizeof(float));
     if (!center) return 0.0f;
 
@@ -875,10 +926,17 @@ int evolution_initialize_from_existing(EvolutionEngine* engine,
 
     update_population_stats(&engine->population);
 
+    /* P1修复: 释放旧的历史指针，避免重复初始化时内存泄漏 */
+    if (engine->stats.fitness_history) safe_free((void**)&engine->stats.fitness_history);
+    if (engine->stats.diversity_history) safe_free((void**)&engine->stats.diversity_history);
+
     engine->stats.fitness_history = (float*)safe_malloc(
         engine->config.max_generations * sizeof(float));
     engine->stats.diversity_history = (float*)safe_malloc(
         engine->config.max_generations * sizeof(float));
+    /* P1修复: 重置历史计数器，避免越界写入旧数据 */
+    engine->stats.history_size = 0;
+    engine->stats.diversity_size = 0;
 
     engine->initialized = 1;
     return 0;
@@ -889,6 +947,7 @@ typedef struct {
     EvolutionPopulation* island;
     EvolutionEngine* engine;
     int island_index;
+    unsigned int rng_seed;  /* P1修复: 独立随机种子副本，避免多线程读取engine->rng_state的数据竞争 */
 } IslandTaskData;
 
 int evolution_step(EvolutionEngine* engine) {
@@ -1014,6 +1073,12 @@ int evolution_step(EvolutionEngine* engine) {
 
             float* c1 = (float*)safe_malloc(chrom_size * sizeof(float));
             float* c2 = (float*)safe_malloc(chrom_size * sizeof(float));
+            /* P2修复: crossover前检查父代chromosome是否有效，避免空指针解引用 */
+            if (!pop->individuals[p1_idx].chromosome || !pop->individuals[p2_idx].chromosome) {
+                safe_free((void**)&c1);
+                safe_free((void**)&c2);
+                continue;
+            }
             if (c1 && c2) {
                 crossover(engine, pop->individuals[p1_idx].chromosome,
                          pop->individuals[p2_idx].chromosome, c1, c2, chrom_size);
@@ -1028,6 +1093,23 @@ int evolution_step(EvolutionEngine* engine) {
             } else {
                 safe_free((void**)&c1);
                 safe_free((void**)&c2);
+                /* P1修复: 分配失败时从随机精英复制替代，避免无效"死"个体 */
+                int src_idx = 0;
+                if (elite_count > 0) {
+                    int elite_pick = (int)(rand_float(rng) * (float)elite_count);
+                    if (elite_pick >= elite_count) elite_pick = elite_count - 1;
+                    src_idx = elite_indices[elite_pick];
+                } else {
+                    src_idx = (int)(rand_float(rng) * (float)pop_size);
+                    if (src_idx >= (int)pop_size) src_idx = (int)pop_size - 1;
+                }
+                if (copy_individual(&new_pop[i], &pop->individuals[src_idx]) != 0) {
+                    /* 复制也失败则跳过，保留零初始化个体 */
+                    continue;
+                }
+                /* 对复制个体施加变异，避免与父代完全重复 */
+                mutate(engine, new_pop[i].chromosome, chrom_size, mutation_rate);
+                new_pop[i].id = (int)engine->eval_counter;
             }
         } else {
             /* 直接变异现有个体 */
@@ -1094,7 +1176,9 @@ int evolution_step(EvolutionEngine* engine) {
     /* 停滞重启 */
     if (engine->config.use_restart_stagnation &&
         pop->stagnated_generations >= engine->config.restart_stagnation_generations) {
-        float min_v = -10.0f, max_v = 10.0f;
+        /* P2修复10: 使用config配置范围替代硬编码的[-10, 10] */
+        float min_v = engine->config.chromosome_min;
+        float max_v = engine->config.chromosome_max;
         for (size_t i = elite_count; i < pop_size; i++) {
             for (size_t j = 0; j < chrom_size; j++) {
                 pop->individuals[i].chromosome[j] = min_v + rand_float(rng) * (max_v - min_v);
@@ -1114,31 +1198,61 @@ int evolution_step(EvolutionEngine* engine) {
 
 /* 岛模型真正并行演化
      * 原代码创建ThreadPool后仍在主线程串行循环处理，线程池未实际使用。
-     * 修复: 为每个岛提交独立任务到线程池，实现真正的岛间并行演化。 */
+     * 修复: 为每个岛提交独立任务到线程池，实现真正的岛间并行演化。
+     * P1修复6: 仅当config.parallel_evaluation==1时启用并行评估，
+     *          默认串行模式(0)确保fitness_func线程安全不被破坏。
+     *          并行模式下fitness_func必须由调用者保证线程安全。 */
     if (engine->island_count > 1 && engine->islands) {
-        ThreadPoolConfig tp_cfg;
-        memset(&tp_cfg, 0, sizeof(tp_cfg));
-        tp_cfg.num_threads = engine->island_count < 8 ? engine->island_count : 8;
-        tp_cfg.max_tasks = engine->island_count * 2;
-        ThreadPool* tp = thread_pool_create(&tp_cfg);
-        if (tp) {
-            /* 为每个岛提交独立的演化任务到线程池 */
-             void evolve_island_task(void* arg);
-            for (int i = 0; i < engine->island_count; i++) {
-                EvolutionPopulation* isl = &engine->islands[i];
-                /* 复制岛数据到堆上，供线程池任务使用(线程安全) */
-                IslandTaskData* task_data = (IslandTaskData*)safe_malloc(sizeof(IslandTaskData));
-                if (!task_data) continue;
-                task_data->island = isl;
-                task_data->engine = engine;
-                task_data->island_index = i;
-                thread_pool_submit(tp, evolve_island_task, task_data, 0);
+        if (engine->config.parallel_evaluation == 1) {
+            /* 并行模式: 使用线程池并行演化各岛 */
+            ThreadPoolConfig tp_cfg;
+            memset(&tp_cfg, 0, sizeof(tp_cfg));
+            tp_cfg.num_threads = engine->island_count < 8 ? engine->island_count : 8;
+            tp_cfg.max_tasks = engine->island_count * 2;
+            ThreadPool* tp = thread_pool_create(&tp_cfg);
+            if (tp) {
+                /* P1修复5: 在串行段中提前复制rng_state到局部变量，避免多线程读取数据竞争 */
+                unsigned int base_rng_seed = engine->rng_state;
+                /* 为每个岛提交独立的演化任务到线程池 */
+                 void evolve_island_task(void* arg);
+                for (int i = 0; i < engine->island_count; i++) {
+                    EvolutionPopulation* isl = &engine->islands[i];
+                    /* 复制岛数据到堆上，供线程池任务使用(线程安全) */
+                    IslandTaskData* task_data = (IslandTaskData*)safe_malloc(sizeof(IslandTaskData));
+                    if (!task_data) continue;
+                    task_data->island = isl;
+                    task_data->engine = engine;
+                    task_data->island_index = i;
+                    task_data->rng_seed = base_rng_seed; /* P1修复: 传入种子副本 */
+                    thread_pool_submit(tp, evolve_island_task, task_data, 0);
+                }
+                /* 等待所有岛演化完成(无限超时) */
+                thread_pool_wait_all(tp, 0);
+                thread_pool_free(tp);
+            } else {
+                /* 线程池创建失败：回退到串行岛演化 */
+                for (int i = 0; i < engine->island_count; i++) {
+                    EvolutionPopulation* isl = &engine->islands[i];
+                    for (size_t j = engine->config.elite_count; j < isl->size; j++) {
+                        if (isl->individuals[j].chromosome) {
+                            for (size_t k = 0; k < engine->config.chromosome_size; k++) {
+                                if (rand_float(rng) < engine->config.mutation_rate) {
+                                    isl->individuals[j].chromosome[k] +=
+                                        rand_gaussian(rng, 0.0f, engine->config.gaussian_sigma);
+                                }
+                            }
+                            float fit = engine->fitness_func ?
+                                engine->fitness_func(isl->individuals[j].chromosome,
+                                    engine->config.chromosome_size, engine->user_data) : 0.0f;
+                            if (fit > isl->individuals[j].fitness)
+                                isl->individuals[j].fitness = fit;
+                        }
+                    }
+                    update_population_stats(isl);
+                }
             }
-            /* 等待所有岛演化完成(无限超时) */
-            thread_pool_wait_all(tp, 0);
-            thread_pool_free(tp);
         } else {
-            /* 线程池创建失败：回退到串行岛演化 */
+            /* P1修复6: 串行模式(默认)——确保fitness_func不被并发调用 */
             for (int i = 0; i < engine->island_count; i++) {
                 EvolutionPopulation* isl = &engine->islands[i];
                 for (size_t j = engine->config.elite_count; j < isl->size; j++) {
@@ -1296,8 +1410,8 @@ void evolve_island_task(void* arg) {
     EvolutionPopulation* isl = data->island;
     EvolutionEngine* engine = data->engine;
 
-    /* 每个岛使用独立随机种子(基于岛索引) */
-    unsigned int island_seed = engine->rng_state + (unsigned int)(data->island_index * 2654435761u);
+    /* P1修复: 使用任务数据中的独立随机种子副本，避免多线程读取engine->rng_state的数据竞争 */
+    unsigned int island_seed = data->rng_seed + (unsigned int)(data->island_index * 2654435761u);
     for (size_t j = engine->config.elite_count; j < isl->size && j < isl->capacity; j++) {
         if (!isl->individuals[j].chromosome) continue;
         for (size_t k = 0; k < engine->config.chromosome_size; k++) {
@@ -1473,10 +1587,11 @@ int evolution_load_population(EvolutionEngine* engine, const char* filepath) {
 
     uint32_t magic;
     size_t saved_size, saved_chrom_size;
-    fread(&magic, sizeof(uint32_t), 1, fp);
+    /* P2修复9: 检查fread返回值，防止文件损坏导致读取不完整 */
+    if (fread(&magic, sizeof(uint32_t), 1, fp) != 1) { fclose(fp); return -1; }
     if (magic != 0x45564F4C) { fclose(fp); return -1; }
-    fread(&saved_size, sizeof(size_t), 1, fp);
-    fread(&saved_chrom_size, sizeof(size_t), 1, fp);
+    if (fread(&saved_size, sizeof(size_t), 1, fp) != 1) { fclose(fp); return -1; }
+    if (fread(&saved_chrom_size, sizeof(size_t), 1, fp) != 1) { fclose(fp); return -1; }
 
     /* 防止恶意文件指定极大值 */
     if (saved_size == 0 || saved_size > 10000 ||
@@ -1499,8 +1614,16 @@ int evolution_load_population(EvolutionEngine* engine, const char* filepath) {
         EvolutionIndividual* ind = &engine->population.individuals[i];
         ind->chromosome = (float*)safe_malloc(saved_chrom_size * sizeof(float));
         ind->chromosome_size = saved_chrom_size;
-        fread(ind->chromosome, sizeof(float), saved_chrom_size, fp);
-        fread(&ind->fitness, sizeof(float), 1, fp);
+        /* P2修复9: 检查fread返回值，读取失败时跳过该个体 */
+        if (fread(ind->chromosome, sizeof(float), saved_chrom_size, fp) != saved_chrom_size) {
+            log_warning("[演化引擎] 读取个体%zu染色体失败", i);
+            safe_free((void**)&ind->chromosome);
+            ind->chromosome_size = 0;
+        }
+        if (fread(&ind->fitness, sizeof(float), 1, fp) != 1) {
+            log_warning("[演化引擎] 读取个体%zu适应度失败", i);
+            ind->fitness = 0.0f;
+        }
         ind->id = (int)i;
     }
     fclose(fp);

@@ -56,7 +56,8 @@ void system_mutex_destroy(void* mutex_ptr) {
 #else
     pthread_mutex_destroy((pthread_mutex_t*)mutex_ptr);
 #endif
-    /* P0-R4修复: safe_free((void**)&mutex_ptr)只将栈局部变量置NULL，
-     * 调用方指针仍悬空(UAF风险)。改用free()由调用方负责管理指针生命周期。 */
-    free(mutex_ptr);
+    /* P-AUDIT修复(C-1): mutex_ptr由safe_malloc分配,必须用safe_free释放。
+     * 原注释称safe_free只置空局部变量而改用free(),但safe_free((void**)&ptr)
+     * 会正确释放并置空指针。原用free()释放safe_malloc内存,关闭旁路模式时堆损坏。 */
+    safe_free((void**)&mutex_ptr);
 }

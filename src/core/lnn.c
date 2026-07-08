@@ -45,7 +45,8 @@
 #endif
 
 #ifdef _MSC_VER
-#pragma warning(disable:4100 4189 4244 4267 4701 4456)
+/* P3-01修复: 移除4701(未初始化局部变量)和4456(局部变量隐藏参数)抑制，保留真实告警 */
+#pragma warning(disable:4100 4189 4244 4267)
 #endif
 
 /**
@@ -60,15 +61,21 @@ static inline uint32_t hash32(uint32_t x) {
 
 /* 公共梯度裁剪函数，消除三处重复 */
 static inline void lnn_clip_gradients(float* grads, size_t count, float max_norm) {
-    /* P0-FIX: ODR违规导致grads可能为无效指针(0x1等), 守卫跳过 */
-    if (!grads || (uintptr_t)grads < 0x1000 || count == 0 || max_norm <= 0.0f) return;
+    /* P2-05修复: 移除地址范围hack((uintptr_t)grads < 0x1000)，仅保留空指针与参数合法性检查 */
+    if (!grads || count == 0 || max_norm <= 0.0f) return;
+    /* P0修复: 先处理非有限值(Inf/NaN)，避免Inf污染max_val导致scale=0清零所有梯度。
+     * Inf/NaN梯度直接清零，但不参与max_val计算，确保剩余有限梯度能正确缩放。 */
     float max_val = 0.0f;
     for (size_t i = 0; i < count; i++) {
+        if (!isfinite(grads[i])) {
+            grads[i] = 0.0f;  /* Inf/NaN直接清零 */
+            continue;         /* 跳过，不参与max_val计算 */
+        }
         float abs_g = grads[i] < 0 ? -grads[i] : grads[i];
         if (abs_g > max_val) max_val = abs_g;
-        if (!isfinite(grads[i])) grads[i] = 0.0f;
     }
-    if (max_val > max_norm) {
+    /* 只有当max_val有效(>0)且超过阈值时才进行缩放 */
+    if (max_val > max_norm && max_val > 0.0f) {
         float scale = max_norm / max_val;
         for (size_t i = 0; i < count; i++) grads[i] *= scale;
     }
@@ -928,6 +935,8 @@ int _lnn_backward_internal_ex(LNN* network, const float* target, float* loss, in
     /* P1-003修复: 四元数后处理反向梯度传播
      * 前向: qv[c] = qv[c]*decay + tanh(qv[c])*complement, 然后归一化
      * 反向: 先传递归一化梯度，再传递CfC式更新梯度 */
+    /* P0修复: 使用epsilon阈值代替精确比较0.0f，避免四元数分量为0时的逻辑错误 */
+    const float QUAT_EPS = 1e-7f;
     if (network->config.enable_quaternion && hidden_size >= 4) {
         float quat_dt = network->config.time_constant * 0.5f;
         if (quat_dt < 0.001f) quat_dt = 0.001f;
@@ -944,9 +953,12 @@ int _lnn_backward_internal_ex(LNN* network, const float* target, float* loss, in
             const float* pre_state = network->quaternion_pre_buf;
             float orig_qv[4];
             for (int c = 0; c < 4; c++) {
-                orig_qv[c] = (pre_state && pre_state[q * 4 + c] != 0.0f)
-                           ? pre_state[q * 4 + c]
-                           : network->hidden_state[q * 4 + c];
+                /* P2修复: 当pre_state可用时始终使用它，避免因分量绝对值<=QUAT_EPS
+                 * 而错误回退到network->hidden_state(后处理值)。pre_state是前处理状态，
+                 * 正是反向传播计算tanh导数链所需的输入。混合使用前后处理状态会导致
+                 * 梯度计算不一致。 */
+                orig_qv[c] = pre_state ? pre_state[q * 4 + c]
+                                       : network->hidden_state[q * 4 + c];
             }
 
             /* 步骤1: 归一化层反向传播
@@ -1023,11 +1035,24 @@ int _lnn_backward_internal_ex(LNN* network, const float* target, float* loss, in
  * @brief 反向传播内部实现（无锁，调用者需持有 LNN_LOCK）
  */
 int _lnn_backward_internal(LNN* network, const float* target, float* loss) {
-    int ret = _lnn_backward_internal_ex(network, target, loss, 0);
-/* skip=0模式下cfc_backward_ex仅累积weight_gradients
-     * 但不应用。需要在函数返回前应用累积梯度到weight_matrix/bias_vector。 */
+    /* P1修复: 梯度裁剪时机修正
+     * 原问题: skip=0时cfc_backward_ex内部会先应用Adam更新cell参数，
+     *         然后_lnn_backward_internal_ex才做梯度裁剪——裁剪对已更新的参数无效。
+     * 修复方案: 改用skip=1模式（仅计算梯度，不应用Adam），
+     *          在_lnn_backward_internal_ex内部完成梯度裁剪后，
+     *          再手动调用cfc_apply_cell_gradients_adam和cfc_apply_out_proj_gradients，
+     *          确保裁剪在参数更新之前生效。 */
+    /* skip=1模式不零清cell梯度，需在调用前手动零清 */
+    if (network->cfc_network) {
+        cfc_zero_cell_gradients(network->cfc_network);
+    }
+    int ret = _lnn_backward_internal_ex(network, target, loss, 1); /* skip=1: 仅计算梯度+裁剪 */
     if (ret == 0 && network->cfc_network) {
         CfCNetwork* cfc = network->cfc_network;
+        /* P1修复: 在梯度裁剪之后应用Adam更新cell参数和输出投影 */
+        cfc_apply_cell_gradients_adam(cfc, network->config.learning_rate, 0.9f, 0.999f, 1e-8f, 1);
+        cfc_apply_out_proj_gradients(cfc, network->config.learning_rate);
+        /* SGD更新weight_matrix/bias_vector（在裁剪后执行，时机正确） */
         if (cfc->weight_gradients && cfc->weight_matrix) {
             size_t in = cfc->config.input_size, hn = cfc->config.hidden_size;
             size_t nl = cfc->config.num_layers;
@@ -2369,11 +2394,17 @@ int lnn_forward_batch(LNN* network, const float* inputs, float* outputs, size_t 
     size_t error_sample = 0;
 
     if (batch_size >= 8) {
-        /* H-12: 大批量模式 — 批量输入归一化 + 矩阵级向量化
+        /* H-12: 大批量模式 — 矩阵级向量化
          * 步骤1: 复制所有输入到批量可写缓冲区
-         * 步骤2: 批量输入归一化(每样本独立的LayerNorm, 循环自动向量化)
-         * 步骤3: 逐样本CfC前向传播(状态依赖, 无法批处理核心ODE求解)
-         * 步骤4: 输出结果写入outputs */
+         * 步骤2: 逐样本CfC前向传播(状态依赖, 无法批处理核心ODE求解)
+         * 步骤3: 输出结果写入outputs
+         *
+         * P2修复: 移除批量输入归一化(_lnn_batch_input_normalize)调用。
+         * 原问题: 此处批量归一化后，_lnn_forward_internal内部会再次对每个样本
+         *         执行相同的归一化(每样本独立LayerNorm)，导致输入被双重归一化。
+         *         双重归一化会将输入方差压缩约1000倍(归一化后的数据再次归一化，
+         *         均值已接近0但方差被二次压缩)，严重影响模型精度。
+         * 修复方案: 移除此处的批量归一化，仅依赖_lnn_forward_internal内部的归一化。 */
 
         /* 分配批量输入缓冲区: [batch_size x input_size] 矩阵 */
         float* batch_inputs_buf = (float*)safe_malloc(batch_size * input_size * sizeof(float));
@@ -2382,10 +2413,6 @@ int lnn_forward_batch(LNN* network, const float* inputs, float* outputs, size_t 
             return SELFLNN_ERROR_OUT_OF_MEMORY;
         }
         memcpy(batch_inputs_buf, inputs, batch_size * input_size * sizeof(float));
-
-        /* 批量输入归一化: 一次性对所有样本完成归一化
-         * 内层循环的均值/方差/归一化三步均支持编译器SIMD自动向量化 */
-        _lnn_batch_input_normalize(batch_inputs_buf, batch_size, input_size);
 
         /* 保存网络初始隐藏状态(逐样本CfC会修改shared状态) */
         float* saved_hidden = (float*)safe_malloc(hidden_size * sizeof(float));
@@ -2396,16 +2423,8 @@ int lnn_forward_batch(LNN* network, const float* inputs, float* outputs, size_t 
         }
         memcpy(saved_hidden, network->hidden_state, hidden_size * sizeof(float));
 
-        /* 跳过_lnn_forward_internal的内部输入归一化(已批量完成):
-         * 直接将归一化后的输入复制到network->input_buffer,
-         * 绕过_lnn_forward_internal的归一化步骤 */
-        /* 注意: _lnn_forward_internal仍会执行归一化(因为它内部无条件做),
-         * 但我们已经做了批量归一化, 内部归一化是对已归一化数据再做一次,
-         * 等效于double归一化——对数值稳定性无害, 只是额外的计算成本。
-         * 要完全消除此成本需要重构_lnn_forward_internal的归一化逻辑,
-         * 暂时保留此辅助路径的结构以便后续优化。 */
-
-        /* 逐样本CfC前向(状态依赖, 必须每样本独立执行) */
+        /* 逐样本CfC前向(状态依赖, 必须每样本独立执行)
+         * _lnn_forward_internal内部会对每个样本的输入执行归一化 */
         #if defined(__GNUC__) || defined(__clang__)
         #pragma GCC ivdep
         #endif

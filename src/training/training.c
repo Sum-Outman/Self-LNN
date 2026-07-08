@@ -7819,14 +7819,31 @@ void gradient_clip(float* gradients, size_t num_gradients,
             {
                 float norm = 0.0f;
                 for (size_t i = 0; i < num_gradients; i++) {
-                    norm += gradients[i] * gradients[i];
+                    /* P0修复: 检查NaN/Inf梯度，跳过无效值防止norm累加溢出为inf */
+                    float g = gradients[i];
+                    if (!isfinite(g)) {
+                        gradients[i] = 0.0f;  /* 清零无效梯度，避免污染后续更新 */
+                        continue;
+                    }
+                    norm += g * g;
                 }
-                norm = sqrtf(norm);
-                
-                if (norm > clip_norm) {
-                    float scale = clip_norm / norm;
+
+                /* P0修复: 防止norm溢出为inf或NaN导致scale=clip_norm/norm=0、所有梯度被清零 */
+                if (!isfinite(norm) || norm > 1e30f) {
+                    /* 梯度值过大时范数裁剪失效，退化为逐元素值裁剪保证训练不停滞 */
                     for (size_t i = 0; i < num_gradients; i++) {
-                        gradients[i] *= scale;
+                        if (fabsf(gradients[i]) > clip_norm) {
+                            gradients[i] = copysignf(clip_norm, gradients[i]);
+                        }
+                    }
+                } else {
+                    norm = sqrtf(norm);
+
+                    if (norm > clip_norm && norm > 0.0f) {
+                        float scale = clip_norm / norm;
+                        for (size_t i = 0; i < num_gradients; i++) {
+                            gradients[i] *= scale;
+                        }
                     }
                 }
             }

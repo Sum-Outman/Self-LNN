@@ -48,6 +48,14 @@ void memory_utils_bypass_safe_alloc(int bypass) { g_bypass_safe_alloc = bypass; 
  * 修复#4: magic字段添加volatile限定符，防止MSVC /O2优化下编译器将
  * magic != MEMORY_MAGIC 常量折叠为false或跨函数缓存magic值。
  * volatile确保每次读取都从内存获取，不依赖寄存器缓存。
+ *
+ * raw_ptr字段(P1修复 _safe_aligned_malloc兼容): 指向 malloc 返回的原始指针。
+ * 普通safe_malloc块: raw_ptr == header(即malloc返回值,因header就放在raw_ptr处);
+ * 对齐safe_aligned_malloc块: raw_ptr != header(数据指针经手动对齐,header在
+ * 对齐后的数据指针之前,但真正的malloc返回值raw_ptr更靠前)。safe_free统一通过
+ * free(header->raw_ptr)释放,从而兼容两种分配方式。
+ * 注意: 该字段填入结构体原有尾部填充区(sizeof 56->64,BLOCK_HEADER_SIZE仍为64),
+ * 不改变头部大小与现有块布局。
  */
 typedef struct {
     size_t size;              /**< 块大小 */
@@ -57,6 +65,7 @@ typedef struct {
     volatile size_t magic;    /**< 魔法数字用于验证（volatile防止编译器优化） */
     size_t alloc_id;          /**< 分配序号（用于调试） */
     void* caller_address;     /**< 调用者返回地址（用于调试） */
+    void* raw_ptr;            /**< malloc返回的原始指针（用于safe_free统一释放，兼容对齐分配） */
 } MemoryBlockHeader;
 
 /**
@@ -76,6 +85,10 @@ struct MemoryPool {
     size_t used_size;         /**< 已使用大小 */
     size_t free_size;         /**< 空闲大小 */
     int* block_status;        /**< 块状态数组（0=空闲，1=已用） */
+    /* P1修复(memory_pool_free多块泄漏): 仅靠 block_status 无法知道一次分配占用几个块,
+     * 原释放逻辑只释放首块导致多块分配泄漏。block_span 与 block_status 并行, 仅在每次
+     * 分配的首块记录该次分配占用的块数, 其余块为0; 释放时读取首块的 span 释放完整跨度。 */
+    size_t* block_span;       /**< 每次分配首块记录的占用块数(其余块为0) */
     size_t block_count;       /**< 块数量 */
     size_t first_free;        /**< 第一个空闲块索引 */
 };
@@ -93,8 +106,14 @@ static size_t g_allocation_counter = 0;
 /* 线程安全锁：保护全局内存统计和分配跟踪 */
 #ifdef _WIN32
 static CRITICAL_SECTION g_mem_lock;
-static int g_mem_lock_init = 0;
-#define MEM_LOCK()   do { if (!g_mem_lock_init) { InitializeCriticalSection(&g_mem_lock); g_mem_lock_init = 1; } EnterCriticalSection(&g_mem_lock); } while(0)
+/* P0修复(竞态条件): 原为普通int + 双检锁(DCL)模式，多线程下存在竞态——
+ * 两个线程可能同时通过 !g_mem_lock_init 检查并同时初始化/进入未就绪的临界区。
+ * 改为 volatile LONG + 原子CAS状态机，与下方 g_alloc_track_lock_initialized 修复模式一致。
+ * 状态机: 0=未初始化, 2=初始化中, 1=已初始化完成。 */
+static volatile LONG g_mem_lock_init = 0;
+/* mem_lock_init() 在下方定义（紧随 alloc_track_lock_init 之后），保证首次加锁前
+ * 临界区已就绪；其余线程自旋等待至状态变为1再进入。 */
+#define MEM_LOCK()   do { mem_lock_init(); EnterCriticalSection(&g_mem_lock); } while(0)
 #define MEM_UNLOCK() LeaveCriticalSection(&g_mem_lock)
 #else
 static pthread_mutex_t g_mem_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -155,6 +174,11 @@ static void memory_auto_cleanup(void) {
     size_t leaked = memory_check_leaks();
     (void)leaked;
 #ifdef _WIN32
+    /* P0修复: 同步销毁 g_mem_lock 临界区，避免句柄泄漏（原仅销毁跟踪锁） */
+    if (g_mem_lock_init) {
+        DeleteCriticalSection(&g_mem_lock);
+        g_mem_lock_init = 0;
+    }
     if (g_alloc_track_lock_initialized) {
         DeleteCriticalSection(&g_alloc_track_lock);
         g_alloc_track_lock_initialized = 0;
@@ -183,6 +207,23 @@ static void alloc_track_lock_init(void) {
         atexit(memory_auto_cleanup);
     }
 }
+
+/* P0修复(MEM_LOCK DCL竞态): 与 alloc_track_lock_init 完全一致的状态机模式。
+ * 仅Windows需要——临界区无法静态初始化。状态: 0=未初始化, 2=初始化中, 1=已就绪。
+ * 并发首次进入时, CAS(0->2)成功者执行 InitializeCriticalSection 并置1;
+ * 失败者(读到2或1)自旋等待至状态变为1再返回, 确保不进入未就绪的临界区。 */
+#ifdef _WIN32
+static void mem_lock_init(void) {
+    if (!g_mem_lock_init) {
+        if (InterlockedCompareExchange(&g_mem_lock_init, 2, 0) == 0) {
+            InitializeCriticalSection(&g_mem_lock);
+            g_mem_lock_init = 1;
+        } else {
+            while (g_mem_lock_init != 1) { Sleep(0); }
+        }
+    }
+}
+#endif
 
 /**
  * @brief 加锁分配跟踪链表
@@ -213,7 +254,11 @@ static void alloc_track_unlock(void) {
 static void alloc_track_add(void* data_ptr, size_t size, size_t alloc_id,
                             const char* file, int line) {
     if (!data_ptr) return;
-    AllocTrackNode* node = (AllocTrackNode*)safe_malloc(sizeof(AllocTrackNode));
+    /* P-AUDIT修复(根因): 原使用safe_malloc分配跟踪节点,但safe_malloc内部会调用alloc_track_add,
+     * 形成无限互递归: alloc_track_add → safe_malloc → _safe_malloc → alloc_track_add → ...
+     * 这导致所有未调用memory_utils_bypass_safe_alloc(1)的程序(如lnn_verify.exe)栈溢出。
+     * 修复: 跟踪系统自身使用原始malloc/free,不经过跟踪系统(否则跟踪跟踪器本身就是递归)。 */
+    AllocTrackNode* node = (AllocTrackNode*)malloc(sizeof(AllocTrackNode));
     if (!node) return;
     node->data_ptr = data_ptr;
     node->size = size;
@@ -238,12 +283,44 @@ static void alloc_track_remove(void* data_ptr) {
             AllocTrackNode* to_free = *pp;
             *pp = (*pp)->next;
             alloc_track_unlock();
-            safe_free((void**)&to_free);
+            /* P-AUDIT修复(根因): 同alloc_track_add,使用原始free释放跟踪节点,
+             * 避免safe_free → alloc_track_remove → safe_free 的递归。 */
+            free(to_free);
             return;
         }
         pp = &(*pp)->next;
     }
     alloc_track_unlock();
+}
+
+/**
+ * @brief 检查指针是否由 safe_malloc/_safe_calloc 分配并跟踪
+ *
+ * P0修复(safe_realloc/safe_free越界读头): 在读取 MemoryBlockHeader 之前,
+ * 必须先确认该指针确由本内存工具分配。对 malloc/calloc/realloc/外部库分配
+ * 的指针直接读取头部属于越界读/未定义行为(读取不属于调用者的内存)。
+ * 本函数通过遍历分配跟踪链表验证指针来源,避免对非托管指针读取头部。
+ *
+ * @param data_ptr 待验证的数据指针
+ * @param out_size 输出参数,若非NULL且指针已跟踪,则写入跟踪记录中的分配大小;
+ *                 用于头部损坏时安全复制(避免读取已损坏的header->size)。
+ * @return 1 表示已跟踪(safe_malloc分配,可安全读取头部), 0 表示未跟踪(外部指针)
+ */
+static int alloc_track_contains(void* data_ptr, size_t* out_size) {
+    if (!data_ptr) return 0;
+    int found = 0;
+    alloc_track_lock();
+    AllocTrackNode* node = g_alloc_track_list;
+    while (node) {
+        if (node->data_ptr == data_ptr) {
+            found = 1;
+            if (out_size) *out_size = node->size;
+            break;
+        }
+        node = node->next;
+    }
+    alloc_track_unlock();
+    return found;
 }
 
 /**
@@ -379,6 +456,9 @@ void* _safe_malloc(size_t size, const char* file, int line) {
     header->file = file;
     header->line = line;
     header->magic = MEMORY_MAGIC;
+    /* P1修复: 记录malloc原始指针,使safe_free能通过 free(header->raw_ptr) 统一释放
+     * (普通块 raw_ptr == header, 对齐块 raw_ptr != header)。 */
+    header->raw_ptr = raw_ptr;
     /* 修复#4: 编译器屏障——确保magic写入完成后，后续代码不会因优化而重排到magic写入之前。
      * MSVC: _ReadWriteBarrier() | GCC/Clang: asm volatile("" ::: "memory") */
 #ifdef _MSC_VER
@@ -470,50 +550,104 @@ void* _safe_calloc(size_t num, size_t size, const char* file, int line) {
 
 /**
  * @brief 内部安全内存分配：分配对齐内存（带文件/行号跟踪）
+ *
+ * P1修复(添加头部): 原实现直接调用 _aligned_malloc/posix_memalign 返回对齐指针,
+ * 未添加 MemoryBlockHeader, 导致:
+ *   1) 该指针传入 safe_free 时头部读取为堆管理器内部数据 → magic 不匹配 → 静默泄漏;
+ *      且 Windows 上 _aligned_malloc 指针不能用 free 释放, 必须用 _aligned_free。
+ *   2) 无保护字节/尾部, 无法检测越界写。
+ * 现改为: 用 malloc 分配足够空间(含对齐余量 + 头部 + 尾部 + 保护字节),
+ * 手动将数据指针对齐到 alignment, 在数据指针之前放置 MemoryBlockHeader(含 raw_ptr
+ * 指向 malloc 原始返回值), 之后放置保护字节与尾部。这样返回的指针可被 safe_free
+ * 统一释放(free(header->raw_ptr) 即 free(raw), 正确), 并具备与 safe_malloc 一致的
+ * 损坏检测能力(头部/尾部/保护字节魔法校验)。
  */
 void* _safe_aligned_malloc(size_t size, size_t alignment, const char* file, int line) {
     if (size == 0 || alignment == 0) {
         return NULL;
     }
-    
-    // 确保对齐是2的幂
+
+    /* 确保对齐是2的幂 */
     if ((alignment & (alignment - 1)) != 0) {
         return NULL;
     }
-    
-    // 分配对齐内存
-#ifdef _WIN32
-    void* ptr = _aligned_malloc(size, alignment);
-#else
-    void* ptr = NULL;
-    if (posix_memalign(&ptr, alignment, size) != 0) {
-        ptr = NULL;
+
+    /* 溢出检查: 避免巨大 alignment/size 导致 total_size 回绕。
+     * 将各项限制在 SIZE_MAX/2 以内, 保证后续求和不溢出。 */
+    if (alignment > SIZE_MAX / 2 || size > SIZE_MAX / 2) {
+        return NULL;
     }
+
+    /* 布局: [raw][对齐填充][头部BLOCK_HEADER_SIZE][数据aligned_size][保护字节guard][尾部FOOTER]
+     * 取 alignment 作为对齐余量上界(>= alignment-1), 保证 data_ptr 能在 raw+BLOCK_HEADER_SIZE
+     * 之后向上对齐到 alignment, 且头部不越界到 raw_ptr 之前。 */
+    size_t aligned_size = align_size(size, 16);
+    size_t guard_size = 16;  /* 与 safe_malloc 一致的保护字节大小 */
+    size_t total_size = (size_t)alignment + BLOCK_HEADER_SIZE + aligned_size + guard_size + BLOCK_FOOTER_SIZE;
+
+    void* raw_ptr = malloc(total_size);
+    if (!raw_ptr) {
+        return NULL;
+    }
+
+    /* 计算对齐的数据指针: data_ptr = 向上对齐(raw_ptr + BLOCK_HEADER_SIZE, alignment) */
+    uintptr_t base = (uintptr_t)raw_ptr + BLOCK_HEADER_SIZE;
+    uintptr_t data_addr = (base + (uintptr_t)alignment - 1) & ~((uintptr_t)alignment - 1);
+    void* data_ptr = (void*)data_addr;
+
+    /* 头部位于数据指针之前(BLOCK_HEADER_SIZE 处) */
+    MemoryBlockHeader* header = (MemoryBlockHeader*)((char*)data_ptr - BLOCK_HEADER_SIZE);
+    header->size = size;
+    header->is_allocated = 1;
+    header->file = file;
+    header->line = line;
+    header->magic = MEMORY_MAGIC;
+    header->raw_ptr = raw_ptr;  /* 关键: 记录 malloc 原始返回值, 供 safe_free 释放 */
+    /* 编译器屏障: 确保 magic/raw_ptr 写入对其他线程可见后再写后续字段 */
+#ifdef _MSC_VER
+    _ReadWriteBarrier();
+#else
+    __asm__ __volatile__("" ::: "memory");
 #endif
-    
-    if (ptr) {
-        // 初始化内存为零
-        memset(ptr, 0, size);
-        
-    /* R7-006修复: _safe_aligned_malloc加锁保护全局统计 */
+    MEM_LOCK();
+    header->alloc_id = ++g_allocation_counter;
+    MEM_UNLOCK();
+#ifdef _MSC_VER
+    header->caller_address = _ReturnAddress();
+#else
+    header->caller_address = __builtin_return_address(0);
+#endif
+
+    /* 初始化数据区域为零 */
+    memset(data_ptr, 0, aligned_size);
+
+    /* 设置保护字节(与 safe_malloc 一致: 0xAA) */
+    unsigned char* guard_ptr = (unsigned char*)data_ptr + aligned_size;
+    memset(guard_ptr, 0xAA, guard_size);
+
+    /* 设置尾部魔法 */
+    MemoryBlockFooter* footer = (MemoryBlockFooter*)(guard_ptr + guard_size);
+    footer->magic = MEMORY_MAGIC;
+#ifdef _MSC_VER
+    _ReadWriteBarrier();
+#else
+    __asm__ __volatile__("" ::: "memory");
+#endif
+
+    /* 更新统计与跟踪(按实际占用 total_size 计入, 含对齐填充) */
     MEM_LOCK();
     {
-        size_t current_id = ++g_allocation_counter;
-        
-        g_memory_stats.total_allocated += size;
-        g_memory_stats.current_usage += size;
+        g_memory_stats.total_allocated += total_size;
+        g_memory_stats.current_usage += total_size;
         g_memory_stats.allocation_count++;
-        
         if (g_memory_stats.current_usage > g_memory_stats.peak_usage) {
             g_memory_stats.peak_usage = g_memory_stats.current_usage;
         }
-        
-        alloc_track_add(ptr, size, current_id, file, line);
+        alloc_track_add(data_ptr, size, header->alloc_id, file, line);
     }
     MEM_UNLOCK();
-    }
-    
-    return ptr;
+
+    return data_ptr;
 }
 
 /**
@@ -591,7 +725,20 @@ void safe_free(void** ptr) {
     
     void* data_ptr = *ptr;
     
-    // 获取头部
+    /* P0修复(静默泄漏 + 越界读头): 读取头部前先验证指针是否由 safe_malloc 分配并跟踪。
+     * - 未跟踪指针(malloc/calloc/realloc/外部库分配): 直接用系统 free 释放并记录警告,
+     *   修复原实现中 magic 不匹配时完全不调用 free 导致的静默泄漏;
+     *   同时避免对非托管指针读取 MemoryBlockHeader 造成的越界读/未定义行为。
+     * - 已跟踪指针: 确属本工具分配, 读取头部安全, 继续执行原有的完整性校验逻辑
+     *   (对齐/magic/保护字节/尾部), 在检测到损坏时仍跳过 free 以避免堆损坏扩散。 */
+    if (!alloc_track_contains(data_ptr, NULL)) {
+        fprintf(stderr, "警告: 指针 %p 非safe_malloc分配, 使用系统free释放(避免静默泄漏)\n", data_ptr);
+        free(data_ptr);
+        *ptr = NULL;
+        return;
+    }
+    
+    // 获取头部 —— 此时已确认是 safe_malloc 分配的指针, 读取头部安全
     MemoryBlockHeader* header = (MemoryBlockHeader*)((char*)data_ptr - BLOCK_HEADER_SIZE);
     
     /* 修复#4: 编译器屏障——确保header读取前所有对数据区的写入已完成，
@@ -701,8 +848,9 @@ void safe_free(void** ptr) {
     header->magic = 0;
     footer->magic = 0;
     
-    // 释放内存
-    free(header);
+    // 释放内存 —— 通过 raw_ptr 释放 malloc 返回的原始指针
+    // (P1修复: 普通块 raw_ptr==header, 对齐块 raw_ptr!=header, 统一正确释放)
+    free(header->raw_ptr);
     *ptr = NULL;
 #endif /* USE_STANDARD_ALLOC */
 }
@@ -720,14 +868,42 @@ void* safe_realloc(void* ptr, size_t size) {
     if (!ptr) {
         return _safe_malloc(size, __FILE__, __LINE__);
     }
+    /* P0修复: size为0时按C标准释放旧块并返回NULL（原实现缺失此分支, 会继续读取头部） */
+    if (size == 0) {
+        safe_free(&ptr);
+        return NULL;
+    }
     
-    // 获取原始头部
+    /* P0修复(越界读头): 读取头部前先验证指针是否由 safe_malloc 分配并跟踪。
+     * 对 malloc/calloc/realloc/外部库分配的指针直接读取 MemoryBlockHeader 属于
+     * 越界读/未定义行为(读取不属于调用者的内存)。未跟踪指针直接走系统 realloc。 */
+    size_t tracked_old_size = 0;
+    if (!alloc_track_contains(ptr, &tracked_old_size)) {
+        /* 非safe_malloc分配的指针, 直接使用系统realloc */
+        return realloc(ptr, size);
+    }
+    
+    // 获取原始头部 —— 此时已确认是 safe_malloc 分配的指针, 读取头部安全
     MemoryBlockHeader* old_header = (MemoryBlockHeader*)((char*)ptr - BLOCK_HEADER_SIZE);
     
-    // 验证魔法数字
+    // 验证魔法数字（已确认跟踪, 此处校验本工具分配块是否损坏）
     if (old_header->magic != MEMORY_MAGIC) {
-        // 不是通过safe_malloc分配的，使用标准realloc
-        return realloc(ptr, size);
+        /* P0修复(头部损坏): 头部magic损坏说明该块已损坏, 不能再读取 old_header->size
+         * 或尾部(均为已损坏区域)。原实现对此情形调用 realloc(ptr) —— 但 ptr 是
+         * safe_malloc 返回的内部数据指针(非malloc返回的原始指针), realloc 会导致
+         * 堆损坏。改为: 用跟踪记录的安全大小 tracked_old_size 分配新块并复制数据,
+         * 不释放旧块(其头部已损坏, free 会扩散堆损坏), 仅从跟踪表移除并告警。 */
+        fprintf(stderr, "内存损坏检测: 头部魔法不匹配 (地址: %p, 跟踪大小: %zu), 安全迁移数据\n",
+                ptr, tracked_old_size);
+        void* new_ptr = _safe_malloc(size, __FILE__, __LINE__);
+        if (!new_ptr) {
+            return NULL;
+        }
+        size_t copy_size = tracked_old_size < size ? tracked_old_size : size;
+        memcpy(new_ptr, ptr, copy_size);
+        alloc_track_remove(ptr);
+        /* 不调用 safe_free 释放旧块(header已损坏, 释放会扩散堆损坏), 接受单次泄漏 */
+        return new_ptr;
     }
     
     // 验证尾部（计算方式与safe_malloc/safe_free保持一致）
@@ -874,6 +1050,23 @@ MemoryPool* memory_pool_create(const MemoryPoolConfig* config) {
         return NULL;
     }
     
+    /* P1修复: 分配 block_span 数组(与 block_status 并行), calloc 初始化为0 */
+    pool->block_span = (size_t*)safe_calloc(config->num_blocks, sizeof(size_t));
+    if (!pool->block_span) {
+        safe_free((void**)&pool->block_status);
+#ifdef _WIN32
+        if (alignment > 0) {
+            _aligned_free(pool->base_ptr);
+        } else {
+            safe_free((void**)&pool->base_ptr);
+        }
+#else
+        safe_free((void**)&pool->base_ptr);
+#endif
+        safe_free((void**)&pool);
+        return NULL;
+    }
+    
     // 初始化内存池
     pool->total_size = total_size;
     pool->free_size = total_size;
@@ -914,34 +1107,52 @@ void* memory_pool_alloc(MemoryPool* pool, size_t size) {
     
     // 检查是否有足够大的连续块
     size_t blocks_needed = (aligned_size + pool->config.block_size - 1) / pool->config.block_size;
+    if (blocks_needed == 0 || blocks_needed > pool->block_count) {
+        return NULL;  // 单次请求超过池容量
+    }
     
-    // 查找连续空闲块
-    size_t start_block = pool->first_free;
+    /* P1修复(first_block下溢 + 物理连续性): 原实现用 (start_block + i) % block_count
+     * 回绕扫描, 导致:
+     *   1) 跨回绕的"连续"块在物理上不连续(首尾拼接), 返回的指针仅覆盖尾部, 越界写;
+     *   2) first_block = idx - consecutive_free + 1 在跨回绕时下溢(size_t无符号→巨大值),
+     *      后续 block_status[first_block + j] 越界写, 破坏内存。
+     * 改为线性扫描 [0, block_count), 仅接受不跨回绕的物理连续空闲块, first_block 直接取
+     * 连续区起点 run_start, 不会下溢。同时用 block_span 记录本次分配占用的块数, 供
+     * memory_pool_free 释放完整跨度(原实现只释放首块, 多块分配会泄漏)。 */
     size_t consecutive_free = 0;
+    size_t run_start = 0;  // 当前连续空闲区起点(当 consecutive_free>0 时有效)
     
     for (size_t i = 0; i < pool->block_count; i++) {
-        size_t idx = (start_block + i) % pool->block_count;
-        
-        if (pool->block_status[idx] == 0) {
+        if (pool->block_status[i] == 0) {
+            if (consecutive_free == 0) {
+                run_start = i;
+            }
             consecutive_free++;
             if (consecutive_free >= blocks_needed) {
-                // 找到足够的连续块
-                size_t first_block = idx - consecutive_free + 1;
+                // 找到物理连续的空闲块区
+                size_t first_block = run_start;
                 
                 // 标记块为已使用
                 for (size_t j = 0; j < blocks_needed; j++) {
                     pool->block_status[first_block + j] = 1;
+                }
+                /* P1修复: 在首块记录本次分配占用的块数, 其余块置0(防止误释放) */
+                pool->block_span[first_block] = blocks_needed;
+                for (size_t j = 1; j < blocks_needed; j++) {
+                    pool->block_span[first_block + j] = 0;
                 }
                 
                 // 更新空闲大小
                 pool->used_size += blocks_needed * pool->config.block_size;
                 pool->free_size = pool->total_size - pool->used_size;
                 
-                // 更新第一个空闲块索引
+                // 更新第一个空闲块索引(从 first_block + blocks_needed 起线性查找)
+                pool->first_free = first_block + blocks_needed;
                 while (pool->first_free < pool->block_count && pool->block_status[pool->first_free] == 1) {
                     pool->first_free++;
                 }
                 if (pool->first_free >= pool->block_count) {
+                    // 末尾无空闲, 回绕到开头(下次分配从头线性扫描仍正确)
                     pool->first_free = 0;
                 }
                 
@@ -985,15 +1196,31 @@ int memory_pool_free(MemoryPool* pool, void* ptr) {
     
     // 检查块是否已分配
     if (pool->block_status[block_index] == 0) {
-        return -1; // 块未分配
+        return -1; // 块未分配(可能已释放)
     }
     
-    // 需要知道分配了多少块（完整实现：只释放单个块）
-    // 在实际实现中，需要跟踪分配大小
-    pool->block_status[block_index] = 0;
+    /* P1修复(只释放单个块→泄漏): 原实现仅释放 block_index 这一个块, 但多块分配
+     * (blocks_needed > 1) 时其余块未被释放, 造成泄漏且 used_size 统计错误。
+     * 现通过 block_span[block_index] 读取本次分配占用的块数, 释放完整跨度。 */
+    size_t blocks_to_free = pool->block_span[block_index];
+    if (blocks_to_free == 0) {
+        /* span 为 0: 该块不是分配起点(调用者传入了分配中部的指针), 属调用方错误。
+         * 为避免崩溃, 按单块释放并告警(其余块仍占用, 需调用方修正)。 */
+        fprintf(stderr, "警告: memory_pool_free 收到非分配起点的指针(块%zu), 按单块释放\n", block_index);
+        blocks_to_free = 1;
+    }
+    // 防御: 确保不越界释放
+    if (block_index + blocks_to_free > pool->block_count) {
+        blocks_to_free = pool->block_count - block_index;
+    }
     
-    // 更新使用大小（完整实现：假设只分配了一个块）
-    pool->used_size -= pool->config.block_size;
+    for (size_t j = 0; j < blocks_to_free; j++) {
+        pool->block_status[block_index + j] = 0;
+        pool->block_span[block_index + j] = 0;
+    }
+    
+    // 更新使用大小
+    pool->used_size -= blocks_to_free * pool->config.block_size;
     pool->free_size = pool->total_size - pool->used_size;
     
     // 更新第一个空闲块索引
@@ -1025,6 +1252,8 @@ void memory_pool_destroy(MemoryPool* pool) {
     
     // 释放状态数组
     safe_free((void**)&pool->block_status);
+    /* P1修复: 释放 block_span 数组 */
+    safe_free((void**)&pool->block_span);
     
     // 更新统计
     g_memory_stats.pool_count--;

@@ -282,7 +282,10 @@ static JsonValue* json_parse_number(JsonParser* p) {
     }
     if (p->pos < p->len && (p->src[p->pos] == 'e' || p->src[p->pos] == 'E')) {
         p->pos++;
-        if (p->src[p->pos] == '+' || p->src[p->pos] == '-') p->pos++;
+        /* P0修复: pos递增后必须重新检查边界，防止p->src[p->pos]越界读取。
+         * 此前直接访问p->src[p->pos]判断'+/-'，当'e/E'为末字符时pos==len越界。 */
+        if (p->pos < p->len && (p->src[p->pos] == '+' || p->src[p->pos] == '-'))
+            p->pos++;
         while (p->pos < p->len && p->src[p->pos] >= '0' && p->src[p->pos] <= '9') p->pos++;
     }
     size_t num_len = p->pos - start;
@@ -490,8 +493,33 @@ static void json_to_string_core(const JsonValue* v, char* buf, size_t* pos, size
             APPEND_CHAR('{');
             for (size_t i = 0; i < v->data.object.count; i++) {
                 if (i > 0) APPEND_CHAR(',');
+                /* P0修复: 对象键必须转义，与字符串值使用相同的转义逻辑。
+                 * 原代码直接APPEND(keys[i])未转义，含特殊字符的键会生成无效JSON。 */
                 APPEND_CHAR('"');
-                APPEND(v->data.object.keys[i]);
+                if (v->data.object.keys[i]) {
+                    const char* k = v->data.object.keys[i];
+                    while (*k) {
+                        switch (*k) {
+                            case '"':  APPEND("\\\""); break;
+                            case '\\': APPEND("\\\\"); break;
+                            case '\n': APPEND("\\n");  break;
+                            case '\r': APPEND("\\r");  break;
+                            case '\t': APPEND("\\t");  break;
+                            case '\b': APPEND("\\b");  break;
+                            case '\f': APPEND("\\f");  break;
+                            default:
+                                if ((unsigned char)*k < 0x20) {
+                                    char esc[8];
+                                    snprintf(esc, sizeof(esc), "\\u%04x", (unsigned char)*k);
+                                    APPEND(esc);
+                                } else {
+                                    APPEND_CHAR(*k);
+                                }
+                                break;
+                        }
+                        k++;
+                    }
+                }
                 APPEND("\":");
                 json_to_string_core(v->data.object.values[i], buf, pos, cap);
             }

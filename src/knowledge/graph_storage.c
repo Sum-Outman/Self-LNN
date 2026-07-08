@@ -1805,7 +1805,8 @@ int rdf_triple_store_import_ntriples(RDFTripleStore* store,
             strncpy(predicate, token, sizeof(predicate) - 1);
         }
 
-        token = strtok(NULL, " \t");
+        /* P0修复: 使用线程安全的strtok_s替代strtok（与上方第1779行保持一致） */
+        token = strtok_s(NULL, " \t", &saveptr);
         if (!token) continue;
         if (token[0] == '<') {
             size_t len = strlen(token);

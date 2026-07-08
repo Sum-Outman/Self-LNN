@@ -1602,106 +1602,41 @@ class ApiService {
     }
     
     /**
-     * 暂停训练
+     * 【FE-003修复】暂停训练 - 已弃用，请使用 trainingPause()
+     * @deprecated 自2026-07起弃用，转发到 trainingPause() 新方法
+     *              保留此方法以保证 agi-controller.js / voice-command.js 等旧调用方兼容
      */
     async pauseTraining() {
-        try {
-            // 尝试调用后端API暂停训练
-            const response = await this.request('/training/pause', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                }
-            });
-            
-            if (!response.ok) {
-                throw new Error(`HTTP错误: ${response.status}`);
-            }
-            
-            const data = await response.json();
-            return {
-                success: true,
-                data: data
-            };
-        } catch (error) {
-            console.error('暂停训练失败:', error);
-            return {
-                success: false,
-                error: error.message || '训练暂停后端连接失败，请检查服务器状态',
-                data: null
-            };
-        }
+        console.warn('[ApiService] pauseTraining() 已弃用，请迁移到 trainingPause()');
+        return await this.trainingPause();
     }
     
     /**
-     * 停止训练任务 - 别名，供外部统一调用
-     * C-005修复: 为agi-controller.js和voice-command.js提供stopTraining入口
+     * 【FE-003修复】停止训练任务 - 已弃用，请使用 trainingStop()
+     * @deprecated 自2026-07起弃用，转发到 trainingStop() 新方法
+     *              C-005修复: 保留以兼容 agi-controller.js 和 voice-command.js
      */
     async stopTraining() {
-        return await this.stopTrainingJob();
+        console.warn('[ApiService] stopTraining() 已弃用，请迁移到 trainingStop()');
+        return await this.trainingStop();
     }
 
     /**
-     * 停止训练任务
+     * 【FE-003修复】停止训练任务 - 已弃用，请使用 trainingStop()
+     * @deprecated 自2026-07起弃用，转发到 trainingStop() 新方法
      */
     async stopTrainingJob() {
-        try {
-            // 尝试调用后端API停止训练任务
-            const response = await this.request('/training/stop', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                }
-            });
-            
-            if (!response.ok) {
-                throw new Error(`HTTP错误: ${response.status}`);
-            }
-            
-            const data = await response.json();
-            return {
-                success: true,
-                data: data
-            };
-        } catch (error) {
-            console.error('停止训练任务失败:', error);
-            return {
-                success: false,
-                error: error.message || '训练停止后端连接失败，请检查服务器状态',
-                data: null
-            };
-        }
+        console.warn('[ApiService] stopTrainingJob() 已弃用，请迁移到 trainingStop()');
+        return await this.trainingStop();
     }
     
     /**
-     * 恢复训练任务
+     * 【FE-003修复】恢复训练任务 - 已弃用，请使用 trainingResume()
+     * @deprecated 自2026-07起弃用，转发到 trainingResume() 新方法
      */
     async resumeTrainingJob() {
-        try {
-            const response = await this.request('/training/resume', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                }
-            });
-            
-            if (!response.ok) {
-                throw new Error(`HTTP错误: ${response.status}`);
-            }
-            
-            const data = await response.json();
-            return {
-                success: true,
-                data: data
-            };
-        } catch (error) {
-            console.error('恢复训练失败:', error);
-            return {
-                success: false,
-                error: error.message || '训练恢复后端连接失败，请检查服务器状态',
-                data: null
-            };
-        }
+        console.warn('[ApiService] resumeTrainingJob() 已弃用，请迁移到 trainingResume()');
+        return await this.trainingResume();
     }
     
     /**
@@ -2066,12 +2001,12 @@ class ApiService {
 
     /**
      * 知识图谱搜索
-     * GET /api/kg/search?q=... → 返回匹配的节点和边
+     * POST /api/kg/search → 返回匹配的节点和边
      */
     async searchKnowledgeGraph(query) {
         try {
-            const q = (query && query.trim()) ? '?q=' + encodeURIComponent(query) : '';
-            const response = await this.request('/kg/search' + q, { method: 'GET' });
+            const params = (query && query.trim()) ? { q: query.trim() } : {};
+            const response = await this.request('/kg/search', { method: 'POST', body: JSON.stringify(params) });
             if (!response.ok) throw new Error('HTTP错误: ' + response.status);
             const data = await response.json();
             return { success: true, data: data };
@@ -3569,12 +3504,13 @@ class ApiService {
     }
 
 
+    /**
+     * 【FE-003修复】获取训练状态 - 已弃用，请使用 getTrainingStatus()
+     * @deprecated 自2026-07起弃用，转发到 getTrainingStatus() 新方法
+     */
     async trainingStatus() {
-        try {
-            var resp = await this.request('/training/status', {method: 'GET'});
-            var data = await resp.json();
-            return { success: resp.ok, data: data };
-        } catch (e) { return { success: false, error: e.message }; }
+        console.warn('[ApiService] trainingStatus() 已弃用，请迁移到 getTrainingStatus()');
+        return await this.getTrainingStatus();
     }
 
     async trainingPause() {
@@ -3585,9 +3521,19 @@ class ApiService {
         } catch (e) { return { success: false, error: e.message }; }
     }
 
-    async trainingResume() {
+    /**
+     * 【FE-003/FE-004修复】恢复训练任务 - 支持可选checkpointId参数
+     * @param {string} [checkpointId] - 可选，检查点ID，用于加载指定检查点后恢复训练
+     */
+    async trainingResume(checkpointId) {
         try {
-            var resp = await this.request('/training/resume', {method: 'POST'});
+            var options = { method: 'POST' };
+            /* FE-004修复: 支持传入checkpoint_id以加载检查点 */
+            if (checkpointId) {
+                options.headers = { 'Content-Type': 'application/json' };
+                options.body = JSON.stringify({ checkpoint_id: checkpointId });
+            }
+            var resp = await this.request('/training/resume', options);
             var data = await resp.json();
             return { success: resp.ok, data: data };
         } catch (e) { return { success: false, error: e.message }; }
@@ -4857,9 +4803,10 @@ class ApiService {
 
     async getDecisionLog(params) {
         try {
-            var resp = await this.request('/decision/log', {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(params || {})
+            /* P-AUDIT修复: 后端 /decision/log 为 GET 方法,原用 POST 导致 405 */
+            var qs = params ? '?' + new URLSearchParams(params).toString() : '';
+            var resp = await this.request('/decision/log' + qs, {
+                method: 'GET'
             });
             var data = await resp.json();
             return { success: resp.ok, data: data };
@@ -5385,10 +5332,10 @@ class ApiService {
      */
     async testInference(testParams) {
         try {
-            const response = await this.request('/reasoning/test', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(testParams || {})
+            /* P-AUDIT修复: 后端 /reasoning/test 为 GET 方法,原用 POST 导致 405 */
+            const qs = testParams ? '?' + new URLSearchParams(testParams).toString() : '';
+            const response = await this.request('/reasoning/test' + qs, {
+                method: 'GET'
             });
             if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
             const data = await response.json();
@@ -5425,10 +5372,9 @@ class ApiService {
      */
     async knowledgeLoad(knowledgeId) {
         try {
-            const response = await this.request('/knowledge/load', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ id: knowledgeId || '' })
+            /* P-AUDIT修复: 后端 /knowledge/load 为 GET 方法,原用 POST 导致 405 */
+            const response = await this.request('/knowledge/load?id=' + encodeURIComponent(knowledgeId || ''), {
+                method: 'GET'
             });
             if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
             const data = await response.json();
@@ -5624,8 +5570,9 @@ class ApiService {
         try { var r = await this.request('/knowledge/stats'); var d = await r.json(); return { success: true, data: d }; }
         catch(e) { return { success: false, error: e.message }; }
     }
+    /* P-AUDIT修复: knowledgeExport 原用 GET (无方法指定),后端 /knowledge/export 为 POST,导致 405 */
     async knowledgeExport() {
-        try { var r = await this.request('/knowledge/export'); var d = await r.json(); return { success: true, data: d }; }
+        try { var r = await this.request('/knowledge/export', { method: 'POST' }); var d = await r.json(); return { success: true, data: d }; }
         catch(e) { return { success: false, error: e.message }; }
     }
     async knowledgeDelete(entryId) {
@@ -5786,7 +5733,8 @@ class ApiService {
 
     /* --- 能力诊断 --- */
     async capabilityDiagnose() {
-        try { var r = await this.request('/capability/diagnose'); var d = await r.json(); return { success: true, data: d }; }
+        /* 集成修复: 后端声明为POST方法(backend.c:593)，前端需指定method */
+        try { var r = await this.request('/capability/diagnose', { method: 'POST', headers: {'Content-Type': 'application/json'} }); var d = await r.json(); return { success: true, data: d }; }
         catch(e) { return { success: false, error: e.message }; }
     }
 
@@ -5816,10 +5764,7 @@ class ApiService {
         try { var r = await this.request('/simulation/plan_path', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({start:start, goal:goal}) }); var d = await r.json(); return { success: true, data: d }; }
         catch(e) { return { success: false, error: e.message }; }
     }
-    async teachGetConcepts() {
-        try { var r = await this.request('/teach/get_concepts', { method:'GET' }); var d = await r.json(); return { success: true, data: d }; }
-        catch(e) { return { success: false, error: e.message }; }
-    }
+    /* P1-2修复: teachGetConcepts为重复定义,已删除(保留先定义于第3396行) */
     async teachTestConcept(concept) {
         try { var r = await this.request('/teach/test_concept', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({concept:concept}) }); var d = await r.json(); return { success: true, data: d }; }
         catch(e) { return { success: false, error: e.message }; }
@@ -5924,22 +5869,26 @@ class ApiService {
         } catch (e) { return { success: false, error: e.message }; }
     }
 
-    /* searchMemory: 按查询字符串搜索记忆 (GET方式) */
+    /* searchMemory: 按查询字符串搜索记忆 (POST方式, 后端期望JSON body) */
     async searchMemory(query) {
         try {
-            var r = await this.request('/memory/search?q=' + encodeURIComponent(query || ''));
+            var r = await this.request('/memory/search', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ query: query || '' })
+            });
             var d = await r.json();
             return { success: true, data: d };
         } catch (e) { return { success: false, error: e.message }; }
     }
 
     /* --- I-04: 推理引擎补充方法 --- */
-    /* testReasoning: 测试推理引擎 */
+    /* P-AUDIT修复: testReasoning 后端 /reasoning/test 为 GET,原用 POST 导致 405 */
     async testReasoning(data) {
         try {
-            var r = await this.request('/reasoning/test', {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(data || {})
+            var qs = data ? '?' + new URLSearchParams(data).toString() : '';
+            var r = await this.request('/reasoning/test' + qs, {
+                method: 'GET'
             });
             var d = await r.json();
             return { success: true, data: d };
@@ -5983,10 +5932,13 @@ class ApiService {
     /* --- I-06: 编程工作台 - 所有方法已存在(programmingAnalyze/Generate/Execute/Optimize/Compile/Status) --- */
 
     /* --- I-07: 产品设计补充方法 --- */
-    /* getProductSpec: 获取产品规格 */
+    /* P-AUDIT修复: getProductSpec 后端 /product/spec 为 POST,原用 GET(通过query param)导致 405 */
     async getProductSpec(id) {
         try {
-            var r = await this.request('/product/spec?id=' + encodeURIComponent(id || ''));
+            var r = await this.request('/product/spec', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: id || '' })
+            });
             var d = await r.json();
             return { success: true, data: d };
         } catch (e) { return { success: false, error: e.message }; }
@@ -6023,10 +5975,15 @@ class ApiService {
         } catch (e) { return { success: false, error: e.message }; }
     }
 
-    /* searchSkills: 按查询搜索技能 (GET方式) */
+    /* searchSkills: 按查询搜索技能 */
+    /* P1-1修复: 后端期望POST方法,原GET导致方法不匹配 */
     async searchSkills(query) {
         try {
-            var r = await this.request('/skills/search?q=' + encodeURIComponent(query || ''));
+            var r = await this.request('/skills/search', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ query: query || '' })
+            });
             var d = await r.json();
             return { success: true, data: d };
         } catch (e) { return { success: false, error: e.message }; }
@@ -6054,20 +6011,20 @@ class ApiService {
     }
 
     /* --- I-09: LNN控制面板补充方法 --- */
-    /* getLnnStatus: 获取LNN状态 */
+    /* P-AUDIT修复: getLnnStatus 原调用 /lnn (断链),改为后端实际路由 /lnn/status */
     async getLnnStatus() {
         try {
-            var r = await this.request('/lnn');
+            var r = await this.request('/lnn/status');
             var d = await r.json();
             return { success: true, data: d };
         } catch (e) { return { success: false, error: e.message }; }
     }
 
-    /* updateLnnConfig: 更新LNN配置 */
+    /* P-AUDIT修复: updateLnnConfig 原调用 PUT /lnn (断链),改为 POST /lnn/config */
     async updateLnnConfig(data) {
         try {
-            var r = await this.request('/lnn', {
-                method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            var r = await this.request('/lnn/config', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(data || {})
             });
             var d = await r.json();
@@ -6106,29 +6063,32 @@ class ApiService {
         } catch (e) { return { success: false, error: e.message }; }
     }
 
-    /* deleteDataset: 删除数据集 */
+    /* P-AUDIT修复: deleteDataset 原调用 /datasets/{id} (断链),改为后端实际路由 /dataset/delete */
     async deleteDataset(id) {
         try {
-            var r = await this.request('/datasets/' + encodeURIComponent(id), { method: 'DELETE' });
+            var r = await this.request('/dataset/delete', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: id })
+            });
             var d = await r.json();
             return { success: true, data: d };
         } catch (e) { return { success: false, error: e.message }; }
     }
 
     /* --- I-11: 多机器人补充方法 --- */
-    /* getRobots: 获取所有机器人列表 */
+    /* P-AUDIT修复: getRobots 原调用 /robots (断链),改为后端实际路由 /robot/list */
     async getRobots() {
         try {
-            var r = await this.request('/robots');
+            var r = await this.request('/robot/list');
             var d = await r.json();
             return { success: true, data: d };
         } catch (e) { return { success: false, error: e.message }; }
     }
 
-    /* createRobot: 创建/注册机器人 */
+    /* P-AUDIT修复: createRobot 原调用 POST /robots (断链),改为后端实际路由 /robot/register */
     async createRobot(data) {
         try {
-            var r = await this.request('/robots', {
+            var r = await this.request('/robot/register', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(data || {})
             });
@@ -6137,10 +6097,10 @@ class ApiService {
         } catch (e) { return { success: false, error: e.message }; }
     }
 
-    /* controlRobotGroup: 多机器人编组控制 */
+    /* P-AUDIT修复: controlRobotGroup 原调用 /robots/group (断链),改为后端实际路由 /multi_robot/sync */
     async controlRobotGroup(data) {
         try {
-            var r = await this.request('/robots/group', {
+            var r = await this.request('/multi_robot/sync', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(data || {})
             });
@@ -6152,48 +6112,48 @@ class ApiService {
     /* --- I-12: 知识库 - 所有方法已存在(getKnowledgeStats/exportKnowledge/importKnowledge) --- */
 
     /* --- I-13: 仿真控制补充方法 --- */
-    /* getSimulationView: 获取仿真视图 */
+    /* P-AUDIT修复: getSimulationView 原调用 /simulation/view (断链),改为 /simulation/status */
     async getSimulationView() {
         try {
-            var r = await this.request('/simulation/view');
+            var r = await this.request('/simulation/status');
             var d = await r.json();
             return { success: true, data: d };
         } catch (e) { return { success: false, error: e.message }; }
     }
 
     /* --- I-14: 设备管理补充方法 --- */
-    /* getDevices: 获取所有设备列表 */
+    /* P-AUDIT修复: getDevices 原调用 /devices (断链),改为后端实际路由 /devices/list */
     async getDevices() {
         try {
-            var r = await this.request('/devices');
+            var r = await this.request('/devices/list', { method: 'POST' });
             var d = await r.json();
             return { success: true, data: d };
         } catch (e) { return { success: false, error: e.message }; }
     }
 
-    /* discoverDevices: 发现/扫描设备 */
+    /* P-AUDIT修复: discoverDevices 原用 POST (方法不匹配),后端为 GET /devices/discover */
     async discoverDevices() {
         try {
-            var r = await this.request('/devices/discover', { method: 'POST' });
+            var r = await this.request('/devices/discover');
             var d = await r.json();
             return { success: true, data: d };
         } catch (e) { return { success: false, error: e.message }; }
     }
 
     /* --- I-15: API密钥补充方法 --- */
-    /* getApiKeys: 获取所有API密钥 */
+    /* P-AUDIT修复: getApiKeys 原调用 /keys (断链),改为后端实际路由 /key/list */
     async getApiKeys() {
         try {
-            var r = await this.request('/keys');
+            var r = await this.request('/key/list');
             var d = await r.json();
             return { success: true, data: d };
         } catch (e) { return { success: false, error: e.message }; }
     }
 
-    /* createApiKey: 创建API密钥 */
+    /* P-AUDIT修复: createApiKey 原调用 /keys (断链),改为后端实际路由 /key/create */
     async createApiKey(data) {
         try {
-            var r = await this.request('/keys', {
+            var r = await this.request('/key/create', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(data || {})
             });
@@ -6202,29 +6162,29 @@ class ApiService {
         } catch (e) { return { success: false, error: e.message }; }
     }
 
-    /* getKeyStats: 获取API密钥统计 */
+    /* P-AUDIT修复: getKeyStats 原调用 /keys/stats (断链),改为后端实际路由 /key/stats */
     async getKeyStats() {
         try {
-            var r = await this.request('/keys/stats');
+            var r = await this.request('/key/stats');
             var d = await r.json();
             return { success: true, data: d };
         } catch (e) { return { success: false, error: e.message }; }
     }
 
     /* --- I-16: 多智能体补充方法 --- */
-    /* getAgents: 获取所有智能体 */
+    /* P-AUDIT修复: getAgents 原调用 /agents (断链),改为后端实际路由 /multi-agent/status */
     async getAgents() {
         try {
-            var r = await this.request('/agents');
+            var r = await this.request('/multi-agent/status');
             var d = await r.json();
             return { success: true, data: d };
         } catch (e) { return { success: false, error: e.message }; }
     }
 
-    /* createAgent: 创建智能体 */
+    /* P-AUDIT修复: createAgent 原调用 /agents (断链),改为后端实际路由 /multi-agent/coalition */
     async createAgent(data) {
         try {
-            var r = await this.request('/agents', {
+            var r = await this.request('/multi-agent/coalition', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(data || {})
             });
@@ -6233,10 +6193,10 @@ class ApiService {
         } catch (e) { return { success: false, error: e.message }; }
     }
 
-    /* agentMessage: 向智能体发送消息 */
+    /* P-AUDIT修复: agentMessage 原调用 /agents/message (断链),改为后端实际路由 /multi-agent/message */
     async agentMessage(data) {
         try {
-            var r = await this.request('/agents/message', {
+            var r = await this.request('/multi-agent/message', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(data || {})
             });
@@ -6255,10 +6215,10 @@ class ApiService {
         } catch (e) { return { success: false, error: e.message }; }
     }
 
-    /* runAgiTest: 运行AGI测试 */
+    /* P-AUDIT修复: runAgiTest 原调用 /agi/test (断链),改为后端实际路由 /agi/execute */
     async runAgiTest(data) {
         try {
-            var r = await this.request('/agi/test', {
+            var r = await this.request('/agi/execute', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(data || {})
             });
@@ -6278,19 +6238,24 @@ class ApiService {
     }
 
     /* --- I-18: 双目感知补充方法 --- */
-    /* getStereoStatus: 获取双目感知状态 */
+    /* P-AUDIT修复: getStereoStatus 原调用 /stereo (断链),改为后端实际路由 /stereo/perception */
+    /* P1-1修复: 后端期望POST方法,原GET导致方法不匹配 */
     async getStereoStatus() {
         try {
-            var r = await this.request('/stereo');
+            var r = await this.request('/stereo/perception', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: '{}'
+            });
             var d = await r.json();
             return { success: true, data: d };
         } catch (e) { return { success: false, error: e.message }; }
     }
 
-    /* calibrateStereo: 校准双目摄像头 */
+    /* P-AUDIT修复: calibrateStereo 原调用 /stereo/calibrate (断链),改为后端实际路由 /stereo/perception */
     async calibrateStereo() {
         try {
-            var r = await this.request('/stereo/calibrate', { method: 'POST' });
+            var r = await this.request('/stereo/perception', { method: 'POST' });
             var d = await r.json();
             return { success: true, data: d };
         } catch (e) { return { success: false, error: e.message }; }
@@ -6438,10 +6403,10 @@ class ApiService {
     }
 
     /* getRobotParams: 获取机器人参数 */
-    /* GET /api/robot/params */
+    /* P-AUDIT修复: 后端 /robot/params 为 POST,原用 GET 导致 405 */
     async getRobotParams() {
         try {
-            var r = await this.request('/robot/params', { method: 'GET' });
+            var r = await this.request('/robot/params', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
             var d = await r.json();
             return { success: r.ok, data: d };
         } catch (e) { return { success: false, error: e.message }; }
@@ -6639,12 +6604,7 @@ class ApiService {
     /* === H-007修复: 后端已实现但前端缺失的API封装补充(20个) === */
 
     /* --- GPU诊断与基准测试 --- */
-    /* getGpuDiagnostic: 获取GPU诊断报告 */
-    /* GET /api/gpu/diagnostic */
-    async getGpuDiagnostic() {
-        try { var r = await this.request('/gpu/diagnostic'); var d = await r.json(); return { success: r.ok, data: d }; }
-        catch (e) { return { success: false, error: e.message }; }
-    }
+    /* P1-2修复: getGpuDiagnostic为重复定义,已删除(保留先定义于GPU模块补充区) */
 
     /* postGpuBenchmark: 运行GPU基准测试 */
     /* POST /api/gpu/benchmark */
@@ -6654,19 +6614,7 @@ class ApiService {
     }
 
     /* --- 数据集管理 --- */
-    /* getDatasets: 获取数据集列表 */
-    /* GET /api/dataset/list */
-    async getDatasets() {
-        try { var r = await this.request('/dataset/list'); var d = await r.json(); return { success: r.ok, data: d }; }
-        catch (e) { return { success: false, error: e.message }; }
-    }
-
-    /* createDataset: 创建新数据集 */
-    /* POST /api/dataset/create */
-    async createDataset(config) {
-        try { var r = await this.request('/dataset/create', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config || {}) }); var d = await r.json(); return { success: r.ok, data: d }; }
-        catch (e) { return { success: false, error: e.message }; }
-    }
+    /* P1-2修复: getDatasets、createDataset为重复定义,已删除(保留先定义于I-10数据集管理区,调用/datasets更标准) */
 
     /* getDatasetStats: 获取数据集统计信息 */
     /* GET /api/dataset/stats */
@@ -6691,19 +6639,7 @@ class ApiService {
         catch (e) { return { success: false, error: e.message }; }
     }
 
-    /* exportKnowledge: 导出知识库数据 */
-    /* POST /api/knowledge/export */
-    async exportKnowledge() {
-        try { var r = await this.request('/knowledge/export', { method: 'POST' }); var d = await r.json(); return { success: r.ok, data: d }; }
-        catch (e) { return { success: false, error: e.message }; }
-    }
-
-    /* importKnowledge: 导入知识库数据 */
-    /* POST /api/knowledge/import */
-    async importKnowledge(data) {
-        try { var r = await this.request('/knowledge/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data || {}) }); var d = await r.json(); return { success: r.ok, data: d }; }
-        catch (e) { return { success: false, error: e.message }; }
-    }
+    /* P1-2修复: exportKnowledge、importKnowledge为重复定义,已删除(保留先定义) */
 
     /* --- 系统诊断与日志 --- */
     /* getSystemDiagnostic: 运行系统诊断 */
@@ -6713,19 +6649,7 @@ class ApiService {
         catch (e) { return { success: false, error: e.message }; }
     }
 
-    /* exportDiagnosticData: 导出诊断数据 */
-    /* GET /api/system/export_diagnostic */
-    async exportDiagnosticData() {
-        try { var r = await this.request('/system/export_diagnostic'); var d = await r.json(); return { success: r.ok, data: d }; }
-        catch (e) { return { success: false, error: e.message }; }
-    }
-
-    /* getSystemLogs: 获取系统日志 */
-    /* GET /api/system/logs */
-    async getSystemLogs() {
-        try { var r = await this.request('/system/logs'); var d = await r.json(); return { success: r.ok, data: d }; }
-        catch (e) { return { success: false, error: e.message }; }
-    }
+    /* P1-2修复: exportDiagnosticData、getSystemLogs为重复定义,已删除(保留先定义) */
 
     /* restartSystem: 重启系统 */
     /* POST /api/system/restart */
@@ -6735,41 +6659,10 @@ class ApiService {
     }
 
     /* --- 摄像头控制 --- */
-    /* getCameraDevices: 获取可用摄像头列表 */
-    /* GET /api/camera/devices */
-    async getCameraDevices() {
-        try { var r = await this.request('/camera/devices'); var d = await r.json(); return { success: r.ok, data: d }; }
-        catch (e) { return { success: false, error: e.message }; }
-    }
-
-    /* startCameraCapture: 启动摄像头采集 */
-    /* POST /api/camera/capture/start */
-    async startCameraCapture(deviceId) {
-        try { var r = await this.request('/camera/capture/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ device_id: deviceId }) }); var d = await r.json(); return { success: r.ok, data: d }; }
-        catch (e) { return { success: false, error: e.message }; }
-    }
-
-    /* stopCameraCapture: 停止摄像头采集 */
-    /* POST /api/camera/capture/stop */
-    async stopCameraCapture() {
-        try { var r = await this.request('/camera/capture/stop', { method: 'POST' }); var d = await r.json(); return { success: r.ok, data: d }; }
-        catch (e) { return { success: false, error: e.message }; }
-    }
+    /* P1-2修复: getCameraDevices、startCameraCapture、stopCameraCapture为重复定义,已删除(保留先定义) */
 
     /* --- 音频采集 --- */
-    /* startAudioCapture: 启动音频采集 */
-    /* POST /api/audio/capture/start */
-    async startAudioCapture(deviceId) {
-        try { var r = await this.request('/audio/capture/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ device_id: deviceId }) }); var d = await r.json(); return { success: r.ok, data: d }; }
-        catch (e) { return { success: false, error: e.message }; }
-    }
-
-    /* stopAudioCapture: 停止音频采集 */
-    /* POST /api/audio/capture/stop */
-    async stopAudioCapture() {
-        try { var r = await this.request('/audio/capture/stop', { method: 'POST' }); var d = await r.json(); return { success: r.ok, data: d }; }
-        catch (e) { return { success: false, error: e.message }; }
-    }
+    /* P1-2修复: startAudioCapture、stopAudioCapture为重复定义,已删除(保留先定义) */
 
     /* --- 知识图谱SPARQL查询 --- */
     /* kgSparql: 执行SPARQL语义查询 */
@@ -7120,7 +7013,7 @@ class WebSocketManager {
             this.reconnectTimer = null;
             this.reconnectAttempts++;
             this.reconnectDelay = Math.min(this.reconnectDelay * 2, effectiveMaxDelay);
-            this.connect;
+            this.connect();  /* P0-2修复: 添加()实际调用connect方法，原代码this.connect缺少括号导致重连定时器触发后不执行重连 */
         }, delay);
     }
 

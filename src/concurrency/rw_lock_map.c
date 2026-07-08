@@ -65,6 +65,8 @@ struct RwLockMapIter {
     RwLockMap* map;
     size_t bucket_index;
     RwLockMapEntry* current;
+    int has_bucket_lock;         /**< P0修复: 标记当前是否持有桶锁 */
+    size_t locked_bucket_index;  /**< P0修复: 当前持有的桶锁索引 */
 };
 
 static size_t rw_map_hash_string(const char* key, size_t capacity) {
@@ -180,17 +182,20 @@ void rw_lock_map_destroy(RwLockMap* map) {
 
 int rw_lock_map_insert(RwLockMap* map, const char* key, void* value) {
     if (!map || !key || !map->is_initialized) return -1;
+    /* P0修复: 获取global_lock保护resize和capacity/bucket_locks读取，防止Use-After-Free */
+    rw_map_spin_lock(&map->global_lock);
     if (map->config.enable_auto_resize &&
         map->entry_count >= (size_t)(map->capacity * map->config.load_factor)) {
         size_t new_cap = map->capacity * 2;
         if (new_cap <= map->config.max_capacity) {
-            rw_lock_map_resize(map, new_cap);
+            rw_map_resize_internal(map, new_cap);
         }
     }
 
     size_t idx = rw_map_hash_string(key, map->capacity);
     rw_map_lock_t* lock = &map->bucket_locks[idx];
     rw_map_spin_lock(lock);
+    /* P0修复: 持有global_lock至桶操作完成，防止并发resize释放bucket_locks数组导致UAF */
 
     RwLockMapEntry* entry = map->buckets[idx];
     size_t chain_len = 0;
@@ -200,6 +205,7 @@ int rw_lock_map_insert(RwLockMap* map, const char* key, void* value) {
             void* old_val = entry->value;
             entry->value = value;
             rw_map_spin_unlock(lock);
+            rw_map_spin_unlock(&map->global_lock);
             map->insert_count++;
             return (old_val != value) ? 1 : 0;
         }
@@ -209,6 +215,7 @@ int rw_lock_map_insert(RwLockMap* map, const char* key, void* value) {
     RwLockMapEntry* new_entry = (RwLockMapEntry*)safe_calloc(1, sizeof(RwLockMapEntry));
     if (!new_entry) {
         rw_map_spin_unlock(lock);
+        rw_map_spin_unlock(&map->global_lock);
         return -1;
     }
 
@@ -221,6 +228,7 @@ int rw_lock_map_insert(RwLockMap* map, const char* key, void* value) {
     if (!new_entry->key) {
         safe_free((void**)&new_entry);
         rw_map_spin_unlock(lock);
+        rw_map_spin_unlock(&map->global_lock);
         return -1;
     }
 
@@ -236,24 +244,27 @@ int rw_lock_map_insert(RwLockMap* map, const char* key, void* value) {
     if (chain_len > 1) map->total_collisions++;
 
     rw_map_spin_unlock(lock);
+    rw_map_spin_unlock(&map->global_lock);
     map->insert_count++;
     return 1;
 }
 
 int rw_lock_map_insert_int_key(RwLockMap* map, int64_t key, void* value) {
     if (!map || !map->is_initialized) return -1;
-
+    /* P0修复: 获取global_lock保护resize和capacity/bucket_locks读取，防止Use-After-Free */
+    rw_map_spin_lock(&map->global_lock);
     if (map->config.enable_auto_resize &&
         map->entry_count >= (size_t)(map->capacity * map->config.load_factor)) {
         size_t new_cap = map->capacity * 2;
         if (new_cap <= map->config.max_capacity) {
-            rw_lock_map_resize(map, new_cap);
+            rw_map_resize_internal(map, new_cap);
         }
     }
 
     size_t idx = rw_map_hash_int(key, map->capacity);
     rw_map_lock_t* lock = &map->bucket_locks[idx];
     rw_map_spin_lock(lock);
+    /* P0修复: 持有global_lock至桶操作完成，防止并发resize释放bucket_locks数组导致UAF */
 
     RwLockMapEntry* entry = map->buckets[idx];
     size_t chain_len = 0;
@@ -263,6 +274,7 @@ int rw_lock_map_insert_int_key(RwLockMap* map, int64_t key, void* value) {
             void* old_val = entry->value;
             entry->value = value;
             rw_map_spin_unlock(lock);
+            rw_map_spin_unlock(&map->global_lock);
             map->insert_count++;
             return (old_val != value) ? 1 : 0;
         }
@@ -272,6 +284,7 @@ int rw_lock_map_insert_int_key(RwLockMap* map, int64_t key, void* value) {
     RwLockMapEntry* new_entry = (RwLockMapEntry*)safe_calloc(1, sizeof(RwLockMapEntry));
     if (!new_entry) {
         rw_map_spin_unlock(lock);
+        rw_map_spin_unlock(&map->global_lock);
         return -1;
     }
 
@@ -288,15 +301,19 @@ int rw_lock_map_insert_int_key(RwLockMap* map, int64_t key, void* value) {
     if (chain_len > 1) map->total_collisions++;
 
     rw_map_spin_unlock(lock);
+    rw_map_spin_unlock(&map->global_lock);
     map->insert_count++;
     return 1;
 }
 
 void* rw_lock_map_get(RwLockMap* map, const char* key) {
     if (!map || !key || !map->is_initialized) return NULL;
+    /* P0修复: 获取global_lock保护capacity/bucket_locks读取，防止并发resize导致UAF */
+    rw_map_spin_lock(&map->global_lock);
     size_t idx = rw_map_hash_string(key, map->capacity);
     rw_map_lock_t* lock = &map->bucket_locks[idx];
     rw_map_spin_lock(lock); /* 读操作必须持有桶锁，防止与insert/remove产生数据竞争 */
+    /* P0修复: 持有global_lock至桶操作完成，防止并发resize释放bucket_locks数组导致UAF */
     RwLockMapEntry* entry = map->buckets[idx];
     map->lookup_count++;
     void* value = NULL;
@@ -308,14 +325,18 @@ void* rw_lock_map_get(RwLockMap* map, const char* key) {
         entry = entry->next;
     }
     rw_map_spin_unlock(lock);
+    rw_map_spin_unlock(&map->global_lock);
     return value;
 }
 
 void* rw_lock_map_get_int_key(RwLockMap* map, int64_t key) {
     if (!map || !map->is_initialized) return NULL;
+    /* P0修复: 获取global_lock保护capacity/bucket_locks读取，防止并发resize导致UAF */
+    rw_map_spin_lock(&map->global_lock);
     size_t idx = rw_map_hash_int(key, map->capacity);
     rw_map_lock_t* lock = &map->bucket_locks[idx];
     rw_map_spin_lock(lock); /* 读操作必须持有桶锁 */
+    /* P0修复: 持有global_lock至桶操作完成，防止并发resize释放bucket_locks数组导致UAF */
     RwLockMapEntry* entry = map->buckets[idx];
     map->lookup_count++;
     void* value = NULL;
@@ -327,14 +348,18 @@ void* rw_lock_map_get_int_key(RwLockMap* map, int64_t key) {
         entry = entry->next;
     }
     rw_map_spin_unlock(lock);
+    rw_map_spin_unlock(&map->global_lock);
     return value;
 }
 
 int rw_lock_map_remove(RwLockMap* map, const char* key) {
     if (!map || !key || !map->is_initialized) return -1;
+    /* P0修复: 获取global_lock保护capacity/bucket_locks读取，防止并发resize导致UAF */
+    rw_map_spin_lock(&map->global_lock);
     size_t idx = rw_map_hash_string(key, map->capacity);
     rw_map_lock_t* lock = &map->bucket_locks[idx];
     rw_map_spin_lock(lock);
+    /* P0修复: 持有global_lock至桶操作完成，防止并发resize释放bucket_locks数组导致UAF */
 
     RwLockMapEntry* prev = NULL;
     RwLockMapEntry* entry = map->buckets[idx];
@@ -346,6 +371,7 @@ int rw_lock_map_remove(RwLockMap* map, const char* key) {
             safe_free((void**)&entry);
             map->entry_count--;
             rw_map_spin_unlock(lock);
+            rw_map_spin_unlock(&map->global_lock);
             map->remove_count++;
             return 0;
         }
@@ -354,14 +380,18 @@ int rw_lock_map_remove(RwLockMap* map, const char* key) {
     }
 
     rw_map_spin_unlock(lock);
+    rw_map_spin_unlock(&map->global_lock);
     return -1;
 }
 
 int rw_lock_map_remove_int_key(RwLockMap* map, int64_t key) {
     if (!map || !map->is_initialized) return -1;
+    /* P0修复: 获取global_lock保护capacity/bucket_locks读取，防止并发resize导致UAF */
+    rw_map_spin_lock(&map->global_lock);
     size_t idx = rw_map_hash_int(key, map->capacity);
     rw_map_lock_t* lock = &map->bucket_locks[idx];
     rw_map_spin_lock(lock);
+    /* P0修复: 持有global_lock至桶操作完成，防止并发resize释放bucket_locks数组导致UAF */
 
     RwLockMapEntry* prev = NULL;
     RwLockMapEntry* entry = map->buckets[idx];
@@ -372,6 +402,7 @@ int rw_lock_map_remove_int_key(RwLockMap* map, int64_t key) {
             safe_free((void**)&entry);
             map->entry_count--;
             rw_map_spin_unlock(lock);
+            rw_map_spin_unlock(&map->global_lock);
             map->remove_count++;
             return 0;
         }
@@ -380,6 +411,7 @@ int rw_lock_map_remove_int_key(RwLockMap* map, int64_t key) {
     }
 
     rw_map_spin_unlock(lock);
+    rw_map_spin_unlock(&map->global_lock);
     return -1;
 }
 
@@ -400,7 +432,11 @@ size_t rw_lock_map_size(RwLockMap* map) {
 
 int rw_lock_map_clear(RwLockMap* map) {
     if (!map || !map->is_initialized) return -1;
+    /* P0修复: 获取global_lock写锁，阻止并发resize导致capacity/bucket_locks指针失效 */
+    rw_map_spin_lock(&map->global_lock);
     for (size_t i = 0; i < map->capacity; i++) {
+        rw_map_lock_t* lock = &map->bucket_locks[i];
+        rw_map_spin_lock(lock); /* 逐桶加锁，防止并发读写线程访问正在释放的entry */
         RwLockMapEntry* entry = map->buckets[i];
         while (entry) {
             RwLockMapEntry* next = entry->next;
@@ -409,10 +445,12 @@ int rw_lock_map_clear(RwLockMap* map) {
             entry = next;
         }
         map->buckets[i] = NULL;
+        rw_map_spin_unlock(lock);
     }
     map->entry_count = 0;
     map->total_collisions = 0;
     map->max_chain_length = 0;
+    rw_map_spin_unlock(&map->global_lock);
     return 0;
 }
 
@@ -430,6 +468,8 @@ int rw_lock_map_for_each(RwLockMap* map,
                          void* user_data) {
     if (!map || !callback || !map->is_initialized) return -1;
     int count = 0;
+    /* P0修复: 获取global_lock保护整个遍历过程，防止并发resize导致capacity/bucket_locks指针失效 */
+    rw_map_spin_lock(&map->global_lock);
     for (size_t i = 0; i < map->capacity; i++) {
         rw_map_lock_t* lock = &map->bucket_locks[i];
         rw_map_spin_lock(lock);
@@ -443,6 +483,7 @@ int rw_lock_map_for_each(RwLockMap* map,
         }
         rw_map_spin_unlock(lock);
     }
+    rw_map_spin_unlock(&map->global_lock);
     return count;
 }
 
@@ -468,26 +509,63 @@ RwLockMapIter* rw_lock_map_iter_create(RwLockMap* map) {
     iter->map = map;
     iter->bucket_index = 0;
     iter->current = NULL;
+    iter->has_bucket_lock = 0;
+    iter->locked_bucket_index = 0;
+    /* P0修复: 获取global_lock并持有至iter_destroy，防止遍历期间并发resize
+     * 导致capacity/bucket_locks指针失效（UAF） */
+    rw_map_spin_lock(&map->global_lock);
     return iter;
 }
 
 int rw_lock_map_iter_next(RwLockMapIter* iter, const char** key, void** value) {
-    if (!iter || !key || !value) return -1;
+    if (!iter || !key || !value || !iter->map) return -1;
+    RwLockMap* map = iter->map;
+
+    /* P0修复: 如果当前有entry，移动到next（在当前桶锁保护下安全访问） */
     if (iter->current) {
         iter->current = iter->current->next;
     }
-    while (!iter->current && iter->bucket_index < iter->map->capacity) {
-        iter->current = iter->map->buckets[iter->bucket_index];
+
+    /* 寻找下一个非空桶，移动到新桶时获取该桶的锁，离开旧桶时释放旧桶锁 */
+    while (!iter->current && iter->bucket_index < map->capacity) {
+        /* 释放当前持有的桶锁（如果有的话） */
+        if (iter->has_bucket_lock) {
+            rw_map_spin_unlock(&map->bucket_locks[iter->locked_bucket_index]);
+            iter->has_bucket_lock = 0;
+        }
+        /* 获取新桶的锁，保护entry链表遍历 */
+        rw_map_lock_t* lock = &map->bucket_locks[iter->bucket_index];
+        rw_map_spin_lock(lock);
+        iter->has_bucket_lock = 1;
+        iter->locked_bucket_index = iter->bucket_index;
+        iter->current = map->buckets[iter->bucket_index];
         iter->bucket_index++;
     }
+
     if (iter->current) {
         *key = iter->current->key;
         *value = iter->current->value;
         return 0;
     }
+
+    /* 遍历结束，释放最后持有的桶锁 */
+    if (iter->has_bucket_lock) {
+        rw_map_spin_unlock(&map->bucket_locks[iter->locked_bucket_index]);
+        iter->has_bucket_lock = 0;
+    }
     return -1;
 }
 
 void rw_lock_map_iter_destroy(RwLockMapIter* iter) {
+    if (!iter) return;
+    /* P0修复: 释放可能仍持有的桶锁 */
+    if (iter->map && iter->has_bucket_lock) {
+        rw_map_spin_unlock(&iter->map->bucket_locks[iter->locked_bucket_index]);
+        iter->has_bucket_lock = 0;
+    }
+    /* 释放global_lock（在iter_create中获取，持有整个遍历生命周期） */
+    if (iter->map) {
+        rw_map_spin_unlock(&iter->map->global_lock);
+    }
     safe_free((void**)&iter);
 }

@@ -466,31 +466,36 @@
     window.pollSimulation = pollSimulation;
 
     async function sim3dResetView() {
-        try { await window.SelfLnnApi.request('/simulation/view/reset', { method: 'POST' }); window.showNotification('视图已重置', 'info'); }
+        /* 集成修复: 使用正确的后端端点 /simulation/view/reset (backend.c:2651) */
+        try { await window.SelfLnnApi.request('/simulation/view/reset', { method: 'POST', headers: {'Content-Type': 'application/json'} }); window.showNotification('视图已重置', 'info'); }
         catch(e) { console.error('[仿真] 视图重置失败:', e.message); window.showNotification('操作失败', 'danger'); }
     }
     window.sim3dResetView = sim3dResetView;
 
     async function sim3dToggleGrid() {
-        try { await window.SelfLnnApi.request('/simulation/view/toggle_grid', { method: 'POST' }); window.showNotification('网格已切换', 'info'); }
+        /* 集成修复: 使用正确的后端端点 /simulation/view/toggle_grid (backend.c:2652) */
+        try { await window.SelfLnnApi.request('/simulation/view/toggle_grid', { method: 'POST', headers: {'Content-Type': 'application/json'} }); window.showNotification('网格已切换', 'info'); }
         catch(e) { console.error('[仿真] 网格切换失败:', e.message); window.showNotification('操作失败', 'danger'); }
     }
     window.sim3dToggleGrid = sim3dToggleGrid;
 
     async function sim3dAddRobot() {
-        try { var resp = await window.SelfLnnApi.request('/simulation/robot/add', { method: 'POST', body: JSON.stringify({}) }); var d = await resp.json(); window.showNotification(d && d.success ? '机器人已添加' : '添加失败: ' + (d && d.error || '未知错误'), d && d.success ? 'success' : 'danger'); }
+        /* P1-4修复: /simulation/robot/add → /simulation/robot_control；P2-16: 补全Content-Type */
+        try { var resp = await window.SelfLnnApi.request('/simulation/robot_control', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({}) }); var d = await resp.json(); window.showNotification(d && d.success ? '机器人已添加' : '添加失败: ' + (d && d.error || '未知错误'), d && d.success ? 'success' : 'danger'); }
         catch(e) { window.showNotification('添加失败: ' + (e && e.message || '网络错误'), 'danger'); }
     }
     window.sim3dAddRobot = sim3dAddRobot;
 
     async function sim3dClearAll() {
-        try { await window.SelfLnnApi.request('/simulation/clear', { method: 'POST' }); window.showNotification('场景已清空', 'info'); }
+        /* P1-4修复: /simulation/clear → /simulation/reset；P2-16: 补全Content-Type */
+        try { await window.SelfLnnApi.request('/simulation/reset', { method: 'POST', headers: {'Content-Type': 'application/json'} }); window.showNotification('场景已清空', 'info'); }
         catch(e) { console.error('[仿真] 场景清空失败:', e.message); window.showNotification('操作失败', 'danger'); }
     }
     window.sim3dClearAll = sim3dClearAll;
 
     async function start3DReconstruction() {
-        try { var resp = await window.SelfLnnApi.request('/simulation/reconstruct3d', { method: 'POST', body: JSON.stringify({}) }); var d = await resp.json(); window.showNotification(d && d.success ? '三维重建已启动' : '启动失败: ' + (d && d.error || '未知错误'), d && d.success ? 'success' : 'danger'); }
+        /* P1-4修复: /simulation/reconstruct3d → /simulation/reconstruct；P2-16: 补全Content-Type */
+        try { var resp = await window.SelfLnnApi.request('/simulation/reconstruct', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({}) }); var d = await resp.json(); window.showNotification(d && d.success ? '三维重建已启动' : '启动失败: ' + (d && d.error || '未知错误'), d && d.success ? 'success' : 'danger'); }
         catch(e) { window.showNotification('启动失败: ' + (e && e.message || '网络错误'), 'danger'); }
     }
     window.start3DReconstruction = start3DReconstruction;
@@ -499,7 +504,8 @@
         var cmd = document.getElementById('cmd-input') ? document.getElementById('cmd-input').value : '';
         if (!cmd) { window.showNotification('请输入命令', 'warning'); return; }
         try {
-            var resp = await window.SelfLnnApi.request('/simulation/command', { method: 'POST', body: JSON.stringify({ command: cmd }) });
+            /* P1-4修复: /simulation/command → /simulation/robot_control；P2-16: 补全Content-Type */
+            var resp = await window.SelfLnnApi.request('/simulation/robot_control', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ command: cmd }) });
             var d = await resp.json();
             var execOk = d && d.simulation && d.simulation.executed;
             window.showNotification(execOk ? '命令已执行' : '执行失败', execOk ? 'success' : 'danger');
@@ -509,7 +515,8 @@
 
     async function planPath() {
         try {
-            var resp = await window.SelfLnnApi.request('/robot/path/plan', { method: 'POST', body: JSON.stringify({}) });
+            /* P1-4修复: /robot/path/plan → /simulation/plan_path；P2-16: 补全Content-Type */
+            var resp = await window.SelfLnnApi.request('/simulation/plan_path', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({}) });
             var d = await resp.json();
             window.showNotification('路径规划完成，步数: ' + (d && d.steps || 0), 'success');
         } catch(e) { window.showNotification('连接失败', 'danger'); }

@@ -146,8 +146,14 @@ typedef struct {
     int executed;
     int prepare_count;
     uint32_t prepare_digests[PBFT_MAX_NODES][8];
+    /* P1修复: 已投票prepare的节点跟踪数组，防止同一节点重复投票 */
+    uint32_t prepare_voters[PBFT_MAX_NODES];
+    int prepare_voter_count;
     int commit_count;
     uint32_t commit_digests[PBFT_MAX_NODES][8];
+    /* P1修复: 已投票commit的节点跟踪数组，防止同一节点重复投票 */
+    uint32_t commit_voters[PBFT_MAX_NODES];
+    int commit_voter_count;
     /* 请求负载 (per-entry 避免并发提交覆盖) */
     uint8_t* payload;
     uint32_t payload_size;

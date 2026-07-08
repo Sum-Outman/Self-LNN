@@ -343,7 +343,9 @@ static void buddy_cleanup(CpuBuddyAllocator* allocator)
     /* 释放所有溢出回退块 */
     for (int i = 0; i < allocator->overflow_count; i++) {
         if (allocator->overflow_blocks[i].address) {
-            free(allocator->overflow_blocks[i].address);
+            /* P-AUDIT修复: overflow_blocks[].address由safe_malloc分配,必须用safe_free释放 */
+            void* p = allocator->overflow_blocks[i].address;
+            safe_free((void**)&p);
             allocator->overflow_blocks[i].address = NULL;
         }
     }
@@ -590,7 +592,7 @@ static int buddy_free(CpuBuddyAllocator* allocator, void* ptr)
     for (int i = 0; i < allocator->overflow_count; i++) {
         if (allocator->overflow_blocks[i].address == ptr) {
             /* 从跟踪数组中移除，用最后一个元素填补 */
-            free(ptr);
+            safe_free((void**)&ptr);
             if (allocator->overflow_used >= allocator->overflow_blocks[i].size) {
                 allocator->overflow_used -= allocator->overflow_blocks[i].size;
             }
@@ -608,7 +610,7 @@ static int buddy_free(CpuBuddyAllocator* allocator, void* ptr)
         uint8_t* pool_start = (uint8_t*)allocator->pool_base;
         uint8_t* pool_end = pool_start + allocator->pool_size;
         if ((uint8_t*)ptr < pool_start || (uint8_t*)ptr >= pool_end) {
-            free(ptr);
+            safe_free((void**)&ptr);
             mutex_unlock(allocator->lock);
             return 0;
         }

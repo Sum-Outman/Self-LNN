@@ -96,6 +96,13 @@ int content_filter_load_rules_from_file(ContentFilter* filter, const char* filep
 /* 绑定LNN语义分析层，启用基于LNN的语义内容过滤 */
 int content_filter_set_lnn(ContentFilter* filter, void* lnn_instance);
 
+/* P0修复: 启用/禁用LNN语义评分层。
+ * 在LNN未训练时，语义评分不可靠，应禁用以避免误拦截正常输入。
+ * @param filter 过滤句柄
+ * @param enable 1=启用语义评分, 0=禁用(仅关键词匹配)
+ */
+int content_filter_set_enable_semantic(ContentFilter* filter, int enable);
+
 #ifdef __cplusplus
 }
 #endif

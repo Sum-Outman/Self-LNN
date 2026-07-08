@@ -249,7 +249,27 @@ int dynamics_update(DynamicsSystem* system, const float* input,
     {
         size_t check_n = system->config.state_size < 1000 ? system->config.state_size : 1000;
         for (size_t i = 0; i < check_n; i++) {
-            if (!isfinite(system->state[i])) return -1;
+            /* C-015修复: 检测NaN/Inf后不直接返回，先重置异常状态为0.0f并记录日志，
+             * 确保系统状态数据不会残留NaN/Inf污染后续计算。 */
+            if (!isfinite(system->state[i])) {
+                log_warning("[动力学] 状态[%zu]检测到非有限值(NaN/Inf)=%.4f，重置为0.0f", 
+                           i, (double)system->state[i]);
+                system->state[i] = 0.0f;
+                /* 如果检测到大量NaN/Inf则返回错误，避免系统崩溃 */
+                size_t nan_count = 1;
+                for (size_t j = i + 1; j < check_n; j++) {
+                    if (!isfinite(system->state[j])) {
+                        system->state[j] = 0.0f;
+                        nan_count++;
+                    }
+                }
+                if (nan_count > check_n / 4) {
+                    log_error("[动力学] 严重NaN/Inf污染: %zu/%zu个状态异常，中止迭代",
+                              nan_count, check_n);
+                    return -1;
+                }
+                break; /* 已完成一轮扫描和重置 */
+            }
         }
     }
     
@@ -514,7 +534,7 @@ static void compute_derivatives(const DynamicsSystem* system,
     if (system->config.enable_noise) {
         noise = system->noise_buffer;
     } else {
-        zero_noise = (float*)calloc(state_size, sizeof(float));
+        zero_noise = (float*)safe_calloc(state_size, sizeof(float));
         if (!zero_noise) return; /* 内存分配失败，安全退出 */
         noise = zero_noise;
         need_free = 1;
@@ -527,8 +547,7 @@ static void compute_derivatives(const DynamicsSystem* system,
     }
     
     if (need_free) {
-        free(zero_noise);
-        zero_noise = NULL;
+        safe_free((void**)&zero_noise);
     }
 }
 

@@ -1023,10 +1023,11 @@ int meta_learner_load_checkpoint(MetaLearner* learner, const char* filepath) {
  */
 static float compute_task_loss(NeuralNetwork* model, const MetaTask* task) {
     if (!model || !task) {
-        // 参数无效时返回基于指针哈希的确定性值，而不是固定值
-        uintptr_t ptr1 = (uintptr_t)model;
-        uintptr_t ptr2 = (uintptr_t)task;
-        return 0.3f + 0.4f * (((ptr1 ^ ptr2) % 100) / 100.0f);
+        /* 修复7(P1): compute_task_loss对NULL输入返回伪造值
+         * 原问题: return 0.3f + 0.4f*(((ptr1^ptr2)%100)/100.0f) 用指针地址异或
+         *   生成"伪随机"损失，非真实计算，违反"禁止伪造实现"规则。
+         * 修复方案: 返回 -1.0f 错误码（与compute_default_loss_based_on_model一致） */
+        return -1.0f;
     }
     
     // 将NeuralNetwork转换为CfCNetwork
@@ -1399,67 +1400,124 @@ static float maml_outer_update(MetaLearner* learner, AdaptationContext* ctx,
     float* gradient_direction = ctx->task_gradients;
     
     if (learner->config.use_second_order && gradient_direction && param_count > 0) {
-/*修复H-008: 解析Hessian-向量积替代中心差分
-         * 
-         * 标准MAML二阶更新:
-         *   θ'_i = θ - α·∇_θ L_i(θ)          (内循环适应)
-         *   meta_grad = Σ_i ∇_θ L_i(θ'_i) - α·H_i(θ)·∇_θ L_i(θ'_i) 
-         * 
-         * 解析HVP利用泰勒展开:
-         *   g(θ'_i) ≈ g(θ) - α·H(θ)·(θ - θ'_i)/α = g(θ) - α·H(θ)·g(θ)
-         *   所以 H(θ)·g(θ) ≈ (g(θ) - g(θ'_i)) / α
-         * 
-         * 其中 g(θ) = ∇_θ L_i(θ)  (inner gradient at original params)
-         *       g(θ'_i) = ∇_θ'_i L_i(θ'_i)  (gradient at adapted params)
-         * 
-         * 此方法只需2次gradient计算(vs 中心差分4次), 效率提升~50% */
+        /* 修复6(P1): MAML忽略查询集(query set)
+         *
+         * 原问题: g_inner/g_adapted均为support set梯度，MAML元梯度应在query set上
+         *   计算，违背MAML"优化适应后查询性能"的核心目标。
+         *
+         * 修复后的MAML二阶更新:
+         *   θ'_i = θ - α·∇_θ L_support(θ)              (内循环在support set上适应)
+         *   v = ∇_θ' L_query(θ')                        (查询集梯度在适应后参数上)
+         *   HVP = H_support(θ)·v ≈ (g(θ+εv̂) - g(θ-εv̂)) / (2ε)  (支持集Hessian)
+         *   meta_grad = v - α·HVP                        (二阶元梯度)
+         *
+         * 其中 g(θ) = ∇_θ L_support(θ) (支持集梯度在原始参数上)
+         *       v̂ = v/|v| (查询梯度归一化方向)
+         *
+         * 此方法需3次梯度计算: g_inner(support), v(query), g_perturbed(support) */
         float v_norm = 0.0f;
         for (size_t i = 0; i < param_count; i++)
             v_norm += gradient_direction[i] * gradient_direction[i];
         v_norm = sqrtf(v_norm + 1e-10f);
         if (v_norm < 1e-8f) goto first_order_update;
 
-        /* 分配: saved_params, g_inner(原始梯度), g_adapted(适应后梯度) */
+        /* 分配: saved_params, g_inner(支持集梯度), v_query(查询集梯度),
+         *       g_perturbed(扰动后支持集梯度), hv(HVP) */
         float* saved_params = (float*)safe_malloc(param_count * sizeof(float));
         float* g_inner = (float*)safe_calloc(param_count, sizeof(float));
-        float* g_adapted = (float*)safe_calloc(param_count, sizeof(float));
-        float* hv_analytic = (float*)safe_calloc(param_count, sizeof(float));
-        
-        if (!saved_params || !g_inner || !g_adapted || !hv_analytic) {
+        float* v_query = (float*)safe_calloc(param_count, sizeof(float));
+        float* g_perturbed = (float*)safe_calloc(param_count, sizeof(float));
+        float* hv = (float*)safe_calloc(param_count, sizeof(float));
+
+        if (!saved_params || !g_inner || !v_query || !g_perturbed || !hv) {
             safe_free((void**)&saved_params); safe_free((void**)&g_inner);
-            safe_free((void**)&g_adapted); safe_free((void**)&hv_analytic);
+            safe_free((void**)&v_query); safe_free((void**)&g_perturbed);
+            safe_free((void**)&hv);
             goto first_order_update;
         }
 
-        /* 步骤1: 保存原始参数并计算内梯度 g(θ) */
+        /* 构造查询集任务副本: 将query_data放入support字段以复用梯度计算函数 */
+        MetaTask query_task;
+        memcpy(&query_task, ctx->task, sizeof(MetaTask));
+        if (ctx->task->query_data && ctx->task->query_labels &&
+            ctx->task->setting.query_samples > 0) {
+            query_task.support_data = ctx->task->query_data;
+            query_task.support_labels = ctx->task->query_labels;
+            query_task.setting.support_samples = ctx->task->setting.query_samples;
+        }
+        /* 若无query数据，回退使用support集（降级但不中断） */
+
+        /* 步骤1: 保存原始参数并计算支持集内梯度 g(θ) = ∇L_support(θ) */
         memcpy(saved_params, learner->model_parameters, param_count * sizeof(float));
         compute_task_loss_with_gradients(learner->meta_model, ctx->task, g_inner, param_count);
 
-        /* 步骤2: 内循环适应 θ' = θ - α·g(θ) */
+        /* 步骤2: 内循环适应 θ' = θ - α·g(θ) （在support set上） */
         for (size_t i = 0; i < param_count; i++)
             learner->model_parameters[i] = saved_params[i] - inner_learning_rate * g_inner[i];
         apply_model_parameters(learner->meta_model, learner->model_parameters, param_count);
 
-        /* 步骤3: 计算适应后梯度 g(θ') */
-        compute_task_loss_with_gradients(learner->meta_model, ctx->task, g_adapted, param_count);
+        /* 步骤3: 计算查询集梯度 v = ∇L_query(θ') （在query set上，修复核心） */
+        compute_task_loss_with_gradients(learner->meta_model, &query_task, v_query, param_count);
 
-        /* 步骤4: 解析HVP H·g ≈ (g(θ) - g(θ')) / α
-         * 步骤5: MAML元梯度 = g(θ') - α·H·g(θ') */
-        float inv_alpha = 1.0f / (inner_learning_rate + 1e-8f);
+        /* 步骤4: 计算HVP = H_support(θ)·v 通过中心差分
+         *   H·v ≈ (g(θ+εv̂) - g(θ-εv̂)) / (2ε)
+         *   其中 g(·) = ∇L_support(·), v̂ = v/|v| */
+        float v_query_norm = 0.0f;
+        for (size_t i = 0; i < param_count; i++)
+            v_query_norm += v_query[i] * v_query[i];
+        v_query_norm = sqrtf(v_query_norm + 1e-10f);
+
+        if (v_query_norm > 1e-8f) {
+            float eps = 1e-3f;  /* 有限差分步长 */
+            float inv_v_norm = 1.0f / v_query_norm;
+            float inv_2eps = 1.0f / (2.0f * eps);
+
+            /* 恢复原始参数 */
+            memcpy(learner->model_parameters, saved_params, param_count * sizeof(float));
+
+            /* θ + ε·v̂: 在原始参数上沿查询梯度方向前向扰动 */
+            for (size_t i = 0; i < param_count; i++)
+                learner->model_parameters[i] = saved_params[i] + eps * v_query[i] * inv_v_norm;
+            apply_model_parameters(learner->meta_model, learner->model_parameters, param_count);
+            /* g(θ+εv̂) = ∇L_support(θ+εv̂) */
+            compute_task_loss_with_gradients(learner->meta_model, ctx->task, g_perturbed, param_count);
+
+            /* θ - ε·v̂: 反向扰动 */
+            for (size_t i = 0; i < param_count; i++)
+                learner->model_parameters[i] = saved_params[i] - eps * v_query[i] * inv_v_norm;
+            apply_model_parameters(learner->meta_model, learner->model_parameters, param_count);
+            /* g(θ-εv̂) = ∇L_support(θ-εv̂)，结果累加到g_perturbed中取差 */
+            {
+                float* g_neg = (float*)safe_calloc(param_count, sizeof(float));
+                if (g_neg) {
+                    compute_task_loss_with_gradients(learner->meta_model, ctx->task, g_neg, param_count);
+                    for (size_t i = 0; i < param_count; i++)
+                        hv[i] = (g_perturbed[i] - g_neg[i]) * inv_2eps;
+                    safe_free((void**)&g_neg);
+                } else {
+                    /* 回退: 前向差分 H·v ≈ (g(θ+εv̂) - g(θ)) / ε */
+                    for (size_t i = 0; i < param_count; i++)
+                        hv[i] = (g_perturbed[i] - g_inner[i]) / eps;
+                }
+            }
+        }
+
+        /* 步骤5: MAML元梯度 = v - α·HVP */
         for (size_t i = 0; i < param_count; i++) {
-            /* HVP_analytic[i] = H(θ)·g_adapted[i] ≈ (g_inner[i] - g_adapted[i]) / α */
-            float hvp_val = (g_inner[i] - g_adapted[i]) * inv_alpha;
-            /* meta_grad = g_adapted[i] - α * hvp_val */
-            float meta_grad = g_adapted[i] - inner_learning_rate * hvp_val;
+            float meta_grad = v_query[i] - inner_learning_rate * hv[i];
             learner->model_parameters[i] = saved_params[i] - meta_learning_rate * meta_grad;
         }
 
-        /* 恢复并应用参数 */
-        memcpy(learner->model_parameters, saved_params, param_count * sizeof(float));
-        apply_model_parameters(learner->meta_model, learner->model_parameters, param_count);
+        /* P1修复(修复7): 删除原第1512-1513行对 model_parameters 的覆盖。
+         * 原实现在步骤5正确计算元梯度并更新 model_parameters 后，立即用 saved_params
+         * （原始参数）覆盖 model_parameters 并调用 apply_model_parameters，导致步骤5
+         * 的元梯度更新被完全丢弃，二阶MAML退化为无更新。
+         * 步骤5已将正确的更新后参数写入 model_parameters，外部第1539行的
+         * apply_model_parameters 会正确应用，无需在此重复应用原始参数。 */
 
         safe_free((void**)&saved_params); safe_free((void**)&g_inner);
-        safe_free((void**)&g_adapted); safe_free((void**)&hv_analytic);
+        safe_free((void**)&v_query); safe_free((void**)&g_perturbed);
+        safe_free((void**)&hv);
     } else {
 first_order_update:
         // ================================================================
@@ -1685,7 +1743,20 @@ static float prototypical_network(MetaLearner* learner, const MetaTask* task) {
                 valid_query_count++;
             }
         }
-        
+
+        /* 修复8(P1): 度量型元学习永不更新模型
+         * 原问题: 仅调用prototypical_network()做前向并累加loss，
+         *   从不计算梯度或反向，嵌入网络永不被训练。
+         * 修复方案: 对每个查询样本，以真实类原型作为目标构造MSE目标向量，
+         *   调用lnn_backward使嵌入网络的输出向正确类原型靠拢。
+         *   lnn_backward以MSE计算 error = embedding - prototype，
+         *   梯度下降使嵌入向类原型方向移动，实现嵌入空间优化 */
+        {
+            const float* proto_target = prototypes + true_label * config.output_size;
+            float bwd_loss = 0.0f;
+            lnn_backward((LNN*)network, proto_target, &bwd_loss);
+        }
+
         safe_free((void**)&distances);
     }
     
@@ -2366,11 +2437,14 @@ NeuralNetwork* meta_learner_adapt(MetaLearner* learner, const MetaTask* task) {
     // 从基础模型提取初始参数
     int extracted_count = extract_model_parameters(learner->meta_model, ctx.initial_parameters, learner->parameter_count);
     if (extracted_count <= 0) {
-        /* M-001修复：使用secure_random_float替代简单LCG回退 */
-        rng_init(NULL);
-        for (size_t i = 0; i < learner->parameter_count; i++) {
-            ctx.initial_parameters[i] = secure_random_float() - 0.5f;
-        }
+        /* P2修复: 参数提取失败时统一返回NULL，与meta_learner_maml_step保持一致，
+         * 禁止使用随机值回退（会导致适应结果不可复现且与元学习语义不符） */
+        lnn_free((LNN*)adapted_model);
+        safe_free((void**)&ctx.initial_parameters);
+        safe_free((void**)&ctx.adapted_parameters);
+        safe_free((void**)&ctx.task_gradients);
+        log_error("[meta_learner_adapt] 参数提取失败，无法执行元学习适应");
+        return NULL;
     }
     
     // 将初始参数复制到适应后参数（作为起点）
@@ -2494,7 +2568,15 @@ NeuralNetwork* meta_learner_adapt(MetaLearner* learner, const MetaTask* task) {
     }
     
     // 将适应后参数应用到模型（确保模型状态与参数数组同步）
-    if (ctx.adapted_parameters && ctx.initial_parameters) {
+    /* P1修复(修复8): MAML/FOMAML 路径跳过参数差异应用。
+     * maml_inner_loop 已同时更新 ctx.adapted_parameters（参数数组）和
+     * ctx.adapted_model（实际模型，通过 extract/apply_model_parameters），
+     * 若下方再次基于 param_diff=adapted_parameters-initial_parameters 做增量更新，
+     * 会导致内循环梯度被双重应用（参数变化被施加两次），适应结果失真。
+     * 仅对非 MAML/FOMAML 算法（如默认梯度下降、ANIL、Meta-SGD 等）执行此增量同步。 */
+    if (learner->config.algorithm != META_LEARNING_MAML &&
+        learner->config.algorithm != META_LEARNING_FOMAML &&
+        ctx.adapted_parameters && ctx.initial_parameters) {
         // 计算参数变化
         float* param_diff = (float*)safe_malloc(learner->parameter_count * sizeof(float));
         if (param_diff) {
@@ -2646,14 +2728,25 @@ float meta_learner_maml_step(MetaLearner* learner, const MetaTask* task) {
         return 0.0f;
     }
     
-    // 7. S-009修复: 计算查询集梯度（在适应后模型上）
-    //    MAML的正确二阶梯度要求：
-    //    外循环梯度 = ∇L_query(θ') - α·∇²L_support(θ)·∇L_query(θ')
-    //    需要分别计算：v_query = ∇L_query(θ') 在适应后模型上
-    //                 HVP = ∇²L_support(θ)·v_query 在初始模型上
+    // 7. 修复6(P1): 计算查询集梯度（在适应后模型上）
+    //    原问题: compute_model_gradients使用task->support_data，虽注释为"查询集梯度"
+    //    但实际在support set上计算。
+    //    修复: 构造query_task副本，使用query_data计算真正的查询集梯度
+    MetaTask query_task_for_grad;
+    memcpy(&query_task_for_grad, task, sizeof(MetaTask));
+    int has_query_data = 0;
+    if (task->query_data && task->query_labels && task->setting.query_samples > 0) {
+        query_task_for_grad.support_data = task->query_data;
+        query_task_for_grad.support_labels = task->query_labels;
+        query_task_for_grad.setting.support_samples = task->setting.query_samples;
+        has_query_data = 1;
+    }
+
     float* query_gradients = init_parameter_array(learner->parameter_count, 0.0f);
     if (query_gradients) {
-        int qgrad_result = compute_model_gradients(adapted_model, task,
+        /* 使用query_task计算真正的查询集梯度（若无query数据则回退到support集） */
+        MetaTask* grad_task = has_query_data ? &query_task_for_grad : (MetaTask*)task;
+        int qgrad_result = compute_model_gradients(adapted_model, grad_task,
                                                  0.0f, query_gradients, learner->parameter_count);
         if (qgrad_result == 0) {
             /* 将查询集梯度复制到task_gradients，供外循环使用 */
@@ -2661,9 +2754,10 @@ float meta_learner_maml_step(MetaLearner* learner, const MetaTask* task) {
         }
         safe_free((void**)&query_gradients);
     }
-    
-    // 8. 计算查询损失（在适应后模型上评估）
-    float query_loss = compute_task_loss(adapted_model, task);
+
+    // 8. 计算查询损失（在适应后模型上评估，使用query set）
+    float query_loss = compute_task_loss(adapted_model,
+        has_query_data ? &query_task_for_grad : (const MetaTask*)task);
     ctx.query_loss = query_loss;
     
     // 9. 执行MAML外循环更新（task_gradients现在是查询集梯度）
@@ -2969,6 +3063,29 @@ float meta_learner_matching_step(MetaLearner* learner, const MetaTask* task) {
         }
     }
 
+    /* 修复8(P1): 度量型元学习永不更新模型
+     * 计算类原型供后续反向传播使用 */
+    float* match_prototypes = (float*)safe_calloc(n_way * out_dim, sizeof(float));
+    int* match_class_counts = (int*)safe_calloc(n_way, sizeof(int));
+    if (match_prototypes && match_class_counts) {
+        const int* match_support_labels = (const int*)task->support_labels;
+        for (int i = 0; i < support_samples; i++) {
+            int label = match_support_labels[i];
+            if (label >= 0 && label < n_way) {
+                for (int d = 0; d < out_dim; d++)
+                    match_prototypes[label * out_dim + d] += support_embs[i * out_dim + d];
+                match_class_counts[label]++;
+            }
+        }
+        for (int c = 0; c < n_way; c++) {
+            if (match_class_counts[c] > 0) {
+                float inv = 1.0f / match_class_counts[c];
+                for (int d = 0; d < out_dim; d++)
+                    match_prototypes[c * out_dim + d] *= inv;
+            }
+        }
+    }
+
     /* 对每个查询样本计算注意力权重 */
     const float* query_data = (const float*)task->query_data;
     const int* query_labels = (const int*)task->query_labels;
@@ -3023,11 +3140,21 @@ float meta_learner_matching_step(MetaLearner* learner, const MetaTask* task) {
             float prob = expf(logits[true_label] - lmax) / (lsum + 1e-8f);
             total_loss += -logf(prob + 1e-8f);
             valid_queries++;
+
+            /* 修复8(P1): 度量型元学习永不更新模型 — 添加反向传播
+             * 以真实类原型作为目标，调用lnn_backward更新嵌入网络，
+             * 使查询嵌入向正确类原型靠拢 */
+            if (match_prototypes) {
+                const float* proto_target = match_prototypes + true_label * out_dim;
+                float bwd_loss = 0.0f;
+                lnn_backward(network, proto_target, &bwd_loss);
+            }
         }
     }
 
     safe_free((void**)&support_embs); safe_free((void**)&embedding);
     safe_free((void**)&logits); safe_free((void**)&attn_weights);
+    safe_free((void**)&match_prototypes); safe_free((void**)&match_class_counts);
 
     learner->cumulative_loss += total_loss;
     learner->episode_count++;
@@ -3062,19 +3189,29 @@ int meta_learner_train(MetaLearner* learner, MetaTask* tasks, int task_count) {
     learner->is_training = 1;
     learner->state.current_step = 0;
     
-    // 课程学习：按照任务相似度对训练任务排序
+    // 交叉验证集：留出20%的任务作为验证集（至少1个）
+    // P2修复: 先计算训练集/验证集划分，再对训练任务排序，
+    // 避免课程排序包含验证集任务导致数据泄露（验证集任务被提前学习）
+    int val_count = task_count / 5;
+    if (val_count < 1) val_count = 1;
+    if (val_count >= task_count) val_count = task_count - 1;
+    int train_count = task_count - val_count;
+
+    MetaTask* val_tasks = tasks + train_count;
+
+    // 课程学习：仅对训练任务排序（不含验证集任务）
     // 使用第一个任务作为参考，按相似度从高到低排序
     // 这样模型先学习容易（高相似度）的任务，逐步过渡到困难任务
     int* curriculum_order = (int*)safe_malloc(task_count * sizeof(int));
     float* task_difficulty = (float*)safe_calloc(task_count, sizeof(float));
-    if (curriculum_order && task_difficulty && task_count >= 2) {
-        for (int i = 0; i < task_count; i++) {
+    if (curriculum_order && task_difficulty && train_count >= 2) {
+        for (int i = 0; i < train_count; i++) {
             curriculum_order[i] = i;
             task_difficulty[i] = meta_task_similarity(&tasks[0], &tasks[i]);
         }
-        // 按相似度降序排序（冒泡排序，简单实现）
-        for (int i = 0; i < task_count - 1; i++) {
-            for (int j = 0; j < task_count - i - 1; j++) {
+        // 按相似度降序排序（冒泡排序，简单实现），仅排序训练集任务
+        for (int i = 0; i < train_count - 1; i++) {
+            for (int j = 0; j < train_count - i - 1; j++) {
                 if (task_difficulty[j] < task_difficulty[j + 1]) {
                     float tmp_d = task_difficulty[j];
                     task_difficulty[j] = task_difficulty[j + 1];
@@ -3090,19 +3227,11 @@ int meta_learner_train(MetaLearner* learner, MetaTask* tasks, int task_count) {
             curriculum_order = (int*)safe_malloc(task_count * sizeof(int));
         }
         if (curriculum_order) {
-            for (int i = 0; i < task_count; i++) {
+            for (int i = 0; i < train_count; i++) {
                 curriculum_order[i] = i;
             }
         }
     }
-    
-    // 交叉验证集：留出20%的任务作为验证集（至少1个）
-    int val_count = task_count / 5;
-    if (val_count < 1) val_count = 1;
-    if (val_count >= task_count) val_count = task_count - 1;
-    int train_count = task_count - val_count;
-    
-    MetaTask* val_tasks = tasks + train_count;
     
     // 早停参数
     float best_val_loss = 1e10f;

@@ -10,6 +10,18 @@
 #include <stdio.h>
 #include <time.h>
 
+/* P1-07修复: log_event自旋锁 — 使用InterlockedExchange(GCC内置原子操作)实现原子加锁/解锁
+ * 保护event_log[]和event_count的并发访问，防止多线程同时调用log_event导致数据损坏 */
+#ifdef _WIN32
+#include <windows.h>
+#include <intrin.h>
+#define SCHEDULER_LOG_LOCK(s)    do { while (InterlockedExchange((volatile LONG*)&(s)->log_lock, 1) != 0) { _mm_pause(); } } while(0)
+#define SCHEDULER_LOG_UNLOCK(s)  InterlockedExchange((volatile LONG*)&(s)->log_lock, 0)
+#else
+#define SCHEDULER_LOG_LOCK(s)    do { while (__sync_lock_test_and_set(&(s)->log_lock, 1) != 0) { } } while(0)
+#define SCHEDULER_LOG_UNLOCK(s)  __sync_lock_release(&(s)->log_lock)
+#endif
+
 struct SystemScheduler {
     SchedulerConfig config;
     SystemModule modules[SCHEDULER_MAX_MODULES];
@@ -18,6 +30,7 @@ struct SystemScheduler {
     size_t task_count;
     SchedulerEvent event_log[1024];
     size_t event_count;
+    volatile long log_lock;           /* P1-07修复: log_event自旋锁，保护event_log并发访问 */
     scheduler_event_callback event_callback;
     void* event_callback_data;
     SchedulerStats stats;
@@ -43,6 +56,8 @@ static uint64_t get_current_time_ms(void) {
 
 static void log_event(SystemScheduler* scheduler, const char* module_name, int severity, int error_code, const char* message) {
     if (!scheduler || !scheduler->config.enable_event_logging) return;
+    /* P1-07修复: 加自旋锁保护event_log[]和event_count，防止多线程并发调用导致数据损坏 */
+    SCHEDULER_LOG_LOCK(scheduler);
     if (scheduler->event_count >= scheduler->config.max_events) {
         memmove(scheduler->event_log, scheduler->event_log + 1, (scheduler->event_count - 1) * sizeof(SchedulerEvent));
         scheduler->event_count--;
@@ -55,8 +70,13 @@ static void log_event(SystemScheduler* scheduler, const char* module_name, int s
     ev->error_code = error_code;
     strncpy(ev->message, message ? message : "", 255);
     ev->message[255] = '\0';
+    /* 拷贝事件数据到栈上局部变量，解锁后通过拷贝执行回调
+     * 避免回调期间event_log被并发memmove导致悬垂指针 */
+    SchedulerEvent ev_local = *ev;
+    SCHEDULER_LOG_UNLOCK(scheduler);
+    /* 回调在锁外执行，避免回调函数再次调用log_event导致自旋锁死锁 */
     if (scheduler->event_callback) {
-        scheduler->event_callback(ev, scheduler->event_callback_data);
+        scheduler->event_callback(&ev_local, scheduler->event_callback_data);
     }
 }
 

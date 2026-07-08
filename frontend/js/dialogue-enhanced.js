@@ -183,9 +183,7 @@ class DialogueEnhanced {
         if (this.audioPlayer && this.audioPlayer.paused) {
             this.audioPlayer.play();
         }
-        if (window.speechSynthesis && window.speechSynthesis.paused) {
-            window.speechSynthesis.resume();
-        }
+        /* P2-15修复: 移除speechSynthesis.resume残留调用（遵循禁止浏览器TTS降级规范） */
     }
 
     setTtsSpeed(speed) {
@@ -253,12 +251,13 @@ class DialogueEnhanced {
         this.dialogueHistory.push(entry);
 
         /* F-严重修复: 对话历史持久化到后端
-         * 使用 /api/dialogue/history 端点进行历史记录的持久化存储。
+         * 使用 /dialogue/history 端点进行历史记录的持久化存储。
+         * P2-18修复: 统一使用不带/api/前缀的路径，由api-service.js自动补全。
          * 检查是否有专门的历史追加API，若无则仍使用主dialogue端点。 */
         if (window.SelfLnnApi && window.SelfLnnApi.connected) {
             try {
                 /* 优先使用专用的历史记录API端点 */
-                window.SelfLnnApi.request('/api/dialogue/history/save', {
+                window.SelfLnnApi.request('/dialogue/history/save', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -391,9 +390,10 @@ class DialogueEnhanced {
         var count = this.dialogueHistory ? this.dialogueHistory.length : 0;
         this.dialogueHistory = [];
         /* F-严重修复: 清空后端对话历史 */
+        /* P2-18修复: 统一使用不带/api/前缀的路径，由api-service.js自动补全 */
         if (window.SelfLnnApi && window.SelfLnnApi.connected) {
             try {
-                window.SelfLnnApi.request('/api/dialogue/clear', { method: 'POST' })
+                window.SelfLnnApi.request('/dialogue/clear', { method: 'POST' })
                     .catch(function(err) {
                         console.warn('对话历史清空失败:', err);
                         if (typeof window.showNotification === 'function') {
@@ -452,8 +452,9 @@ class DialogueEnhanced {
                 var delay = Math.min(1000 * Math.pow(2, self.wsReconnectAttempts - 1), 30000);
                 console.warn('[SELF-LNN] WebSocket断开，第' + self.wsReconnectAttempts + '/' + self.wsMaxReconnect + '次重连，延迟' + delay + 'ms...');
                 if (self.onWsStatusChange) self.onWsStatusChange('reconnecting');
+                /* FE-009修复: 重连时传递this.url，确保WS使用正确的URL而非默认值 */
                 setTimeout(function() {
-                    try { gws.connect(); } catch(er) { console.warn('[SELF-LNN] WS重连失败:', er); }
+                    try { gws.connect(self.wsUrl || self.url); } catch(er) { console.warn('[SELF-LNN] WS重连失败:', er); }
                 }, delay);
             };
             wsElement.addEventListener('close', this._wsCloseHandler);
@@ -516,7 +517,8 @@ class DialogueEnhanced {
         if (imageData) payload.image = imageData;
         if (audioData) payload.audio = audioData;
         if (params) {
-            if (params.temperature !== undefined) payload.temperature = params.temperature;
+            /* P1-14修复: temperature后端期望整数(0-20)，需乘10取整转换 */
+            if (params.temperature !== undefined) payload.temperature = Math.round(params.temperature * 10);
             if (params.max_length !== undefined) payload.max_length = params.max_length;
             if (params.top_k !== undefined) payload.top_k = params.top_k;
             if (params.memory !== undefined) payload.memory = params.memory;

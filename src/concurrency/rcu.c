@@ -134,10 +134,15 @@ static int rcu_allocate_thread_id(RcuDomain* domain) {
 
 static void rcu_release_thread_id(RcuDomain* domain, int thread_id) {
     if (!domain || thread_id < 0 || thread_id >= MAX_RCU_THREADS) return;
-    domain->thread_active[thread_id] = 0;
-    domain->thread_in_read_section[thread_id] = 0;
-    /* P2修复: 原子释放清除epoch */
+    /* P1修复: 先清除reader_epochs和thread_in_read_section，加内存屏障，
+     * 再设置thread_active=0。防止新线程获取槽位后读到旧的stale state。
+     * 原代码先设thread_active=0，新线程可能在此后获取槽位但读到
+     * 旧的thread_in_read_section和reader_epochs值，导致错误的宽限期等待。 */
     SELFLNN_ATOMIC_RELEASE(&domain->reader_epochs[thread_id]);
+    domain->thread_in_read_section[thread_id] = 0;
+    /* 内存屏障确保上述清除操作对其他线程可见后再标记槽位为可用 */
+    atomic_thread_fence();
+    domain->thread_active[thread_id] = 0;
     atomic_decrement(&domain->registered_thread_count);
 }
 

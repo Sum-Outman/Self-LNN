@@ -1530,8 +1530,17 @@ typedef struct OpenCLStream {
 
 /**
  * @brief OpenCL上下文句柄
+ *
+ * 修复5(P0): 以GpuContext header作为首字段，确保与GpuContext布局兼容。
+ * opencl_backend_context_create返回的指针既可以被上层当作GpuContext*使用
+ * （访问backend/device_index/is_initialized/device_name/kernel_cache等字段），
+ * 也可以在后端内部当作OpenCLContext*使用（访问context/device/command_queue等字段）。
+ * 仿照CUDA后端的实现方式。OpenCL特有的重叠字段（device_index/total_memory/
+ * free_memory/is_initialized/device_name）保留在header之后，由后端内部代码使用；
+ * header中的同名字段在context_create中同步填充，供上层gpu_context_create使用。
  */
 typedef struct OpenCLContext {
+    GpuContext header;                              /* 必须是首字段，确保与GpuContext布局兼容 */
     cl_context context;
     cl_device_id device;
     cl_platform_id platform;
@@ -2376,6 +2385,19 @@ static GpuContext* opencl_backend_context_create(int device_index) {
     }
     
     memset(context_struct, 0, sizeof(OpenCLContext));
+
+    /* 修复5(P0): 填充GpuContext header字段，使上层gpu_context_create能正确访问
+     * backend/device_index/is_initialized/device_name等字段。
+     * 设置is_initialized=1后，gpu_context_create会跳过二次设置，
+     * 并使用header.device_name创建自动内核优化器。 */
+    context_struct->header.backend = GPU_BACKEND_OPENCL;
+    context_struct->header.device_index = device_index;
+    context_struct->header.is_initialized = 1;
+    context_struct->header.total_memory = (size_t)global_mem_size;
+    context_struct->header.free_memory = (size_t)global_mem_size;
+    strncpy(context_struct->header.device_name, device_name, sizeof(context_struct->header.device_name) - 1);
+    context_struct->header.device_name[sizeof(context_struct->header.device_name) - 1] = '\0';
+
     context_struct->context = context;
     context_struct->device = device;
     context_struct->platform = platform;
@@ -2606,6 +2628,14 @@ static int opencl_backend_memory_copy_to_device(GpuMemory* dst, const void* src,
         return 0;
     }
     
+    /* 修复6(P1): 非SVM路径在调用clEnqueueWriteBuffer前校验size <= mem->size，
+     * 防止越界写入导致缓冲区溢出。SVM路径已有检查但非SVM路径遗漏。 */
+    if (size > mem->size) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string),
+                "复制大小%zu超过设备内存大小%zu", size, mem->size);
+        return -1;
+    }
+    
     cl_int result;
     cl_command_queue queue = NULL;
     int use_temp_queue = 0;
@@ -2699,6 +2729,14 @@ static int opencl_backend_memory_copy_from_device(void* dst, GpuMemory* src, siz
         }
         memcpy(dst, mem->svm_ptr, size);
         return 0;
+    }
+    
+    /* 修复6(P1): 非SVM路径在调用clEnqueueReadBuffer前校验size <= mem->size，
+     * 防止越界读取导致缓冲区溢出。SVM路径已有检查但非SVM路径遗漏。 */
+    if (size > mem->size) {
+        snprintf(g_opencl_error_string, sizeof(g_opencl_error_string),
+                "复制大小%zu超过设备内存大小%zu", size, mem->size);
+        return -1;
     }
     
     cl_int result;
@@ -3069,7 +3107,10 @@ static GpuKernel* opencl_backend_kernel_create(GpuContext* context, const char* 
         
         if (OPENCL_CHECK_ERROR_EX(result, "创建命令队列", additional_info) != 0) {
             clReleaseKernel(kernel);
-            clReleaseProgram(program);
+            /* 修复7(P1): 仅当program非缓存且非二进制加载时才释放，避免释放缓存持有的program导致悬垂指针 */
+            if (!is_from_cache && !is_from_binary) {
+                clReleaseProgram(program);
+            }
             return NULL;
         }
         created_new_queue = 1;
@@ -3082,7 +3123,10 @@ static GpuKernel* opencl_backend_kernel_create(GpuContext* context, const char* 
             clReleaseCommandQueue(queue);
         }
         clReleaseKernel(kernel);
-        clReleaseProgram(program);
+        /* 修复7(P1): 仅当program非缓存且非二进制加载时才释放，避免释放缓存持有的program导致悬垂指针 */
+        if (!is_from_cache && !is_from_binary) {
+            clReleaseProgram(program);
+        }
         snprintf(g_opencl_error_string, sizeof(g_opencl_error_string),
                 "内存分配失败：OpenCL内核结构");
         return NULL;
@@ -3102,7 +3146,10 @@ static GpuKernel* opencl_backend_kernel_create(GpuContext* context, const char* 
         safe_free((void**)&opencl_kernel);
         clReleaseCommandQueue(queue);
         clReleaseKernel(kernel);
-        clReleaseProgram(program);
+        /* 修复7(P1): 仅当program非缓存且非二进制加载时才释放，避免释放缓存持有的program导致悬垂指针 */
+        if (!is_from_cache && !is_from_binary) {
+            clReleaseProgram(program);
+        }
         snprintf(g_opencl_error_string, sizeof(g_opencl_error_string),
                 "内存分配失败：内核名称");
         return NULL;

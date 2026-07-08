@@ -11,6 +11,11 @@
  * - 优先经验回放
  */
 
+/* 修复5(P1): 定义宏以访问CfCNetwork/CfCCell结构体内部成员，
+ * 用于目标网络软更新时遍历cell级参数（门控权重、时间常数等） */
+#define SELFLNN_IMPLEMENTATION 1
+#define SELFLNN_CORE_INTERNAL 1
+
 #include "selflnn/learning/reinforcement_learning.h"
 #include "selflnn/learning/exploration_strategies.h" /* ZSFJJJ-H005: 高级探索策略集成 */
 #include "selflnn/utils/memory_utils.h"
@@ -166,6 +171,166 @@ static int rl_lnn_create_if(RLAgent* agent, RLNetworkType type, const LNNConfig*
     if (!agent->networks[type]) return -1;
     agent->network_active[type] = 1;
     return 0;
+}
+
+/* ============================================================================
+ * 修复5(P1): 目标网络软更新完整实现
+ *
+ * 原问题: lnn_get_parameters 仅返回 cfc_network->weight_matrix（param_block起始），
+ *   lnn_get_parameter_count 仅返回 total_weight_params + total_bias_params，
+ *   Polyak更新只覆盖权重和偏置，输出投影(W_out/b_out)和cell级参数
+ *   （门控权重、时间常数等）永远停留在初始值。
+ *
+ * 本函数遍历CfCNetwork的所有参数块和每层CfCCell的可学习参数，
+ * 执行完整的Polyak平均: target = (1-tau)*target + tau*online
+ * ============================================================================ */
+static void rl_soft_update_network(LNN* online_net, LNN* target_net, float tau)
+{
+    if (!online_net || !target_net || tau <= 0.0f || tau > 1.0f) return;
+
+    CfCNetwork* online_cfc = lnn_get_cfc_network(online_net);
+    CfCNetwork* target_cfc = lnn_get_cfc_network(target_net);
+    if (!online_cfc || !target_cfc) return;
+
+    /* 1. 软更新权重矩阵（param_block前段：所有层权重） */
+    if (online_cfc->weight_matrix && target_cfc->weight_matrix &&
+        online_cfc->total_weight_params > 0 &&
+        online_cfc->total_weight_params == target_cfc->total_weight_params)
+    {
+        size_t wc = online_cfc->total_weight_params;
+        for (size_t i = 0; i < wc; i++)
+            target_cfc->weight_matrix[i] = (1.0f - tau) * target_cfc->weight_matrix[i]
+                                         + tau * online_cfc->weight_matrix[i];
+    }
+
+    /* 2. 软更新偏置向量（param_block中段：所有层偏置） */
+    if (online_cfc->bias_vector && target_cfc->bias_vector &&
+        online_cfc->total_bias_params > 0 &&
+        online_cfc->total_bias_params == target_cfc->total_bias_params)
+    {
+        size_t bc = online_cfc->total_bias_params;
+        for (size_t i = 0; i < bc; i++)
+            target_cfc->bias_vector[i] = (1.0f - tau) * target_cfc->bias_vector[i]
+                                       + tau * online_cfc->bias_vector[i];
+    }
+
+    /* 3. 软更新输出投影参数 W_out / b_out */
+    if (online_cfc->W_out_params && target_cfc->W_out_params)
+    {
+        size_t out_size = online_cfc->config.output_size;
+        size_t hidden_size = online_cfc->config.hidden_size;
+        size_t wout_count = out_size * hidden_size;
+        for (size_t i = 0; i < wout_count; i++)
+            target_cfc->W_out_params[i] = (1.0f - tau) * target_cfc->W_out_params[i]
+                                         + tau * online_cfc->W_out_params[i];
+    }
+    if (online_cfc->b_out_params && target_cfc->b_out_params)
+    {
+        size_t out_size = online_cfc->config.output_size;
+        for (size_t i = 0; i < out_size; i++)
+            target_cfc->b_out_params[i] = (1.0f - tau) * target_cfc->b_out_params[i]
+                                         + tau * online_cfc->b_out_params[i];
+    }
+
+    /* 4. 软更新每层CfCCell的可学习参数（门控权重、时间常数等） */
+    int num_layers = online_cfc->config.num_layers;
+    if (num_layers != target_cfc->config.num_layers) return;
+    if (!online_cfc->layers || !target_cfc->layers) return;
+
+    for (int l = 0; l < num_layers; l++)
+    {
+        CfCCell* online_cell = online_cfc->layers[l];
+        CfCCell* target_cell = target_cfc->layers[l];
+        if (!online_cell || !target_cell) continue;
+
+        size_t hs = online_cell->config.hidden_size;
+        size_t is = online_cell->config.input_size;
+
+        /* cell级权重矩阵和偏置向量 */
+        if (online_cell->weight_matrix && target_cell->weight_matrix)
+        {
+            size_t wsz = is * hs;
+            for (size_t i = 0; i < wsz; i++)
+                target_cell->weight_matrix[i] = (1.0f - tau) * target_cell->weight_matrix[i]
+                                              + tau * online_cell->weight_matrix[i];
+        }
+        if (online_cell->bias_vector && target_cell->bias_vector)
+        {
+            for (size_t i = 0; i < hs; i++)
+                target_cell->bias_vector[i] = (1.0f - tau) * target_cell->bias_vector[i]
+                                            + tau * online_cell->bias_vector[i];
+        }
+
+        /* 时间常数 */
+        if (online_cell->time_constants && target_cell->time_constants)
+        {
+            for (size_t i = 0; i < hs; i++)
+                target_cell->time_constants[i] = (1.0f - tau) * target_cell->time_constants[i]
+                                               + tau * online_cell->time_constants[i];
+        }
+
+        /* 门控权重: input/forget/output gate (input_size * hidden_size) */
+        if (online_cell->input_gate_weights && target_cell->input_gate_weights)
+        {
+            size_t gsz = is * hs;
+            for (size_t i = 0; i < gsz; i++)
+                target_cell->input_gate_weights[i] = (1.0f - tau) * target_cell->input_gate_weights[i]
+                                                   + tau * online_cell->input_gate_weights[i];
+        }
+        if (online_cell->forget_gate_weights && target_cell->forget_gate_weights)
+        {
+            size_t gsz = is * hs;
+            for (size_t i = 0; i < gsz; i++)
+                target_cell->forget_gate_weights[i] = (1.0f - tau) * target_cell->forget_gate_weights[i]
+                                                    + tau * online_cell->forget_gate_weights[i];
+        }
+        if (online_cell->output_gate_weights && target_cell->output_gate_weights)
+        {
+            size_t gsz = is * hs;
+            for (size_t i = 0; i < gsz; i++)
+                target_cell->output_gate_weights[i] = (1.0f - tau) * target_cell->output_gate_weights[i]
+                                                    + tau * online_cell->output_gate_weights[i];
+        }
+
+        /* 门控偏置 (hidden_size * 3) */
+        if (online_cell->gate_biases && target_cell->gate_biases)
+        {
+            size_t gbsz = hs * 3;
+            for (size_t i = 0; i < gbsz; i++)
+                target_cell->gate_biases[i] = (1.0f - tau) * target_cell->gate_biases[i]
+                                            + tau * online_cell->gate_biases[i];
+        }
+
+        /* 隐藏到门控权重 (hidden_size * hidden_size) */
+        if (online_cell->hidden_to_input_gate_weights && target_cell->hidden_to_input_gate_weights)
+        {
+            size_t hsz = hs * hs;
+            for (size_t i = 0; i < hsz; i++)
+                target_cell->hidden_to_input_gate_weights[i] = (1.0f - tau) * target_cell->hidden_to_input_gate_weights[i]
+                                                             + tau * online_cell->hidden_to_input_gate_weights[i];
+        }
+        if (online_cell->hidden_to_forget_gate_weights && target_cell->hidden_to_forget_gate_weights)
+        {
+            size_t hsz = hs * hs;
+            for (size_t i = 0; i < hsz; i++)
+                target_cell->hidden_to_forget_gate_weights[i] = (1.0f - tau) * target_cell->hidden_to_forget_gate_weights[i]
+                                                              + tau * online_cell->hidden_to_forget_gate_weights[i];
+        }
+        if (online_cell->hidden_to_output_gate_weights && target_cell->hidden_to_output_gate_weights)
+        {
+            size_t hsz = hs * hs;
+            for (size_t i = 0; i < hsz; i++)
+                target_cell->hidden_to_output_gate_weights[i] = (1.0f - tau) * target_cell->hidden_to_output_gate_weights[i]
+                                                              + tau * online_cell->hidden_to_output_gate_weights[i];
+        }
+        if (online_cell->hidden_to_activation_weights && target_cell->hidden_to_activation_weights)
+        {
+            size_t hsz = hs * hs;
+            for (size_t i = 0; i < hsz; i++)
+                target_cell->hidden_to_activation_weights[i] = (1.0f - tau) * target_cell->hidden_to_activation_weights[i]
+                                                            + tau * online_cell->hidden_to_activation_weights[i];
+        }
+    }
 }
 
 /* ============================================================================
@@ -817,7 +982,10 @@ void rl_replay_buffer_destroy(RLReplayBuffer* buffer)
 
 int rl_replay_buffer_add(RLReplayBuffer* buffer, const RLExperience* experience)
 {
-    if (!buffer || !experience) return -1;
+    /* 修复2(P0): 原仅检查 !buffer || !experience，未检查 buffer->buffer==NULL
+     * 或 capacity==0。当 capacity==0 时 (head+1)%capacity 模零导致 SIGFPE；
+     * buffer->buffer[idx] 解引用 NULL。现增加完整校验。 */
+    if (!buffer || !experience || !buffer->buffer || buffer->capacity <= 0) return -1;
     int idx = buffer->head;
     buffer->buffer[idx] = *experience;
     if (buffer->replay_type == RL_REPLAY_PRIORITIZED && buffer->priorities)
@@ -1088,13 +1256,23 @@ static int rl_dqn_train(RLAgent* agent, int batch_size)
         float loss = td_errors[i] * td_errors[i] * weights[i];
         total_loss += loss;
 
-        float* q_grad = (float*)safe_calloc(RL_MAX_ACTION_DIM, sizeof(float));
-        if (q_grad)
-        {
-            q_grad[act_idx] = -2.0f * td_errors[i] * weights[i];
-            lnn_backward(q_net, q_grad, &loss);
-            safe_free((void**)&q_grad);
-        }
+        /* 修复1(P1): DQN梯度/目标语义混淆
+         * 原问题: q_grad[act_idx] = -2*td*weights 作为 lnn_backward 的 target 传入，
+         *   但 lnn_backward 期望目标输出值(MSE下 error = output - target)。
+         *   后果: act_idx处有效梯度 = q[act]+2w*td(非正确的-w*td)，
+         *         其余动作 error = q[other](非零!)，错误地把所有动作输出拉向0。
+         * 正确做法: 仿照 rl_cfc_r2d2_train 的写法，构造完整目标向量，
+         *   仅修改执行动作的Q值，其余动作目标等于当前输出(MSE梯度为0) */
+        int num_actions_dqn = agent->config.discrete_actions ?
+                              agent->config.num_actions : samples[i].action_dim;
+        if (num_actions_dqn < 1) num_actions_dqn = 1;
+        if (num_actions_dqn > RL_MAX_ACTION_DIM) num_actions_dqn = RL_MAX_ACTION_DIM;
+
+        float q_target[RL_MAX_ACTION_DIM];
+        memcpy(q_target, current_q, (size_t)num_actions_dqn * sizeof(float));
+        q_target[act_idx] = target_q;  /* target_q = reward + gamma * max_a Q_target(next_state) */
+        float dqn_loss = 0.0f;
+        lnn_backward(q_net, q_target, &dqn_loss);
     }
 
     float avg_td = 0.0f;
@@ -1108,15 +1286,8 @@ static int rl_dqn_train(RLAgent* agent, int batch_size)
 
     if (agent->total_steps % dc->target_update_freq == 0)
     {
-        float tau = dc->tau;
-        float* q_params = lnn_get_parameters(q_net);
-        float* t_params = lnn_get_parameters(target_net);
-        size_t nparams = lnn_get_parameter_count(q_net);
-        if (q_params && t_params && nparams > 0)
-        {
-            for (size_t p = 0; p < nparams; p++)
-                t_params[p] = (1.0f - tau) * t_params[p] + tau * q_params[p];
-        }
+        /* 修复5(P1): 使用完整的软更新函数，覆盖权重、偏置、输出投影和cell级参数 */
+        rl_soft_update_network(q_net, target_net, dc->tau);
     }
     safe_free((void**)&td_errors);
     safe_free((void**)&samples);
@@ -1232,6 +1403,80 @@ static float rl_ppo_get_action_probs(RLAgent* agent, const float* state, int sta
     }
 }
 
+/* ============================================================================
+ * 修复3(P1): PPO重要性采样用错动作 — 算法根本性错误
+ *
+ * 原问题: rl_ppo_get_action_probs 重新采样一个随机动作并返回其log-prob，
+ *   完全忽略经验中实际采取的action。old_log_probs与训练循环内new_log_prob
+ *   对应不同的动作，重要性比毫无意义。
+ *
+ * 本函数计算**指定存储动作**在当前策略下的log-prob，而非重新采样。
+ * 离散动作: 对actor输出做softmax，取指定action的概率的对数
+ * 连续动作: 对actor输出的均值和标准差计算高斯log-prob
+ * ============================================================================ */
+static float rl_ppo_get_stored_action_log_prob(RLAgent* agent, const float* state,
+                                                int state_dim, const float* stored_action,
+                                                int action_dim, float* probs_out)
+{
+    (void)state_dim;
+    (void)action_dim;
+    LNN* actor = agent->networks[RL_NETWORK_ACTOR];
+    if (!actor || !state || !stored_action) return -10.0f;
+
+    LNNConfig acfg;
+    memset(&acfg, 0, sizeof(LNNConfig));
+    lnn_get_config(actor, &acfg);
+    int output_size = (int)acfg.output_size;
+
+    float* raw = (float*)safe_malloc((size_t)output_size * sizeof(float));
+    if (!raw) return -10.0f;
+
+    int ret = lnn_forward(actor, state, raw);
+    if (ret != 0) { safe_free((void**)&raw); return -10.0f; }
+
+    float log_prob = 0.0f;
+
+    if (agent->config.discrete_actions)
+    {
+        /* 离散动作: softmax归一化后取存储动作的概率 */
+        int num_actions = output_size;
+        float max_p = raw[0];
+        for (int i = 1; i < num_actions; i++)
+            if (raw[i] > max_p) max_p = raw[i];
+        float sum = 0.0f;
+        for (int i = 0; i < num_actions; i++)
+        {
+            probs_out[i] = expf(raw[i] - max_p);
+            sum += probs_out[i];
+        }
+        if (sum < 1e-7f) sum = 1e-7f;
+        for (int i = 0; i < num_actions; i++) probs_out[i] /= sum;
+
+        int act = (int)stored_action[0];
+        if (act < 0) act = 0;
+        if (act >= num_actions) act = num_actions - 1;
+        log_prob = logf(probs_out[act] + 1e-10f);
+    }
+    else
+    {
+        /* 连续动作: 高斯分布log-prob */
+        int dim = output_size / 2;
+        for (int i = 0; i < dim; i++)
+        {
+            float mean = raw[i];
+            float log_std = RL_CLAMP(raw[i + dim], -5.0f, 2.0f);
+            float std = expf(log_std);
+            float diff = stored_action[i] - mean;
+            log_prob += -0.5f * (1.8378770664f + 2.0f * log_std
+                                + diff * diff / (std * std + 1e-7f));
+            if (probs_out) probs_out[i] = stored_action[i];
+        }
+    }
+
+    safe_free((void**)&raw);
+    return log_prob;
+}
+
 static int rl_ppo_train(RLAgent* agent, int batch_size)
 {
     RLConfigPPO* pc = &agent->config.algo_config.ppo;
@@ -1272,12 +1517,12 @@ static int rl_ppo_train(RLAgent* agent, int batch_size)
      * 步骤4：标准化优势函数（均值0，标准差1）
      */
 
-    /* 步骤0: 计算所有样本的旧策略对数概率（PPO重要性采样所需） */
+    /* 步骤0: 计算所有样本的旧策略对数概率（PPO重要性采样所需）
+     * 修复3(P1): 使用存储动作的log-prob，而非重新采样的动作 */
     for (int i = 0; i < actual; i++) {
         float probs[RL_MAX_ACTION_DIM];
-        int sel_a = 0;
-        old_log_probs[i] = rl_ppo_get_action_probs(agent, samples[i].state,
-            samples[i].state_dim, probs, &sel_a);
+        old_log_probs[i] = rl_ppo_get_stored_action_log_prob(agent, samples[i].state,
+            samples[i].state_dim, samples[i].action, samples[i].action_dim, probs);
     }
 
     /* 步骤1: 前向计算所有状态值V(s_t) */
@@ -1336,10 +1581,11 @@ static int rl_ppo_train(RLAgent* agent, int batch_size)
                 float v_target[1] = {returns[idx]};
                 lnn_backward(critic, v_target, &v_loss);
 
+                /* 修复3(P1): 计算存储动作在当前策略下的new_log_prob */
                 float probs[RL_MAX_ACTION_DIM];
-                int sel_a = 0;
-                float new_log_prob = rl_ppo_get_action_probs(agent, samples[idx].state,
-                    samples[idx].state_dim, probs, &sel_a);
+                float new_log_prob = rl_ppo_get_stored_action_log_prob(agent,
+                    samples[idx].state, samples[idx].state_dim,
+                    samples[idx].action, samples[idx].action_dim, probs);
 
                 float ratio = expf(RL_CLAMP(new_log_prob - old_log_probs[idx], -10.0f, 10.0f));
                 float surr1 = ratio * advantages[idx];
@@ -1355,12 +1601,53 @@ static int rl_ppo_train(RLAgent* agent, int batch_size)
                             entropy -= probs[a] * logf(probs[a]);
                     }
                 }
-                float total_loss = p_loss + pc->value_coef * v_loss - pc->entropy_coef * entropy;
-                /* P1-034修复：使用独立的target和loss缓冲区，避免同一float既作梯度又作损失 */
+
+                /* 修复2(P1): PPO actor把loss值当target — 系统性错误
+                 * 原问题: float actor_target[1] = {total_loss} 把标量损失值当作
+                 *   网络的目标输出。MSE下 error = action - total_loss，不等于策略梯度。
+                 * 修复方案: 构造目标 = 当前actor输出 + 小步长 * 优势方向，
+                 *   使lnn_backward通过MSE误差间接实现策略梯度更新。
+                 *   对离散动作: 增大有优势动作的logit
+                 *   对连续动作: 沿优势方向微调均值输出 */
                 {
-                    float actor_target[1] = {total_loss};
-                    float actor_loss = 0.0f;
-                    lnn_backward(actor, actor_target, &actor_loss);
+                    LNNConfig acfg;
+                    memset(&acfg, 0, sizeof(LNNConfig));
+                    lnn_get_config(actor, &acfg);
+                    int actor_out_size = (int)acfg.output_size;
+                    float* actor_output = (float*)safe_malloc((size_t)actor_out_size * sizeof(float));
+                    float* actor_target = (float*)safe_malloc((size_t)actor_out_size * sizeof(float));
+                    if (actor_output && actor_target)
+                    {
+                        lnn_forward(actor, samples[idx].state, actor_output);
+                        float actor_alpha = 0.01f;  /* 小步长更新系数 */
+                        if (agent->config.discrete_actions)
+                        {
+                            /* 离散动作: 增大有正优势的存储动作的logit */
+                            int act = (int)samples[idx].action[0];
+                            if (act < 0) act = 0;
+                            if (act >= actor_out_size) act = actor_out_size - 1;
+                            for (int a = 0; a < actor_out_size; a++)
+                                actor_target[a] = actor_output[a];
+                            actor_target[act] = actor_output[act] + actor_alpha * advantages[idx];
+                        }
+                        else
+                        {
+                            /* 连续动作: 沿优势方向微调均值输出 */
+                            int half = actor_out_size / 2;
+                            for (int a = 0; a < actor_out_size; a++)
+                                actor_target[a] = actor_output[a];
+                            for (int a = 0; a < half; a++)
+                            {
+                                /* 将均值向存储动作方向移动，步长正比于优势 */
+                                float diff = samples[idx].action[a] - actor_output[a];
+                                actor_target[a] = actor_output[a] + actor_alpha * advantages[idx] * diff;
+                            }
+                        }
+                        float actor_loss = 0.0f;
+                        lnn_backward(actor, actor_target, &actor_loss);
+                    }
+                    safe_free((void**)&actor_output);
+                    safe_free((void**)&actor_target);
                 }
             }
         }
@@ -1469,14 +1756,18 @@ static int rl_a2c_train(RLAgent* agent, int batch_size)
             float v_target[1] = {returns[idx]};
             lnn_backward(critic, v_target, &v_loss);
 
-            /* Actor更新：纯策略梯度（无PPO裁剪） */
+            /* Actor更新：纯策略梯度（无PPO裁剪）
+             * 修复2(P1): A2C actor把loss值当target — 系统性错误
+             * 原问题: float actor_target[1] = {total_loss} 把标量损失值当作
+             *   网络的目标输出。MSE下 error = action - total_loss，不等于策略梯度。
+             * 修复方案: 构造目标 = 当前actor输出 + 小步长 * 优势方向，
+             *   使lnn_backward通过MSE误差间接实现策略梯度更新。
+             *   对离散动作: 增大有优势的存储动作的logit
+             *   对连续动作: 沿优势方向微调均值输出 */
             float probs[RL_MAX_ACTION_DIM];
-            int sel_a = 0;
-            rl_ppo_get_action_probs(agent, samples[idx].state,
-                samples[idx].state_dim, probs, &sel_a);
-
-            /* A2C不使用importance ratio，直接使用优势函数梯度 */
-            float log_pi = logf(RL_MAX(probs[sel_a], 1e-7f));
+            /* 使用存储动作计算概率，而非重新采样 */
+            float log_pi = rl_ppo_get_stored_action_log_prob(agent, samples[idx].state,
+                samples[idx].state_dim, samples[idx].action, samples[idx].action_dim, probs);
             float p_loss = -log_pi * advantages[idx];
 
             float entropy = 0.0f;
@@ -1488,12 +1779,45 @@ static int rl_a2c_train(RLAgent* agent, int batch_size)
                         entropy -= probs[a] * logf(probs[a]);
                 }
             }
-            float total_loss = p_loss + pc->value_coef * v_loss - pc->entropy_coef * entropy;
-            /* P1-034修复：使用独立的target和loss缓冲区，避免同一float既作梯度又作损失 */
+
             {
-                float actor_target[1] = {total_loss};
-                float actor_loss = 0.0f;
-                lnn_backward(actor, actor_target, &actor_loss);
+                LNNConfig acfg;
+                memset(&acfg, 0, sizeof(LNNConfig));
+                lnn_get_config(actor, &acfg);
+                int actor_out_size = (int)acfg.output_size;
+                float* actor_output = (float*)safe_malloc((size_t)actor_out_size * sizeof(float));
+                float* actor_target = (float*)safe_malloc((size_t)actor_out_size * sizeof(float));
+                if (actor_output && actor_target)
+                {
+                    lnn_forward(actor, samples[idx].state, actor_output);
+                    float actor_alpha = 0.01f;  /* 小步长更新系数 */
+                    if (agent->config.discrete_actions)
+                    {
+                        /* 离散动作: 增大有正优势的存储动作的logit */
+                        int act = (int)samples[idx].action[0];
+                        if (act < 0) act = 0;
+                        if (act >= actor_out_size) act = actor_out_size - 1;
+                        for (int a = 0; a < actor_out_size; a++)
+                            actor_target[a] = actor_output[a];
+                        actor_target[act] = actor_output[act] + actor_alpha * advantages[idx];
+                    }
+                    else
+                    {
+                        /* 连续动作: 沿优势方向微调均值输出 */
+                        int half = actor_out_size / 2;
+                        for (int a = 0; a < actor_out_size; a++)
+                            actor_target[a] = actor_output[a];
+                        for (int a = 0; a < half; a++)
+                        {
+                            float diff = samples[idx].action[a] - actor_output[a];
+                            actor_target[a] = actor_output[a] + actor_alpha * advantages[idx] * diff;
+                        }
+                    }
+                    float actor_loss = 0.0f;
+                    lnn_backward(actor, actor_target, &actor_loss);
+                }
+                safe_free((void**)&actor_output);
+                safe_free((void**)&actor_target);
             }
         }
     }
@@ -2054,9 +2378,23 @@ static int rl_cfc_td3_train(RLAgent* agent, int batch_size)
             float actor_loss = -q1_val;
             total_actor_loss += actor_loss;
 
-            /* P1-034修复：TD3 actor使用独立target/loss缓冲区 */
-            float actor_target_loss_buf[1] = {actor_loss};
-            lnn_backward(actor, actor_target_loss_buf, &actor_loss);
+            /* 修复2(P1): TD3 actor把loss值当target — 系统性错误
+             * 原问题: float actor_target_loss_buf[1] = {actor_loss} 把标量损失值
+             *   当作网络的目标输出。MSE下 error = action - actor_loss，
+             *   不等于策略梯度，且buffer大小[1]与actor输出维度不匹配。
+             * 修复方案: 构造目标 = 当前输出 + 小步长 * Q值方向（增大高价值动作）。
+             *   lnn_backward以MSE计算 error = output - target = -alpha*q1_val，
+             *   梯度下降使输出向 target 移动，等效于沿增大Q方向更新策略 */
+            float actor_alpha = 0.01f;  /* 小步长更新系数 */
+            float* actor_target_vec = (float*)safe_malloc((size_t)act_dim * sizeof(float));
+            if (actor_target_vec)
+            {
+                for (int d = 0; d < act_dim; d++)
+                    actor_target_vec[d] = actor_action[d] + actor_alpha * q1_val;
+                float actor_bwd_loss = 0.0f;
+                lnn_backward(actor, actor_target_vec, &actor_bwd_loss);
+                safe_free((void**)&actor_target_vec);
+            }
 
             safe_free((void**)&sa_pair);
             safe_free((void**)&actor_action);
@@ -2065,25 +2403,9 @@ static int rl_cfc_td3_train(RLAgent* agent, int batch_size)
         agent->td3_avg_actor_loss = agent->td3_avg_actor_loss * 0.9f +
                                     (total_actor_loss / (float)actual) * 0.1f;
 
-        /* 软更新目标网络 */
-        float tau = tc->tau;
-        float* actor_params = lnn_get_parameters(actor);
-        float* actor_target_params = lnn_get_parameters(actor_target);
-        size_t actor_np = lnn_get_parameter_count(actor);
-        if (actor_params && actor_target_params && actor_np > 0)
-        {
-            for (size_t p = 0; p < actor_np; p++)
-                actor_target_params[p] = (1.0f - tau) * actor_target_params[p] + tau * actor_params[p];
-        }
-
-        float* c1_params = lnn_get_parameters(critic1);
-        float* c1t_params = lnn_get_parameters(critic1_target);
-        size_t c1_np = lnn_get_parameter_count(critic1);
-        if (c1_params && c1t_params && c1_np > 0)
-        {
-            for (size_t p = 0; p < c1_np; p++)
-                c1t_params[p] = (1.0f - tau) * c1t_params[p] + tau * c1_params[p];
-        }
+        /* 修复5(P1): 使用完整的软更新函数，覆盖权重、偏置、输出投影和cell级参数 */
+        rl_soft_update_network(actor, actor_target, tc->tau);
+        rl_soft_update_network(critic1, critic1_target, tc->tau);
     }
 
     agent->total_steps++;
@@ -2107,7 +2429,8 @@ static int rl_cfc_rainbow_init(RLAgent* agent)
     if (rc->gamma <= 0.0f) rc->gamma = 0.99f;
     if (rc->tau <= 0.0f) rc->tau = 0.005f;
     if (rc->target_update_freq <= 0) rc->target_update_freq = 100;
-    if (rc->num_atoms <= 0) rc->num_atoms = 51;
+    /* P0修复: num_atoms必须>=2，否则(num_atoms-1)在第2123/2188行导致除零 */
+    if (rc->num_atoms < 2) rc->num_atoms = 51;
     if (rc->multi_step_n <= 0) rc->multi_step_n = 3;
     if (rc->v_max <= 0.0f) { rc->v_min = -10.0f; rc->v_max = 10.0f; }
     if (rc->cfc_time_constant <= 0.0f) rc->cfc_time_constant = 1.0f;
@@ -2223,15 +2546,41 @@ static int rl_cfc_rainbow_train(RLAgent* agent, int batch_size)
     RLExperience* samples = (RLExperience*)safe_calloc((size_t)alloc_batch, sizeof(RLExperience));
     int* indices = (int*)safe_calloc((size_t)alloc_batch, sizeof(int));
     float* weights = (float*)safe_calloc((size_t)alloc_batch, sizeof(float));
-    if (!samples || !indices || !weights) {
-        safe_free((void**)&samples); safe_free((void**)&indices); safe_free((void**)&weights);
-        return -1;
+
+    /* 修复1(P0): 原大栈数组 value_out/adv_out/raw_out/raw_next/raw_next_online 等使用
+     * RL_MAX_BATCH_SIZE*RL_MAX_BATCH_SIZE(=4096*4096*4B=64MB) 栈分配，远超 Windows
+     * 默认 1MB 线程栈，进入 dueling+distributional 默认路径即必然栈溢出崩溃。
+     * 现全部改为堆分配，并按实际 num_actions*num_atoms(<=64*51=3264, 约13KB)分配。 */
+    size_t dist_buf_count = (size_t)num_actions * (size_t)num_atoms;
+    float* value_out = (float*)safe_malloc((size_t)num_atoms * sizeof(float));
+    float* adv_out = (float*)safe_malloc(dist_buf_count * sizeof(float));
+    float* next_value = (float*)safe_malloc((size_t)num_atoms * sizeof(float));
+    float* raw_out = (float*)safe_malloc(dist_buf_count * sizeof(float));
+    float* raw_next = (float*)safe_malloc(dist_buf_count * sizeof(float));
+    float* online_next_q = (float*)safe_malloc((size_t)num_actions * sizeof(float));
+    float* raw_next_online = (float*)safe_malloc(dist_buf_count * sizeof(float));
+    /* 修复3(P0): 反向传播完整梯度缓冲，大小为 num_actions*num_atoms，
+     * 防止 lnn_backward 按 output_size 读取 target 时越界读。 */
+    float* full_target = (float*)safe_malloc(dist_buf_count * sizeof(float));
+    /* 修复4(P1): td_errors 用 safe_calloc 清零，避免 continue 跳过的样本
+     * 使用栈垃圾值写入优先级。 */
+    float* td_errors = (float*)safe_calloc((size_t)alloc_batch, sizeof(float));
+    float* abs_errors = (float*)safe_malloc((size_t)alloc_batch * sizeof(float));
+
+    int ret_code = 0;
+
+    if (!samples || !indices || !weights || !value_out || !adv_out ||
+        !next_value || !raw_out || !raw_next || !online_next_q ||
+        !raw_next_online || !full_target || !td_errors || !abs_errors)
+    {
+        ret_code = -1;
+        goto cleanup;
     }
 
     int actual = rl_replay_buffer_sample(buf, batch_size, samples, indices, weights);
     if (actual <= 0) {
-        safe_free((void**)&samples); safe_free((void**)&indices); safe_free((void**)&weights);
-        return 0;
+        ret_code = 0;
+        goto cleanup;
     }
 
     LNN* dist_net = agent->networks[RL_NETWORK_DISTRIBUTION];
@@ -2240,11 +2589,10 @@ static int rl_cfc_rainbow_train(RLAgent* agent, int batch_size)
     LNN* adv_net = agent->networks[RL_NETWORK_ADVANTAGE_STREAM];
 
     if (!dist_net || !dist_target || !value_net || !adv_net) {
-        safe_free((void**)&samples); safe_free((void**)&indices); safe_free((void**)&weights);
-        return -1;
+        ret_code = -1;
+        goto cleanup;
     }
 
-    float td_errors[RL_MAX_BATCH_SIZE];
     float total_loss = 0.0f;
 
     for (int i = 0; i < actual; i++)
@@ -2260,21 +2608,31 @@ static int rl_cfc_rainbow_train(RLAgent* agent, int batch_size)
 
         if (rc->use_dueling && rc->use_distributional && value_net && adv_net)
         {
-            float value_out[RL_MAX_BATCH_SIZE];
-            float adv_out[RL_MAX_BATCH_SIZE * RL_MAX_BATCH_SIZE];
+            /* 修复1: value_out/adv_out 已改为函数级堆缓冲，此处直接复用 */
             lnn_forward(value_net, samples[i].state, value_out);
             lnn_forward(adv_net, samples[i].state, adv_out);
 
-            float adv_mean = 0.0f;
+            /* 修复4(P1): Rainbow Dueling聚合错误
+             * 原问题: adv_mean仅对adv[a,0]（首atom）求均值，又再除一次num_actions
+             *   →等效/num_actions²，偏离标准dueling V(z)+A(a,z)-mean_a A(a,z)。
+             * 修复方案: 对所有动作的完整advantage分布按atom求均值，
+             *   Q(z) = V(z) + A(a,z) - mean_a A(a,z) */
+            float adv_mean_buf[256];  /* 分布原子数上限，C51=51，QR-DQN=200 */
+            if (num_atoms > 256) num_atoms = 256;
+            memset(adv_mean_buf, 0, (size_t)num_atoms * sizeof(float));
             for (int a = 0; a < num_actions; a++)
-                adv_mean += adv_out[a * num_atoms];
-            adv_mean /= (float)num_actions;
+            {
+                for (int z = 0; z < num_atoms; z++)
+                    adv_mean_buf[z] += adv_out[a * num_atoms + z];
+            }
+            for (int z = 0; z < num_atoms; z++)
+                adv_mean_buf[z] /= (float)num_actions;
 
             for (int a = 0; a < num_actions; a++)
             {
                 for (int z = 0; z < num_atoms; z++)
                 {
-                    float val = value_out[z] + adv_out[a * num_atoms + z] - adv_mean / (float)num_atoms;
+                    float val = value_out[z] + adv_out[a * num_atoms + z] - adv_mean_buf[z];
                     current_dist[a * num_atoms + z] = val;
                 }
             }
@@ -2298,7 +2656,7 @@ static int rl_cfc_rainbow_train(RLAgent* agent, int batch_size)
             }
 
             /* 目标网络输出（仅价值流作为目标） */
-            float next_value[RL_MAX_BATCH_SIZE];
+            /* 修复1: next_value 已改为函数级堆缓冲，此处直接复用 */
             lnn_forward(dist_target, samples[i].next_state, next_value);
             float max_v = next_value[0];
             for (int z = 1; z < num_atoms; z++)
@@ -2316,7 +2674,7 @@ static int rl_cfc_rainbow_train(RLAgent* agent, int batch_size)
         }
         else if (dist_net && dist_target)
         {
-            float raw_out[RL_MAX_BATCH_SIZE * RL_MAX_BATCH_SIZE];
+            /* 修复1: raw_out 已改为函数级堆缓冲，此处直接复用 */
             lnn_forward(dist_net, samples[i].state, raw_out);
 
             /* softmax over atoms per action */
@@ -2337,7 +2695,7 @@ static int rl_cfc_rainbow_train(RLAgent* agent, int batch_size)
                     current_dist[a * num_atoms + z] /= sum;
             }
 
-            float raw_next[RL_MAX_BATCH_SIZE * RL_MAX_BATCH_SIZE];
+            /* 修复1: raw_next 已改为函数级堆缓冲，此处直接复用 */
             lnn_forward(dist_target, samples[i].next_state, raw_next);
             for (int a = 0; a < num_actions; a++)
             {
@@ -2387,10 +2745,10 @@ static int rl_cfc_rainbow_train(RLAgent* agent, int batch_size)
             int best_next_action = 0;
             if (rc->use_double_dqn)
             {
-                float online_next_q[RL_MAX_BATCH_SIZE];
+                /* 修复1: online_next_q 已改为函数级堆缓冲，此处直接复用 */
                 if (dist_net)
                 {
-                    float raw_next_online[RL_MAX_BATCH_SIZE * RL_MAX_BATCH_SIZE];
+                    /* 修复1: raw_next_online 已改为函数级堆缓冲，此处直接复用 */
                     lnn_forward(dist_net, samples[i].next_state, raw_next_online);
                     for (int a = 0; a < num_actions; a++)
                     {
@@ -2444,7 +2802,15 @@ static int rl_cfc_rainbow_train(RLAgent* agent, int batch_size)
                 }
                 total_loss += dist_loss;
                 td_errors[i] = dist_loss;
-                lnn_backward(dist_net, projected, &dist_loss);
+                /* 修复3(P0): dist_net 输出尺寸为 num_actions*num_atoms，而 projected
+                 * 仅 num_atoms 个 float。原调用 lnn_backward(dist_net, projected,&dist_loss)
+                 * 会导致 loss_gradient_ex 按 output_size 读取 target 时堆缓冲区越界读。
+                 * 现构造 num_actions*num_atoms 完整梯度缓冲，仅 act_idx(所采取动作)
+                 * 位置填 projected 值，其余为0（交叉熵下0目标产生0梯度，不影响其他动作）。 */
+                memset(full_target, 0, dist_buf_count * sizeof(float));
+                memcpy(full_target + (size_t)act_idx * (size_t)num_atoms,
+                       projected, (size_t)num_atoms * sizeof(float));
+                lnn_backward(dist_net, full_target, &dist_loss);
 
                 safe_free((void**)&projected);
             }
@@ -2457,17 +2823,30 @@ static int rl_cfc_rainbow_train(RLAgent* agent, int batch_size)
 
     if (buf->replay_type == RL_REPLAY_PRIORITIZED)
     {
-        float abs_errors[RL_MAX_BATCH_SIZE];
+        /* 修复1: abs_errors 已改为函数级堆缓冲，此处直接复用 */
         for (int i = 0; i < actual; i++)
             abs_errors[i] = fabsf(td_errors[i]);
         rl_replay_buffer_update_priorities(buf, indices, abs_errors, actual);
     }
 
     agent->total_steps++;
+
+cleanup:
+    /* 修复1: 统一释放所有堆缓冲，使用 goto cleanup 模式处理提前返回 */
     safe_free((void**)&samples);
     safe_free((void**)&indices);
     safe_free((void**)&weights);
-    return 0;
+    safe_free((void**)&value_out);
+    safe_free((void**)&adv_out);
+    safe_free((void**)&next_value);
+    safe_free((void**)&raw_out);
+    safe_free((void**)&raw_next);
+    safe_free((void**)&online_next_q);
+    safe_free((void**)&raw_next_online);
+    safe_free((void**)&full_target);
+    safe_free((void**)&td_errors);
+    safe_free((void**)&abs_errors);
+    return ret_code;
 }
 
 /* ============ CfC-IMPALA 实现 ============ */
@@ -2736,9 +3115,53 @@ static int rl_cfc_impala_train(RLAgent* agent, int batch_size)
         float actor_loss = policy_loss + entropy_loss;
         total_loss += actor_loss;
 
-        /* P1-034修复：IMPALA actor使用独立target/loss缓冲区 */
-        float actor_target[1] = {actor_loss};
-        lnn_backward(actor, actor_target, &actor_loss);
+        /* 修复2(P1): IMPALA actor把loss值当target — 系统性错误
+         * 原问题: float actor_target[1] = {actor_loss} 把标量损失值当作
+         *   网络的目标输出。MSE下 error = action - actor_loss，不等于策略梯度。
+         *   且buffer大小[1]与actor输出维度不匹配。
+         * 修复方案: 构造目标 = 当前actor输出 + 小步长 * 优势方向，
+         *   使lnn_backward通过MSE误差间接实现策略梯度更新。
+         *   对离散动作: 增大有优势的存储动作的logit
+         *   对连续动作: 沿优势方向微调均值输出 */
+        {
+            LNNConfig acfg;
+            memset(&acfg, 0, sizeof(LNNConfig));
+            lnn_get_config(actor, &acfg);
+            int actor_out_size = (int)acfg.output_size;
+            float* cur_output = (float*)safe_malloc((size_t)actor_out_size * sizeof(float));
+            float* actor_target = (float*)safe_malloc((size_t)actor_out_size * sizeof(float));
+            if (cur_output && actor_target)
+            {
+                lnn_forward(actor, s, cur_output);
+                float actor_alpha = 0.01f;  /* 小步长更新系数 */
+                if (agent->config.discrete_actions)
+                {
+                    /* 离散动作: 增大有正优势的存储动作的logit */
+                    int act = (int)actions[t];
+                    if (act < 0) act = 0;
+                    if (act >= actor_out_size) act = actor_out_size - 1;
+                    for (int a = 0; a < actor_out_size; a++)
+                        actor_target[a] = cur_output[a];
+                    actor_target[act] = cur_output[act] + actor_alpha * advantage;
+                }
+                else
+                {
+                    /* 连续动作: 沿优势方向微调均值输出 */
+                    int half = actor_out_size / 2;
+                    for (int a = 0; a < actor_out_size; a++)
+                        actor_target[a] = cur_output[a];
+                    for (int a = 0; a < half; a++)
+                    {
+                        float diff = actions[t * act_dim + a] - cur_output[a];
+                        actor_target[a] = cur_output[a] + actor_alpha * advantage * diff;
+                    }
+                }
+                float bwd_loss = 0.0f;
+                lnn_backward(actor, actor_target, &bwd_loss);
+            }
+            safe_free((void**)&cur_output);
+            safe_free((void**)&actor_target);
+        }
 
         /* 价值函数损失 */
         float value = 0.0f;
@@ -3317,11 +3740,13 @@ int rl_select_action(RLAgent* agent, const float* state, int state_dim, float* a
         {
             LNN* q_net = agent->networks[RL_NETWORK_RECURRENT_Q];
             if (!q_net) return -1;
-            float q_values[RL_MAX_ACTION_DIM];
+            /* R-P2-19修复: lnn_forward可能写入output_size(最多256)个值，
+               原RL_MAX_ACTION_DIM(64)缓冲区过小会导致栈溢出，扩容至256 */
+            float q_values[256];
             if (lnn_forward(q_net, state, q_values) != 0) return -1;
             int best = 0;
             int nact = agent->config.num_actions;
-            for (int i = 1; i < nact && i < RL_MAX_ACTION_DIM; i++)
+            for (int i = 1; i < nact && i < 256; i++)
                 if (q_values[i] > q_values[best]) best = i;
             action[0] = (float)best;
             return 0;

@@ -969,16 +969,18 @@ int dc_generate_hypotheses(DCCorrectionSystem* dcs, int error_id, DCCorrectionHy
                 h->confidence = dcs->rules[r].success_rate;
                 h->estimated_impact = 0.7f * dcs->rules[r].success_rate;
 
+                /* 使用自适应强度调整置信度（先调整再保存，
+                 * P2修复: 确保存储到 dcs->hypotheses 的副本与返回 out[count] 的值一致，
+                 * 原实现先 memcpy 再调整，导致存储副本保留未调整的旧值） */
+                float adaptive_str = dc_adaptive_strength(dcs, h->hypothesis_id);
+                h->confidence = h->confidence * 0.7f + adaptive_str * 0.3f;
+                h->estimated_impact = h->estimated_impact * 0.7f + adaptive_str * 0.3f;
+
                 /* 保存到系统假设列表 */
                 if (dcs->hypothesis_count < DC_MAX_ERRORS * DC_MAX_HYPOTHESES) {
                     memcpy(&dcs->hypotheses[dcs->hypothesis_count], h, sizeof(DCCorrectionHypothesis));
                     dcs->hypothesis_count++;
                 }
-
-                /* 使用自适应强度调整置信度 */
-                float adaptive_str = dc_adaptive_strength(dcs, h->hypothesis_id);
-                h->confidence = h->confidence * 0.7f + adaptive_str * 0.3f;
-                h->estimated_impact = h->estimated_impact * 0.7f + adaptive_str * 0.3f;
 
                 count++;
             }

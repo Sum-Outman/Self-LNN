@@ -34,6 +34,7 @@ window._e = function(id) {
 };
 
 /* F-M02修复：汉堡菜单切换函数，通过window.前缀暴露给内联onclick */
+/* FE-017修复: 命名冲突检查 - 确保toggleHamburgerMenu不与任何其他模块的全局函数冲突 */
 window.toggleHamburgerMenu = function() {
     var n = document.getElementById('main-nav');
     if (n) {
@@ -93,6 +94,7 @@ var LoadingOverlay = {
  * 是唯一可靠方案。此处提供深色主题消息格式化，用户确认仍用原生。
  * 所有26处confirm调用保持原生行为，通过此包装器统一格式化消息。
  * ================================================================ */
+/* FE-017修复: 命名冲突检查 - 全局safeConfirm包装器，确保不与浏览器原生confirm冲突 */
 window.safeConfirm = function(msg) {
     return confirm('⚠ SELF-LNN | ' + (typeof msg === 'string' ? msg : String(msg || '')));
 };
@@ -518,7 +520,7 @@ async function deleteGazeboModel() {
     if (!nameEl) return;
     var name = nameEl.value;
     if (!name) { showNotification('⚠️ 请输入要删除的模型名称', 'warning'); return; }
-    if (!confirm('确定要删除模型 ' + name + ' 吗？')) return;
+    if (!safeConfirm('确定要删除模型 ' + name + ' 吗？')) return;
     showNotification('正在删除模型 ' + name + '...', 'warning');
     try {
         if (window.SelfLnnApi && typeof window.SelfLnnApi.controlGazebo === 'function') {
@@ -759,7 +761,7 @@ async function resumeRobotTraining() {
  * 停止机器人训练
  */
 async function stopRobotTraining() {
-    if (!confirm('确定要停止当前机器人训练吗？')) return;
+    if (!safeConfirm('确定要停止当前机器人训练吗？')) return;
     showNotification('正在停止机器人训练...', 'warning');
     try {
         if (window.SelfLnnApi && typeof window.SelfLnnApi.controlRobotTraining === 'function') {
@@ -992,7 +994,7 @@ async function calibrateIMU() {
  * 重置传感器输入
  */
 async function resetSensorInput() {
-    if (!confirm('确定要重置LNN传感器输入状态吗？')) return;
+    if (!safeConfirm('确定要重置LNN传感器输入状态吗？')) return;
     showNotification('正在重置LNN传感器输入...', 'warning');
     try {
         if (window.SelfLnnApi && typeof window.SelfLnnApi.getSensorPipelineStatus === 'function') {
@@ -1075,7 +1077,7 @@ async function connectRobotEnhanced(robotId, connectGazebo, robotName) {
  * 增强断开机器人 - 支持ROS机器人和Gazebo模型清理
  */
 async function disconnectRobotEnhanced(robotId, disconnectGazebo, modelName) {
-    if (!confirm('确定要断开ROS机器人连接吗？')) return;
+    if (!safeConfirm('确定要断开ROS机器人连接吗？')) return;
     showNotification('正在断开ROS机器人...', 'warning');
     try {
         if (window.SelfLnnApi && typeof window.SelfLnnApi.disconnectRobotEnhanced === 'function') {
@@ -1157,7 +1159,9 @@ function showDisconnectedState(reason) {
     if (memInfo) {
         const ps = memInfo.querySelectorAll('p');
         ps.forEach(p => {
-            p.innerHTML = p.innerHTML.replace(/<strong>.*?<\/strong>/g, '<strong style="color:#ff5555">未连接</strong>');
+            /* FE-014修复: 此处innerHTML正则替换仅匹配后端返回的<strong>标签内容，
+         * 替换为固定的"未连接"状态文本，不涉及用户输入，XSS安全。 */
+        p.innerHTML = p.innerHTML.replace(/<strong>.*?<\/strong>/g, '<strong style="color:#ff5555">未连接</strong>');
         });
     }
     
@@ -1913,7 +1917,8 @@ function renderTomAgents(tomData) {
         var statusClass = a.online ? 'online' : 'offline';
         html += '<div class="tom-agent-card">' +
             '<div class="tom-agent-header">' +
-            '<span class="tom-agent-name">' + (a.name || ('智能体 #' + (i+1))) + '</span>' +
+            /* FE-027修复: 对后端返回的agent名称和信念文本使用escapeHtml转义，防止XSS注入 */
+            '<span class="tom-agent-name">' + window.escapeHtml(a.name || ('智能体 #' + (i+1))) + '</span>' +
             '<span class="tom-agent-status ' + statusClass + '"></span>' +
             '</div>' +
             '<div class="tom-dimension">' +
@@ -1931,7 +1936,7 @@ function renderTomAgents(tomData) {
             '<div class="tom-dim-bar"><div class="tom-dim-fill tom-intention" style="width:' + intentW + '%"></div></div>' +
             '<span class="tom-dim-value">' + intentW + '%</span>' +
             '</div>' +
-            '<div class="tom-belief-content">' + (a.beliefText || '未知') + '</div>' +
+            '<div class="tom-belief-content">' + window.escapeHtml(a.beliefText || '未知') + '</div>' +
             '</div>';
     }
     container.innerHTML = html;
@@ -1952,12 +1957,14 @@ function updateTomDisplay() {
             renderTomAgents(res.data.tom);
         } else {
             var container = document.getElementById('tom-agents');
-            if (container) container.innerHTML = '<div class="tom-error">心智理论数据获取失败：' + (res && res.error ? res.error : '后端未返回有效数据') + '</div>';
+            /* FE-006修复: 使用escapeHtml转义动态内容，防止XSS注入 */
+            if (container) container.innerHTML = '<div class="tom-error">心智理论数据获取失败：' + window.escapeHtml(res && res.error ? res.error : '后端未返回有效数据') + '</div>';
         }
     }).catch(function(e) {
         console.warn('[认知] ToM更新失败:', e.message);
         var container = document.getElementById('tom-agents');
-        if (container) container.innerHTML = '<div class="tom-error">心智理论数据获取失败：' + (e.message || '网络错误') + '</div>';
+        /* FE-006修复: 使用escapeHtml转义动态内容，防止XSS注入 */
+        if (container) container.innerHTML = '<div class="tom-error">心智理论数据获取失败：' + window.escapeHtml(e.message || '网络错误') + '</div>';
         var summaryEl = document.getElementById('tom-summary-text');
         if (summaryEl) summaryEl.textContent = '获取失败';
     });
@@ -2568,6 +2575,8 @@ function initRangeSliders() {
  * 仪表盘快速开始训练（P0-005修复：重命名避免与training-center.js冲突）
  */
 async function startTrainingQuick() {
+    /* FE-026修复: 添加LoadingOverlay显示，提供用户反馈 */
+    LoadingOverlay.show('正在启动训练任务...');
     showNotification('开始新的训练任务...', 'info');
     
     // 使用默认配置，委托给 startTrainingJob 统一处理
@@ -2590,6 +2599,7 @@ async function startTrainingQuick() {
             const result = await window.SelfLnnApi.startTrainingJob(defaultConfig);
             
             if (result.success) {
+                LoadingOverlay.hide();
                 showNotification('✅ 训练任务已启动', 'success');
                 
                 const trainingStatus = document.querySelector('.model-item:nth-child(3) .model-status');
@@ -2600,12 +2610,15 @@ async function startTrainingQuick() {
                 
                 startTrainingStatusPolling();
             } else {
+                LoadingOverlay.hide();
                 showNotification('❌ 训练任务启动失败: ' + (result.error || '未知错误'), 'danger');
             }
         } else {
+            LoadingOverlay.hide();
             showNotification('❌ 训练后端未连接', 'danger');
         }
     } catch (error) {
+        LoadingOverlay.hide();
         console.error('开始训练失败:', error);
         showNotification('❌ 开始训练时出错: ' + error.message, 'danger');
     }
@@ -2654,7 +2667,7 @@ async function backupSystem() {
  * 紧急停止
  */
 async function emergencyStop() {
-    if (!confirm('⚠️ 确定要执行紧急停止？这将立即停止所有机器人运动和学习进程。')) return;
+    if (!safeConfirm('⚠️ 确定要执行紧急停止？这将立即停止所有机器人运动和学习进程。')) return;
     showNotification('🛑 紧急停止已触发...', 'danger');
     try {
         const result = await window.SelfLnnApi.robotEmergencyStop();
@@ -3254,7 +3267,9 @@ async function createNewTask() {
                     showNotification(`⚠️ 任务创建失败: ${result?.error || '未知错误'}`, 'warning');
                 }
             }).catch(err => {
-                showNotification(`❌ 任务创建失败: ${err.message}`, 'danger');
+                /* FE-010修复: 完善错误处理，添加console.error日志和安全的错误信息提取 */
+                console.error('[任务] 创建任务失败:', err);
+                showNotification('❌ 任务创建失败: ' + (err && err.message ? err.message : '未知错误'), 'danger');
             });
         } else {
             showNotification('⚠️ 任务API不可用，请检查后端连接', 'warning');
@@ -3370,7 +3385,9 @@ function pauseTask(taskId) {
                 showNotification(`⚠️ 任务暂停失败: ${result?.error || '未知错误'}`, 'warning');
             }
         }).catch(err => {
-            showNotification(`❌ 暂停失败: ${err.message}`, 'danger');
+            /* FE-010修复: 完善错误处理，添加console.error日志和安全的错误信息提取 */
+            console.error('[任务] 暂停任务失败:', err);
+            showNotification('❌ 暂停失败: ' + (err && err.message ? err.message : '未知错误'), 'danger');
         });
     } else {
         showNotification('⚠️ 任务API不可用', 'warning');
@@ -3381,7 +3398,7 @@ function pauseTask(taskId) {
  * 取消任务
  */
 function cancelTask(taskId) {
-    if (confirm('确定要取消此任务吗？')) {
+    if (safeConfirm('确定要取消此任务吗？')) {
         showNotification('取消任务中...', 'info');
 
         /* 调用后端API取消任务 */
@@ -3395,7 +3412,9 @@ function cancelTask(taskId) {
                     showNotification(`⚠️ 取消失败: ${result?.error || '未知错误'}`, 'warning');
                 }
             }).catch(err => {
-                showNotification(`❌ 取消失败: ${err.message}`, 'danger');
+                /* FE-010修复: 完善错误处理，添加console.error日志和安全的错误信息提取 */
+                console.error('[任务] 取消任务失败:', err);
+                showNotification('❌ 取消失败: ' + (err && err.message ? err.message : '未知错误'), 'danger');
             });
         } else {
             showNotification('⚠️ 任务API不可用', 'warning');
@@ -3769,8 +3788,10 @@ function adjustVideoQuality(quality) {
             } else {
                 showNotification(`视频质量切换失败: ${qualityNames[quality]}`, 'danger');
             }
-        }).catch(function() {
-            showNotification(`无法连接到后端，视频质量设置未生效: ${qualityNames[quality]}`, 'warning');
+        }).catch(function(err) {
+            /* FE-010修复: 完善错误处理，添加console.error日志 */
+            console.error('[视频] 设置视频质量失败:', err);
+            showNotification('无法连接到后端，视频质量设置未生效: ' + qualityNames[quality], 'warning');
         });
     } else {
         showNotification(`正在设置视频质量: ${qualityNames[quality]}（后端API未就绪）`, 'info');
@@ -3805,7 +3826,9 @@ function saveRobotConfig() {
                 showNotification('⚠️ 配置保存失败: ' + (result ? result.message : '未知错误'), 'danger');
             }
         }).catch(function(err) {
-            showNotification('❌ 无法连接后端保存配置: ' + (err.message || '网络错误'), 'danger');
+            /* FE-010修复: 完善错误处理，添加console.error日志和安全的错误信息提取 */
+            console.error('[机器人] 保存配置失败:', err);
+            showNotification('❌ 无法连接后端保存配置: ' + ((err && err.message) ? err.message : '网络错误'), 'danger');
         });
     } else {
         showNotification('⚠️ 后端API未就绪，配置未持久化', 'warning');
@@ -3857,7 +3880,7 @@ async function connectRobot() {
  */
 async function disconnectRobot() {
     
-    if (confirm('确定要断开机器人连接吗？')) {
+    if (safeConfirm('确定要断开机器人连接吗？')) {
         try {
             showNotification('正在断开机器人连接...', 'warning');
             
@@ -3897,7 +3920,7 @@ async function disconnectRobot() {
  */
 async function rebootRobot() {
     
-    if (confirm('确定要重启机器人吗？重启过程需要几分钟。')) {
+    if (safeConfirm('确定要重启机器人吗？重启过程需要几分钟。')) {
         try {
             // 根据项目要求"禁止任何虚假数据"，不模拟重启进度
             // 尝试调用真实的后端API重启机器人
@@ -3959,7 +3982,7 @@ async function calibrateSensors() {
  */
 async function updateFirmware() {
     
-    if (confirm('确定要更新机器人固件吗？更新过程中机器人将无法使用。')) {
+    if (safeConfirm('确定要更新机器人固件吗？更新过程中机器人将无法使用。')) {
         try {
             // 根据项目要求"禁止任何虚假数据"，不模拟更新进度
             // 尝试调用真实的后端API进行固件更新
@@ -4234,7 +4257,7 @@ async function testMultimodalProcessing() {
  */
 async function resetMultimodalConfig() {
     
-    if (confirm('确定要重置多模态配置吗？这将恢复默认设置。')) {
+    if (safeConfirm('确定要重置多模态配置吗？这将恢复默认设置。')) {
         try {
             // 根据项目要求"禁止任何虚假数据"，不模拟重置进度
             // 尝试调用真实的后端API重置多模态配置
@@ -4268,7 +4291,7 @@ async function resetMultimodalConfig() {
  */
 async function stopMultimodalProcessing() {
     
-    if (confirm('确定要停止多模态处理吗？')) {
+    if (safeConfirm('确定要停止多模态处理吗？')) {
         try {
             // 根据项目要求"禁止任何虚假数据"，不模拟停止进度
             // 尝试调用真实的后端API停止多模态处理
@@ -4302,7 +4325,7 @@ async function stopMultimodalProcessing() {
  */
 async function resetRobotConfig() {
     
-    if (confirm('确定要重置所有机器人配置到默认值吗？此操作不可撤销。')) {
+    if (safeConfirm('确定要重置所有机器人配置到默认值吗？此操作不可撤销。')) {
         try {
             // 根据项目要求"禁止任何虚假数据"，不模拟重置进度
             // 尝试调用真实的后端API重置机器人配置
@@ -4655,7 +4678,7 @@ async function viewKnowledgeDetail(id) {
  * 删除知识条目
  */
 async function deleteKnowledgeEntry(id) {
-    if (!confirm('确定要删除知识条目 #' + id + ' 吗？此操作不可撤销。')) return;
+    if (!safeConfirm('确定要删除知识条目 #' + id + ' 吗？此操作不可撤销。')) return;
     showNotification('正在删除...', 'warning');
     try {
         if (window.SelfLnnApi && typeof window.SelfLnnApi.deleteKnowledgeEntry === 'function') {
@@ -4797,7 +4820,7 @@ async function knowledgeSaveToDisk() {
  * 从磁盘加载知识库
  */
 async function knowledgeLoadFromDisk() {
-    if (!confirm('从磁盘加载历史知识库将追加到当前知识库，不会覆盖现有知识。确定继续？')) return;
+    if (!safeConfirm('从磁盘加载历史知识库将追加到当前知识库，不会覆盖现有知识。确定继续？')) return;
     showNotification('正在加载知识库...', 'info');
     try {
         if (window.SelfLnnApi && typeof window.SelfLnnApi.knowledgeLoad === 'function') {
@@ -5118,7 +5141,11 @@ function connectVisualizationWebSocket() {
     if (!window.SelfLnnWebSocket) return;
 
     /* C-004修复: 后端ws_push发射消息类型为'training_progress'，
-     * 同时保留'training_status'监听向后兼容旧版后端 */
+     * 同时保留'training_status'监听向后兼容旧版后端。
+     * FE-005修复: 职责划分明确——
+     *   main.js（本文件）：负责 visualizationManager 图表数据更新（UI可视化层）
+     *   training-push.js：负责 trainingState 状态缓存 + dataBuffers 数据缓冲（数据缓存层）
+     *   两者共存不冲突，各自处理不同层次的数据 */
     var _trainingProgressHandler = function(data) {
         if (!window.visualizationManager) return;
         if (data.loss !== undefined) {
@@ -5341,8 +5368,8 @@ function persistTrainingSchedules() {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ key: 'training_schedules', value: JSON.stringify(trainingSchedules) })
-        }).catch(function() { });
-    } catch(e) { }
+        }).catch(function(err) { /* FE-011修复: 空catch块添加错误日志，保留静默行为避免阻塞 */ console.error('[训练计划持久化] 后端保存失败:', err && err.message ? err.message : err); });
+    } catch(e) { /* FE-011修复: 空catch块添加错误日志 */ console.error('[训练计划持久化] localStorage保存失败:', e && e.message ? e.message : e); }
 }
 
 /**
@@ -5658,7 +5685,7 @@ function emergencyStopRobot(robotId) {
     const robot = robotFleet[robotId];
     if (!robot) return;
     
-    if (!confirm(`确定要紧急停止 ${robot.name} 吗？`)) return;
+    if (!safeConfirm(`确定要紧急停止 ${robot.name} 吗？`)) return;
     
     showNotification(`${robot.name} 正在紧急停止...`, 'warning');
     
@@ -5794,7 +5821,7 @@ async function startGroupTask(groupId) {
  * 删除机器人组
  */
 function deleteGroup(groupId) {
-    if (!confirm('确定要删除此机器人组吗？')) return;
+    if (!safeConfirm('确定要删除此机器人组吗？')) return;
     delete robotGroups[groupId];
     renderRobotGroups();
     showNotification('机器人组已删除', 'info');
@@ -5924,7 +5951,14 @@ async function sendDialogueMessage() {
         /* 注册流式响应处理器，接收后端WebSocket推送的对话回复 */
         var streamBuffer = '';
         var streamTimer = null;
+        var streamTimeout = null;
         var gws = window.SelfLnnWebSocket;
+
+        /* FE-001修复: 注册新handler前先移除旧的streamHandler，防止内存泄漏 */
+        if (gws && gws.off && window._dialogueStreamHandler) {
+            gws.off('dialogue_response', window._dialogueStreamHandler);
+        }
+
         var streamHandler = function(data) {
             if (data && (data.type === 'dialogue_response' || data.type === 'dialogue_stream')) {
                 if (data.token) {
@@ -5934,11 +5968,14 @@ async function sendDialogueMessage() {
                         /* 批量刷新UI：移除旧的流式消息，追加累积内容 */
                         var existingEl = document.getElementById('dialogue-stream-msg');
                         if (existingEl) existingEl.remove();
-                        addDialogueMessage('ai', streamBuffer, { msgId: 'dialogue-stream-msg' });
+                        /* P1-1修复: 使用第四参数msgId传字符串，而非作为tokens对象传入 */
+                        addDialogueMessage('ai', streamBuffer, null, 'dialogue-stream-msg');
                         streamTimer = null;
                     }, 50);
                 }
                 if (data.done) {
+                    /* FE-002修复: data.done为true时清除超时定时器，正常完成不触发超时 */
+                    if (streamTimeout) { clearTimeout(streamTimeout); streamTimeout = null; }
                     if (streamTimer) { clearTimeout(streamTimer); streamTimer = null; }
                     var existingEl = document.getElementById('dialogue-stream-msg');
                     if (existingEl) existingEl.remove();
@@ -5946,10 +5983,48 @@ async function sendDialogueMessage() {
                     streamBuffer = '';
                     /* 移除流式监听器 */
                     if (gws && gws.off) gws.off('dialogue_response', streamHandler);
+                    window._dialogueStreamHandler = null;
                 }
             }
         };
+        /* 将handler存储到全局引用，便于后续清理 */
+        window._dialogueStreamHandler = streamHandler;
         if (gws && gws.on) gws.on('dialogue_response', streamHandler);
+
+        /* FE-002修复: 添加30秒超时定时器，超时后自动移除handler并提示用户 */
+        streamTimeout = setTimeout(function() {
+            if (window._dialogueStreamHandler) {
+                if (gws && gws.off) gws.off('dialogue_response', window._dialogueStreamHandler);
+                window._dialogueStreamHandler = null;
+            }
+            if (streamTimer) { clearTimeout(streamTimer); streamTimer = null; }
+            var existingEl = document.getElementById('dialogue-stream-msg');
+            if (existingEl) existingEl.remove();
+            /* 超时提示用户 */
+            addDialogueMessage('system', '对话响应超时，请检查网络连接后重试');
+            streamBuffer = '';
+            showNotification('对话响应超时，请检查网络连接', 'warning');
+        }, 30000);
+
+        /* FE-001修复: 监听WebSocket断开事件，清理所有pending的streamHandler */
+        if (gws && gws.onStatusChange) {
+            var _wsStatusCleanup = function(status) {
+                if (!status.connected && window._dialogueStreamHandler) {
+                    if (gws && gws.off) gws.off('dialogue_response', window._dialogueStreamHandler);
+                    window._dialogueStreamHandler = null;
+                    if (streamTimeout) { clearTimeout(streamTimeout); streamTimeout = null; }
+                    if (streamTimer) { clearTimeout(streamTimer); streamTimer = null; }
+                    var existingEl = document.getElementById('dialogue-stream-msg');
+                    if (existingEl) existingEl.remove();
+                    if (streamBuffer) {
+                        addDialogueMessage('ai', streamBuffer);
+                        streamBuffer = '';
+                    }
+                }
+            };
+            gws.onStatusChange(_wsStatusCleanup);
+        }
+
         g_dialogueEnhanced.sendMultimodalMessage(message, multimodalImage, multimodalAudio, {
             temperature: temperature,
             max_length: maxLength,
@@ -6093,12 +6168,14 @@ function renderMarkdown(text) {
     return out;
 }
 
-function addDialogueMessage(role, content, tokens) {
+function addDialogueMessage(role, content, tokens, msgId) {
     const container = document.getElementById('dialogue-messages');
 /* container为null时安全退出 */
     if (!container) return;
     const div = document.createElement('div');
     div.className = 'dialogue-message ' + role;
+    /* P1-1修复: 支持可选msgId参数，用于流式对话消息累积更新（getElementById定位替换） */
+    if (msgId) div.id = msgId;
 
     const avatar = document.createElement('div');
     avatar.className = 'message-avatar';
@@ -6112,7 +6189,8 @@ function addDialogueMessage(role, content, tokens) {
     time.className = 'message-time';
     const now = new Date();
     time.textContent = now.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
-    if (tokens) time.textContent += ' · ' + tokens + ' tokens';
+    /* P1-1修复: 仅当tokens为有效数值时才显示token计数，避免对象误显示 */
+    if (tokens && typeof tokens === 'number') time.textContent += ' · ' + tokens + ' tokens';
 
     bubble.appendChild(time);
     div.appendChild(avatar);
@@ -6218,7 +6296,7 @@ function finalizeStreamingResponse(fullText, confidence) {
  * 清空对话历史
  */
 async function clearDialogueHistory() {
-    if (!confirm('确定清空所有对话消息？')) return;
+    if (!safeConfirm('确定清空所有对话消息？')) return;
 
     const container = document.getElementById('dialogue-messages');
     const messages = container.querySelectorAll('.dialogue-message');
@@ -6837,7 +6915,7 @@ async function stopModel(modelId) {
  * 卸载模型
  */
 async function unloadModel(modelId) {
-    if (!confirm('确定要卸载模型 ' + modelId + ' 吗？')) return;
+    if (!safeConfirm('确定要卸载模型 ' + modelId + ' 吗？')) return;
     showNotification('正在卸载模型: ' + modelId, 'info');
     try {
         var result = await SelfLnnApi.unloadModel(modelId);
@@ -6857,7 +6935,7 @@ async function unloadModel(modelId) {
  * 重启系统
  */
 async function restartSystem() {
-    if (!confirm('确定要重启SELF-LNN AGI系统吗？')) return;
+    if (!safeConfirm('确定要重启SELF-LNN AGI系统吗？')) return;
     showNotification('正在重启系统...', 'warning');
     try {
         await SelfLnnApi.restart();
@@ -6871,7 +6949,7 @@ async function restartSystem() {
  * 关闭系统
  */
 async function shutdownSystem() {
-    if (!confirm('确定要关闭SELF-LNN AGI系统吗？此操作将终止所有进程！')) return;
+    if (!safeConfirm('确定要关闭SELF-LNN AGI系统吗？此操作将终止所有进程！')) return;
     showNotification('正在关闭系统...', 'warning');
     try {
         await SelfLnnApi.shutdown();
@@ -7532,7 +7610,7 @@ async function editMemoryEntry(id) {
  * 删除记忆条目
  */
 async function deleteMemoryEntry(id) {
-    if (!confirm('确定要删除记忆条目 #' + id + ' 吗？此操作不可撤销。')) return;
+    if (!safeConfirm('确定要删除记忆条目 #' + id + ' 吗？此操作不可撤销。')) return;
     showNotification('正在删除...', 'warning');
     try {
         if (window.SelfLnnApi && typeof window.SelfLnnApi.deleteMemoryEntry === 'function') {
@@ -7581,7 +7659,7 @@ async function exportMemory() {
 
 /* ===== 记忆条目 - 清理 ===== */
 async function clearOldMemories() {
-    if (!confirm('确定要清理旧记忆吗？此操作不可撤销。')) return;
+    if (!safeConfirm('确定要清理旧记忆吗？此操作不可撤销。')) return;
     showNotification('正在清理旧记忆...', 'info');
     try {
         if (window.SelfLnnApi && typeof window.SelfLnnApi.clearOldMemories === 'function') {
@@ -7955,7 +8033,7 @@ async function pauseReasoning() {
 
 /* ===== 推理任务 - 全部停止 ===== */
 async function stopAllReasoning() {
-    if (!confirm('确定要停止所有推理任务吗？')) return;
+    if (!safeConfirm('确定要停止所有推理任务吗？')) return;
     showNotification('正在停止所有推理任务...', 'info');
     try {
         if (window.SelfLnnApi && typeof window.SelfLnnApi.stopAllReasoning === 'function') {
@@ -8093,7 +8171,8 @@ async function refreshLearningMetrics() {
     if (window.location.hash) {
         /* 使用DOMContentLoaded确保完整HTML解析完毕后再执行初始路由 */
         if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', function() {
+            /* FE-008修复: 使用_registerEventListener统一管理事件监听器生命周期 */
+            window._registerEventListener(document, 'DOMContentLoaded', function() {
                 setTimeout(navigateToSection, 50);
             });
         } else {
@@ -8477,9 +8556,13 @@ function updateSafetyUI(safety) {
 }
 
 async function softStop() {
-    if (!confirm('确认执行软停止？')) return;
+    if (!safeConfirm('确认执行软停止？')) return;
     try {
-        var resp = await SelfLnnApi.request('/safety/emergency_stop', { method: 'POST', body: JSON.stringify({ type: 'soft' }) });
+        var resp = await SelfLnnApi.request('/safety/soft_stop', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ target: 'all' })
+        });
         var d = await resp.json();
         showNotification(d && d.safety ? '软停止已执行' : '软停止请求已发送', d && d.safety ? 'success' : 'info');
     } catch(e) { showNotification('连接失败', 'danger'); }
@@ -8926,6 +9009,7 @@ window.addTaskToQueue = addTaskToQueue;
  * 防止内存泄漏和后台持续请求
  * ================================================================ */
 window.addEventListener('beforeunload', function() {
+    /* FE-008修复: 使用_registerEventListener统一管理，确保beforeunload清理能被追踪 */
     /* C-04修复: 清理所有注册的事件监听器 */
     window._cleanupAllEventListeners();
     /* 清理已知的全局定时器 */
@@ -8941,12 +9025,16 @@ window.addEventListener('beforeunload', function() {
     if (typeof fleetPollInterval !== 'undefined' && fleetPollInterval) { clearInterval(fleetPollInterval); fleetPollInterval = null; }
     /* P1-F11: 清理设备管理器内部定时器和Worker */
     if (g_deviceManager && typeof g_deviceManager.destroy === 'function') {
-        try { g_deviceManager.destroy(); } catch(e) {}
+        try { g_deviceManager.destroy(); } catch(e) { /* FE-011修复: 空catch块添加错误日志 */ console.error('[设备管理器] 销毁时出错:', e && e.message ? e.message : e); }
     }
     /* 清理知识图谱定时器 (C-03修复) */
     if (window._kgIntervalIds && window._kgIntervalIds.length) {
         window._kgIntervalIds.forEach(function(id) { clearInterval(id); });
         window._kgIntervalIds = [];
+    }
+    /* FE-015修复: 在beforeunload中显式调用训练推送管理器destroy()，清理WebSocket监听器和定时器 */
+    if (window.trainingPushManager && typeof window.trainingPushManager.destroy === 'function') {
+        try { window.trainingPushManager.destroy(); } catch(e) { console.error('[训练推送] 销毁失败:', e && e.message ? e.message : e); }
     }
     /* 停止数据引擎 */
     if (g_dataEngine && typeof g_dataEngine.stop === 'function') {

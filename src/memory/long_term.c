@@ -11,6 +11,7 @@
 
 #include "selflnn/memory/long_term.h"
 #include "selflnn/memory/memory.h"
+#include "selflnn/core/errors.h"
 #include "selflnn/utils/memory_utils.h"
 
 #include <stdlib.h>
@@ -18,6 +19,7 @@
 #include <math.h>
 #include <time.h>
 #include <stdint.h>
+#include <float.h>  /* P1修复: FLT_MAX用于weakest初始化，避免1.0f导致victim选择失效 */
 
 #ifdef _WIN32
 #include <windows.h>
@@ -159,13 +161,17 @@ static void ltm_apply_decay(LongTermMemory* memory) {
         
         /* 极弱记忆自动清除 */
         if (rec->current_strength < 0.001f) {
-            memory_forget(memory->memory_system, rec->key);
-            if (i < memory->record_count - 1) {
-                memcpy(&memory->access_records[i], &memory->access_records[memory->record_count - 1],
-                       sizeof(LTMAccessRecord));
+            int forget_ret = memory_forget(memory->memory_system, rec->key);
+            /* P2修复: forget返回0或SELFLNN_ERROR_MEMORY_NOT_FOUND时表示底层记忆已不存在，
+             * 应同步移除access_record；其他错误码则保留记录待下次重试。 */
+            if (forget_ret == 0 || forget_ret == SELFLNN_ERROR_MEMORY_NOT_FOUND) {
+                if (i < memory->record_count - 1) {
+                    memcpy(&memory->access_records[i], &memory->access_records[memory->record_count - 1],
+                           sizeof(LTMAccessRecord));
+                }
+                memory->record_count--;
+                i--;
             }
-            memory->record_count--;
-            i--;
         }
     }
     memory->last_decay_time = now;
@@ -292,35 +298,68 @@ int long_term_memory_store(LongTermMemory* memory, const char* key,
     ltm_apply_decay(memory);
     ltm_consolidation_scan(memory);
     
-    /* F-007: 容量管理 */
-    if (memory->record_count >= memory->config.capacity) {
-        /* 找最弱的记忆驱逐 */
-        int victim = -1;
-        float weakest = 1.0f;
-        for (size_t i = 0; i < memory->record_count; i++) {
-            if (memory->access_records[i].current_strength < weakest) {
-                weakest = memory->access_records[i].current_strength;
-                victim = (int)i;
-            }
-        }
-        if (victim >= 0) {
-            memory_forget(memory->memory_system, memory->access_records[victim].key);
-            if ((size_t)victim < memory->record_count - 1) {
-                memcpy(&memory->access_records[victim],
-                       &memory->access_records[memory->record_count - 1], sizeof(LTMAccessRecord));
-            }
-            memory->record_count--;
-        }
-    }
-    
+    /* P1修复: 先存储再淘汰，避免存储失败时victim数据双向丢失 */
     int result = memory_store(memory->memory_system, key, data, data_size,
                               MEMORY_TYPE_LONG_TERM, strength);
     if (result == 0) {
+        /* 存储成功后，若容量超限则淘汰最弱记忆 */
+        if (memory->record_count >= memory->config.capacity) {
+            /* 找最弱的记忆驱逐 */
+            /* P1修复: weakest初始化为FLT_MAX而非1.0f。
+             * 原代码用1.0f做严格<比较，当所有记录的current_strength >= 1.0时
+             * victim保持-1，导致容量路径不淘汰(record_count持续增长)，
+             * overflow路径覆盖第一条记录(未必最弱)。 */
+            int victim = -1;
+            float weakest = FLT_MAX;
+            for (size_t i = 0; i < memory->record_count; i++) {
+                if (memory->access_records[i].current_strength < weakest) {
+                    weakest = memory->access_records[i].current_strength;
+                    victim = (int)i;
+                }
+            }
+            if (victim < 0) victim = 0;  /* 安全兜底: record_count>0时必然命中 */
+            if (victim >= 0) {
+                /* P2修复: 检查memory_forget返回值。若失败（键已被其他线程移除），
+                 * 不移除access_record、不递减record_count，避免底层记忆项与索引记录不同步。 */
+                int forget_ret = memory_forget(memory->memory_system, memory->access_records[victim].key);
+                /* P2修复: forget返回0表示成功移除，返回SELFLNN_ERROR_MEMORY_NOT_FOUND(-304)
+                 * 表示底层记忆项已被其他线程移除。两种情况都意味着底层已不存在该记忆，
+                 * 应同步移除access_record以保持索引与底层一致。仅其他错误码才不移除。 */
+                if (forget_ret == 0 || forget_ret == SELFLNN_ERROR_MEMORY_NOT_FOUND) {
+                    if ((size_t)victim < memory->record_count - 1) {
+                        memcpy(&memory->access_records[victim],
+                               &memory->access_records[memory->record_count - 1], sizeof(LTMAccessRecord));
+                    }
+                    memory->record_count--;
+                }
+            }
+        }
+        
         int idx = ltm_find_record(memory, key);
         uint64_t now = ltm_get_time_ms();
         if (idx < 0) {
-            idx = (int)memory->record_count;
-            memory->record_count++;
+            /* P1修复: 添加record_capacity边界检查，防止越界写入。
+             * 当forget持续失败（R10修复后forget失败不移除记录）时，
+             * record_count会持续增长，若无边界检查将导致access_records[idx]越界。
+             * 参照short_term.c的模式：容量未满则追加，已满则覆盖最弱记录。 */
+            if (memory->record_count < memory->record_capacity) {
+                /* 容量未满，追加新记录 */
+                idx = (int)memory->record_count;
+                memory->record_count++;
+            } else {
+                /* 容量已满，覆盖强度最弱的记录 */
+                /* P1修复: weakest初始化为FLT_MAX而非1.0f，确保能正确选出最弱记录 */
+                int victim = -1;
+                float weakest = FLT_MAX;
+                for (size_t i = 0; i < memory->record_count; i++) {
+                    if (memory->access_records[i].current_strength < weakest) {
+                        weakest = memory->access_records[i].current_strength;
+                        victim = (int)i;
+                    }
+                }
+                if (victim < 0) victim = 0;  /* 安全兜底 */
+                idx = victim;
+            }
         }
         LTMAccessRecord* rec = &memory->access_records[idx];
         strncpy(rec->key, key, sizeof(rec->key) - 1);

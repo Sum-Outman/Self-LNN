@@ -324,7 +324,10 @@ int slam_detect_loop_closure(SlamSystem* system, int frame_id, int* matched_fram
         int geo_ok = slam_verify_loop_geometric_8point(system, frame_id, cand_id,
                                                         &num_inliers, &inlier_ratio_val, F);
 
-        if (geo_ok && inlier_ratio_val > 0.3f) {
+        /* P1修复: 原代码用if(geo_ok && ...)判断，但slam_verify_loop_geometric_8point
+         * 返回-1表示错误时，-1在C中为真值，导致错误被当作成功。
+         * 改为geo_ok > 0明确要求返回正值（成功）才进入闭环确认逻辑。 */
+        if (geo_ok > 0 && inlier_ratio_val > 0.3f) {
             ilc->consecutive_detections++;
             ilc->detection_confidence = (float)ilc->consecutive_detections /
                                          (ilc->consecutive_detections + 5.0f);

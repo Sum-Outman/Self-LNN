@@ -15,6 +15,7 @@
 
 #include "selflnn/gpu/gpu_hardware_detect.h"
 #include "selflnn/utils/logging.h"
+#include "selflnn/utils/memory_utils.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -582,7 +583,7 @@ int gpu_hardware_detect_vendor(GpuVendor vendor, GpuHardwareInfo* info,
         return -1;
     }
 
-    GpuHardwareInfo* all_info = (GpuHardwareInfo*)calloc((size_t)max_devices, sizeof(GpuHardwareInfo));
+    GpuHardwareInfo* all_info = (GpuHardwareInfo*)safe_calloc((size_t)max_devices, sizeof(GpuHardwareInfo));
     if (!all_info) return -1;
 
     int total_found = 0;
@@ -598,7 +599,7 @@ int gpu_hardware_detect_vendor(GpuVendor vendor, GpuHardwareInfo* info,
         }
     }
 
-    free(all_info);
+    safe_free((void**)&all_info);
     return ret;
 }
 

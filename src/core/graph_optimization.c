@@ -1897,7 +1897,7 @@ int graph_execute_parallel(ComputationGraph* graph) {
     if (gi->sorted_count <= 0) return 0;
 
     /* 计算每个节点的拓扑深度（层级） */
-    int* depth = (int*)calloc((size_t)gi->sorted_count, sizeof(int));
+    int* depth = (int*)safe_calloc((size_t)gi->sorted_count, sizeof(int));
     if (!depth) return -1;
     int max_depth = 0;
     for (int i = 0; i < gi->sorted_count; i++) {
@@ -1922,8 +1922,8 @@ int graph_execute_parallel(ComputationGraph* graph) {
     }
 
     /* 统计每层节点数并分配任务数组 */
-    int* level_node_counts = (int*)calloc((size_t)(max_depth + 1), sizeof(int));
-    if (!level_node_counts) { free(depth); return -1; }
+    int* level_node_counts = (int*)safe_calloc((size_t)(max_depth + 1), sizeof(int));
+    if (!level_node_counts) { safe_free((void**)&depth); return -1; }
     for (int i = 0; i < gi->sorted_count; i++) {
         if (depth[i] >= 0 && !gi->sorted_nodes[i]->eliminated && !gi->sorted_nodes[i]->fused) {
             level_node_counts[depth[i]]++;
@@ -1940,7 +1940,7 @@ int graph_execute_parallel(ComputationGraph* graph) {
     tp_cfg.enable_work_stealing = 1;
 
     ThreadPool* pool = thread_pool_create(&tp_cfg);
-    if (!pool) { free(level_node_counts); free(depth); return graph_execute(graph); }
+    if (!pool) { safe_free((void**)&level_node_counts); safe_free((void**)&depth); return graph_execute(graph); }
 
     /* 按层级逐层并行执行 */
     volatile int error_flag = 0;
@@ -1950,7 +1950,7 @@ int graph_execute_parallel(ComputationGraph* graph) {
         if (level_node_counts[level] <= 0) continue;
 
         /* 收集本层任务 */
-        ParallelNodeTask* tasks = (ParallelNodeTask*)calloc((size_t)level_node_counts[level], sizeof(ParallelNodeTask));
+        ParallelNodeTask* tasks = (ParallelNodeTask*)safe_calloc((size_t)level_node_counts[level], sizeof(ParallelNodeTask));
         if (!tasks) { result = -1; break; }
 
         int task_idx = 0;
@@ -1977,12 +1977,12 @@ int graph_execute_parallel(ComputationGraph* graph) {
             result = -1;
         }
 
-        free(tasks);
+        safe_free((void**)&tasks);
     }
 
     thread_pool_free(pool);
-    free(level_node_counts);
-    free(depth);
+    safe_free((void**)&level_node_counts);
+    safe_free((void**)&depth);
 
     if (error_flag) return -1;
     return result;

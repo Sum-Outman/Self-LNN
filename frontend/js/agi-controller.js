@@ -329,7 +329,8 @@ class AGIController {
             case 'delete':
                 return await this._apiPost('/api/files/delete', { path: task.params.path });
             case 'list':
-                return await this._apiPost('/api/files/list', { path: task.params.path || '/' });
+                /* P1-9修复: 文件列表查询应为GET方法，_apiGet自动将params转为查询字符串 */
+                return await this._apiGet('/api/files/list', { path: task.params.path || '/' });
             default:
                 throw new Error('未知文件操作: ' + task.action);
         }

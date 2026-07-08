@@ -111,6 +111,9 @@ typedef struct {
     int island_count;                /* 岛屿数量 */
     int migration_interval;          /* 迁移间隔 */
     int migration_size;              /* 迁移大小 */
+    int parallel_evaluation;         /* P1修复: 并行评估开关(0=串行[默认], 1=并行。
+                                         * 并行模式下fitness_func必须线程安全，
+                                         * 因fitness_func将在多线程中被并发调用 */
 } EvolutionConfig;
 
 /* 演化统计 */

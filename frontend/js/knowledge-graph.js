@@ -111,6 +111,8 @@
 
     /* M-009修复: 添加destroy清理方法，页面离开时移除WS事件监听器 */
     function destroyKgWs() {
+        /* P1-2修复: ws变量原引用未定义的局部变量，改用全局SelfLnnWebSocket */
+        var ws = window.SelfLnnWebSocket;
         if (ws) {
             ws.off('knowledge_update', fetchKnowledgeFromBackend);
             ws.off('knowledge_added', fetchKnowledgeFromBackend);
@@ -287,7 +289,8 @@
     }
 
     function deleteEntry(id) {
-        window.SelfLnnApi.request('/knowledge/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ entry_id: id }) })
+        /* P1-8修复: /knowledge/delete → /kg/delete，匹配后端实际端点 */
+        window.SelfLnnApi.request('/kg/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ entry_id: id }) })
             .then(function(response) {
                 if (!response.ok) throw new Error('HTTP ' + response.status);
                 return response.json();
@@ -834,7 +837,8 @@
     function clearGraph() {
         if (confirm('确定要清空所有知识条目吗？')) {
             /* P0-C007修复: 添加Content-Type请求头，确保后端正确解析JSON body */
-            window.SelfLnnApi.request('/knowledge/delete', { 
+            /* P1-8修复: /knowledge/delete → /kg/delete，匹配后端实际端点 */
+            window.SelfLnnApi.request('/kg/delete', { 
                 method: 'POST', 
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ clear_all: true }) 
@@ -1094,7 +1098,8 @@
             var resp = await window.SelfLnnApi.request('/kg/sparql', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ query: queryEl.value.trim() })
+                /* P1-6修复: 后端字段名为 sparql，非 query */
+                body: JSON.stringify({ sparql: queryEl.value.trim() })
             });
             if (!resp.ok) throw new Error('HTTP ' + resp.status);
             var data = await resp.json();
@@ -1112,10 +1117,9 @@
         var topkEl = document.getElementById('kg-pagerank-topk');
         var topk = topkEl ? parseInt(topkEl.value) || 10 : 10;
         try {
-            var resp = await window.SelfLnnApi.request('/kg/pagerank', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ top_k: topk })
+            /* P1-7修复: kg/pagerank 后端为GET方法，移除请求体，top_k改为查询参数 */
+            var resp = await window.SelfLnnApi.request('/kg/pagerank?top_k=' + topk, {
+                method: 'GET'
             });
             if (!resp.ok) throw new Error('HTTP ' + resp.status);
             var data = await resp.json();
@@ -1183,7 +1187,8 @@
             var resp = await window.SelfLnnApi.request('/kg/path', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ from: fromVal, to: toVal, max_depth: 5 })
+                /* P1-5修复: 后端字段名为 source/target，非 from/to */
+                body: JSON.stringify({ source: fromVal, target: toVal, max_depth: 5 })
             });
             if (!resp.ok) throw new Error('HTTP ' + resp.status);
             var data = await resp.json();
@@ -1322,7 +1327,15 @@
         /* 清除resize监听器 */
         try { window.removeEventListener('resize', resizeCanvas); } catch(e) {}
         try { window.removeEventListener('resize', resize3D); } catch(e) {}
-        /* 清除DOM事件监听器 */
+        /* FE-007修复: 清理canvas上的所有事件监听器（mousedown/mousemove/mouseup/wheel/dblclick） */
+        if (canvas) {
+            try { canvas.removeEventListener('mousedown', onMouseDown); } catch(e) {}
+            try { canvas.removeEventListener('mousemove', onMouseMove); } catch(e) {}
+            try { canvas.removeEventListener('mouseup', onMouseUp); } catch(e) {}
+            try { canvas.removeEventListener('wheel', onWheel); } catch(e) {}
+            try { canvas.removeEventListener('dblclick', onDoubleClick); } catch(e) {}
+        }
+        /* 清除DOM事件监听器（WebGL 3D canvas等） */
         _kgCleanupList.forEach(function(entry) {
             try { entry.el.removeEventListener(entry.evt, entry.fn); } catch(e) {}
         });

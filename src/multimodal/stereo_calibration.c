@@ -475,6 +475,13 @@ int camera_calibrate_monocular(CameraCalibrator* calibrator,
 
     if (!calibrator->all_image_points || !calibrator->all_object_points)
     {
+        /* P0修复: 释放已分配的成员，防止内存泄漏。
+         * 场景: 第一处malloc成功、第二处失败时，已分配内存需释放。
+         * free(NULL)安全，故两处均释放无需判断。 */
+        free(calibrator->all_image_points);
+        calibrator->all_image_points = NULL;
+        free(calibrator->all_object_points);
+        calibrator->all_object_points = NULL;
         free(detected_counts);
         free(all_image_corners);
         free(all_object_corners);

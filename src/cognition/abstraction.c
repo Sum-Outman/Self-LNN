@@ -1525,7 +1525,12 @@ static int perform_analogical_reasoning(AbstractionSystem* system,
                                 cur = matched[next_j];
                             }
                         }
-                        free(visited_src); free(visited_tgt); free(slack); free(prev);
+                        /* P-AUDIT修复(COG-1): visited_src/visited_tgt/slack/prev由safe_calloc/malloc分配,
+                         * 必须用safe_free释放,原用free()导致堆损坏风险 */
+                        safe_free((void**)&visited_src);
+                        safe_free((void**)&visited_tgt);
+                        safe_free((void**)&slack);
+                        safe_free((void**)&prev);
                     }
                     
                     /* 提取最优匹配权重 */
@@ -1536,7 +1541,12 @@ static int perform_analogical_reasoning(AbstractionSystem* system,
                     mapping->mapping_size = min_size;
                 }
                 
-                free(matched); free(label_src); free(label_tgt); free(link);
+                /* P-AUDIT修复(COG-2): matched/label_src/label_tgt/link由safe_malloc/calloc分配,
+                 * 必须用safe_free释放,原用free()导致堆损坏风险 */
+                safe_free((void**)&matched);
+                safe_free((void**)&label_src);
+                safe_free((void**)&label_tgt);
+                safe_free((void**)&link);
             }
             
             mapping->similarity_score = similarity;

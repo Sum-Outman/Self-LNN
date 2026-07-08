@@ -763,7 +763,7 @@ static void cfc_depth_network_backward_spsa(CfcDepthNetwork* net,
     if (!net || !image || !ground_truth || !temp_output) return;
     if (!net->is_initialized || width <= 0 || height <= 0) return;
 
-    int num_pixels = width * height;
+    int num_pixels = (size_t)width * (size_t)height;
     int hid = net->hidden_dim;
     int patch_dim = net->patch_dim;
 
@@ -1081,7 +1081,7 @@ int depth_estimate_monocular(DepthEstimator* estimator,
     PerfTimer timer;
     perf_timer_start(&timer);
 
-    size_t image_size = (size_t)(width * height);
+    size_t image_size = (size_t)width * (size_t)height;
 
     if (!result->depth_map) {
         result->depth_map = (float*)safe_malloc(image_size * sizeof(float));
@@ -1139,7 +1139,7 @@ int depth_estimate_monocular(DepthEstimator* estimator,
         }
 
         float max_gradient = 0.0f;
-        for (int i = 0; i < width * height; i++) {
+        for (int i = 0; i < (size_t)width * (size_t)height; i++) {
             float gx = gradient_x[i];
             float gy = gradient_y[i];
             float gradient_magnitude = sqrtf(gx * gx + gy * gy);
@@ -1294,7 +1294,7 @@ int depth_estimate_monocular(DepthEstimator* estimator,
     result->depth_accuracy = 0.0f;
 
     if (estimator->config.output_format == 1 || estimator->config.output_format == 2) {
-        size_t max_points = (size_t)(width * height);
+        size_t max_points = (size_t)width * (size_t)height;
         result->point_cloud = (float*)safe_malloc(max_points * 3 * sizeof(float));
         if (result->point_cloud) {
             CameraCalibration temp_calib;
@@ -1775,7 +1775,7 @@ void depth_estimator_reset(DepthEstimator* estimator) {
 static int stereo_rectify(const DepthEstimator* estimator,
                          const float* left_image, const float* right_image,
                          int width, int height, int channels) {
-    size_t required_size = (size_t)(width * height * channels);
+    size_t required_size = (size_t)width * (size_t)height * channels;
     if (estimator->buffer_size < required_size) {
         ((DepthEstimator*)estimator)->buffer_size = required_size;
         safe_free((void**)&((DepthEstimator*)estimator)->rectified_left);
@@ -1836,9 +1836,9 @@ static int detect_chessboard_corners(const float* image, int width, int height,
     // 完整角点检测实现，基于梯度分析和棋盘格模式识别
     
     // 步骤1：计算图像梯度（Sobel算子）
-    float* gradient_x = (float*)safe_malloc(width * height * sizeof(float));
-    float* gradient_y = (float*)safe_malloc(width * height * sizeof(float));
-    float* gradient_magnitude = (float*)safe_malloc(width * height * sizeof(float));
+    float* gradient_x = (float*)safe_malloc((size_t)width * (size_t)height * sizeof(float));
+    float* gradient_y = (float*)safe_malloc((size_t)width * (size_t)height * sizeof(float));
+    float* gradient_magnitude = (float*)safe_malloc((size_t)width * (size_t)height * sizeof(float));
     
     if (!gradient_x || !gradient_y || !gradient_magnitude) {
         safe_free((void**)&gradient_x);
@@ -1867,7 +1867,7 @@ static int detect_chessboard_corners(const float* image, int width, int height,
     }
     
     // 步骤2：寻找局部梯度极大值点（可能的角点候选）
-    int max_candidates = width * height / 16;  // 最多候选点数量
+    int max_candidates = (size_t)width * (size_t)height / 16;  // 最多候选点数量
     int* candidate_indices = (int*)safe_malloc(max_candidates * sizeof(int));
     float* candidate_scores = (float*)safe_malloc(max_candidates * sizeof(float));
     
@@ -1911,7 +1911,7 @@ static int detect_chessboard_corners(const float* image, int width, int height,
     }
     
     // 步骤3：完整的Harris角点响应函数计算（ ）
-    float* corner_response = (float*)safe_malloc(width * height * sizeof(float));
+    float* corner_response = (float*)safe_malloc((size_t)width * (size_t)height * sizeof(float));
     if (!corner_response) {
         safe_free((void**)&gradient_x);
         safe_free((void**)&gradient_y);
@@ -1921,7 +1921,7 @@ static int detect_chessboard_corners(const float* image, int width, int height,
         return 0;
     }
     
-    memset(corner_response, 0, width * height * sizeof(float));
+    memset(corner_response, 0, (size_t)width * (size_t)height * sizeof(float));
     
     // 预计算高斯权重矩阵（5x5窗口，sigma=1.5）
     float gaussian_weights[5][5];
@@ -2016,9 +2016,9 @@ static int detect_chessboard_corners(const float* image, int width, int height,
     
     // 步骤3.1：非极大值抑制（NMS）以提高角点质量
     // 在3x3邻域内进行非极大值抑制
-    float* nms_response = (float*)safe_malloc(width * height * sizeof(float));
+    float* nms_response = (float*)safe_malloc((size_t)width * (size_t)height * sizeof(float));
     if (nms_response) {
-        memcpy(nms_response, corner_response, width * height * sizeof(float));
+        memcpy(nms_response, corner_response, (size_t)width * (size_t)height * sizeof(float));
         
         for (int i = 0; i < num_candidates; i++) {
             int idx = candidate_indices[i];
@@ -2047,7 +2047,7 @@ static int detect_chessboard_corners(const float* image, int width, int height,
         }
         
         // 使用NMS后的响应
-        memcpy(corner_response, nms_response, width * height * sizeof(float));
+        memcpy(corner_response, nms_response, (size_t)width * (size_t)height * sizeof(float));
         safe_free((void**)&nms_response);
     }
     
@@ -3303,6 +3303,8 @@ static void calibrate_camera_intrinsic(const float** images, int num_images,
                 float cam_y = R[3] * X + R[4] * Y + R[5] * Z + t[1];
                 float cam_z = R[6] * X + R[7] * Y + R[8] * Z + t[2];
 
+                /* P1修复: 防止cam_z为零导致除零产生Inf/NaN，跳过该点 */
+                if (fabsf(cam_z) < 1e-6f) continue;
                 float xn = cam_x / cam_z;
                 float yn = cam_y / cam_z;
 
@@ -3589,6 +3591,13 @@ static void calibrate_stereo_extrinsic(const float** left_images,
         return;
     }
     
+    /* P1修复: 验证相机内参fx/fy非零，防止后续归一化与基线估计除零 */
+    if (left_calib->fx <= 0.0f || left_calib->fy <= 0.0f ||
+        right_calib->fx <= 0.0f || right_calib->fy <= 0.0f) {
+        stereo_calib->is_calibrated = 0;
+        return;
+    }
+
     // 复制左右相机内参
     stereo_calib->left_intrinsics.fx = left_calib->fx;
     stereo_calib->left_intrinsics.fy = left_calib->fy;
@@ -4368,7 +4377,7 @@ static int compute_disparity_ncc(const DepthEstimator* estimator,
     }
     
     // 初始化视差图为无效值
-    for (int i = 0; i < width * height; i++) {
+    for (int i = 0; i < (size_t)width * (size_t)height; i++) {
         disparity[i] = -1.0f;
     }
     
@@ -4454,7 +4463,7 @@ int depth_estimate_stereo(DepthEstimator* estimator,
     perf_timer_start(&timer);
     
     // 分配结果缓冲区
-    size_t image_size = (size_t)(width * height);
+    size_t image_size = (size_t)width * (size_t)height;
     if (!result->depth_map) {
         result->depth_map = (float*)safe_malloc(image_size * sizeof(float));
         SELFLNN_CHECK_MEMORY(result->depth_map, "分配深度图缓冲区失败");
@@ -4589,7 +4598,7 @@ int depth_estimate_stereo(DepthEstimator* estimator,
     
     // 如果需要点云
     if (estimator->config.output_format == 1 || estimator->config.output_format == 2) {
-        size_t max_points = width * height;
+        size_t max_points = (size_t)width * (size_t)height;
         result->point_cloud = (float*)safe_malloc(max_points * 3 * sizeof(float));
         if (result->point_cloud) {
             // 创建临时CameraCalibration结构体，从left_intrinsics复制数据
@@ -4724,6 +4733,11 @@ int depth_estimate_convert_to_point_cloud(const float* depth_map, int width, int
     SELFLNN_CHECK(width > 0 && height > 0, SELFLNN_ERROR_INVALID_ARGUMENT,
                  "图像尺寸无效: %dx%d", width, height);
     
+    /* P1修复: 验证相机内参fx/fy非零，防止点云转换时除零 */
+    SELFLNN_CHECK(calibration->fx > 0.0f && calibration->fy > 0.0f,
+                 SELFLNN_ERROR_INVALID_ARGUMENT,
+                 "相机内参fx/fy无效: fx=%f, fy=%f", calibration->fx, calibration->fy);
+
     // 相机参数
     float fx = calibration->fx;
     float fy = calibration->fy;
@@ -4793,17 +4807,22 @@ static int compute_disparity_bm(const DepthEstimator* estimator,
                                const float* left_image, const float* right_image,
                                int width, int height, float* disparity) {
     // 参数检查
-    if (!estimator || !left_image || !right_image || !disparity) {
+    if (!estimator || !left_image || !right_image || !disparity ||
+        width <= 0 || height <= 0) {
         return SELFLNN_ERROR_INVALID_ARGUMENT;
     }
-    
+
     // 算法参数
     int window_size = estimator->stereo_matcher.window_size;
-    int half_window = window_size / 2;
     int disparity_range = estimator->stereo_matcher.disparity_range;
+    // 设置默认值（与NCC版本保持一致）
+    if (window_size <= 0) window_size = 7;
+    if (disparity_range <= 0) disparity_range = 64;
+    if (window_size % 2 == 0) window_size++;  // 确保窗口大小为奇数
+    int half_window = window_size / 2;
     
     // 初始化视差图为无效值
-    for (int i = 0; i < width * height; i++) {
+    for (int i = 0; i < (size_t)width * (size_t)height; i++) {
         disparity[i] = -1.0f;
     }
     
@@ -5168,7 +5187,7 @@ int depth_stereo_disparity_to_depth(const float* disparity_map,
     if (baseline <= 0.0f) baseline = 0.1f;
     if (focal_length <= 0.0f) focal_length = (float)width;
 
-    for (int i = 0; i < width * height; i++) {
+    for (int i = 0; i < (size_t)width * (size_t)height; i++) {
         float d = disparity_map[i];
         if (d > 1e-6f) {
             depth_map[i] = focal_length * baseline / d;
@@ -5288,7 +5307,7 @@ static int compute_disparity_sgbm(const DepthEstimator* estimator,
     int disparity_range = max_disparity - min_disparity;
     
     // 分配代价卷缓冲区 [disparity_range x height x width]
-    float* cost_volume = (float*)safe_calloc(disparity_range * height * width, sizeof(float));
+    float* cost_volume = (float*)safe_calloc(disparity_range * (size_t)height * (size_t)width, sizeof(float));
     if (!cost_volume) {
         return SELFLNN_ERROR_OUT_OF_MEMORY;
     }
@@ -5349,7 +5368,7 @@ static int compute_disparity_sgbm(const DepthEstimator* estimator,
     };
     
     // 聚合代价卷
-    float* aggregated_cost = (float*)safe_calloc(disparity_range * height * width, sizeof(float));
+    float* aggregated_cost = (float*)safe_calloc(disparity_range * (size_t)height * (size_t)width, sizeof(float));
     if (!aggregated_cost) {
         safe_free((void**)&left_patch);
         safe_free((void**)&right_patch);
@@ -5358,7 +5377,7 @@ static int compute_disparity_sgbm(const DepthEstimator* estimator,
     }
     
     // 初始化聚合代价
-    for (int i = 0; i < disparity_range * height * width; i++) {
+    for (int i = 0; i < disparity_range * (size_t)height * (size_t)width; i++) {
         aggregated_cost[i] = cost_volume[i];
     }
     
@@ -5604,14 +5623,14 @@ static int apply_bilateral_filter(float* image, int width, int height,
     }
     
     // 创建输出图像缓冲区
-    float* output = (float*)safe_malloc(width * height * sizeof(float));
+    float* output = (float*)safe_malloc((size_t)width * (size_t)height * sizeof(float));
     if (!output) {
         safe_free((void**)&space_weight);
         return -1;
     }
     
     // 复制输入图像到输出（边缘区域保持不变）
-    for (int i = 0; i < width * height; i++) {
+    for (int i = 0; i < (size_t)width * (size_t)height; i++) {
         output[i] = image[i];
     }
     
@@ -5652,7 +5671,7 @@ static int apply_bilateral_filter(float* image, int width, int height,
     }
     
     // 复制回原图像
-    for (int i = 0; i < width * height; i++) {
+    for (int i = 0; i < (size_t)width * (size_t)height; i++) {
         image[i] = output[i];
     }
     
@@ -5680,13 +5699,13 @@ static int apply_median_filter(float* image, int width, int height, int kernel_s
     int window_size = kernel_size * kernel_size;
     
     // 创建输出图像缓冲区
-    float* output = (float*)safe_malloc(width * height * sizeof(float));
+    float* output = (float*)safe_malloc((size_t)width * (size_t)height * sizeof(float));
     if (!output) {
         return -1;
     }
     
     // 复制输入图像到输出（边缘区域保持不变）
-    for (int i = 0; i < width * height; i++) {
+    for (int i = 0; i < (size_t)width * (size_t)height; i++) {
         output[i] = image[i];
     }
     
@@ -5728,7 +5747,7 @@ static int apply_median_filter(float* image, int width, int height, int kernel_s
     }
     
     // 复制回原图像
-    for (int i = 0; i < width * height; i++) {
+    for (int i = 0; i < (size_t)width * (size_t)height; i++) {
         image[i] = output[i];
     }
     
@@ -5781,14 +5800,14 @@ static int apply_gaussian_filter(float* image, int width, int height,
     }
     
     // 创建输出图像缓冲区
-    float* output = (float*)safe_malloc(width * height * sizeof(float));
+    float* output = (float*)safe_malloc((size_t)width * (size_t)height * sizeof(float));
     if (!output) {
         safe_free((void**)&kernel);
         return -1;
     }
     
     // 复制输入图像到输出（边缘区域保持不变）
-    for (int i = 0; i < width * height; i++) {
+    for (int i = 0; i < (size_t)width * (size_t)height; i++) {
         output[i] = image[i];
     }
     
@@ -5810,7 +5829,7 @@ static int apply_gaussian_filter(float* image, int width, int height,
     }
     
     // 复制回原图像
-    for (int i = 0; i < width * height; i++) {
+    for (int i = 0; i < (size_t)width * (size_t)height; i++) {
         image[i] = output[i];
     }
     
@@ -5920,7 +5939,8 @@ static int disparity_to_depth(const DepthEstimator* estimator,
  */
 static inline float* cnn_safe_calloc(size_t count) {
     if (count == 0) return NULL;
-    float* ptr = (float*)malloc(count * sizeof(float));
+    /* P1修复: 使用safe_malloc替代raw malloc，统一内存分配失败处理和跟踪 */
+    float* ptr = (float*)safe_malloc(count * sizeof(float));
     if (ptr) memset(ptr, 0, count * sizeof(float));
     return ptr;
 }
@@ -6202,20 +6222,21 @@ static void cnn_depth_network_init(CnnDepthNetwork* net) {
 static void cnn_depth_network_free(CnnDepthNetwork* net) {
     if (!net) return;
 
-    if (net->enc_conv1_w) { free(net->enc_conv1_w); net->enc_conv1_w = NULL; }
-    if (net->enc_conv1_b) { free(net->enc_conv1_b); net->enc_conv1_b = NULL; }
-    if (net->enc_conv2_w) { free(net->enc_conv2_w); net->enc_conv2_w = NULL; }
-    if (net->enc_conv2_b) { free(net->enc_conv2_b); net->enc_conv2_b = NULL; }
-    if (net->enc_conv3_w) { free(net->enc_conv3_w); net->enc_conv3_w = NULL; }
-    if (net->enc_conv3_b) { free(net->enc_conv3_b); net->enc_conv3_b = NULL; }
-    if (net->bottleneck_w) { free(net->bottleneck_w); net->bottleneck_w = NULL; }
-    if (net->bottleneck_b) { free(net->bottleneck_b); net->bottleneck_b = NULL; }
-    if (net->dec_conv1_w) { free(net->dec_conv1_w); net->dec_conv1_w = NULL; }
-    if (net->dec_conv1_b) { free(net->dec_conv1_b); net->dec_conv1_b = NULL; }
-    if (net->dec_conv2_w) { free(net->dec_conv2_w); net->dec_conv2_w = NULL; }
-    if (net->dec_conv2_b) { free(net->dec_conv2_b); net->dec_conv2_b = NULL; }
-    if (net->dec_conv3_w) { free(net->dec_conv3_w); net->dec_conv3_w = NULL; }
-    if (net->dec_conv3_b) { free(net->dec_conv3_b); net->dec_conv3_b = NULL; }
+    /* P1修复: 使用safe_free释放cnn_safe_calloc(内部safe_malloc)分配的内存 */
+    safe_free((void**)&net->enc_conv1_w);
+    safe_free((void**)&net->enc_conv1_b);
+    safe_free((void**)&net->enc_conv2_w);
+    safe_free((void**)&net->enc_conv2_b);
+    safe_free((void**)&net->enc_conv3_w);
+    safe_free((void**)&net->enc_conv3_b);
+    safe_free((void**)&net->bottleneck_w);
+    safe_free((void**)&net->bottleneck_b);
+    safe_free((void**)&net->dec_conv1_w);
+    safe_free((void**)&net->dec_conv1_b);
+    safe_free((void**)&net->dec_conv2_w);
+    safe_free((void**)&net->dec_conv2_b);
+    safe_free((void**)&net->dec_conv3_w);
+    safe_free((void**)&net->dec_conv3_b);
 
     net->is_initialized = 0;
     net->weights_loaded = 0;
@@ -6250,32 +6271,35 @@ static void cnn_depth_network_forward(CnnDepthNetwork* net,
     /* 步骤0: 缩放输入图像到224×224×3 */
     size_t input_size = (size_t)dst_w * dst_h * dst_c;
     float* resized_input = cnn_safe_calloc(input_size);
+    /* P1修复: 分配失败时立即返回，防止后续操作解引用NULL */
+    if (!resized_input) return;
 
     if (c == 1) {
         /* 灰度图扩展为3通道 */
         float* gray_resized = cnn_safe_calloc((size_t)dst_w * dst_h);
+        if (!gray_resized) { safe_free((void**)&resized_input); return; }
         cnn_depth_resize_bilinear(image, h, w, 1, dst_h, dst_w, gray_resized);
         for (int i = 0; i < dst_w * dst_h; i++) {
             resized_input[i * 3 + 0] = gray_resized[i];
             resized_input[i * 3 + 1] = gray_resized[i];
             resized_input[i * 3 + 2] = gray_resized[i];
         }
-        free(gray_resized);
+        safe_free((void**)&gray_resized);
     } else if (c == 3) {
         cnn_depth_resize_bilinear(image, h, w, c, dst_h, dst_w, resized_input);
     } else {
         /* 多通道：取前3通道 */
         float* temp = cnn_safe_calloc((size_t)w * h * 3);
+        /* P1修复: 分配失败时清理并返回 */
+        if (!temp) { safe_free((void**)&resized_input); return; }
         for (int i = 0; i < w * h; i++) {
             temp[i * 3 + 0] = image[i * c + 0];
             temp[i * 3 + 1] = (c > 1) ? image[i * c + 1] : image[i * c + 0];
             temp[i * 3 + 2] = (c > 2) ? image[i * c + 2] : image[i * c + 0];
         }
         cnn_depth_resize_bilinear(temp, h, w, 3, dst_h, dst_w, resized_input);
-        free(temp);
+        safe_free((void**)&temp);
     }
-
-    if (!resized_input) return;
 
     /* 输入归一化: [0,255] → [0,1] 范围 */
     /* 注意: 深度估计输入image为归一化后的像素值，已在[0,1]范围不做额外处理 */
@@ -6286,6 +6310,8 @@ static void cnn_depth_network_forward(CnnDepthNetwork* net,
     int e1c = 32;
     int e1h, e1w;
     float* enc1_out = cnn_safe_calloc((size_t)dst_w * dst_h * e1c);
+    /* P1修复: 分配失败时清理已分配缓冲区并返回 */
+    if (!enc1_out) { safe_free((void**)&resized_input); return; }
     cnn_depth_conv2d(resized_input, dst_h, dst_w, dst_c,
                      net->enc_conv1_w, net->enc_conv1_b,
                      3, 3, e1c, 1, 1,
@@ -6296,12 +6322,14 @@ static void cnn_depth_network_forward(CnnDepthNetwork* net,
     /* 池化: 224×224×32 → 112×112×32 */
     int p1h, p1w;
     float* pool1_out = cnn_safe_calloc((size_t)(dst_w / 2) * (dst_h / 2) * e1c);
+    if (!pool1_out) { safe_free((void**)&resized_input); safe_free((void**)&enc1_skip); return; }
     cnn_depth_maxpool2d(enc1_out, e1h, e1w, e1c, 2, 2, pool1_out, &p1h, &p1w);
 
     /* 编码器第2层: Conv2(3×3, 32→64), pad=1, stride=1 → ReLU → 112×112×64 */
     int e2c = 64;
     int e2h, e2w;
     float* enc2_out = cnn_safe_calloc((size_t)p1w * p1h * e2c);
+    if (!enc2_out) { safe_free((void**)&resized_input); safe_free((void**)&enc1_skip); safe_free((void**)&pool1_out); return; }
     cnn_depth_conv2d(pool1_out, p1h, p1w, e1c,
                      net->enc_conv2_w, net->enc_conv2_b,
                      3, 3, e2c, 1, 1,
@@ -6312,12 +6340,14 @@ static void cnn_depth_network_forward(CnnDepthNetwork* net,
     /* 池化: 112×112×64 → 56×56×64 */
     int p2h, p2w;
     float* pool2_out = cnn_safe_calloc((size_t)(e2w / 2) * (e2h / 2) * e2c);
+    if (!pool2_out) { safe_free((void**)&resized_input); safe_free((void**)&enc1_skip); safe_free((void**)&pool1_out); safe_free((void**)&enc2_skip); return; }
     cnn_depth_maxpool2d(enc2_out, e2h, e2w, e2c, 2, 2, pool2_out, &p2h, &p2w);
 
     /* 编码器第3层: Conv3(3×3, 64→128), pad=1, stride=1 → ReLU → 56×56×128 */
     int e3c = 128;
     int e3h, e3w;
     float* enc3_out = cnn_safe_calloc((size_t)p2w * p2h * e3c);
+    if (!enc3_out) { safe_free((void**)&resized_input); safe_free((void**)&enc1_skip); safe_free((void**)&pool1_out); safe_free((void**)&enc2_skip); safe_free((void**)&pool2_out); return; }
     cnn_depth_conv2d(pool2_out, p2h, p2w, e2c,
                      net->enc_conv3_w, net->enc_conv3_b,
                      3, 3, e3c, 1, 1,
@@ -6328,6 +6358,7 @@ static void cnn_depth_network_forward(CnnDepthNetwork* net,
     /* 池化: 56×56×128 → 28×28×128 (瓶颈) */
     int p3h, p3w;
     float* bottleneck_in = cnn_safe_calloc((size_t)(e3w / 2) * (e3h / 2) * e3c);
+    if (!bottleneck_in) { safe_free((void**)&resized_input); safe_free((void**)&enc1_skip); safe_free((void**)&pool1_out); safe_free((void**)&enc2_skip); safe_free((void**)&pool2_out); safe_free((void**)&enc3_skip); return; }
     cnn_depth_maxpool2d(enc3_out, e3h, e3w, e3c, 2, 2, bottleneck_in, &p3h, &p3w);
 
     /* ========== 瓶颈层 ========== */
@@ -6335,6 +6366,8 @@ static void cnn_depth_network_forward(CnnDepthNetwork* net,
     int bnc = 128;
     int bnh, bnw;
     float* bottleneck_out = cnn_safe_calloc((size_t)p3w * p3h * bnc);
+    /* P1修复: 分配失败时清理所有已分配缓冲区并返回 */
+    if (!bottleneck_out) { safe_free((void**)&resized_input); safe_free((void**)&enc1_skip); safe_free((void**)&pool1_out); safe_free((void**)&enc2_skip); safe_free((void**)&pool2_out); safe_free((void**)&enc3_skip); safe_free((void**)&bottleneck_in); return; }
     cnn_depth_conv2d(bottleneck_in, p3h, p3w, e3c,
                      net->bottleneck_w, net->bottleneck_b,
                      3, 3, bnc, 1, 1,
@@ -6342,10 +6375,11 @@ static void cnn_depth_network_forward(CnnDepthNetwork* net,
     cnn_depth_relu(bottleneck_out, bnh * bnw * bnc);
 
     /* 释放不再需要的中间缓冲区 */
-    free(resized_input);
-    free(pool1_out);
-    free(pool2_out);
-    free(bottleneck_in);
+    safe_free((void**)&resized_input);
+    safe_free((void**)&pool1_out);
+    safe_free((void**)&pool2_out);
+    safe_free((void**)&bottleneck_in);
+    /* 此处存活: enc1_skip, enc2_skip, enc3_skip, bottleneck_out */
 
     /* ========== 解码器阶段 ========== */
 
@@ -6354,12 +6388,14 @@ static void cnn_depth_network_forward(CnnDepthNetwork* net,
      *              Conv(3×3, 256→64), pad=1, stride=1 → ReLU → 56×56×64 */
     int u1h, u1w;
     float* up1 = cnn_safe_calloc((size_t)bnw * 2 * bnh * 2 * bnc);
+    if (!up1) { safe_free((void**)&enc1_skip); safe_free((void**)&enc2_skip); safe_free((void**)&enc3_skip); safe_free((void**)&bottleneck_out); return; }
     cnn_depth_upsample2d(bottleneck_out, bnh, bnw, bnc, 2, up1, &u1h, &u1w);
 
     /* Concat: up1(56×56×128) + enc3_skip(56×56×128) = 56×56×256 */
     int concat1_len_per_pixel = bnc + e3c;        /* 128 + 128 = 256 */
     int concat1_total = u1h * u1w * concat1_len_per_pixel;
     float* concat1 = cnn_safe_calloc((size_t)concat1_total);
+    if (!concat1) { safe_free((void**)&enc1_skip); safe_free((void**)&enc2_skip); safe_free((void**)&enc3_skip); safe_free((void**)&bottleneck_out); safe_free((void**)&up1); return; }
     {
         int pixel_count = u1h * u1w;
         for (int i = 0; i < pixel_count; i++) {
@@ -6369,29 +6405,35 @@ static void cnn_depth_network_forward(CnnDepthNetwork* net,
                    enc3_skip + i * e3c, (size_t)e3c * sizeof(float));
         }
     }
-    free(up1);
+    safe_free((void**)&up1);
+    /* 此处存活: enc1_skip, enc2_skip, enc3_skip, bottleneck_out, concat1 */
 
     int d1c = 64;
     int d1h, d1w;
     float* dec1_out = cnn_safe_calloc((size_t)u1w * u1h * d1c);
+    if (!dec1_out) { safe_free((void**)&enc1_skip); safe_free((void**)&enc2_skip); safe_free((void**)&enc3_skip); safe_free((void**)&bottleneck_out); safe_free((void**)&concat1); return; }
     cnn_depth_conv2d(concat1, u1h, u1w, concat1_len_per_pixel,
                      net->dec_conv1_w, net->dec_conv1_b,
                      3, 3, d1c, 1, 1,
                      dec1_out, &d1h, &d1w);
     cnn_depth_relu(dec1_out, d1h * d1w * d1c);
-    free(concat1);
+    safe_free((void**)&concat1);
+    /* 此处存活: enc1_skip, enc2_skip, enc3_skip, bottleneck_out, dec1_out */
 
     /* 解码器第2层: UpSample(56×56×64 → 112×112×64) +
      *              Concat(Skip2:112×112×64) = 112×112×128 +
      *              Conv(3×3, 128→32), pad=1, stride=1 → ReLU → 112×112×32 */
     int u2h, u2w;
     float* up2 = cnn_safe_calloc((size_t)d1w * 2 * d1h * 2 * d1c);
+    if (!up2) { safe_free((void**)&enc1_skip); safe_free((void**)&enc2_skip); safe_free((void**)&enc3_skip); safe_free((void**)&bottleneck_out); safe_free((void**)&dec1_out); return; }
     cnn_depth_upsample2d(dec1_out, d1h, d1w, d1c, 2, up2, &u2h, &u2w);
-    free(dec1_out);
+    safe_free((void**)&dec1_out);
+    /* 此处存活: enc1_skip, enc2_skip, enc3_skip, bottleneck_out, up2 */
 
     int concat2_len_per_pixel = d1c + e2c;        /* 64 + 64 = 128 */
     int concat2_total = u2h * u2w * concat2_len_per_pixel;
     float* concat2 = cnn_safe_calloc((size_t)concat2_total);
+    if (!concat2) { safe_free((void**)&enc1_skip); safe_free((void**)&enc2_skip); safe_free((void**)&enc3_skip); safe_free((void**)&bottleneck_out); safe_free((void**)&up2); return; }
     {
         int pixel_count = u2h * u2w;
         for (int i = 0; i < pixel_count; i++) {
@@ -6401,30 +6443,36 @@ static void cnn_depth_network_forward(CnnDepthNetwork* net,
                    enc2_skip + i * e2c, (size_t)e2c * sizeof(float));
         }
     }
-    free(up2);
-    free(enc2_skip);
+    safe_free((void**)&up2);
+    safe_free((void**)&enc2_skip);
+    /* 此处存活: enc1_skip, enc3_skip, bottleneck_out, concat2 */
 
     int d2c = 32;
     int d2h, d2w;
     float* dec2_out = cnn_safe_calloc((size_t)u2w * u2h * d2c);
+    if (!dec2_out) { safe_free((void**)&enc1_skip); safe_free((void**)&enc3_skip); safe_free((void**)&bottleneck_out); safe_free((void**)&concat2); return; }
     cnn_depth_conv2d(concat2, u2h, u2w, concat2_len_per_pixel,
                      net->dec_conv2_w, net->dec_conv2_b,
                      3, 3, d2c, 1, 1,
                      dec2_out, &d2h, &d2w);
     cnn_depth_relu(dec2_out, d2h * d2w * d2c);
-    free(concat2);
+    safe_free((void**)&concat2);
+    /* 此处存活: enc1_skip, enc3_skip, bottleneck_out, dec2_out */
 
     /* 解码器第3层: UpSample(112×112×32 → 224×224×32) +
      *              Concat(Skip1:224×224×32) = 224×224×64 +
      *              Conv(3×3, 64→1), pad=1, stride=1 → Sigmoid → 224×224×1 */
     int u3h, u3w;
     float* up3 = cnn_safe_calloc((size_t)d2w * 2 * d2h * 2 * d2c);
+    if (!up3) { safe_free((void**)&enc1_skip); safe_free((void**)&enc3_skip); safe_free((void**)&bottleneck_out); safe_free((void**)&dec2_out); return; }
     cnn_depth_upsample2d(dec2_out, d2h, d2w, d2c, 2, up3, &u3h, &u3w);
-    free(dec2_out);
+    safe_free((void**)&dec2_out);
+    /* 此处存活: enc1_skip, enc3_skip, bottleneck_out, up3 */
 
     int concat3_len_per_pixel = d2c + e1c;        /* 32 + 32 = 64 */
     int concat3_total = u3h * u3w * concat3_len_per_pixel;
     float* concat3 = cnn_safe_calloc((size_t)concat3_total);
+    if (!concat3) { safe_free((void**)&enc1_skip); safe_free((void**)&enc3_skip); safe_free((void**)&bottleneck_out); safe_free((void**)&up3); return; }
     {
         int pixel_count = u3h * u3w;
         for (int i = 0; i < pixel_count; i++) {
@@ -6434,28 +6482,34 @@ static void cnn_depth_network_forward(CnnDepthNetwork* net,
                    enc1_skip + i * e1c, (size_t)e1c * sizeof(float));
         }
     }
-    free(up3);
-    free(enc1_skip);
+    safe_free((void**)&up3);
+    safe_free((void**)&enc1_skip);
+    /* 此处存活: enc3_skip, bottleneck_out, concat3 */
 
     int d3c = 1;
     int d3h, d3w;
     float* depth_224 = cnn_safe_calloc((size_t)u3w * u3h * d3c);
+    if (!depth_224) { safe_free((void**)&enc3_skip); safe_free((void**)&bottleneck_out); safe_free((void**)&concat3); return; }
     cnn_depth_conv2d(concat3, u3h, u3w, concat3_len_per_pixel,
                      net->dec_conv3_w, net->dec_conv3_b,
                      3, 3, d3c, 1, 1,
                      depth_224, &d3h, &d3w);
     cnn_depth_sigmoid(depth_224, d3h * d3w * d3c);
-    free(concat3);
+    safe_free((void**)&concat3);
+    /* 此处存活: enc3_skip, bottleneck_out, depth_224 */
 
     /* ========== 输出: 缩放回原始尺寸 ========== */
     /* 将224×224深度图双线性缩放回原始w×h */
     float* depth_resized = cnn_safe_calloc((size_t)w * h);
+    if (!depth_resized) { safe_free((void**)&enc3_skip); safe_free((void**)&bottleneck_out); safe_free((void**)&depth_224); return; }
     cnn_depth_resize_bilinear(depth_224, d3h, d3w, 1, h, w, depth_resized);
 
     memcpy(depth_map, depth_resized, (size_t)w * h * sizeof(float));
 
-    free(depth_224);
-    free(depth_resized);
+    safe_free((void**)&depth_224);
+    safe_free((void**)&depth_resized);
+    safe_free((void**)&enc3_skip);
+    safe_free((void**)&bottleneck_out);
 }
 
 /* ================================================================
@@ -6659,9 +6713,14 @@ int de_load_monocular_model(DepthEstimator* estimator, const char* filepath) {
 
     /* 读取网络配置 */
     int saved_w, saved_h, saved_c;
-    fread(&saved_w, sizeof(int), 1, fp);
-    fread(&saved_h, sizeof(int), 1, fp);
-    fread(&saved_c, sizeof(int), 1, fp);
+    if (fread(&saved_w, sizeof(int), 1, fp) != 1 ||
+        fread(&saved_h, sizeof(int), 1, fp) != 1 ||
+        fread(&saved_c, sizeof(int), 1, fp) != 1) {
+        fclose(fp);
+        selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                              "读取CNN网络配置失败");
+        return -1;
+    }
 
     if (saved_w != CNN_DEPTH_INPUT_W || saved_h != CNN_DEPTH_INPUT_H || saved_c != CNN_DEPTH_CHANNELS) {
         fclose(fp);
@@ -6682,31 +6741,33 @@ int de_load_monocular_model(DepthEstimator* estimator, const char* filepath) {
         return -1;
     }
 
-    /* 按顺序读取所有权重 */
-    size_t read_result;
+    /* P1修复: 检查每个fread返回值，截断/损坏文件时拒绝加载权重 */
+    #define CNN_READ_FLOATS(ptr, count, name) \
+        do { \
+            if (fread((ptr), sizeof(float), (size_t)(count), fp) != (size_t)(count)) { \
+                fclose(fp); \
+                selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__, \
+                                      "读取%s权重失败", (name)); \
+                return -1; \
+            } \
+        } while (0)
 
-    read_result = fread(cnn->enc_conv1_w, sizeof(float), (size_t)3 * 3 * CNN_DEPTH_CHANNELS * 32, fp);
-    read_result = fread(cnn->enc_conv1_b, sizeof(float), 32, fp);
+    CNN_READ_FLOATS(cnn->enc_conv1_w, 3 * 3 * CNN_DEPTH_CHANNELS * 32, "enc_conv1_w");
+    CNN_READ_FLOATS(cnn->enc_conv1_b, 32, "enc_conv1_b");
+    CNN_READ_FLOATS(cnn->enc_conv2_w, 3 * 3 * 32 * 64, "enc_conv2_w");
+    CNN_READ_FLOATS(cnn->enc_conv2_b, 64, "enc_conv2_b");
+    CNN_READ_FLOATS(cnn->enc_conv3_w, 3 * 3 * 64 * 128, "enc_conv3_w");
+    CNN_READ_FLOATS(cnn->enc_conv3_b, 128, "enc_conv3_b");
+    CNN_READ_FLOATS(cnn->bottleneck_w, 3 * 3 * 128 * 128, "bottleneck_w");
+    CNN_READ_FLOATS(cnn->bottleneck_b, 128, "bottleneck_b");
+    CNN_READ_FLOATS(cnn->dec_conv1_w, 3 * 3 * 256 * 64, "dec_conv1_w");
+    CNN_READ_FLOATS(cnn->dec_conv1_b, 64, "dec_conv1_b");
+    CNN_READ_FLOATS(cnn->dec_conv2_w, 3 * 3 * 128 * 32, "dec_conv2_w");
+    CNN_READ_FLOATS(cnn->dec_conv2_b, 32, "dec_conv2_b");
+    CNN_READ_FLOATS(cnn->dec_conv3_w, 3 * 3 * 64 * 1, "dec_conv3_w");
+    CNN_READ_FLOATS(cnn->dec_conv3_b, 1, "dec_conv3_b");
 
-    read_result = fread(cnn->enc_conv2_w, sizeof(float), (size_t)3 * 3 * 32 * 64, fp);
-    read_result = fread(cnn->enc_conv2_b, sizeof(float), 64, fp);
-
-    read_result = fread(cnn->enc_conv3_w, sizeof(float), (size_t)3 * 3 * 64 * 128, fp);
-    read_result = fread(cnn->enc_conv3_b, sizeof(float), 128, fp);
-
-    read_result = fread(cnn->bottleneck_w, sizeof(float), (size_t)3 * 3 * 128 * 128, fp);
-    read_result = fread(cnn->bottleneck_b, sizeof(float), 128, fp);
-
-    read_result = fread(cnn->dec_conv1_w, sizeof(float), (size_t)3 * 3 * 256 * 64, fp);
-    read_result = fread(cnn->dec_conv1_b, sizeof(float), 64, fp);
-
-    read_result = fread(cnn->dec_conv2_w, sizeof(float), (size_t)3 * 3 * 128 * 32, fp);
-    read_result = fread(cnn->dec_conv2_b, sizeof(float), 32, fp);
-
-    read_result = fread(cnn->dec_conv3_w, sizeof(float), (size_t)3 * 3 * 64 * 1, fp);
-    read_result = fread(cnn->dec_conv3_b, sizeof(float), 1, fp);
-
-    (void)read_result; /* 抑制未使用警告 */
+    #undef CNN_READ_FLOATS
 
     cnn->weights_loaded = 1;
 

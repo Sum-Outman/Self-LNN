@@ -85,8 +85,8 @@ static void lm_free(LanguageModel* lm) {
             if (lm->ngram_maps[i]->entries) {
                 for (int j = 0; j < lm->ngram_maps[i]->entry_count; j++) {
                     if (lm->ngram_maps[i]->entries[j].ngram_str) {
-                        free(lm->ngram_maps[i]->entries[j].ngram_str);
-                        lm->ngram_maps[i]->entries[j].ngram_str = NULL;
+                        /* P-AUDIT修复(M-1): ngram_str由safe_malloc分配,必须用safe_free释放 */
+                        safe_free((void**)&lm->ngram_maps[i]->entries[j].ngram_str);
                     }
                 }
             }

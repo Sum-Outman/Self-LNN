@@ -274,6 +274,9 @@ MemorySystem* memory_create(const MemoryConfig* config) {
  */
 static void memory_apply_decay(MemorySystem* system, float time_delta);
 
+/* P0修复: 再巩固内部无锁版本前向声明 —— 供已持锁的调用方使用，避免死锁 */
+static int memory_trigger_reconsolidation_nolock(MemorySystem* system, const char* key);
+
 int memory_periodic_decay_update(MemorySystem* system) {
     if (!system || system->config.decay_rate <= 0.0f) return 0;
     time_t now = time(NULL);
@@ -901,7 +904,8 @@ int memory_retrieve(MemorySystem* system, const char* key, float* data,
     if (item->strength > 1.0f) item->strength = 1.0f;
     
     if (system->config.enable_reconsolidation) {
-        memory_trigger_reconsolidation(system, key);
+        /* P0修复: memory_retrieve已持有锁，调用_nolock版本避免在非递归锁上二次加锁导致死锁 */
+        memory_trigger_reconsolidation_nolock(system, key);
     }
     
     item->timestamp = system->current_time;
@@ -966,14 +970,28 @@ int memory_update(MemorySystem* system, const char* key, const float* data,
     
     // 如果强度足够高，转移到长期记忆（释放锁避免递归）
     int need_transfer = (found_type == MEMORY_TYPE_SHORT_TERM && item->strength > 0.8f);
-    float* item_data = item->data;
-    size_t item_data_size = item->data_size;
-    float item_strength = item->strength;
-    
+    /* P0修复: 在锁内将数据复制到局部缓冲区，解锁后用副本调用memory_store。
+     * 原代码保存item->data指针后解锁，其他线程可能释放item->data导致Use-After-Free。
+     * key为外部参数，解锁后仍安全可用。 */
+    float* data_copy = NULL;
+    size_t copy_data_size = 0;
+    float copy_strength = 0.0f;
     if (need_transfer) {
+        copy_data_size = item->data_size;
+        copy_strength = item->strength;
+        data_copy = (float*)safe_malloc(copy_data_size * sizeof(float));
+        if (data_copy) {
+            memcpy(data_copy, item->data, copy_data_size * sizeof(float));
+        }
+    }
+    
+    if (need_transfer && data_copy) {
         MEMORY_UNLOCK(system);
-        memory_store(system, key, item_data, item_data_size, MEMORY_TYPE_LONG_TERM, item_strength);
+        memory_store(system, key, data_copy, copy_data_size, MEMORY_TYPE_LONG_TERM, copy_strength);
+        safe_free((void**)&data_copy);
         MEMORY_LOCK(system);
+    } else if (data_copy) {
+        safe_free((void**)&data_copy);
     }
     
     /* L-021: 使用真实挂钟时间差替代硬编码0.1f，与last_decay_time一致 */
@@ -1138,16 +1156,28 @@ int memory_consolidate(MemorySystem* system, const char* key) {
 
     int need_transfer = (item->strength > sliding_threshold && item->access_count >= 3);
     int already_in_lt = (memory_find_item(system, key, MEMORY_TYPE_LONG_TERM) != NULL);
-    float* item_data = item->data;
-    size_t item_data_size = item->data_size;
+    /* P0修复: 在锁内将数据复制到局部缓冲区，避免解锁后使用悬空指针item->data。
+     * key为外部参数，解锁后仍安全可用。 */
+    float* data_copy = NULL;
+    size_t copy_data_size = 0;
     float transfer_strength = item->strength * 0.9f;
     float cons_rate = system->config.consolidation_rate;
-
     if (need_transfer && !already_in_lt) {
+        copy_data_size = item->data_size;
+        data_copy = (float*)safe_malloc(copy_data_size * sizeof(float));
+        if (data_copy) {
+            memcpy(data_copy, item->data, copy_data_size * sizeof(float));
+        }
+    }
+
+    if (need_transfer && !already_in_lt && data_copy) {
         MEMORY_UNLOCK(system);
-        memory_store(system, key, item_data, item_data_size,
+        memory_store(system, key, data_copy, copy_data_size,
                     MEMORY_TYPE_LONG_TERM, transfer_strength);
+        safe_free((void**)&data_copy);
         MEMORY_LOCK(system);
+    } else if (data_copy) {
+        safe_free((void**)&data_copy);
     } else if (need_transfer && already_in_lt) {
         MemoryItem* lt_item = memory_find_item(system, key, MEMORY_TYPE_LONG_TERM);
         if (lt_item) {
@@ -1490,15 +1520,30 @@ int memory_sleep_consolidation(MemorySystem* system, float sleep_duration, int s
 
                 if (item->strength > 0.7f && item->access_count >= 2) {
                     if (!memory_find_item(system, item->key, MEMORY_TYPE_LONG_TERM)) {
-                        char* item_key = item->key;
-                        float* item_data = item->data;
+                        /* P0修复: 在锁内将key和data复制到局部缓冲区，解锁后用副本调用memory_store。
+                         * 原代码保存item->key和item->data指针后解锁，其他线程可能释放item导致Use-After-Free。 */
+                        char key_copy[256];
+                        strncpy(key_copy, item->key, sizeof(key_copy) - 1);
+                        key_copy[sizeof(key_copy) - 1] = '\0';
                         size_t item_dsize = item->data_size;
                         float item_str = item->strength;
+                        float* data_copy = (float*)safe_malloc(item_dsize * sizeof(float));
+                        if (data_copy) {
+                            memcpy(data_copy, item->data, item_dsize * sizeof(float));
+                        }
                         MEMORY_UNLOCK(system);
-                        memory_store(system, item_key, item_data, item_dsize,
-                                    MEMORY_TYPE_LONG_TERM, item_str * 0.85f);
+                        /* P2修复: 检查memory_store返回值，仅在成功时递增consolidated。
+                         * 此前无条件执行consolidated++，即使safe_malloc失败或memory_store返回错误。 */
+                        int store_ret = -1;
+                        if (data_copy) {
+                            store_ret = memory_store(system, key_copy, data_copy, item_dsize,
+                                        MEMORY_TYPE_LONG_TERM, item_str * 0.85f);
+                            safe_free((void**)&data_copy);
+                        }
                         MEMORY_LOCK(system);
-                        consolidated++;
+                        if (store_ret == 0) {
+                            consolidated++;
+                        }
                     } else {
                         MemoryItem* lt = memory_find_item(system, item->key, MEMORY_TYPE_LONG_TERM);
                         if (lt) {
@@ -2401,17 +2446,15 @@ static int reconsolidation_find_free(MemorySystem* system) {
 }
 
 /**
- * @brief 触发记忆再巩固
+ * @brief 触发记忆再巩固（内部无锁版本）
+ *
+ * 假设调用方已持有system->lock，不再获取锁。
+ * 供memory_retrieve等已持锁的内部调用方使用，避免在非递归锁上二次加锁导致死锁。
  */
-int memory_trigger_reconsolidation(MemorySystem* system, const char* key) {
-    SELFLNN_CHECK_NULL(system, "记忆系统句柄为空");
-    SELFLNN_CHECK_NULL(key, "记忆键为空");
-    SELFLNN_CHECK_INITIALIZED(system, "记忆系统未初始化");
-    
-    MEMORY_LOCK(system);
+static int memory_trigger_reconsolidation_nolock(MemorySystem* system, const char* key) {
+    if (!system || !key || !system->is_initialized) return -1;
     
     if (!system->config.enable_reconsolidation) {
-        MEMORY_UNLOCK(system);
         return 0;
     }
     
@@ -2421,21 +2464,18 @@ int memory_trigger_reconsolidation(MemorySystem* system, const char* key) {
         if (entry->state == RECONSOLIDATION_LABILE ||
             entry->state == RECONSOLIDATION_IN_PROGRESS) {
             entry->trigger_time = system->current_time;
-            MEMORY_UNLOCK(system);
             return 0;
         }
         
         if (entry->state == RECONSOLIDATION_COMPLETE) {
             entry->state = RECONSOLIDATION_LABILE;
             entry->trigger_time = system->current_time;
-            MEMORY_UNLOCK(system);
             return 0;
         }
         
         entry->state = RECONSOLIDATION_LABILE;
         entry->trigger_time = system->current_time;
         entry->is_active = 1;
-        MEMORY_UNLOCK(system);
         return 0;
     }
     
@@ -2453,7 +2493,6 @@ int memory_trigger_reconsolidation(MemorySystem* system, const char* key) {
         }
     }
     if (idx < 0) {
-        MEMORY_UNLOCK(system);
         return -1;
     }
     
@@ -2463,7 +2502,6 @@ int memory_trigger_reconsolidation(MemorySystem* system, const char* key) {
         if (item) break;
     }
     if (!item) {
-        MEMORY_UNLOCK(system);
         return -1;
     }
     
@@ -2488,8 +2526,21 @@ int memory_trigger_reconsolidation(MemorySystem* system, const char* key) {
         system->reconsolidation_count++;
     }
     
-    MEMORY_UNLOCK(system);
     return 0;
+}
+
+/**
+ * @brief 触发记忆再巩固（公共版本，获取锁后委托给_nolock版本）
+ */
+int memory_trigger_reconsolidation(MemorySystem* system, const char* key) {
+    SELFLNN_CHECK_NULL(system, "记忆系统句柄为空");
+    SELFLNN_CHECK_NULL(key, "记忆键为空");
+    SELFLNN_CHECK_INITIALIZED(system, "记忆系统未初始化");
+    
+    MEMORY_LOCK(system);
+    int ret = memory_trigger_reconsolidation_nolock(system, key);
+    MEMORY_UNLOCK(system);
+    return ret;
 }
 
 /**
@@ -3058,13 +3109,23 @@ int memory_batch_consolidate(MemorySystem* system, size_t top_n) {
         MemoryItem* item = system->short_term_mem[indices[i]];
         if (!item) continue;
         if (!memory_find_item(system, item->key, MEMORY_TYPE_LONG_TERM)) {
-            char* item_key = item->key;
-            float* item_data = item->data;
+            /* P0修复: 在锁内将key和data复制到局部缓冲区，避免解锁后Use-After-Free */
+            char key_copy[256];
+            strncpy(key_copy, item->key, sizeof(key_copy) - 1);
+            key_copy[sizeof(key_copy) - 1] = '\0';
             size_t item_dsize = item->data_size;
             float item_str = item->strength;
+            float* data_copy = (float*)safe_malloc(item_dsize * sizeof(float));
+            if (data_copy) {
+                memcpy(data_copy, item->data, item_dsize * sizeof(float));
+            }
             MEMORY_UNLOCK(system);
-            int ret = memory_store(system, item_key, item_data, item_dsize,
+            int ret = -1;
+            if (data_copy) {
+                ret = memory_store(system, key_copy, data_copy, item_dsize,
                                    MEMORY_TYPE_LONG_TERM, item_str * 0.85f);
+                safe_free((void**)&data_copy);
+            }
             MEMORY_LOCK(system);
             if (ret == 0) {
                 consolidated++;

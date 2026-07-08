@@ -161,6 +161,8 @@ struct AGISystem {
     int autonomous_mode;
     char self_model_description[AGI_DESC_LEN];
     int initialized;
+    /* P1修复: 添加任务互斥锁，保护tasks[]/goals[]/status的并发访问 */
+    MutexHandle task_mutex;
 };
 
 /* 认知循环并行任务结构 */
@@ -200,64 +202,115 @@ static void parallel_learn_task(void* arg) {
 /* TaskScheduler回调包装 — 将AGI任务执行包装为调度器可调用格式 */
 typedef struct {
     AGISystem* system;
-    int task_index;
+    int task_index;   /* 保留用于日志/兼容，不再用于定位任务 */
+    int task_id;      /* P0修复(修复7): 用稳定的 task_id 定位任务，避免数组压缩使索引失效 */
 } TSWrapperArg;
 
 static int ts_execute_task_wrapper(void* context) {
     TSWrapperArg* w = (TSWrapperArg*)context;
     if (!w || !w->system) return -1;
     AGISystem* s = w->system;
-    int ti = w->task_index;
-    if (ti < 0 || ti >= s->task_count) return -1;
+
+    /* P0修复(修复7): 原实现通过 w->task_index（数组下标）在加锁前定位任务。
+     * 但 remove_task 用交换末尾元素压缩 tasks 数组，会改变其他任务的下标，
+     * 导致回调通过旧 task_index 访问错位或越界的任务（指向另一个任务或越界）。
+     * 改为加锁后按稳定的 task_id 重新查找任务在数组中的当前位置。 */
+    mutex_lock(s->task_mutex);
+    int ti = -1;
+    for (int i = 0; i < s->task_count; i++) {
+        if (s->tasks[i].task_id == w->task_id) { ti = i; break; }
+    }
+    if (ti < 0 || ti >= s->task_count) { mutex_unlock(s->task_mutex); return -1; }
 
     AGITask* t = &s->tasks[ti];
+    /* P1修复: 使用细粒度锁保护任务状态修改，不影响LNN计算的并发性 */
     if (!t->action_sequence || t->action_count <= 0) {
         t->status = AGI_TASK_FAILED;
         t->error_code = -3;
         snprintf(t->error_message, sizeof(t->error_message), "调度任务无有效动作序列");
         s->status.failed_task_count++;
+        mutex_unlock(s->task_mutex);
         return -1;
     }
 
-    if (t->status != AGI_TASK_RUNNING && t->status != AGI_TASK_PENDING) {
+    /* P0修复: 接受QUEUED状态(已提交到调度器但尚未执行的任务) */
+    if (t->status != AGI_TASK_RUNNING && t->status != AGI_TASK_PENDING &&
+        t->status != AGI_TASK_QUEUED) {
+        mutex_unlock(s->task_mutex);
         return 0;
     }
 
-    if (t->status == AGI_TASK_PENDING) {
+    /* P0修复: PENDING或QUEUED状态的任务转为RUNNING */
+    if (t->status == AGI_TASK_PENDING || t->status == AGI_TASK_QUEUED) {
         t->status = AGI_TASK_RUNNING;
         t->started_at = time(NULL);
     }
 
-/* 真实执行替代模拟执行索引推进
-     * 通过系统LNN处理动作序列，产生真实的执行输出，并通过多系统控制委派 */
+    /* P0修复(UAF): 解锁前将执行所需数据快照到局部变量。
+     * 原实现解锁后仍持 t=&s->tasks[ti] 指针访问 action_sequence /
+     * current_action_index / result_data 等字段，而并发
+     * agi_system_remove_task 会释放这些字段并压缩 tasks 数组，导致 UAF /
+     * NULL 解引用 / 双重管理。此处（锁内）完成所有对 t 的读取，并拷贝本次
+     * 需执行的动作片段到局部缓冲，解锁后仅使用局部变量，杜绝悬空指针访问。 */
     int output_dim = AGI_OUTPUT_DIM;
-    int action_dim = (t->action_count > 0 && t->action_sequence) ?
-                     (int)(t->action_count * sizeof(float)) : output_dim;
-    if (action_dim < output_dim) action_dim = output_dim;
-    if (action_dim > 16384) action_dim = 16384;
+    int action_count = t->action_count;
+    int start_action_index = t->current_action_index;
+    int task_id_local = t->task_id;
 
-    float* execution_output = (float*)safe_malloc((size_t)action_dim * sizeof(float));
+    /* 边界检查：起始索引已超出动作数则无需执行 */
+    if (start_action_index >= action_count) {
+        mutex_unlock(s->task_mutex);
+        return -2;
+    }
+    int steps_to_exec = (action_count - start_action_index > 3) ?
+                        3 : (action_count - start_action_index);
+    if (steps_to_exec <= 0) steps_to_exec = 1;
+
+    /* 快照任务元数据（用于多系统控制委派），避免解锁后访问已释放结构体 */
+    char task_name_snap[AGI_NAME_LEN];
+    snprintf(task_name_snap, sizeof(task_name_snap), "%s", t->name);
+    AGIPriority task_priority_snap = t->priority;
+    time_t task_created_at_snap = t->created_at;
+
+    /* 拷贝本次需执行的动作片段到局部缓冲（action_sequence 仅读不写）。
+     * 拷贝完成后不再依赖 tasks[ti] 的任何指针字段。 */
+    float* action_snapshot = (float*)safe_malloc(
+        (size_t)steps_to_exec * (size_t)output_dim * sizeof(float));
+    if (!action_snapshot) {
+        mutex_unlock(s->task_mutex);
+        return -1;
+    }
+    for (int step = 0; step < steps_to_exec; step++) {
+        int idx = start_action_index + step;
+        if (idx < 0 || idx >= action_count) {
+            memset(&action_snapshot[step * output_dim], 0,
+                   (size_t)output_dim * sizeof(float));
+        } else {
+            memcpy(&action_snapshot[step * output_dim],
+                   &t->action_sequence[idx * output_dim],
+                   (size_t)output_dim * sizeof(float));
+        }
+    }
+    mutex_unlock(s->task_mutex);
+
+    /* ===== 阶段2: 锁外执行 LNN 前向 / 多系统协调等耗时操作 =====
+     * 此区间不访问共享 tasks 数组，仅使用局部快照，保证并发安全。 */
+    float* execution_output = (float*)safe_malloc((size_t)output_dim * sizeof(float));
     if (!execution_output) {
-        t->status = AGI_TASK_FAILED;
-        t->error_code = -4;
-        snprintf(t->error_message, sizeof(t->error_message), "执行输出缓冲区分配失败");
-        s->status.failed_task_count++;
+        safe_free((void**)&action_snapshot);
         return -1;
     }
 
-    int steps_to_exec = (t->action_count - t->current_action_index > 3) ?
-                        3 : (t->action_count - t->current_action_index);
-    if (steps_to_exec <= 0) steps_to_exec = 1;
-
+    /* 保存最后一步 LNN 输出，留待阶段3在锁内写入 result_data */
+    float last_lnn_output[AGI_OUTPUT_DIM];
+    memset(last_lnn_output, 0, sizeof(last_lnn_output));
     int executed = 0;
-    for (int step = 0; step < steps_to_exec; step++) {
-        int idx = t->current_action_index;
-        if (idx >= t->action_count) break;
+    int has_lnn_output = 0;
 
-        int copy_len = output_dim;
-        if (idx * output_dim + output_dim > t->action_count * output_dim) break;
-        memcpy(execution_output, &t->action_sequence[idx * output_dim],
-               (size_t)copy_len * sizeof(float));
+    for (int step = 0; step < steps_to_exec; step++) {
+        int idx = start_action_index + step;
+        memcpy(execution_output, &action_snapshot[step * output_dim],
+               (size_t)output_dim * sizeof(float));
 
         /* 通过LNN处理动作输出，产生真实系统效应 */
         if (s->lnn) {
@@ -265,30 +318,25 @@ static int ts_execute_task_wrapper(void* context) {
             memset(lnn_output, 0, sizeof(lnn_output));
             lnn_forward(s->lnn, execution_output, lnn_output);
 
-/* 动作结果写入任务结果数据区 */
-            if (!t->result_data) {
-                t->result_data = safe_malloc((size_t)output_dim * sizeof(float));
-                t->result_size = (size_t)output_dim * sizeof(float);
-            }
-            if (t->result_data) {
-                memcpy(t->result_data, lnn_output, (size_t)output_dim * sizeof(float));
-            }
+            /* 保存最后一步 LNN 输出，阶段3在锁内回写到 result_data */
+            memcpy(last_lnn_output, lnn_output, (size_t)output_dim * sizeof(float));
+            has_lnn_output = 1;
 
-/* 通过多系统控制委派执行真实任务。
-             * 原使用coordinate_task_execution(不存在)已修正为coordinate_multitask_execution。
-             * 将处理后的LNN输出封装为协调任务发送到远程设备。 */
+            /* 通过多系统控制委派执行真实任务。
+             * 将处理后的LNN输出封装为协调任务发送到远程设备。
+             * 原使用coordinate_task_execution(不存在)已修正为coordinate_multitask_execution。 */
             if (s->multisystem_control) {
                 Task ms_task;
                 memset(&ms_task, 0, sizeof(ms_task));
                 snprintf(ms_task.name, sizeof(ms_task.name), "agi_exec_%s_step%d",
-                         t->name, idx);
+                         task_name_snap, idx);
                 memcpy(ms_task.params, lnn_output,
                        (sizeof(float) * (size_t)output_dim) <= sizeof(ms_task.params) ?
                        (sizeof(float) * (size_t)output_dim) : sizeof(ms_task.params));
                 ms_task.param_count = output_dim;
-                ms_task.priority = (t->priority == AGI_PRIORITY_CRITICAL) ? 3 :
-                                   (t->priority == AGI_PRIORITY_HIGH) ? 2 : 1;
-                ms_task.deadline = (double)(t->created_at + 120);
+                ms_task.priority = (task_priority_snap == AGI_PRIORITY_CRITICAL) ? 3 :
+                                   (task_priority_snap == AGI_PRIORITY_HIGH) ? 2 : 1;
+                ms_task.deadline = (double)(task_created_at_snap + 120);
                 Task* pending_tasks[1];
                 pending_tasks[0] = &ms_task;
                 CoordinationPlan* plan = coordinate_multitask_execution(
@@ -301,23 +349,61 @@ static int ts_execute_task_wrapper(void* context) {
                 }
             }
         }
-
-        t->current_action_index++;
         executed++;
     }
 
     safe_free((void**)&execution_output);
+    safe_free((void**)&action_snapshot);
 
-    if (t->current_action_index >= t->action_count) {
-        t->status = AGI_TASK_COMPLETED;
-        t->completed_at = time(NULL);
-        t->progress = 1.0f;
+    /* ===== 阶段3: 重新加锁，按 task_id 重新定位任务并回写结果 =====
+     * 任务可能已被并发移除导致位置变化，需按 task_id 重新查找。 */
+    mutex_lock(s->task_mutex);
+    ti = -1;
+    for (int i = 0; i < s->task_count; i++) {
+        if (s->tasks[i].task_id == task_id_local) { ti = i; break; }
+    }
+    if (ti < 0 || ti >= s->task_count) {
+        /* 任务已被并发移除，无法回写；已执行的副作用（LNN/协调）已生效。 */
+        mutex_unlock(s->task_mutex);
+        log_debug("[AGI执行] 任务%d在执行期间被移除，结果未回写", task_id_local);
+        return executed > 0 ? 0 : -2;
+    }
+    AGITask* t2 = &s->tasks[ti];
+    /* 校验任务仍处于 RUNNING 状态（未被并发取消/失败） */
+    if (t2->status != AGI_TASK_RUNNING) {
+        mutex_unlock(s->task_mutex);
+        return executed > 0 ? 0 : -2;
+    }
+
+    /* 回写执行进度（current_action_index 在锁内递增） */
+    t2->current_action_index += executed;
+    if (t2->current_action_index > t2->action_count) {
+        t2->current_action_index = t2->action_count;
+    }
+
+    /* 在锁内分配并写入 result_data，避免并发释放导致双重管理 */
+    if (has_lnn_output) {
+        if (!t2->result_data) {
+            t2->result_data = safe_malloc((size_t)output_dim * sizeof(float));
+            t2->result_size = (size_t)output_dim * sizeof(float);
+        }
+        if (t2->result_data) {
+            memcpy(t2->result_data, last_lnn_output, (size_t)output_dim * sizeof(float));
+        }
+    }
+
+    /* 更新任务完成/进度状态（锁保护） */
+    if (t2->current_action_index >= t2->action_count) {
+        t2->status = AGI_TASK_COMPLETED;
+        t2->completed_at = time(NULL);
+        t2->progress = 1.0f;
         s->status.active_task_count--;
         if (s->status.active_task_count < 0) s->status.active_task_count = 0;
         s->status.completed_task_count++;
     } else {
-        t->progress = (float)t->current_action_index / (float)t->action_count;
+        t2->progress = (float)t2->current_action_index / (float)t2->action_count;
     }
+    mutex_unlock(s->task_mutex);
 
     return executed > 0 ? 0 : -2;
 }
@@ -627,6 +713,8 @@ AGISystem* agi_system_create(const AGIConfig* config)
     AGISystem* system = (AGISystem*)safe_malloc(sizeof(AGISystem));
     if (!system) return NULL;
     memset(system, 0, sizeof(AGISystem));
+    /* P1修复: 初始化任务互斥锁 */
+    system->task_mutex = mutex_create();
 
     if (config) {
         system->config = *config;
@@ -658,6 +746,7 @@ AGISystem* agi_system_create(const AGIConfig* config)
 
     system->state_vector = (float*)safe_malloc((size_t)system->expand_state_vector * sizeof(float));
     if (!system->state_vector) {
+        if (system->task_mutex) mutex_destroy(system->task_mutex);
         safe_free((void**)&system);
         return NULL;
     }
@@ -666,6 +755,7 @@ AGISystem* agi_system_create(const AGIConfig* config)
     system->cognitive_history = (float*)safe_malloc((size_t)system->max_cognitive_history * sizeof(float));
     if (!system->cognitive_history) {
         safe_free((void**)&system->state_vector);
+        if (system->task_mutex) mutex_destroy(system->task_mutex);
         safe_free((void**)&system);
         return NULL;
     }
@@ -674,6 +764,7 @@ AGISystem* agi_system_create(const AGIConfig* config)
     if (create_default_knowledge_base(system) != 0) {
         safe_free((void**)&system->cognitive_history);
         safe_free((void**)&system->state_vector);
+        if (system->task_mutex) mutex_destroy(system->task_mutex);
         safe_free((void**)&system);
         return NULL;
     }
@@ -816,6 +907,8 @@ void agi_system_free(AGISystem* system)
             safe_free((void**)&system->tasks[i].result_data);
     }
 
+    /* P1修复: 销毁任务互斥锁 */
+    if (system->task_mutex) { mutex_destroy(system->task_mutex); system->task_mutex = NULL; }
     memset(system, 0, sizeof(AGISystem));
     safe_free((void**)&system);
 }
@@ -1106,7 +1199,14 @@ int agi_system_add_task(AGISystem* system, const char* name, const char* descrip
                          AGIPriority priority, int goal_id)
 {
     if (!system || !name || !description) return -1;
-    if (system->task_count >= AGI_MAX_TASKS) return -1;
+    /* P0修复(修复5): 写 tasks[] 数组与递增 task_count 必须持锁。
+     * update_task/remove_task 都持 task_mutex，原 add_task 全程无锁，
+     * 并发 add 与 remove 时数组压缩会使 add 写入错位，破坏数据完整性。 */
+    mutex_lock(system->task_mutex);
+    if (system->task_count >= AGI_MAX_TASKS) {
+        mutex_unlock(system->task_mutex);
+        return -1;
+    }
 
     AGITask* task = &system->tasks[system->task_count];
     memset(task, 0, sizeof(AGITask));
@@ -1124,12 +1224,15 @@ int agi_system_add_task(AGISystem* system, const char* name, const char* descrip
 
     system->task_count++;
     system->status.active_task_count++;
+    mutex_unlock(system->task_mutex);
     return task->task_id;
 }
 
 int agi_system_update_task(AGISystem* system, int task_id, float progress, AGITaskStatus status)
 {
     if (!system) return -1;
+    /* P0修复: 添加mutex保护，防止并发访问tasks数组导致数据竞争 */
+    mutex_lock(system->task_mutex);
     int i;
     for (i = 0; i < system->task_count; i++) {
         if (system->tasks[i].task_id == task_id) {
@@ -1141,12 +1244,15 @@ int agi_system_update_task(AGISystem* system, int task_id, float progress, AGITa
             if (status == AGI_TASK_COMPLETED || status == AGI_TASK_FAILED) {
                 t->completed_at = time(NULL);
                 system->status.active_task_count--;
+                if (system->status.active_task_count < 0) system->status.active_task_count = 0;
                 if (status == AGI_TASK_COMPLETED) system->status.completed_task_count++;
                 else system->status.failed_task_count++;
             }
+            mutex_unlock(system->task_mutex);
             return 0;
         }
     }
+    mutex_unlock(system->task_mutex);
     return -1;
 }
 
@@ -1166,9 +1272,15 @@ int agi_system_get_task(const AGISystem* system, int task_id, AGITask* task)
 int agi_system_remove_task(AGISystem* system, int task_id)
 {
     if (!system) return -1;
+    /* P0修复: 添加mutex保护，防止并发访问tasks数组导致数据竞争 */
+    mutex_lock(system->task_mutex);
     int i;
     for (i = 0; i < system->task_count; i++) {
         if (system->tasks[i].task_id == task_id) {
+            /* P0修复: 在压缩前保存被删除任务的状态，
+             * 原代码在压缩后检查system->tasks[i].status，
+             * 但此时i位置已被下一个任务覆盖，检查的是错误任务 */
+            AGITaskStatus removed_status = system->tasks[i].status;
             if (system->tasks[i].action_sequence)
                 safe_free((void**)&system->tasks[i].action_sequence);
             if (system->tasks[i].result_data)
@@ -1178,11 +1290,17 @@ int agi_system_remove_task(AGISystem* system, int task_id)
                 system->tasks[j] = system->tasks[j + 1];
             system->task_count--;
             memset(&system->tasks[system->task_count], 0, sizeof(AGITask));
-            if (system->tasks[i].status == AGI_TASK_RUNNING || system->tasks[i].status == AGI_TASK_PENDING)
+            /* P0修复: 使用压缩前保存的状态判断是否需要递减活跃任务计数。
+             * QUEUED状态也是活跃任务(已提交到调度器但未完成) */
+            if (removed_status == AGI_TASK_RUNNING || removed_status == AGI_TASK_PENDING ||
+                removed_status == AGI_TASK_QUEUED)
                 system->status.active_task_count--;
+            if (system->status.active_task_count < 0) system->status.active_task_count = 0;
+            mutex_unlock(system->task_mutex);
             return 0;
         }
     }
+    mutex_unlock(system->task_mutex);
     return -1;
 }
 
@@ -1270,8 +1388,10 @@ int agi_system_perceive(AGISystem* system, const float* sensory_input, int input
             memset(state_vector + dim, 0, (size_t)(system->state_vector_dim - dim) * sizeof(float));
 
         if (system->lnn) {
-            float lnn_output[128];
-            int lnn_dim = 128;
+            /* P0修复: 缓冲区大小必须匹配共享LNN的output_size(256)，
+             * 原float[128]导致lnn_forward写入越界栈溢出 */
+            float lnn_output[256];
+            int lnn_dim = 256;
             if (lnn_dim > system->state_vector_dim) lnn_dim = system->state_vector_dim;
             if (system->config.state_vector_dim > 0) {
                 int ret = lnn_forward(system->lnn, state_vector, lnn_output);
@@ -1391,8 +1511,9 @@ int agi_system_perceive_multimodal(AGISystem* system,
                    (size_t)(state_vector_dim - total_dim) * sizeof(float));
 
         if (system->lnn) {
-            float lnn_output[128];
-            int lnn_dim = 128;
+            /* P0修复: 缓冲区大小必须匹配共享LNN的output_size(256) */
+            float lnn_output[256];
+            int lnn_dim = 256;
             if (lnn_dim > state_vector_dim) lnn_dim = state_vector_dim;
             int ret = lnn_forward(system->lnn, state_vector, lnn_output);
             if (ret == 0) {
@@ -1587,6 +1708,11 @@ int agi_system_execute(AGISystem* system, int chosen_option, float* execution_ou
     if (!system->config.enable_autonomous_execution) return 0;
     if (!capability_is_enabled(CAP_AUTONOMOUS_EXECUTION)) return 0;
 
+    /* P0修复: 添加mutex保护tasks数组的读写操作。
+     * agi_system_execute不调用任何锁定task_mutex的函数，无死锁风险。
+     * 多系统控制的外部调用(discover/coordinate/execute)不使用task_mutex。 */
+    mutex_lock(system->task_mutex);
+
 /* 执行结果状态跟踪 */
     int execution_ok = 1;
 
@@ -1674,46 +1800,85 @@ int agi_system_execute(AGISystem* system, int chosen_option, float* execution_ou
         if (system->tasks[i].status == AGI_TASK_FAILED) any_failure = 1;
     }
 
-    /* 多机器人/多设备任务委派：当多系统控制引擎可用时，将待处理任务委派给远程设备 */
+    /* 多机器人/多设备任务委派：当多系统控制引擎可用时，将待处理任务委派给远程设备。
+     * P1修复(修复8): 原实现在持有 task_mutex 期间调用 discover_available_devices、
+     * coordinate_multitask_execution、execute_coordination_plan 等阻塞式外部IO，
+     * 长时间持锁会阻塞 add_task/remove_task/认知循环等所有任务操作。
+     * 改为：在锁内快照待委派任务(id+描述+优先级)，解锁后执行外部设备发现与协调，
+     * 完成后再重新加锁按 task_id 更新任务状态（数组可能已被压缩，必须按ID查找）。 */
+
+    /* 待委派任务快照（在锁内填充） */
+    typedef struct {
+        int task_id;
+        char description[AGI_DESC_LEN];
+        double priority;
+    } PendingTaskSnapshot;
+    PendingTaskSnapshot snap[AGI_MAX_TASKS];
+    int snap_count = 0;
+
     if (system->multisystem_control) {
+        for (i = 0; i < system->task_count && snap_count < AGI_MAX_TASKS; i++) {
+            if (system->tasks[i].status == AGI_TASK_PENDING) {
+                snap[snap_count].task_id = system->tasks[i].task_id;
+                strncpy(snap[snap_count].description, system->tasks[i].description,
+                        AGI_DESC_LEN - 1);
+                snap[snap_count].description[AGI_DESC_LEN - 1] = '\0';
+                double prio = (double)(AGI_PRIORITY_BACKGROUND - system->tasks[i].priority)
+                            / (double)AGI_PRIORITY_BACKGROUND;
+                if (prio < 0.1) prio = 0.1;
+                if (prio > 1.0) prio = 1.0;
+                snap[snap_count].priority = prio;
+                snap_count++;
+            }
+        }
+    }
+
+    /* 解锁后再调用阻塞式外部IO，避免长时间持锁 */
+    mutex_unlock(system->task_mutex);
+
+    if (system->multisystem_control && snap_count > 0) {
         DeviceInfo** devices = NULL;
         size_t device_count = 0;
+        /* 外部设备发现：可能阻塞，必须在锁外执行 */
         int discovery_ok = discover_available_devices(system->multisystem_control, &devices, &device_count);
         if (discovery_ok == 0 && device_count > 0) {
             Task* pending_tasks[AGI_MAX_TASKS];
-            int pending_indices[AGI_MAX_TASKS];
+            int tmp_ids[AGI_MAX_TASKS];  /* 记录每个待委派任务的原 task_id，用于锁外协调后回写状态 */
             int pending_count = 0;
-            for (i = 0; i < system->task_count && pending_count < AGI_MAX_TASKS; i++) {
-                if (system->tasks[i].status == AGI_TASK_PENDING) {
-                    char task_id[32];
-                    snprintf(task_id, sizeof(task_id), "agi_task_%d", system->tasks[i].task_id);
-                    Task* ms_task = create_task(task_id, TASK_TYPE_CUSTOM, system->tasks[i].description);
-                    if (ms_task) {
-                        double prio = (double)(AGI_PRIORITY_BACKGROUND - system->tasks[i].priority)
-                                    / (double)AGI_PRIORITY_BACKGROUND;
-                        if (prio < 0.1) prio = 0.1;
-                        if (prio > 1.0) prio = 1.0;
-                        ms_task->priority = prio;
-                        pending_tasks[pending_count] = ms_task;
-                        pending_indices[pending_count] = i;
-                        pending_count++;
-                    }
+            for (i = 0; i < snap_count && pending_count < AGI_MAX_TASKS; i++) {
+                char task_id_str[32];
+                snprintf(task_id_str, sizeof(task_id_str), "agi_task_%d", snap[i].task_id);
+                Task* ms_task = create_task(task_id_str, TASK_TYPE_CUSTOM, snap[i].description);
+                if (ms_task) {
+                    ms_task->priority = snap[i].priority;
+                    pending_tasks[pending_count] = ms_task;
+                    tmp_ids[pending_count] = snap[i].task_id;
+                    pending_count++;
                 }
             }
             if (pending_count > 0) {
+                /* 外部协调与执行：可能阻塞，必须在锁外执行 */
                 CoordinationPlan* plan = coordinate_multitask_execution(
                     system->multisystem_control,
                     pending_tasks, (size_t)pending_count,
                     devices, device_count);
                 if (plan) {
                     execute_coordination_plan(system->multisystem_control, plan);
+                    /* 重新加锁，按 task_id 更新任务状态（数组可能已被压缩/重排） */
+                    mutex_lock(system->task_mutex);
                     for (i = 0; i < pending_count; i++) {
-                        int idx = pending_indices[i];
-                        if (system->tasks[idx].status == AGI_TASK_PENDING) {
-                            system->tasks[idx].status = AGI_TASK_RUNNING;
-                            system->tasks[idx].started_at = time(NULL);
+                        int tid = tmp_ids[i];
+                        for (int k = 0; k < system->task_count; k++) {
+                            if (system->tasks[k].task_id == tid) {
+                                if (system->tasks[k].status == AGI_TASK_PENDING) {
+                                    system->tasks[k].status = AGI_TASK_RUNNING;
+                                    system->tasks[k].started_at = time(NULL);
+                                }
+                                break;
+                            }
                         }
                     }
+                    mutex_unlock(system->task_mutex);
                     destroy_coordination_plan(plan);
                 }
                 for (i = 0; i < pending_count; i++) {
@@ -1907,6 +2072,11 @@ int agi_system_cognitive_cycle(AGISystem* system, const float* sensory_input, in
 
 /* 计划生成后向TaskScheduler提交新任务 */
     if (system->task_scheduler) {
+        /* P0修复(修复6): 提交循环遍历 tasks 并改写 status，必须持 task_mutex，
+         * 否则调度器线程并发修改同一 tasks[ti].status 造成数据竞争。
+         * task_scheduler_submit 仅入队（使用调度器自身锁），不会回调
+         * task_mutex，故持锁期间调用不会死锁。 */
+        mutex_lock(system->task_mutex);
         for (int ti = 0; ti < system->task_count; ti++) {
             if (system->tasks[ti].status == AGI_TASK_PENDING) {
                 char ts_name[128];
@@ -1919,12 +2089,20 @@ int agi_system_cognitive_cycle(AGISystem* system, const float* sensory_input, in
                 if (w) {
                     w->system = system;
                     w->task_index = ti;
-                    task_scheduler_submit(system->task_scheduler, ts_name,
+                    w->task_id = system->tasks[ti].task_id; /* P0修复(修复7): 记录稳定ID供回调定位 */
+                    if (task_scheduler_submit(system->task_scheduler, ts_name,
                         ts_execute_task_wrapper, w,
-                        ts_priority, 120, NULL, 0);
+                        ts_priority, 120, NULL, 0) >= 0) {
+                        /* P0修复: 提交成功后将状态改为QUEUED，防止下一轮认知循环重复提交 */
+                        system->tasks[ti].status = AGI_TASK_QUEUED;
+                    } else {
+                        /* P0修复: 提交失败时释放包装参数，避免内存泄漏 */
+                        safe_free((void**)&w);
+                    }
                 }
             }
         }
+        mutex_unlock(system->task_mutex);
     }
 
 /* 决策前注入拉普拉斯稳定性指标 */
@@ -2473,6 +2651,9 @@ int agi_system_cognitive_cycle_multimodal(AGISystem* system,
 
 /* 多模态: 计划生成后向TaskScheduler提交新任务 */
     if (system->task_scheduler) {
+        /* P0修复(修复6): 多模态提交循环同样需要 task_mutex 保护，与认知循环
+         * 提交点保持一致，防止并发改写 tasks[ti].status。 */
+        mutex_lock(system->task_mutex);
         for (int ti = 0; ti < system->task_count; ti++) {
             if (system->tasks[ti].status == AGI_TASK_PENDING) {
                 char ts_name[128];
@@ -2484,12 +2665,20 @@ int agi_system_cognitive_cycle_multimodal(AGISystem* system,
                 if (w) {
                     w->system = system;
                     w->task_index = ti;
-                    task_scheduler_submit(system->task_scheduler, ts_name,
+                    w->task_id = system->tasks[ti].task_id; /* P0修复(修复7): 记录稳定ID供回调定位 */
+                    if (task_scheduler_submit(system->task_scheduler, ts_name,
                         ts_execute_task_wrapper, w,
-                        ts_priority, 120, NULL, 0);
+                        ts_priority, 120, NULL, 0) >= 0) {
+                        /* P0修复: 提交成功后将状态改为QUEUED，防止下一轮认知循环重复提交 */
+                        system->tasks[ti].status = AGI_TASK_QUEUED;
+                    } else {
+                        /* P0修复: 提交失败时释放包装参数，避免内存泄漏 */
+                        safe_free((void**)&w);
+                    }
                 }
             }
         }
+        mutex_unlock(system->task_mutex);
     }
 
     transition_state(system, AGI_STATE_DECIDE);
@@ -2799,8 +2988,10 @@ int agi_system_get_status(const AGISystem* system, AGICognitiveStatus* status)
 
     int i;
     for (i = 0; i < system->task_count; i++) {
+        /* P0修复: QUEUED状态也是活跃任务(已提交到调度器但未完成) */
         if (system->tasks[i].status == AGI_TASK_RUNNING ||
-            system->tasks[i].status == AGI_TASK_PENDING)
+            system->tasks[i].status == AGI_TASK_PENDING ||
+            system->tasks[i].status == AGI_TASK_QUEUED)
             status->active_task_count++;
     }
 
@@ -2866,6 +3057,12 @@ int agi_system_load_state(AGISystem* system, const char* filepath)
     fread(&system->task_count, sizeof(int), 1, f);
     if (system->task_count > AGI_MAX_TASKS) system->task_count = AGI_MAX_TASKS;
     fread(system->tasks, sizeof(AGITask), (size_t)system->task_count, f);
+    /* P0修复: 加载状态后将QUEUED任务重置为PENDING，
+     * 因为新会话的TaskScheduler尚未接收这些任务的提交 */
+    for (int i = 0; i < system->task_count; i++) {
+        if (system->tasks[i].status == AGI_TASK_QUEUED)
+            system->tasks[i].status = AGI_TASK_PENDING;
+    }
     /* P1-032修复：state_vector_dim边界检查防止缓冲区溢出 */
     if (system->state_vector_dim > 1024 * 1024) {
         fclose(f);
@@ -3001,7 +3198,8 @@ int agi_system_execute_plan_step(AGISystem* system, int task_id)
         if (system->tasks[i].task_id == task_id) {
             AGITask* t = &system->tasks[i];
             if (t->status != AGI_TASK_RUNNING) {
-                if (t->status == AGI_TASK_PENDING) {
+                /* P0修复: 接受QUEUED状态(已提交到调度器的任务可直接执行) */
+                if (t->status == AGI_TASK_PENDING || t->status == AGI_TASK_QUEUED) {
                     t->status = AGI_TASK_RUNNING;
                     t->started_at = time(NULL);
                 } else {
@@ -3302,12 +3500,11 @@ int agi_system_process_stereo(AGISystem* system,
         }
     }
 
-    if (result.depth_map) free(result.depth_map);
-    if (result.disparity_map) free(result.disparity_map);
-    if (result.point_cloud) free(result.point_cloud);
-    result.depth_map = NULL;
-    result.disparity_map = NULL;
-    result.point_cloud = NULL;
+    /* P-AUDIT修复(A-1~A-3): depth_map/disparity_map/point_cloud由depth_estimation.c
+     * 通过safe_malloc分配,必须用safe_free释放,原用free()导致堆损坏风险 */
+    safe_free((void**)&result.depth_map);
+    safe_free((void**)&result.disparity_map);
+    safe_free((void**)&result.point_cloud);
 
     if (system->knowledge) {
         char key[64];

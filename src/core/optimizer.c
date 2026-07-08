@@ -24,6 +24,9 @@ struct Optimizer
     size_t num_params;
     int is_initialized;
     int last_error;              /**< 最后一次错误的错误码，0=无错误 */
+    int slow_weights_initialized; /**< P0修复: Ranger LookAhead慢权重是否已初始化标志。
+                                       0=未初始化（需从当前参数快照），1=已初始化。
+                                       在ensure_buffers重分配或optimizer_reset时重置为0。 */
 };
 
 Optimizer* optimizer_create(const OptimizerConfig* config)
@@ -63,6 +66,11 @@ static int ensure_buffers(Optimizer* optimizer, size_t num_params)
     safe_free((void**)&optimizer->beta1_power);
     safe_free((void**)&optimizer->beta2_power);
 
+    /* P0修复: 缓冲区重分配后，Ranger慢权重(cache_buffer)被calloc清零，
+     * 需要重新从当前参数快照初始化，否则LookAhead同步会使用全零慢权重
+     * 导致参数被错误地拉向零。 */
+    optimizer->slow_weights_initialized = 0;
+
     optimizer->num_params = num_params;
 
     switch (optimizer->config.type)
@@ -92,7 +100,14 @@ static int ensure_buffers(Optimizer* optimizer, size_t num_params)
             optimizer->beta1_power = (float*)safe_calloc(1, sizeof(float));
             optimizer->beta2_power = (float*)safe_calloc(1, sizeof(float));
             if (!optimizer->momentum_buffer || !optimizer->velocity_buffer ||
-                !optimizer->beta1_power || !optimizer->beta2_power) return -1;
+                !optimizer->beta1_power || !optimizer->beta2_power) {
+                /* P1-02修复: 分配失败时释放本批次已分配的所有缓冲区，防止内存泄漏 */
+                safe_free((void**)&optimizer->momentum_buffer);
+                safe_free((void**)&optimizer->velocity_buffer);
+                safe_free((void**)&optimizer->beta1_power);
+                safe_free((void**)&optimizer->beta2_power);
+                return -1;
+            }
             *optimizer->beta1_power = 1.0f;
             *optimizer->beta2_power = 1.0f;
             break;
@@ -100,7 +115,12 @@ static int ensure_buffers(Optimizer* optimizer, size_t num_params)
         case OPTIMIZER_ADADELTA:
             optimizer->momentum_buffer = (float*)safe_calloc(num_params, sizeof(float));
             optimizer->velocity_buffer = (float*)safe_calloc(num_params, sizeof(float));
-            if (!optimizer->momentum_buffer || !optimizer->velocity_buffer) return -1;
+            if (!optimizer->momentum_buffer || !optimizer->velocity_buffer) {
+                /* P1-02修复: 分配失败时释放本批次已分配的所有缓冲区，防止内存泄漏 */
+                safe_free((void**)&optimizer->momentum_buffer);
+                safe_free((void**)&optimizer->velocity_buffer);
+                return -1;
+            }
             break;
 
         case OPTIMIZER_LAMB:
@@ -109,7 +129,14 @@ static int ensure_buffers(Optimizer* optimizer, size_t num_params)
             optimizer->beta1_power = (float*)safe_calloc(1, sizeof(float));
             optimizer->beta2_power = (float*)safe_calloc(1, sizeof(float));
             if (!optimizer->momentum_buffer || !optimizer->velocity_buffer ||
-                !optimizer->beta1_power || !optimizer->beta2_power) return -1;
+                !optimizer->beta1_power || !optimizer->beta2_power) {
+                /* P1-02修复: 分配失败时释放本批次已分配的所有缓冲区，防止内存泄漏 */
+                safe_free((void**)&optimizer->momentum_buffer);
+                safe_free((void**)&optimizer->velocity_buffer);
+                safe_free((void**)&optimizer->beta1_power);
+                safe_free((void**)&optimizer->beta2_power);
+                return -1;
+            }
             *optimizer->beta1_power = 1.0f;
             *optimizer->beta2_power = 1.0f;
             break;
@@ -120,23 +147,37 @@ static int ensure_buffers(Optimizer* optimizer, size_t num_params)
             break;
 
         case OPTIMIZER_RANGER:
+            /* P0修复: RANGER分配失败时释放已分配的缓冲区，防止内存泄漏 */
             optimizer->momentum_buffer = (float*)safe_calloc(num_params, sizeof(float));
             optimizer->velocity_buffer = (float*)safe_calloc(num_params, sizeof(float));
             optimizer->cache_buffer = (float*)safe_calloc(num_params, sizeof(float));
             optimizer->beta1_power = (float*)safe_calloc(1, sizeof(float));
             optimizer->beta2_power = (float*)safe_calloc(1, sizeof(float));
             if (!optimizer->momentum_buffer || !optimizer->velocity_buffer ||
-                !optimizer->cache_buffer || !optimizer->beta1_power || !optimizer->beta2_power) return -1;
+                !optimizer->cache_buffer || !optimizer->beta1_power || !optimizer->beta2_power) {
+                safe_free((void**)&optimizer->momentum_buffer);
+                safe_free((void**)&optimizer->velocity_buffer);
+                safe_free((void**)&optimizer->cache_buffer);
+                safe_free((void**)&optimizer->beta1_power);
+                safe_free((void**)&optimizer->beta2_power);
+                return -1;
+            }
             *optimizer->beta1_power = 1.0f;
             *optimizer->beta2_power = 1.0f;
             break;
 
         case OPTIMIZER_NOVOGRAD:
+            /* P0修复: NOVOGRAD分配失败时释放已分配的缓冲区，防止内存泄漏 */
             optimizer->momentum_buffer = (float*)safe_calloc(num_params, sizeof(float));
             optimizer->velocity_buffer = (float*)safe_calloc(num_params, sizeof(float));
             optimizer->beta1_power = (float*)safe_calloc(1, sizeof(float));
             if (!optimizer->momentum_buffer || !optimizer->velocity_buffer ||
-                !optimizer->beta1_power) return -1;
+                !optimizer->beta1_power) {
+                safe_free((void**)&optimizer->momentum_buffer);
+                safe_free((void**)&optimizer->velocity_buffer);
+                safe_free((void**)&optimizer->beta1_power);
+                return -1;
+            }
             *optimizer->beta1_power = 1.0f;
             break;
 
@@ -277,8 +318,10 @@ int optimizer_step(Optimizer* optimizer, float* parameters, float* gradients,
 
             for (i = 0; i < num_params; i++)
             {
-/* 添加解耦权重衰减，与其他优化器一致 */
-                parameters[i] *= (1.0f - lr * wd);
+                /* P1修复: 使用AdamW风格解耦权重衰减（加法形式），替代原乘法衰减。
+                 * 原实现先对参数施加乘法衰减再做Adam更新，虽数学等价但存在数值
+                 * 稳定性隐患（大wd时参数先大幅缩小再更新）。AdamW标准形式将
+                 * 权重衰减合并到参数更新公式中，更稳定且与AdamW实现一致。 */
                 optimizer->momentum_buffer[i] = b1 * optimizer->momentum_buffer[i] +
                                                 (1.0f - b1) * gradients[i];
                 optimizer->velocity_buffer[i] = b2 * optimizer->velocity_buffer[i] +
@@ -295,7 +338,8 @@ int optimizer_step(Optimizer* optimizer, float* parameters, float* gradients,
                 float m_hat = optimizer->momentum_buffer[i] / b1_corr;
                 float v_hat = optimizer->velocity_buffer[i] / b2_corr;
 
-                parameters[i] -= lr * m_hat / (sqrtf(v_hat) + eps);
+                /* P1修复: 解耦权重衰减，在参数更新中直接加上wd*param项 */
+                parameters[i] -= lr * (m_hat / (sqrtf(v_hat) + eps) + wd * parameters[i]);
             }
             break;
         }
@@ -369,8 +413,13 @@ int optimizer_step(Optimizer* optimizer, float* parameters, float* gradients,
             if (!update_tmp) { optimizer->last_error = -1; return -1; }
 
             float param_norm = 0.0f, update_norm = 0.0f;
-            float inv_b1 = 1.0f / (1.0f - *optimizer->beta1_power);
-            float inv_b2 = 1.0f / (1.0f - *optimizer->beta2_power);
+            /* P0修复: 偏置校正除零保护，与Adam保持一致（β^t→1时1/(1-β^t)会溢出） */
+            float b1_corr = 1.0f - *optimizer->beta1_power;
+            float b2_corr = 1.0f - *optimizer->beta2_power;
+            if (b1_corr < 1e-7f) b1_corr = 1e-7f;
+            if (b2_corr < 1e-7f) b2_corr = 1e-7f;
+            float inv_b1 = 1.0f / b1_corr;
+            float inv_b2 = 1.0f / b2_corr;
             for (i = 0; i < num_params; i++)
             {
                 optimizer->momentum_buffer[i] = b1 * optimizer->momentum_buffer[i] +
@@ -437,20 +486,31 @@ int optimizer_step(Optimizer* optimizer, float* parameters, float* gradients,
             *optimizer->beta2_power *= b2;
 
             /* RAdam整流因子计算 */
-            float rho_inf = 2.0f / (1.0f - b2) - 1.0f;
-            float beta2_t = *optimizer->beta2_power;
-            /* P2-R5修复: 使用double中间变量避免(float)step在大步数(>16.7M)时精度丢失 */
-            float rho_t = rho_inf - 2.0f * ((double)step * (double)beta2_t) / (1.0 - (double)beta2_t + 1e-12);
+            /* P1修复: 统一使用double计算rho_inf和rho_t，避免float/double混用
+             * 导致精度不一致。原实现rho_inf为float但参与double运算，
+             * float→double隐式转换可能引入舍入误差，尤其在b2接近1.0时
+             * (1-b2)极小，float精度不足导致rho_inf偏差。 */
+            double d_b2 = (double)b2;
+            double d_rho_inf = 2.0 / (1.0 - d_b2) - 1.0;
+            double d_beta2_t = (double)(*optimizer->beta2_power);
+            double d_step = (double)step;
+            double d_rho_t = d_rho_inf - 2.0 * (d_step * d_beta2_t) / (1.0 - d_beta2_t + 1e-12);
+            float rho_inf = (float)d_rho_inf;
+            float rho_t = (float)d_rho_t;
 
-            /* FIX-002: LookAhead慢权重初始化（首次调用时快照当前参数为慢权重） */
+            /* P0修复: LookAhead慢权重初始化。
+             * 原实现在step==0时初始化，但ensure_buffers重分配缓冲区后
+             * step可能>0而cache_buffer已被calloc清零，导致慢权重全零。
+             * 现改用slow_weights_initialized标志，确保首次使用或重分配后
+             * 都从当前参数快照初始化慢权重。 */
             int k = optimizer->config.lookahead_k > 0 ? optimizer->config.lookahead_k : 5;
             float alpha = optimizer->config.lookahead_alpha > 0.0f
                           ? optimizer->config.lookahead_alpha : 0.5f;
-            int is_first_step = (step == 0);
-            if (is_first_step) {
+            if (!optimizer->slow_weights_initialized) {
                 for (i = 0; i < num_params; i++) {
                     optimizer->cache_buffer[i] = parameters[i];
                 }
+                optimizer->slow_weights_initialized = 1;
             }
 
             for (i = 0; i < num_params; i++)
@@ -462,8 +522,11 @@ int optimizer_step(Optimizer* optimizer, float* parameters, float* gradients,
                 optimizer->velocity_buffer[i] = b2 * optimizer->velocity_buffer[i] +
                                                 (1.0f - b2) * gradients[i] * gradients[i];
 
-                float m_hat = optimizer->momentum_buffer[i] / (1.0f - *optimizer->beta1_power);
-                float v_hat = optimizer->velocity_buffer[i] / (1.0f - *optimizer->beta2_power);
+                /* P0修复: 偏置校正除零保护，与Adam保持一致（β^t→1时1/(1-β^t)会溢出） */
+                float b1_corr = 1.0f - *optimizer->beta1_power; if (b1_corr < 1e-7f) b1_corr = 1e-7f;
+                float b2_corr = 1.0f - *optimizer->beta2_power; if (b2_corr < 1e-7f) b2_corr = 1e-7f;
+                float m_hat = optimizer->momentum_buffer[i] / b1_corr;
+                float v_hat = optimizer->velocity_buffer[i] / b2_corr;
 
                 if (rho_t > 4.0f)
                 {
@@ -519,12 +582,15 @@ int optimizer_step(Optimizer* optimizer, float* parameters, float* gradients,
             optimizer->velocity_buffer[0] = v;
 
             float v_sqrt = sqrtf(v + eps);
+            /* P0修复: 偏置校正除零保护，与Adam保持一致（β1^t→1时1/(1-β1^t)会溢出） */
+            float b1_corr = 1.0f - *optimizer->beta1_power;
+            if (b1_corr < 1e-7f) b1_corr = 1e-7f;
             for (i = 0; i < num_params; i++)
             {
                 float g_normed = gradients[i] / v_sqrt;
                 optimizer->momentum_buffer[i] = b1 * optimizer->momentum_buffer[i] +
                                                 (1.0f - b1) * g_normed;
-                float m_hat = optimizer->momentum_buffer[i] / (1.0f - *optimizer->beta1_power);
+                float m_hat = optimizer->momentum_buffer[i] / b1_corr;
                 parameters[i] -= lr * m_hat;
             }
             break;
@@ -670,8 +736,9 @@ int optimizer_update_multi_group(Optimizer* optimizer, OptimizerParamGroup* grou
                     float b2c = 1.0f - *optimizer->beta2_power; if (b2c < 1e-7f) b2c = 1e-7f;
                     float m_hat = optimizer->momentum_buffer[idx] / b1c;
                     float v_hat = optimizer->velocity_buffer[idx] / b2c;
-                    /* DEEP-FIX: 多组Adam权重衰减 */
-                    params[i] = params[i] * (1.0f - lr * wd) - lr * m_hat / (sqrtf(v_hat) + eps);
+                    /* P1修复: 多组Adam改用AdamW风格解耦权重衰减（加法形式），
+                     * 与单参数组版本和AdamW实现保持一致 */
+                    params[i] -= lr * (m_hat / (sqrtf(v_hat) + eps) + wd * params[i]);
                 }
             }
             break;
@@ -694,8 +761,11 @@ int optimizer_update_multi_group(Optimizer* optimizer, OptimizerParamGroup* grou
                                                       (1.0f - b1) * grads[i];
                     optimizer->velocity_buffer[idx] = b2 * optimizer->velocity_buffer[idx] +
                                                       (1.0f - b2) * grads[i] * grads[i];
-                    float m_hat = optimizer->momentum_buffer[idx] / (1.0f - *optimizer->beta1_power);
-                    float v_hat = optimizer->velocity_buffer[idx] / (1.0f - *optimizer->beta2_power);
+                    /* P0修复: 偏置校正除零保护，与Adam保持一致（β^t→1时1/(1-β^t)会溢出） */
+                    float b1_corr = 1.0f - *optimizer->beta1_power; if (b1_corr < 1e-7f) b1_corr = 1e-7f;
+                    float b2_corr = 1.0f - *optimizer->beta2_power; if (b2_corr < 1e-7f) b2_corr = 1e-7f;
+                    float m_hat = optimizer->momentum_buffer[idx] / b1_corr;
+                    float v_hat = optimizer->velocity_buffer[idx] / b2_corr;
                     params[i] -= lr * (m_hat / (sqrtf(v_hat) + eps) + wd * params[i]);
                 }
             }
@@ -732,8 +802,13 @@ int optimizer_update_multi_group(Optimizer* optimizer, OptimizerParamGroup* grou
             float wd = optimizer->config.weight_decay;
             *optimizer->beta1_power *= b1;
             *optimizer->beta2_power *= b2;
-            float inv_b1 = 1.0f / (1.0f - *optimizer->beta1_power);
-            float inv_b2 = 1.0f / (1.0f - *optimizer->beta2_power);
+            /* P0修复: 偏置校正除零保护，与Adam保持一致（β^t→1时1/(1-β^t)会溢出） */
+            float b1_corr = 1.0f - *optimizer->beta1_power;
+            float b2_corr = 1.0f - *optimizer->beta2_power;
+            if (b1_corr < 1e-7f) b1_corr = 1e-7f;
+            if (b2_corr < 1e-7f) b2_corr = 1e-7f;
+            float inv_b1 = 1.0f / b1_corr;
+            float inv_b2 = 1.0f / b2_corr;
 
 /* 多组LAMB状态保护。分配临时update缓冲区 */
 /* total_params已在函数开头计算，此处复用不重新声明 */
@@ -825,16 +900,21 @@ int optimizer_update_multi_group(Optimizer* optimizer, OptimizerParamGroup* grou
             *optimizer->beta1_power *= b1;
             *optimizer->beta2_power *= b2;
 
-            float rho_inf = 2.0f / (1.0f - b2) - 1.0f;
-            float beta2_t = *optimizer->beta2_power;
-            float rho_t = rho_inf - 2.0f * (float)step * beta2_t / (1.0f - beta2_t + 1e-12f);
+            /* P1修复: 统一使用double计算rho_inf和rho_t，避免float/double混用精度不一致 */
+            double d_b2 = (double)b2;
+            double d_rho_inf = 2.0 / (1.0 - d_b2) - 1.0;
+            double d_beta2_t = (double)(*optimizer->beta2_power);
+            double d_step = (double)step;
+            double d_rho_t = d_rho_inf - 2.0 * (d_step * d_beta2_t) / (1.0 - d_beta2_t + 1e-12);
+            float rho_inf = (float)d_rho_inf;
+            float rho_t = (float)d_rho_t;
 
             int k = optimizer->config.lookahead_k > 0 ? optimizer->config.lookahead_k : 5;
             float alpha = optimizer->config.lookahead_alpha > 0.0f
                           ? optimizer->config.lookahead_alpha : 0.5f;
 
-            /* LookAhead慢权重初始化（首次调用时快照当前参数） */
-            if (step == 0) {
+            /* P0修复: LookAhead慢权重初始化，使用标志位替代step==0检查 */
+            if (!optimizer->slow_weights_initialized) {
                 idx = 0;
                 for (int g = 0; g < num_groups; g++) {
                     float* params = groups[g].parameters;
@@ -843,7 +923,14 @@ int optimizer_update_multi_group(Optimizer* optimizer, OptimizerParamGroup* grou
                         optimizer->cache_buffer[idx] = params[i];
                     }
                 }
+                optimizer->slow_weights_initialized = 1;
             }
+
+            /* P0修复: 偏置校正除零保护，与Adam保持一致（β^t→1时1/(1-β^t)会溢出） */
+            float b1_corr = 1.0f - *optimizer->beta1_power;
+            float b2_corr = 1.0f - *optimizer->beta2_power;
+            if (b1_corr < 1e-7f) b1_corr = 1e-7f;
+            if (b2_corr < 1e-7f) b2_corr = 1e-7f;
 
             idx = 0;
             for (int g = 0; g < num_groups; g++) {
@@ -856,8 +943,8 @@ int optimizer_update_multi_group(Optimizer* optimizer, OptimizerParamGroup* grou
                                                       (1.0f - b1) * grads[i];
                     optimizer->velocity_buffer[idx] = b2 * optimizer->velocity_buffer[idx] +
                                                       (1.0f - b2) * grads[i] * grads[i];
-                    float m_hat = optimizer->momentum_buffer[idx] / (1.0f - *optimizer->beta1_power);
-                    float v_hat = optimizer->velocity_buffer[idx] / (1.0f - *optimizer->beta2_power);
+                    float m_hat = optimizer->momentum_buffer[idx] / b1_corr;
+                    float v_hat = optimizer->velocity_buffer[idx] / b2_corr;
                     if (rho_t > 4.0f) {
                         float l_t = sqrtf(1.0f - *optimizer->beta2_power) / (sqrtf(v_hat) + eps);
                         float r_num = (rho_t - 4.0f) * (rho_t - 2.0f) * rho_inf;
@@ -919,7 +1006,9 @@ int optimizer_update_multi_group(Optimizer* optimizer, OptimizerParamGroup* grou
                     float g_normed = grads[i] / v_sqrt;
                     optimizer->momentum_buffer[idx] = b1 * optimizer->momentum_buffer[idx] +
                                                       (1.0f - b1) * g_normed;
-                    float m_hat = optimizer->momentum_buffer[idx] / (1.0f - *optimizer->beta1_power);
+                    /* P0修复: 偏置校正除零保护，与Adam保持一致（β1^t→1时1/(1-β1^t)会溢出） */
+                    float b1_corr = 1.0f - *optimizer->beta1_power; if (b1_corr < 1e-7f) b1_corr = 1e-7f;
+                    float m_hat = optimizer->momentum_buffer[idx] / b1_corr;
                     params[i] -= lr * m_hat;
                 }
             }
@@ -951,6 +1040,8 @@ void optimizer_reset(Optimizer* optimizer)
     }
     if (optimizer->beta1_power) *optimizer->beta1_power = 1.0f;
     if (optimizer->beta2_power) *optimizer->beta2_power = 1.0f;
+    /* P0修复: 重置时cache_buffer被memset清零，慢权重需重新初始化 */
+    optimizer->slow_weights_initialized = 0;
     optimizer->is_initialized = 1; /* 缓冲区已通过memset清零，保持已初始化状态，避免不必要的重新分配 */
 }
 
@@ -973,6 +1064,11 @@ int optimizer_adamw_step(float* params, float* grads, float* m, float* v, size_t
     if (!params || !grads || !m || !v) return -1;
     float b1_corr = 1.0f - powf(beta1, (float)step);
     float b2_corr = 1.0f - powf(beta2, (float)step);
+    /* P1修复5: step=0时powf(beta,0)=1，b1_corr/b2_corr=0，后续m_hat=m[i]/b1_corr
+     * 除零产生Inf/NaN并污染动量缓冲区m和v，导致永久训练损坏。
+     * 添加下限保护(与标准Adam实现一致)，step=0时偏置校正退化为约等于1。 */
+    if (b1_corr < 1e-7f) b1_corr = 1e-7f;
+    if (b2_corr < 1e-7f) b2_corr = 1e-7f;
 /* 添加逐元素NaN/Inf保护，
      * 防止单次NaN污染动量缓冲区m和v导致永久训练损坏 */
     for (size_t i = 0; i < n; i++) {
@@ -981,14 +1077,29 @@ int optimizer_adamw_step(float* params, float* grads, float* m, float* v, size_t
         m[i] = beta1 * m[i] + (1.0f - beta1) * g;
         v[i] = beta2 * v[i] + (1.0f - beta2) * g * g;
         float m_hat = m[i] / b1_corr, v_hat = v[i] / b2_corr;
-        params[i] = params[i] * (1.0f - lr * weight_decay) - lr * m_hat / (sqrtf(v_hat) + eps);
+        /* P1修复: 使用标准AdamW解耦权重衰减（加法形式），替代原乘法衰减。
+         * 两种形式数学等价，但加法形式数值更稳定且为标准实现。 */
+        params[i] -= lr * (m_hat / (sqrtf(v_hat) + eps) + weight_decay * params[i]);
     }
     return 0;
 }
 
 /* TRAIN-21: Cosine Annealing Warm Restarts */
 float lr_cosine_annealing(float base_lr, float min_lr, int epoch, int T_0, int T_mult) {
+    /* P0修复: T_0<=0时while循环永不终止（T_cur恒>=T_i且T_i恒<=0），
+     * 且最终除以T_i=0导致除零异常。直接返回基础学习率。
+     * T_mult<=0时周期倍增异常（负数导致T_i变负、0导致周期不增长），
+     * 退化为固定周期T_mult=1。 */
+    if (T_0 <= 0) return base_lr;
+    if (T_mult <= 0) T_mult = 1;
     int T_cur = epoch, T_i = T_0;
-    while (T_cur >= T_i) { T_cur -= T_i; T_i *= T_mult; if (T_i == 0) T_i = T_0; }
+    while (T_cur >= T_i) {
+        T_cur -= T_i;
+        T_i *= T_mult;
+        /* 防御性保护：T_mult溢出可能导致T_i<=0，回退到初始周期 */
+        if (T_i <= 0) T_i = T_0;
+    }
+    /* 最终除零保护：极端情况下确保T_i>0 */
+    if (T_i <= 0) T_i = 1;
     return min_lr + 0.5f * (base_lr - min_lr) * (1.0f + cosf((float)M_PI * (float)T_cur / (float)T_i));
 }

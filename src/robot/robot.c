@@ -10,6 +10,7 @@
 #include "selflnn/robot/pybullet_bridge.h"
 #include "selflnn/robot/hardware_detector.h"
 #include "selflnn/robot/ros_robot_controller.h"
+#include "selflnn/robot/kinematics.h" /* P1修复: 引入运动学模型，用于URDF关节限位 */
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/memory_utils.h"
@@ -102,6 +103,9 @@ struct Robot {
     float sim_last_update_time;   /**< 仿真最后更新时间 (秒) */
     float last_update_time;       /**< 力矩控制上次更新时间（非static，避免线程数据竞争） */
     int sim_data_warning;         /**< 仿真数据警告：1=当前含有仿真数据，禁止用于自主学习训练 */
+    
+    /* P1修复: 运动学模型指针，用于获取URDF配置的关节限位（NULL表示未加载） */
+    const KinematicModel* kin_model; /**< 运动学模型（URDF解析结果） */
     
     /* PID控制器状态（用于位置控制） */
     float pid_integral[3];        /**< PID积分项累积 [x, y, z] */
@@ -2243,17 +2247,27 @@ static void robot_sim_update_state(Robot* robot, float dt) {
                 // q_new = q + v_new*dt
                 robot->sim_joint_velocities[i] += acceleration * actual_dt;
                 robot->sim_joint_positions[i] += robot->sim_joint_velocities[i] * actual_dt;
+                /* P1修复: NaN/Inf检查,防止数值积分发散导致关节状态崩溃。
+                 * 极端工况(除零、数值溢出)下积分结果可能产生NaN/Inf,
+                 * 非有限值会传播到运动学和控制器,导致整个机器人行为异常。 */
+                if (!isfinite(robot->sim_joint_velocities[i])) robot->sim_joint_velocities[i] = 0.0f;
+                if (!isfinite(robot->sim_joint_positions[i])) robot->sim_joint_positions[i] = 0.0f;
                 
                 // 7. 关节限制
-                // 速度限制（基于工业机器人典型值）
-                float max_joint_vel = (i < 6) ? 3.0f : 5.0f; // rad/s
+                /* P1修复: 使用URDF配置的安全限位，回退到保守默认值 */
+                float max_joint_vel = (robot->kin_model && i < robot->kin_model->joint_count) ?
+                    robot->kin_model->joints[i].joint_max_velocity :
+                    ((i < 6) ? 3.0f : 5.0f);
+                if (max_joint_vel <= 0.0f) max_joint_vel = (i < 6) ? 3.0f : 5.0f;
                 if (fabsf(robot->sim_joint_velocities[i]) > max_joint_vel) {
                     robot->sim_joint_velocities[i] = copysignf(max_joint_vel, robot->sim_joint_velocities[i]);
                 }
                 
-                // 位置限制（典型关节范围）
-                float min_joint_pos = -(float)M_PI;
-                float max_joint_pos = (float)M_PI;
+                /* P1修复: 使用URDF配置的关节位置限位，回退到默认值 */
+                float min_joint_pos = (robot->kin_model && i < robot->kin_model->joint_count) ?
+                    robot->kin_model->joints[i].joint_limit_lower : -(float)M_PI;
+                float max_joint_pos = (robot->kin_model && i < robot->kin_model->joint_count) ?
+                    robot->kin_model->joints[i].joint_limit_upper : (float)M_PI;
                 if (robot->sim_joint_positions[i] < min_joint_pos) {
                     robot->sim_joint_positions[i] = min_joint_pos;
                     robot->sim_joint_velocities[i] = 0.0f; // 碰到限位停止

@@ -5,8 +5,12 @@
     <description>全液态神经网络AGI大模型系统服务，提供多模态认知、自主决策、机器人控制等功能。</description>
     
     <!-- 执行路径 -->
-    <executable>%BASE%\bin\backend_server.exe</executable>
-    <arguments>--config "%BASE%\config\backend_config.json"</arguments>
+    <!-- P-AUDIT修复: 原引用 backend_server.exe,实际编译产物为 selflnn.exe -->
+    <executable>%BASE%\bin\selflnn.exe</executable>
+    <!-- P-AUDIT修复: 原引用 --config 参数和 backend_config.json,但 main.c 不支持 --config 参数,
+         配置文件由 backend_load_config() 自动从 selflnn_config.json 加载。
+         改用 --port 和 --log-file 参数。 -->
+    <arguments>--port 8080 --log-file "%BASE%\logs\slnn.log"</arguments>
     
     <!-- 工作目录 -->
     <workingdirectory>%BASE%</workingdirectory>
@@ -45,7 +49,8 @@
     <!-- 环境变量 -->
     <env name="PATH" value="%BASE%\bin;%PATH%"/>
     <env name="SLNN_HOME" value="%BASE%"/>
-    <env name="SLNN_CONFIG" value="%BASE%\config\backend_config.json"/>
+    <!-- P-AUDIT修复: 原引用 backend_config.json,实际配置文件为 system_config.json -->
+    <env name="SLNN_CONFIG" value="%BASE%\config\system_config.json"/>
     <env name="SLNN_DATA" value="%BASE%\data"/>
     <env name="SLNN_MODELS" value="%BASE%\models"/>
     <env name="SLNN_LOGS" value="%BASE%\logs"/>
