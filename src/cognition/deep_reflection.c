@@ -58,6 +58,8 @@
 #define DR_MIN(a,b) (((a)<(b))?(a):(b))
 #define DR_CLAMP(v,lo,hi) DR_MIN(DR_MAX((v),(lo)),(hi))
 #define DR_ABS(x) (((x)>=0)?(x):(-(x)))
+/* P2-04修复: 深度反思执行时间硬限制（秒），防止耗时过长 */
+#define DR_MAX_REFLECTION_SECONDS 30
 
 struct DeepReflectionEngine {
     DRConfig config;
@@ -474,6 +476,10 @@ int dr_reflect(DeepReflectionEngine* engine,
 
     memset(chain_out, 0, sizeof(DRReflectionChain));
 
+    /* P2-04修复: 记录反思开始时间，用于执行时间硬限制检查 */
+    clock_t reflection_start_time = clock();
+    int reflection_timeout = 0;
+
     size_t edim = (engine->config.embedding_dim > 0) ? engine->config.embedding_dim : DR_EMBED_DIM;
 
     float base_embed[DR_EMBED_DIM] = {0};
@@ -519,6 +525,22 @@ int dr_reflect(DeepReflectionEngine* engine,
     float prev_risk = 0.0f;
 
     for (int layer = 0; layer < max_layers; layer++) {
+        /* P2-04修复: 每次迭代前检查是否超过时间限制
+         * 使用clock()获取CPU时间，避免因系统时钟调整导致的问题。
+         * 超过限制后提前结束反思，记录日志，防止耗时过长。 */
+        if (!reflection_timeout) {
+            clock_t elapsed_ticks = clock() - reflection_start_time;
+            double elapsed_seconds = (double)elapsed_ticks / (double)CLOCKS_PER_SEC;
+            if (elapsed_seconds > (double)DR_MAX_REFLECTION_SECONDS) {
+                reflection_timeout = 1;
+                log_warn("[深度反思] 反思执行时间超过%d秒限制(已执行%.1f秒), "
+                         "在第%d/%d层提前结束",
+                         DR_MAX_REFLECTION_SECONDS, elapsed_seconds,
+                         layer, max_layers);
+                break;
+            }
+        }
+
         DRLayerResult* lr = &chain_out->layers[layer];
         lr->layer = (DRReflectionLayer)(layer % 7);
 

@@ -652,6 +652,33 @@ int multimodal_unified_input_reset(UnifiedInputState* state)
     return 0;
 }
 
+/**
+ * @brief 释放统一输入状态（仅释放不重新分配，用于关闭清理）
+ * 与 multimodal_unified_input_reset 不同，此函数不会重新分配缓冲区
+ */
+void multimodal_unified_input_free(UnifiedInputState* state) {
+    if (!state) return;
+    
+    for (int m = 0; m < SELFLNN_MAX_MODALITIES; m++) {
+        if (state->projection_matrices[m]) {
+            safe_free((void**)&state->projection_matrices[m]);
+        }
+        if (state->projection_biases[m]) {
+            safe_free((void**)&state->projection_biases[m]);
+        }
+        if (state->projection_weight_v[m]) {
+            safe_free((void**)&state->projection_weight_v[m]);
+        }
+        if (state->projection_bias_v[m]) {
+            safe_free((void**)&state->projection_bias_v[m]);
+        }
+    }
+    
+    safe_free((void**)&state->unified_buffer);
+    safe_free((void**)&state->unified_input_buffer);
+    /* 不重新分配缓冲区，仅释放 */
+}
+
 int multimodal_unified_input_get_stats(const UnifiedInputState* state,
                                 UnifiedInputMethod* active_method,
                                 int* total_count,

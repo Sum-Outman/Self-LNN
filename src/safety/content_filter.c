@@ -230,27 +230,14 @@ ContentFilter* content_filter_create(void) {
      * 语义层与关键词匹配层协同工作：语义层做深度理解，关键词层做精细分类。 */
     filter->enable_semantic = 1;
 
-    /* L-021修复: 创建独立的2层CfC（液态神经网络）分类器用于语义评分。
-     * 当外部未通过content_filter_set_lnn()绑定LNN实例时，
-     * 使用此内部分类器进行语义评分，避免语义评分为0的情况。
-     * 该分类器为轻量级128→64→128双层CfC网络，专为内容安全语义分析优化。 */
-    LNNConfig internal_cfg;
-    memset(&internal_cfg, 0, sizeof(internal_cfg));
-    internal_cfg.input_size = CONTENT_FILTER_EMBED_DIM;
-    internal_cfg.hidden_size = 64;
-    internal_cfg.output_size = CONTENT_FILTER_EMBED_DIM;
-    internal_cfg.num_layers = 2;
-    internal_cfg.time_constant = 0.05f;
-    internal_cfg.learning_rate = 0.001f;
-    internal_cfg.enable_training = 0;
-    internal_cfg.ode_solver_type = 0;
-    filter->internal_cfc = lnn_create(&internal_cfg);
-    if (filter->internal_cfc) {
-        log_info("[内容过滤] 内部2层CfC语义分类器已创建 (input=%d, hidden=64, output=%d)",
-                 CONTENT_FILTER_EMBED_DIM, CONTENT_FILTER_EMBED_DIM);
-    } else {
-        log_warning("[内容过滤] 内部CfC语义分类器创建失败，语义评分将使用关键词匹配");
-    }
+    /* DEFECT-008根因修复: 内部CfC分类器延迟初始化。
+     * content_filter_create()在initialize_subsystems()深层调用栈中执行，
+     * 栈压力已接近极限。lnn_create()内部会触发完整的CfC网络创建链
+     * (cfc_create→cfc_cell_create×2层)，进一步消耗栈空间导致/GS金丝雀检查失败。
+     * 修复策略: 将lnn_create()延迟到content_filter_check()首次语义评分时按需创建，
+     * 此时调用栈极浅(仅从AGI/对话处理线程调用)，有充足的栈空间。
+     * 同时将LNNConfig从static数据段改为堆分配，消除线程安全隐患。 */
+    filter->internal_cfc = NULL;
 
     return filter;
 }
@@ -263,7 +250,11 @@ void content_filter_destroy(ContentFilter* filter) {
     }
     /* FIX-007修复: 释放互斥锁 */
     if (filter->lock) mutex_destroy(filter->lock);
-    safe_free((void**)&filter);
+    /* DEFECT-007修复: 使用临时局部变量通过safe_free释放 */
+    {
+        void* temp = filter;
+        safe_free(&temp);
+    }
 }
 
 /* 绑定LNN语义分析层实现
@@ -419,17 +410,59 @@ int content_filter_check(ContentFilter* filter, const char* content,
     /* ===== 第二层：LNN语义评估（补充过滤维度） =====
      * 在关键词匹配之后，使用LNN对完整文本进行语义级安全评估。
      * L-021修复: 优先使用外部绑定的LNN实例；若未绑定则使用内部独立的2层CfC分类器。
-     * 语义评分作为补充维度：与关键词分数加权融合，提升对隐晦违规内容的检测能力。 */
+     * 语义评分作为补充维度：与关键词分数加权融合，提升对隐晦违规内容的检测能力。
+     * DEFECT-008根因修复: 延迟初始化。如果internal_cfc为NULL且enable_semantic为1，
+     * 则在首次需要语义评分时动态创建内部CfC分类器。此时调用栈极浅，栈空间充足。 */
     void* lnn_for_semantic = cached_lnn_instance ? cached_lnn_instance : cached_internal_cfc;
     /* P0修复: 如果使用外部共享LNN，需要加锁防止与AGI后台线程竞态崩溃。
      * internal_cfc是filter私有的，无需加锁。 */
     int use_shared_lnn = (cached_lnn_instance != NULL);
     if (use_shared_lnn) selflnn_lock_lnn();
+
+    /* DEFECT-008根因修复: 延迟初始化内部CfC分类器 */
+    if (cached_enable_semantic && !cached_internal_cfc && !cached_lnn_instance) {
+        mutex_lock(filter->lock);
+        /* 二次检查（可能其他线程已创建） */
+        if (!filter->internal_cfc) {
+            LNNConfig* internal_cfg = (LNNConfig*)safe_malloc(sizeof(LNNConfig));
+            if (internal_cfg) {
+                memset(internal_cfg, 0, sizeof(LNNConfig));
+                internal_cfg->input_size = CONTENT_FILTER_EMBED_DIM;
+                internal_cfg->hidden_size = 64;
+                internal_cfg->output_size = CONTENT_FILTER_EMBED_DIM;
+                internal_cfg->num_layers = 2;
+                internal_cfg->time_constant = 0.05f;
+                internal_cfg->learning_rate = 0.001f;
+                internal_cfg->enable_training = 0;
+                internal_cfg->ode_solver_type = 0;
+                filter->internal_cfc = lnn_create(internal_cfg);
+                safe_free((void**)&internal_cfg);
+                if (filter->internal_cfc) {
+                    log_info("[内容过滤] 内部2层CfC语义分类器已延迟创建 (input=%d, hidden=64, output=%d)",
+                             CONTENT_FILTER_EMBED_DIM, CONTENT_FILTER_EMBED_DIM);
+                } else {
+                    log_warning("[内容过滤] 内部CfC语义分类器创建失败，语义评分将使用关键词匹配");
+                    filter->enable_semantic = 0;
+                    cached_enable_semantic = 0;
+                }
+            } else {
+                log_warning("[内容过滤] 内存分配失败，无法创建内部CfC分类器，语义评分禁用");
+                filter->enable_semantic = 0;
+                cached_enable_semantic = 0;
+            }
+        }
+        /* 更新缓存，重新选择lnn_for_semantic */
+        cached_internal_cfc = filter->internal_cfc;
+        cached_enable_semantic = filter->enable_semantic;
+        mutex_unlock(filter->lock);
+        lnn_for_semantic = cached_lnn_instance ? cached_lnn_instance : cached_internal_cfc;
+    }
+
     if (lnn_for_semantic && cached_enable_semantic) {
         float input_embed[CONTENT_FILTER_EMBED_DIM];
         memset(input_embed, 0, sizeof(input_embed));
         size_t text_len = strlen(content);
-/* 使用bigram哈希编码替代简单字符编码，提升语义嵌入质量。
+        /* 使用bigram哈希编码替代简单字符编码，提升语义嵌入质量。
          * bigram哈希捕获字符相邻关系，比单字符编码提供更丰富的文本特征。 */
         if (text_len < 2) {
             /* 极短文本：使用字符编码回退 */
@@ -459,7 +492,9 @@ int content_filter_check(ContentFilter* filter, const char* content,
             }
         }
         float lnn_output[CONTENT_FILTER_EMBED_DIM];
+        int lnn_forward_success = 0;
         if (lnn_forward((LNN*)lnn_for_semantic, input_embed, lnn_output) == 0) {
+            lnn_forward_success = 1;
             float output_energy = 0.0f;
             int active_dims = 0;
             float max_activation = 0.0f;
@@ -492,6 +527,232 @@ int content_filter_check(ContentFilter* filter, const char* content,
                 /* 关键词未命中但语义评分较高：作为独立补充维度 */
                 highest_score = semantic_score;
                 strncpy(detected_pattern, "[语义检测]", sizeof(detected_pattern) - 1);
+            }
+        }
+
+        /* P2-03修复: 内部CfC/LNN推理失败时的统计特征fallback
+         * 当LNN forward失败时，不直接放弃语义评估，而是使用基于文本统计特征的
+         * 简单评分方法，提供比纯关键词匹配更丰富的信号。
+         * 统计特征包括：ngram分布异常度、字符熵、模式相似度等。 */
+        if (!lnn_forward_success) {
+            float stat_score = 0.0f;
+            size_t text_len = strlen(content);
+
+            if (text_len > 0) {
+                /* 统计特征1: 字符分布熵
+                 * 高熵通常表示文本内容多样/随机，低熵可能表示重复模式 */
+                int char_freq[256] = {0};
+                for (size_t i = 0; i < text_len; i++) {
+                    char_freq[(unsigned char)content[i]]++;
+                }
+                float char_entropy = 0.0f;
+                float inv_len = 1.0f / (float)text_len;
+                for (int c = 0; c < 256; c++) {
+                    if (char_freq[c] > 0) {
+                        float p = (float)char_freq[c] * inv_len;
+                        char_entropy -= p * log2f(p + 1e-10f);
+                    }
+                }
+                /* 熵归一化到[0,1]，高熵(>6)和极低熵(<2)都可能是异常信号 */
+                float entropy_norm = char_entropy / 8.0f;
+                float entropy_anomaly = 1.0f - fabsf(entropy_norm - 0.5f) * 2.0f;
+                stat_score += entropy_anomaly * 0.2f;
+
+                /* 统计特征2: 已知敏感模式的ngram重叠度
+                 * 遍历所有过滤规则的模式，计算内容与敏感模式的bigram重叠率 */
+                float max_pattern_overlap = 0.0f;
+                for (int ri = 0; ri < snapshot_rule_count; ri++) {
+                    const ContentFilterRule* r = &filter->rules[ri];
+                    if (!r->enabled || r->pattern_count == 0) continue;
+                    for (int pj = 0; pj < r->pattern_count; pj++) {
+                        char pattern_lower[CONTENT_FILTER_PATTERN_LEN];
+                        content_to_lower(r->patterns[pj], pattern_lower, sizeof(pattern_lower));
+                        size_t plen = strlen(pattern_lower);
+                        if (plen < 2) continue;
+
+                        /* 计算内容的bigram集合与模式bigram集合的交集占比 */
+                        int pattern_bigrams[CONTENT_FILTER_EMBED_DIM] = {0};
+                        for (size_t pi = 0; pi + 1 < plen; pi++) {
+                            uint32_t h = ((uint32_t)(unsigned char)pattern_lower[pi] << 8)
+                                       | (uint32_t)(unsigned char)pattern_lower[pi + 1];
+                            h = h * 2654435761u;
+                            pattern_bigrams[(size_t)(h % CONTENT_FILTER_EMBED_DIM)] = 1;
+                        }
+
+                        int content_bigrams[CONTENT_FILTER_EMBED_DIM] = {0};
+                        for (size_t ci = 0; ci + 1 < text_len; ci++) {
+                            uint32_t h = ((uint32_t)(unsigned char)content_lower[ci] << 8)
+                                       | (uint32_t)(unsigned char)content_lower[ci + 1];
+                            h = h * 2654435761u;
+                            content_bigrams[(size_t)(h % CONTENT_FILTER_EMBED_DIM)] = 1;
+                        }
+
+                        /* Jaccard相似度近似：交集/并集 */
+                        int intersect = 0, union_count = 0;
+                        for (int d = 0; d < CONTENT_FILTER_EMBED_DIM; d++) {
+                            if (pattern_bigrams[d] || content_bigrams[d]) union_count++;
+                            if (pattern_bigrams[d] && content_bigrams[d]) intersect++;
+                        }
+                        if (union_count > 0) {
+                            float overlap = (float)intersect / (float)union_count;
+                            if (overlap > max_pattern_overlap) {
+                                max_pattern_overlap = overlap;
+                            }
+                        }
+                    }
+                }
+                stat_score += max_pattern_overlap * 0.5f;
+
+                /* 统计特征3: 特殊字符/控制字符密度
+                 * 恶意代码通常含有较多特殊字符 */
+                int special_chars = 0;
+                for (size_t i = 0; i < text_len; i++) {
+                    unsigned char ch = (unsigned char)content[i];
+                    if (ch < 32 || (ch > 126 && ch < 160)) special_chars++;
+                }
+                float special_ratio = (float)special_chars / (float)text_len;
+                stat_score += special_ratio * 0.3f;
+
+                /* 统计特征4: 重复ngram检测（垃圾信息特征） */
+                uint32_t trigram_buckets[128] = {0};
+                int trigram_count = 0;
+                for (size_t i = 0; i + 2 < text_len && i < 512; i++) {
+                    uint32_t h = ((uint32_t)(unsigned char)content_lower[i] << 16)
+                               | ((uint32_t)(unsigned char)content_lower[i + 1] << 8)
+                               | (uint32_t)(unsigned char)content_lower[i + 2];
+                    h = h * 2654435761u;
+                    trigram_buckets[(size_t)(h % 128)]++;
+                    trigram_count++;
+                }
+                if (trigram_count > 0) {
+                    int max_trigram_freq = 0;
+                    for (int t = 0; t < 128; t++) {
+                        if (trigram_buckets[t] > max_trigram_freq)
+                            max_trigram_freq = trigram_buckets[t];
+                    }
+                    float repeat_ratio = (float)max_trigram_freq / (float)trigram_count;
+                    /* 高重复率可能是垃圾信息或模板注入 */
+                    stat_score += repeat_ratio * 0.3f;
+                }
+
+                /* 限制统计分数在[0,1]范围 */
+                if (stat_score > 1.0f) stat_score = 1.0f;
+                if (stat_score < 0.0f) stat_score = 0.0f;
+
+                /* 统计评分作为fallback语义评分 */
+                if (stat_score > 0.15f) {
+                    semantic_score = stat_score;
+
+                    if (highest_score > 0.0f) {
+                        /* 关键词已命中：加权融合(关键词70% + 统计特征30%) */
+                        float blended_score = highest_score * 0.7f + semantic_score * 0.3f;
+                        if (blended_score > 1.0f) blended_score = 1.0f;
+                        highest_score = blended_score;
+                        if (semantic_score > 0.6f && strstr(detected_pattern, "[统计") == NULL) {
+                            char stat_tag[64];
+                            snprintf(stat_tag, sizeof(stat_tag), "%s [统计特征:%.2f]",
+                                     detected_pattern, semantic_score);
+                            strncpy(detected_pattern, stat_tag, sizeof(detected_pattern) - 1);
+                        }
+                    } else if (semantic_score > 0.5f) {
+                        /* 关键词未命中但统计特征评分较高 */
+                        highest_score = semantic_score;
+                        strncpy(detected_pattern, "[统计特征检测]", sizeof(detected_pattern) - 1);
+                    }
+                }
+            }
+        }
+    } else if (cached_enable_semantic) {
+        /* P2-03修复: LNN完全不可用时的纯统计特征fallback
+         * 当lnn_for_semantic为NULL但enable_semantic为1时，
+         * 说明内部CfC创建失败或外部LNN未绑定，使用统计特征评估文本安全性。
+         * 此路径比纯关键词匹配提供更丰富的信号。 */
+        size_t text_len = strlen(content);
+        if (text_len > 0) {
+            float stat_score = 0.0f;
+
+            /* 字符分布熵 */
+            int char_freq[256] = {0};
+            for (size_t i = 0; i < text_len; i++) {
+                char_freq[(unsigned char)content[i]]++;
+            }
+            float char_entropy = 0.0f;
+            float inv_len = 1.0f / (float)text_len;
+            for (int c = 0; c < 256; c++) {
+                if (char_freq[c] > 0) {
+                    float p = (float)char_freq[c] * inv_len;
+                    char_entropy -= p * log2f(p + 1e-10f);
+                }
+            }
+            float entropy_norm = char_entropy / 8.0f;
+            float entropy_anomaly = 1.0f - fabsf(entropy_norm - 0.5f) * 2.0f;
+            stat_score += entropy_anomaly * 0.2f;
+
+            /* 已知敏感模式bigram重叠度 */
+            float max_pattern_overlap = 0.0f;
+            for (int ri = 0; ri < snapshot_rule_count; ri++) {
+                const ContentFilterRule* r = &filter->rules[ri];
+                if (!r->enabled || r->pattern_count == 0) continue;
+                for (int pj = 0; pj < r->pattern_count; pj++) {
+                    char pattern_lower[CONTENT_FILTER_PATTERN_LEN];
+                    content_to_lower(r->patterns[pj], pattern_lower, sizeof(pattern_lower));
+                    size_t plen = strlen(pattern_lower);
+                    if (plen < 2) continue;
+
+                    int pattern_bigrams[CONTENT_FILTER_EMBED_DIM] = {0};
+                    for (size_t pi = 0; pi + 1 < plen; pi++) {
+                        uint32_t h = ((uint32_t)(unsigned char)pattern_lower[pi] << 8)
+                                   | (uint32_t)(unsigned char)pattern_lower[pi + 1];
+                        h = h * 2654435761u;
+                        pattern_bigrams[(size_t)(h % CONTENT_FILTER_EMBED_DIM)] = 1;
+                    }
+                    int content_bigrams[CONTENT_FILTER_EMBED_DIM] = {0};
+                    for (size_t ci = 0; ci + 1 < text_len; ci++) {
+                        uint32_t h = ((uint32_t)(unsigned char)content_lower[ci] << 8)
+                                   | (uint32_t)(unsigned char)content_lower[ci + 1];
+                        h = h * 2654435761u;
+                        content_bigrams[(size_t)(h % CONTENT_FILTER_EMBED_DIM)] = 1;
+                    }
+                    int intersect = 0, union_count = 0;
+                    for (int d = 0; d < CONTENT_FILTER_EMBED_DIM; d++) {
+                        if (pattern_bigrams[d] || content_bigrams[d]) union_count++;
+                        if (pattern_bigrams[d] && content_bigrams[d]) intersect++;
+                    }
+                    if (union_count > 0) {
+                        float overlap = (float)intersect / (float)union_count;
+                        if (overlap > max_pattern_overlap) max_pattern_overlap = overlap;
+                    }
+                }
+            }
+            stat_score += max_pattern_overlap * 0.5f;
+
+            /* 特殊字符密度 */
+            int special_chars = 0;
+            for (size_t i = 0; i < text_len; i++) {
+                unsigned char ch = (unsigned char)content[i];
+                if (ch < 32 || (ch > 126 && ch < 160)) special_chars++;
+            }
+            stat_score += ((float)special_chars / (float)text_len) * 0.3f;
+
+            if (stat_score > 1.0f) stat_score = 1.0f;
+            if (stat_score < 0.0f) stat_score = 0.0f;
+
+            if (stat_score > 0.15f) {
+                semantic_score = stat_score;
+                if (highest_score > 0.0f) {
+                    float blended_score = highest_score * 0.7f + semantic_score * 0.3f;
+                    if (blended_score > 1.0f) blended_score = 1.0f;
+                    highest_score = blended_score;
+                    if (strstr(detected_pattern, "[统计") == NULL) {
+                        char stat_tag[64];
+                        snprintf(stat_tag, sizeof(stat_tag), "%s [统计特征:%.2f]",
+                                 detected_pattern, semantic_score);
+                        strncpy(detected_pattern, stat_tag, sizeof(detected_pattern) - 1);
+                    }
+                } else if (semantic_score > 0.5f) {
+                    highest_score = semantic_score;
+                    strncpy(detected_pattern, "[统计特征检测]", sizeof(detected_pattern) - 1);
+                }
             }
         }
     }

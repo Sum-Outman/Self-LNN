@@ -4,15 +4,20 @@
  */
 #include "selflnn/multimodal/teaching_loop.h"
 #include "selflnn/utils/memory_utils.h"
+#include "selflnn/utils/logging.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
 #include <time.h>
+#include <stdint.h>
 #include "selflnn/utils/secure_random.h"
 #include "selflnn/learning/imitation_deep.h"  /* H-016集成: 深度模仿学习 */
 #include "selflnn/core/lnn.h"                  /* LNN演化集成 */
 #include "selflnn/core/cfc_cell.h"             /* CfC细胞 */
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 /* 前向声明 */
 struct TeachingLoopSystem {
@@ -46,9 +51,27 @@ TeachingLoopSystem* teaching_loop_create(void) {
 
 void teaching_loop_free(TeachingLoopSystem* tls) {
     if (!tls) return;
+    /* 验证指针是否为规范x64地址，防止在损坏指针上解引用 */
+    {
+        uintptr_t val = (uintptr_t)tls;
+        uintptr_t high = (val >> 47) & 0x1FFFF;
+        if (high != 0 && high != 0x1FFFF) {
+            log_error("teaching_loop_free: 指针损坏(0x%016llX)，跳过释放",
+                      (unsigned long long)val);
+            return;
+        }
+    }
+#ifdef _WIN32
+    __try {
+#endif
     if (tls->lnn_owned && tls->lnn) {
         lnn_free(tls->lnn);
     }
+#ifdef _WIN32
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        log_error("teaching_loop_free 子资源访问异常 (0x%08lX), 跳过清理", GetExceptionCode());
+    }
+#endif
     safe_free((void**)&tls);
 }
 

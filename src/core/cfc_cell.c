@@ -2292,6 +2292,8 @@ static int ensure_ode_workspace(CfCCell* cell, int solver_type) {
         if (!cell->state->ctbp_state_trajectory) {
             cell->state->ctbp_state_trajectory = (float*)safe_calloc(n * 100, sizeof(float));
             if (!cell->state->ctbp_state_trajectory) return -1;
+            /* 修复: 分配后立即设置正确的容量，原代码遗漏导致capacity保持100而非n*100 */
+            cell->state->ctbp_trajectory_capacity = (int)(n * 100);
         }
         break;
     /* S-001修复: ODE_SOLVER_RHS使用前向欧拉/RK2方法，通过noise_buffer和临时malloc

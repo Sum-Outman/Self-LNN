@@ -1522,6 +1522,7 @@ static int kernel_cache_insert(struct GpuContext* ctx, uint64_t hash, struct Gpu
 
 const char* gpu_backend_name(GpuBackend backend) {
     switch (backend) {
+        case GPU_BACKEND_AUTO:      return "自动检测（Auto-Detect）";
         case GPU_BACKEND_CPU:       return "CPU（通用并行计算）";
         case GPU_BACKEND_CUDA:      return "CUDA（NVIDIA GPU）";
         case GPU_BACKEND_OPENCL:    return "OpenCL（通用GPU计算）";
@@ -1546,6 +1547,7 @@ const char* gpu_backend_name(GpuBackend backend) {
  *   2 = 完整运算验证通过（端到端测试通过）
  */
 static int g_gpu_backend_validation_status[GPU_BACKEND_COUNT] = {
+    [GPU_BACKEND_AUTO]     = 0,  /* P0-03修复: 自动检测模式，运行时动态选择 */
     [GPU_BACKEND_CPU]      = 2,  /* CPU后端：始终可用，端到端验证通过 */
     [GPU_BACKEND_CUDA]     = 1,  /* CUDA：运行时加载cuda.dll验证 */
     [GPU_BACKEND_OPENCL]   = 1,  /* OpenCL：运行时加载OpenCL.dll验证 */
@@ -1839,7 +1841,7 @@ int gpu_init(GpuBackend backend) {
 #endif
 
     /* GPU后端自动检测顺序：CUDA → ROCm → Intel → Vulkan → OpenCL → Metal → 昇腾 → 寒武纪 → TPU → CPU
-     * 自动模式(GPU_BACKEND_CPU)依次检测所有后端，使用首个成功初始化的后端 */
+     * 自动模式(GPU_BACKEND_CPU 或 GPU_BACKEND_AUTO)依次检测所有后端，使用首个成功初始化的后端 */
     static const GpuBackend kDetectionOrder[] = {
         GPU_BACKEND_CUDA,
         GPU_BACKEND_ROCM,
@@ -1855,7 +1857,7 @@ int gpu_init(GpuBackend backend) {
     static const int kDetectionCount = sizeof(kDetectionOrder) / sizeof(kDetectionOrder[0]);
 
     /* 保持锁遍历后端确保无并发初始化 */
-    if (backend == GPU_BACKEND_CPU) {
+    if (backend == GPU_BACKEND_CPU || backend == GPU_BACKEND_AUTO) {
         /* 自动模式：依次检测每个后端，使用首个可用的后端 */
         for (int i = 0; i < kDetectionCount; i++) {
             const GpuBackendInterface* iface = gpu_get_backend_interface(kDetectionOrder[i]);

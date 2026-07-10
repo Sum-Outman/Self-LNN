@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file config_loader.c
  * @brief K-030: 系统配置文件加载与保存 (纯C, 零依赖)
  */
@@ -47,7 +47,7 @@ int selflnn_config_load_from_file(const char* filepath, SystemConfig* config) {
     CONFIG_WRLOCK();
 
     const char* path = filepath ? filepath : CONFIG_DEFAULT_PATH;
-    FILE* fp = fopen(path, "r");
+    FILE* fp = fopen(path, "rb");
     if (!fp) { log_warning("[配置] 文件不存在: %s", path); CONFIG_WRUNLOCK(); return -1; }
 
     fseek(fp, 0, SEEK_END);
@@ -86,25 +86,25 @@ int selflnn_config_load_from_file(const char* filepath, SystemConfig* config) {
     v = json_get(root, "state_dimension");
     /* P0修复: 使用json_to_int_clamped钳制double→int范围，防止溢出UB */
     if (v && v->type == JSON_NUMBER) config->state_dimension = json_to_int_clamped(v->data.number_val);
-    if (config->state_dimension <= 0) config->state_dimension = 128;
+    if (config->state_dimension <= 0) config->state_dimension = 256;
 
     v = json_get(root, "multimodal_channels");
     if (v && v->type == JSON_NUMBER) config->multimodal_channels = json_to_int_clamped(v->data.number_val);
-    if (config->multimodal_channels <= 0) config->multimodal_channels = 9;
+    if (config->multimodal_channels <= 0) config->multimodal_channels = 64;
 
     v = json_get(root, "memory_capacity");
     if (v && v->type == JSON_NUMBER) config->memory_capacity = json_to_int_clamped(v->data.number_val);
-    if (config->memory_capacity <= 0) config->memory_capacity = 100000;
+    if (config->memory_capacity <= 0) config->memory_capacity = 10000;
 
     v = json_get(root, "max_concurrent_tasks");
     if (v && v->type == JSON_NUMBER) config->max_concurrent_tasks = json_to_int_clamped(v->data.number_val);
-    if (config->max_concurrent_tasks <= 0) config->max_concurrent_tasks = 8;
+    if (config->max_concurrent_tasks <= 0) config->max_concurrent_tasks = 100;
 
     str_val = json_get_string(root, "power_mode");
     if (str_val) {
-        if (strcmp(str_val, "performance") == 0)
+        if (strcmp(str_val, "performance") == 0 || strcmp(str_val, "high") == 0)
             config->power_mode = POWER_MODE_PERFORMANCE;
-        else if (strcmp(str_val, "power_saving") == 0)
+        else if (strcmp(str_val, "power_saving") == 0 || strcmp(str_val, "low") == 0)
             config->power_mode = POWER_MODE_POWER_SAVING;
         else config->power_mode = POWER_MODE_BALANCED;
     } else {
@@ -118,10 +118,14 @@ int selflnn_config_load_from_file(const char* filepath, SystemConfig* config) {
         else if (strcmp(str_val, "vulkan") == 0) config->gpu_backend = GPU_BACKEND_VULKAN;
         else if (strcmp(str_val, "metal") == 0) config->gpu_backend = GPU_BACKEND_METAL;
         else if (strcmp(str_val, "rocm") == 0) config->gpu_backend = GPU_BACKEND_ROCM;
-        else if (strcmp(str_val, "auto") == 0) config->gpu_backend = GPU_BACKEND_CPU;
+        else if (strcmp(str_val, "auto") == 0) config->gpu_backend = GPU_BACKEND_AUTO;
+        else if (strcmp(str_val, "ascend") == 0) config->gpu_backend = GPU_BACKEND_ASCEND;
+        else if (strcmp(str_val, "cambricon") == 0) config->gpu_backend = GPU_BACKEND_CAMBRICON;
+        else if (strcmp(str_val, "tpu") == 0) config->gpu_backend = GPU_BACKEND_TPU;
+        else if (strcmp(str_val, "intel") == 0) config->gpu_backend = GPU_BACKEND_INTEL;
         else config->gpu_backend = GPU_BACKEND_CPU;
     } else {
-        config->gpu_backend = GPU_BACKEND_CPU;
+        config->gpu_backend = GPU_BACKEND_AUTO;  /* P0-03修复: 默认自动检测GPU后端 */
     }
 
 /* 加载与保存的字段集保持一致 */
@@ -134,22 +138,28 @@ int selflnn_config_load_from_file(const char* filepath, SystemConfig* config) {
     v = json_get(root, "http_port");
     if (v && v->type == JSON_NUMBER) {
         int json_hp = json_to_int_clamped(v->data.number_val);   /* P0修复: 钳制防止溢出UB */
-        if (json_hp > 0 && json_hp <= 65535 && json_hp != SELFLNN_HTTP_PORT) {
-            log_warning("[配置] system_config.json中http_port=%d与port_config.h中SELFLNN_HTTP_PORT=%d不一致，强制使用头文件定义值%d",
-                        json_hp, SELFLNN_HTTP_PORT, SELFLNN_HTTP_PORT);
+        if (json_hp > 0 && json_hp <= 65535) {
+            /* 1.4修复: 使用JSON文件中的端口值，不再强制覆盖为硬编码默认值 */
+            config->http_port = json_hp;
+        } else {
+            config->http_port = SELFLNN_DEFAULT_PORT;
         }
+    } else {
+        config->http_port = SELFLNN_DEFAULT_PORT;
     }
-    config->http_port = SELFLNN_DEFAULT_PORT;
 
     v = json_get(root, "websocket_port");
     if (v && v->type == JSON_NUMBER) {
         int json_ws = json_to_int_clamped(v->data.number_val);   /* P0修复: 钳制防止溢出UB */
-        if (json_ws > 0 && json_ws <= 65535 && json_ws != SELFLNN_WEBSOCKET_PORT) {
-            log_warning("[配置] system_config.json中websocket_port=%d与port_config.h中SELFLNN_WEBSOCKET_PORT=%d不一致，强制使用头文件定义值%d",
-                        json_ws, SELFLNN_WEBSOCKET_PORT, SELFLNN_WEBSOCKET_PORT);
+        if (json_ws > 0 && json_ws <= 65535 && json_ws != config->http_port) {  /* 不与HTTP端口冲突 */
+            /* 1.4修复: 使用JSON文件中的WebSocket端口值 */
+            config->websocket_port = json_ws;
+        } else {
+            config->websocket_port = SELFLNN_WEBSOCKET_PORT;
         }
+    } else {
+        config->websocket_port = SELFLNN_WEBSOCKET_PORT;
     }
-    config->websocket_port = SELFLNN_WEBSOCKET_PORT;
 
     v = json_get(root, "distributed_port");
     if (v && v->type == JSON_NUMBER) config->distributed_port = json_to_int_clamped(v->data.number_val);   /* P0修复: 钳制防止溢出UB */
@@ -179,6 +189,363 @@ int selflnn_config_load_from_file(const char* filepath, SystemConfig* config) {
             }
         } else {
             config->mixed_precision_mode = 0;
+        }
+    }
+
+    /* P1-04修复: 解析 safety 嵌套段 */
+    {
+        const JsonValue* safety_v = json_get(root, "safety");
+        if (safety_v && safety_v->type == JSON_OBJECT) {
+            const JsonValue* v = json_get(safety_v, "content_filter_enabled");
+            if (v && (v->type == JSON_NUMBER)) {
+                config->safety_content_filter_enabled = (v->data.number_val != 0) ? 1 : 0;
+            } else {
+                config->safety_content_filter_enabled = 1; /* 默认启用 */
+            }
+
+            v = json_get(safety_v, "audit_logging_enabled");
+            if (v && (v->type == JSON_NUMBER)) {
+                config->safety_audit_logging_enabled = (v->data.number_val != 0) ? 1 : 0;
+            } else {
+                config->safety_audit_logging_enabled = 1; /* 默认启用 */
+            }
+
+            v = json_get(safety_v, "emergency_stop_enabled");
+            if (v && (v->type == JSON_NUMBER)) {
+                config->safety_emergency_stop_enabled = (v->data.number_val != 0) ? 1 : 0;
+            } else {
+                config->safety_emergency_stop_enabled = 1; /* 默认启用 */
+            }
+
+            v = json_get(safety_v, "behavior_constraints_strictness");
+            if (v && v->type == JSON_NUMBER) {
+                config->safety_behavior_constraints_strictness = (float)v->data.number_val;
+            } else {
+                config->safety_behavior_constraints_strictness = 1.0f; /* 默认严格度 */
+            }
+
+            v = json_get(safety_v, "max_violations_per_hour");
+            if (v && v->type == JSON_NUMBER) {
+                config->safety_max_violations_per_hour = json_to_int_clamped(v->data.number_val);
+            } else {
+                config->safety_max_violations_per_hour = 10; /* 默认值 */
+            }
+
+            v = json_get(safety_v, "circuit_breaker_threshold");
+            if (v && v->type == JSON_NUMBER) {
+                config->safety_circuit_breaker_threshold = json_to_int_clamped(v->data.number_val);
+            } else {
+                config->safety_circuit_breaker_threshold = 5; /* 默认值 */
+            }
+
+            v = json_get(safety_v, "circuit_breaker_cooldown_sec");
+            if (v && v->type == JSON_NUMBER) {
+                config->safety_circuit_breaker_cooldown_sec = json_to_int_clamped(v->data.number_val);
+            } else {
+                config->safety_circuit_breaker_cooldown_sec = 300; /* 默认5分钟冷却 */
+            }
+
+            log_info("[配置] safety段解析: content_filter=%d, audit_log=%d, emergency_stop=%d",
+                     config->safety_content_filter_enabled, config->safety_audit_logging_enabled,
+                     config->safety_emergency_stop_enabled);
+        } else {
+            /* 设置默认值 */
+            config->safety_content_filter_enabled = 1;
+            config->safety_audit_logging_enabled = 1;
+            config->safety_emergency_stop_enabled = 1;
+            config->safety_behavior_constraints_strictness = 1.0f;
+            config->safety_max_violations_per_hour = 10;
+            config->safety_circuit_breaker_threshold = 5;
+            config->safety_circuit_breaker_cooldown_sec = 300;
+        }
+    }
+
+    /* P1-04修复: 解析 evolution 嵌套段 */
+    {
+        const JsonValue* evol_v = json_get(root, "evolution");
+        if (evol_v && evol_v->type == JSON_OBJECT) {
+            const JsonValue* v = json_get(evol_v, "population_size");
+            if (v && v->type == JSON_NUMBER) {
+                config->evolution_population_size = json_to_int_clamped(v->data.number_val);
+            } else {
+                config->evolution_population_size = 100;
+            }
+
+            v = json_get(evol_v, "mutation_rate");
+            if (v && v->type == JSON_NUMBER) {
+                config->evolution_mutation_rate = (float)v->data.number_val;
+            } else {
+                config->evolution_mutation_rate = 0.1f;
+            }
+
+            v = json_get(evol_v, "crossover_rate");
+            if (v && v->type == JSON_NUMBER) {
+                config->evolution_crossover_rate = (float)v->data.number_val;
+            } else {
+                config->evolution_crossover_rate = 0.8f;
+            }
+
+            v = json_get(evol_v, "elite_count");
+            if (v && v->type == JSON_NUMBER) {
+                config->evolution_elite_count = json_to_int_clamped(v->data.number_val);
+            } else {
+                config->evolution_elite_count = 5;
+            }
+
+            v = json_get(evol_v, "generations");
+            if (v && v->type == JSON_NUMBER) {
+                config->evolution_generations = json_to_int_clamped(v->data.number_val);
+            } else {
+                config->evolution_generations = 50;
+            }
+
+            v = json_get(evol_v, "island_count");
+            if (v && v->type == JSON_NUMBER) {
+                config->evolution_island_count = json_to_int_clamped(v->data.number_val);
+            } else {
+                config->evolution_island_count = 1;
+            }
+
+            v = json_get(evol_v, "migration_interval");
+            if (v && v->type == JSON_NUMBER) {
+                config->evolution_migration_interval = json_to_int_clamped(v->data.number_val);
+            } else {
+                config->evolution_migration_interval = 10;
+            }
+
+            log_info("[配置] evolution段解析: population=%d, mutation_rate=%.3f",
+                     config->evolution_population_size, config->evolution_mutation_rate);
+        } else {
+            /* 设置默认值 */
+            config->evolution_population_size = 100;
+            config->evolution_mutation_rate = 0.1f;
+            config->evolution_crossover_rate = 0.8f;
+            config->evolution_elite_count = 5;
+            config->evolution_generations = 50;
+            config->evolution_island_count = 1;
+            config->evolution_migration_interval = 10;
+        }
+    }
+
+    /* P1-04修复: 解析 laplace 嵌套段 */
+    {
+        const JsonValue* lap_v = json_get(root, "laplace");
+        if (lap_v && lap_v->type == JSON_OBJECT) {
+            const JsonValue* v = json_get(lap_v, "freq_bands");
+            if (v && v->type == JSON_NUMBER) {
+                config->laplace_freq_bands = json_to_int_clamped(v->data.number_val);
+            } else {
+                config->laplace_freq_bands = 32;
+            }
+
+            v = json_get(lap_v, "stability_threshold");
+            if (v && v->type == JSON_NUMBER) {
+                config->laplace_stability_threshold = (float)v->data.number_val;
+            } else {
+                config->laplace_stability_threshold = 0.85f;
+            }
+
+            v = json_get(lap_v, "spectral_efficiency_target");
+            if (v && v->type == JSON_NUMBER) {
+                config->laplace_spectral_efficiency_target = (float)v->data.number_val;
+            } else {
+                config->laplace_spectral_efficiency_target = 0.7f;
+            }
+
+            v = json_get(lap_v, "update_interval_sec");
+            if (v && v->type == JSON_NUMBER) {
+                config->laplace_update_interval_sec = json_to_int_clamped(v->data.number_val);
+            } else {
+                config->laplace_update_interval_sec = 1800; /* 30分钟 */
+            }
+
+            log_info("[配置] laplace段解析: freq_bands=%d, stability=%.3f",
+                     config->laplace_freq_bands, config->laplace_stability_threshold);
+        } else {
+            /* 设置默认值 */
+            config->laplace_freq_bands = 32;
+            config->laplace_stability_threshold = 0.85f;
+            config->laplace_spectral_efficiency_target = 0.7f;
+            config->laplace_update_interval_sec = 1800;
+        }
+    }
+
+    /* P1-04修复: 解析 agi 嵌套段 */
+    {
+        const JsonValue* agi_v = json_get(root, "agi");
+        if (agi_v && agi_v->type == JSON_OBJECT) {
+            const JsonValue* v = json_get(agi_v, "self_evolution_enabled");
+            if (v && (v->type == JSON_NUMBER)) {
+                config->agi_self_evolution_enabled = (v->data.number_val != 0) ? 1 : 0;
+            } else {
+                config->agi_self_evolution_enabled = 0; /* 默认关闭 */
+            }
+
+            v = json_get(agi_v, "self_learning_enabled");
+            if (v && (v->type == JSON_NUMBER)) {
+                config->agi_self_learning_enabled = (v->data.number_val != 0) ? 1 : 0;
+            } else {
+                config->agi_self_learning_enabled = 1; /* 默认启用 */
+            }
+
+            v = json_get(agi_v, "self_decision_enabled");
+            if (v && (v->type == JSON_NUMBER)) {
+                config->agi_self_decision_enabled = (v->data.number_val != 0) ? 1 : 0;
+            } else {
+                config->agi_self_decision_enabled = 1; /* 默认启用 */
+            }
+
+            v = json_get(agi_v, "self_execution_enabled");
+            if (v && (v->type == JSON_NUMBER)) {
+                config->agi_self_execution_enabled = (v->data.number_val != 0) ? 1 : 0;
+            } else {
+                config->agi_self_execution_enabled = 1; /* 默认启用 */
+            }
+
+            v = json_get(agi_v, "imitation_learning_enabled");
+            if (v && (v->type == JSON_NUMBER)) {
+                config->agi_imitation_learning_enabled = (v->data.number_val != 0) ? 1 : 0;
+            } else {
+                config->agi_imitation_learning_enabled = 0; /* 默认关闭 */
+            }
+
+            v = json_get(agi_v, "self_correction_enabled");
+            if (v && (v->type == JSON_NUMBER)) {
+                config->agi_self_correction_enabled = (v->data.number_val != 0) ? 1 : 0;
+            } else {
+                config->agi_self_correction_enabled = 1; /* 默认启用 */
+            }
+
+            v = json_get(agi_v, "reflection_enabled");
+            if (v && (v->type == JSON_NUMBER)) {
+                config->agi_reflection_enabled = (v->data.number_val != 0) ? 1 : 0;
+            } else {
+                config->agi_reflection_enabled = 1; /* 默认启用 */
+            }
+
+            v = json_get(agi_v, "planning_enabled");
+            if (v && (v->type == JSON_NUMBER)) {
+                config->agi_planning_enabled = (v->data.number_val != 0) ? 1 : 0;
+            } else {
+                config->agi_planning_enabled = 1; /* 默认启用 */
+            }
+
+            v = json_get(agi_v, "background_loop_interval_sec");
+            if (v && v->type == JSON_NUMBER) {
+                config->agi_background_loop_interval_sec = json_to_int_clamped(v->data.number_val);
+            } else {
+                config->agi_background_loop_interval_sec = 10; /* 默认10秒 */
+            }
+
+            log_info("[配置] agi段解析: self_evolution=%d, self_learning=%d, planning=%d",
+                     config->agi_self_evolution_enabled, config->agi_self_learning_enabled,
+                     config->agi_planning_enabled);
+        } else {
+            /* 设置默认值 */
+            config->agi_self_evolution_enabled = 0;
+            config->agi_self_learning_enabled = 1;
+            config->agi_self_decision_enabled = 1;
+            config->agi_self_execution_enabled = 1;
+            config->agi_imitation_learning_enabled = 0;
+            config->agi_self_correction_enabled = 1;
+            config->agi_reflection_enabled = 1;
+            config->agi_planning_enabled = 1;
+            config->agi_background_loop_interval_sec = 10;
+        }
+    }
+
+    /* P1-04修复: 解析 self_cognition 嵌套段 */
+    {
+        const JsonValue* sc_v = json_get(root, "self_cognition");
+        if (sc_v && sc_v->type == JSON_OBJECT) {
+            const JsonValue* v = json_get(sc_v, "enabled");
+            if (v && (v->type == JSON_NUMBER)) {
+                config->self_cognition_enabled = (v->data.number_val != 0) ? 1 : 0;
+            } else {
+                config->self_cognition_enabled = 1; /* 默认启用 */
+            }
+
+            v = json_get(sc_v, "metacognition_enabled");
+            if (v && (v->type == JSON_NUMBER)) {
+                config->self_cognition_metacognition_enabled = (v->data.number_val != 0) ? 1 : 0;
+            } else {
+                config->self_cognition_metacognition_enabled = 1; /* 默认启用 */
+            }
+
+            v = json_get(sc_v, "self_reflection_interval_minutes");
+            if (v && v->type == JSON_NUMBER) {
+                config->self_cognition_reflection_interval_min = json_to_int_clamped(v->data.number_val);
+            } else {
+                config->self_cognition_reflection_interval_min = 30; /* 默认30分钟 */
+            }
+
+            v = json_get(sc_v, "thought_chain_depth");
+            if (v && v->type == JSON_NUMBER) {
+                config->self_cognition_thought_chain_depth = json_to_int_clamped(v->data.number_val);
+            } else {
+                config->self_cognition_thought_chain_depth = 5; /* 默认深度5 */
+            }
+
+            v = json_get(sc_v, "correction_max_iterations");
+            if (v && v->type == JSON_NUMBER) {
+                config->self_cognition_correction_max_iterations = json_to_int_clamped(v->data.number_val);
+            } else {
+                config->self_cognition_correction_max_iterations = 3; /* 默认3次 */
+            }
+
+            log_info("[配置] self_cognition段解析: enabled=%d, reflection_interval=%d",
+                     config->self_cognition_enabled, config->self_cognition_reflection_interval_min);
+        } else {
+            /* 设置默认值 */
+            config->self_cognition_enabled = 1;
+            config->self_cognition_metacognition_enabled = 1;
+            config->self_cognition_reflection_interval_min = 30;
+            config->self_cognition_thought_chain_depth = 5;
+            config->self_cognition_correction_max_iterations = 3;
+        }
+    }
+
+    /* P1-04修复: 解析 system 嵌套段 */
+    {
+        const JsonValue* sys_v = json_get(root, "system");
+        if (sys_v && sys_v->type == JSON_OBJECT) {
+            const JsonValue* v = json_get(sys_v, "auto_restart_on_failure");
+            if (v && (v->type == JSON_NUMBER)) {
+                config->system_auto_restart_on_failure = (v->data.number_val != 0) ? 1 : 0;
+            } else {
+                config->system_auto_restart_on_failure = 0; /* 默认关闭 */
+            }
+
+            v = json_get(sys_v, "auto_save_interval_minutes");
+            if (v && v->type == JSON_NUMBER) {
+                config->system_auto_save_interval_minutes = json_to_int_clamped(v->data.number_val);
+            } else {
+                config->system_auto_save_interval_minutes = 60; /* 默认60分钟 */
+            }
+
+            const char* ll_str = json_get_string(sys_v, "log_level");
+            if (ll_str && ll_str[0]) {
+                strncpy(config->system_log_level, ll_str, sizeof(config->system_log_level) - 1);
+                config->system_log_level[sizeof(config->system_log_level) - 1] = '\0';
+            } else {
+                strcpy(config->system_log_level, "info");
+            }
+
+            v = json_get(sys_v, "web_ui_enabled");
+            if (v && (v->type == JSON_NUMBER)) {
+                config->system_web_ui_enabled = (v->data.number_val != 0) ? 1 : 0;
+            } else {
+                config->system_web_ui_enabled = 1; /* 默认启用 */
+            }
+
+            log_info("[配置] system段解析: auto_restart=%d, web_ui=%d",
+                     config->system_auto_restart_on_failure, config->system_web_ui_enabled);
+        } else {
+            /* 设置默认值 */
+            config->system_auto_restart_on_failure = 0;
+            config->system_auto_save_interval_minutes = 60;
+            strcpy(config->system_log_level, "info");
+            config->system_web_ui_enabled = 1;
         }
     }
 
@@ -250,7 +617,7 @@ int selflnn_config_save_to_file(const char* filepath, const SystemConfig* config
     if (!config) return -1;
 
     const char* path = filepath ? filepath : CONFIG_DEFAULT_PATH;
-    FILE* fp = fopen(path, "w");
+    FILE* fp = fopen(path, "wb");
     if (!fp) { log_error("[配置] 无法创建: %s", path); return -1; }
 
     const char* pm = "balanced";
@@ -260,6 +627,7 @@ int selflnn_config_save_to_file(const char* filepath, const SystemConfig* config
 /* GPU后端枚举补全 — 原只枚举cuda/opencl */
     const char* gb = "cpu";
     switch (config->gpu_backend) {
+        case GPU_BACKEND_AUTO:     gb = "auto"; break;
         case GPU_BACKEND_CUDA:     gb = "cuda"; break;
         case GPU_BACKEND_OPENCL:   gb = "opencl"; break;
         case GPU_BACKEND_VULKAN:   gb = "vulkan"; break;
@@ -268,6 +636,7 @@ int selflnn_config_save_to_file(const char* filepath, const SystemConfig* config
         case GPU_BACKEND_ASCEND:   gb = "ascend"; break;
         case GPU_BACKEND_CAMBRICON:gb = "cambricon"; break;
         case GPU_BACKEND_TPU:      gb = "tpu"; break;
+        case GPU_BACKEND_INTEL:    gb = "intel"; break;
         case GPU_BACKEND_CPU:      gb = "cpu"; break;
         default:                   gb = "cpu"; break;
     }

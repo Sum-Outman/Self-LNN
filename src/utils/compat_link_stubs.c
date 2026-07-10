@@ -93,6 +93,7 @@ void json_value_free(void* value) {
 int gpu_set_backend_by_name(const char* gpu_backend, const char* name, int device_id) {
     (void)gpu_backend; (void)device_id;
     if (!name) return -1;
+    if (strstr(name, "auto") || strstr(name, "Auto"))        return gpu_init(GPU_BACKEND_AUTO);
     if (strstr(name, "cuda") || strstr(name, "CUDA"))      return gpu_init(GPU_BACKEND_CUDA);
     if (strstr(name, "opencl") || strstr(name, "OpenCL"))  return gpu_init(GPU_BACKEND_OPENCL);
     if (strstr(name, "vulkan") || strstr(name, "Vulkan"))  return gpu_init(GPU_BACKEND_VULKAN);
@@ -102,7 +103,7 @@ int gpu_set_backend_by_name(const char* gpu_backend, const char* name, int devic
     if (strstr(name, "tpu") || strstr(name, "TPU"))        return gpu_init(GPU_BACKEND_TPU);
     if (strstr(name, "rocm") || strstr(name, "ROCm"))      return gpu_init(GPU_BACKEND_ROCM);
     if (strstr(name, "intel") || strstr(name, "Intel"))    return gpu_init(GPU_BACKEND_INTEL);
-    return gpu_init(GPU_BACKEND_CPU);
+    return gpu_init(GPU_BACKEND_AUTO);
 }
 
 /* FIX-D1修复: 参数签名必须与gpu.c中的extern声明完全匹配。

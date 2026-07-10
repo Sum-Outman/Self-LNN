@@ -75,7 +75,10 @@ typedef struct {
 
 struct WSPushServer {
     int port;
-    int running;
+    /* D-4修复: running改为volatile int，确保accept线程在每次循环迭代中
+ * 都从内存重新读取running值，而非使用寄存器缓存。在弱内存序CPU上
+ * 配合ws_push_server_stop中的内存屏障，保证线程安全退出。 */
+    volatile int running;
     ws_socket_t listen_sock;
     WSClientInternal clients[WS_MAX_CLIENTS];
     int client_count;
@@ -721,11 +724,18 @@ int ws_push_broadcast(WSPushServer* srv, WSMessageType type, const char* data)
         if (ws_send_frame(active_socks[i], 0x01, (unsigned char*)json, jlen) == 0) {
             sent++;
         } else {
-            /* 发送失败：重新加锁关闭该客户端 */
+            /* 发送失败：重新加锁关闭该客户端。
+             * TOCTOU竞态防护：重新加锁后验证当前槽位的socket是否与快照一致。
+             * 在锁外发送期间，原始客户端可能已断开且槽位被新客户端重用，
+             * 若不验证socket一致性，将误关闭新客户端。 */
             mutex_lock(srv->mutex);
-            if (active_indices[i] < WS_MAX_CLIENTS && srv->clients[active_indices[i]].active) {
+            if (active_indices[i] < WS_MAX_CLIENTS &&
+                srv->clients[active_indices[i]].active &&
+                srv->clients[active_indices[i]].sock == active_socks[i]) {
+                /* socket一致：确认是同一客户端，安全关闭 */
                 ws_client_close(&srv->clients[active_indices[i]]);
             }
+            /* socket不一致：槽位已被新客户端重用，跳过关闭操作 */
             mutex_unlock(srv->mutex);
         }
     }
@@ -761,8 +771,18 @@ int ws_push_broadcast_json(WSPushServer* srv, const char* json_message)
         if (ws_send_frame(active_socks[i], 0x01, (unsigned char*)json_message, jlen) == 0) {
             sent++;
         } else {
+            /* 发送失败：重新加锁关闭该客户端。
+             * TOCTOU竞态防护：重新加锁后验证当前槽位的socket是否与快照一致。
+             * 在锁外发送期间，原始客户端可能已断开且槽位被新客户端重用，
+             * 若不验证socket一致性，将误关闭新客户端。 */
             mutex_lock(srv->mutex);
-            ws_client_close(&srv->clients[active_indices[i]]);
+            if (active_indices[i] < WS_MAX_CLIENTS &&
+                srv->clients[active_indices[i]].active &&
+                srv->clients[active_indices[i]].sock == active_socks[i]) {
+                /* socket一致：确认是同一客户端，安全关闭 */
+                ws_client_close(&srv->clients[active_indices[i]]);
+            }
+            /* socket不一致：槽位已被新客户端重用，跳过关闭操作 */
             mutex_unlock(srv->mutex);
         }
     }

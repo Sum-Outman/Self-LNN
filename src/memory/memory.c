@@ -358,8 +358,15 @@ void memory_free(MemorySystem* system) {
     safe_free((void**)&system->hash_index_ptr);
     system->hash_index_size = 0;
     system->hash_index_active = 0;
-    // 释放系统结构
-    safe_free((void**)&system);
+    /* DEFECT-003修复: 使用临时栈变量持有指针，通过safe_free正确释放
+     * safe_malloc返回的指针不是原始malloc指针(data_ptr = raw_ptr + header_size),
+     * 直接调用free(system)会传递错误的指针给CRT导致堆损坏。
+     * safe_free内部通过header->raw_ptr正确获取原始指针并释放。
+     * 使用局部变量sys_ptr而非参数&system避免/GS栈金丝雀检查问题。 */
+    {
+        void* sys_ptr = system;
+        safe_free(&sys_ptr);
+    }
 }
 
 /**
@@ -399,22 +406,28 @@ static MemoryItem*** memory_get_array(MemorySystem* system, MemoryType type,
 /**
  * @brief 应用记忆衰减（Ebbinghaus遗忘曲线）
  * 
- * 基于Ebbinghaus遗忘曲线实现记忆衰减。衰减率与记忆强度成反比：
- * 强度越高的记忆衰减越慢，实现人类记忆的"用进废退"特性。
- * 同时考虑不同类型记忆的基础衰减率差异。
+ * P1-02修复: 统一使用与long_term.c的ltm_ebbinghaus_decay相同的tau公式。
+ * tau = 3600 * (1 + strength * persistence * 24 * 30) 秒
+ * 原实现使用简化版exp(-decay * time_delta)，缺少strength依赖的时间常数。
+ * 现在使用正确的Ebbinghaus公式: retention = exp(-time_delta / tau)
+ * 其中tau随记忆强度和持久性增长，实现"用进废退"特性。
  * 
  * @param system 记忆系统
- * @param time_delta 时间增量
+ * @param time_delta 时间增量（秒）
  */
 static void memory_apply_decay(MemorySystem* system, float time_delta) {
     if (time_delta <= 0.0f || system->config.decay_rate <= 0.0f) {
         return;
     }
     
-    // 不同类型记忆的衰减率乘数（短期记忆衰减最快，长期记忆最慢）
+    /* 不同类型记忆的衰减率乘数（短期记忆衰减最快，长期记忆最慢） */
     float decay_multipliers[4] = {1.0f, 0.3f, 0.5f, 0.4f}; // ST, LT, EP, SE
     
-    // 应用衰减到所有记忆类型
+    /* P1-02修复: 使用persistence字段，默认值1.0 */
+    float persistence = system->config.persistence;
+    if (persistence <= 0.0f) persistence = 1.0f;
+    
+    /* 应用衰减到所有记忆类型 */
     for (int type_idx = 0; type_idx < 4; type_idx++) {
         MemoryType type = (MemoryType)type_idx;
         size_t count;
@@ -430,19 +443,23 @@ static void memory_apply_decay(MemorySystem* system, float time_delta) {
         
         for (size_t i = 0; i < count; i++) {
             if (array[i]) {
-                // Ebbinghaus遗忘曲线：有效衰减率与记忆强度成反比
-                // 强度为1.0的记忆衰减最慢（÷4），强度接近0的记忆衰减最快
-                float strength_factor = 1.0f + array[i]->strength * 3.0f;
-                float effective_decay = base_decay_rate / strength_factor;
-                
-                // 应用指数衰减
-                float decay_factor = expf(-effective_decay * time_delta);
-                array[i]->strength *= decay_factor;
+                /* P1-02修复: 使用与long_term.c统一的Ebbinghaus遗忘曲线公式
+                 * tau = 3600 * (1 + strength * persistence * 24 * 30) 秒
+                 * retention = exp(-time_delta / tau)
+                 * 强度越高的记忆，tau越大，衰减越慢。
+                 * 同时保留base_decay_rate作为额外调节因子。 */
+                double tau = 3600.0 * (1.0 + (double)array[i]->strength * 
+                                      (double)persistence * 24.0 * 30.0);
+                /* base_decay_rate作为衰减速率调节因子：值越大，有效时间常数越小 */
+                double effective_tau = (base_decay_rate > 0.0f) ? 
+                                      tau / (double)base_decay_rate : tau;
+                double retention = exp(-(double)time_delta / effective_tau);
+                array[i]->strength *= (float)retention;
                 
                 /* M-017修复：渐进衰减至零（替代硬阈值0.005直接归零） */
                 if (array[i]->strength < 0.005f && array[i]->strength > 0.0f) {
                     /* 最后阶段使用超级指数衰减平滑归零 */
-                    array[i]->strength *= expf(-base_decay_rate * time_delta * 10.0f);
+                    array[i]->strength *= (float)exp(-(double)time_delta / (effective_tau * 0.1));
                     if (array[i]->strength < 1e-6f) array[i]->strength = 0.0f;
                 }
             }

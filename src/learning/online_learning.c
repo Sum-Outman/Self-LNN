@@ -195,12 +195,22 @@ static int detect_concept_drift(OnlineLearner* learner, float loss, ConceptDrift
 /**
  * @brief 创建在线学习器
  */
+/* DEFECT-013修复: 允许零权重初始化。
+ * 原实现强制要求 model_weights != NULL && weights_size > 0，
+ * 但 online_learner_set_weights() 和 online_learner_attach_lnn() 都支持后续注入权重，
+ * 空初始化是合法用例。拒绝非法组合(NULL+非零)即可。 */
 OnlineLearner* online_learner_create(const OnlineLearningConfig* config,
                                      const float* model_weights,
                                      size_t weights_size) {
-    if (!config || !model_weights || weights_size == 0) {
+    if (!config) {
         selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
-                              "创建在线学习器：无效参数");
+                              "创建在线学习器：无效参数(config为NULL)");
+        return NULL;
+    }
+    /* 拒绝非法组合: NULL指针+非零大小，但不拒绝NULL+0(空初始化) */
+    if (model_weights == NULL && weights_size > 0) {
+        selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
+                              "创建在线学习器：model_weights为NULL但weights_size>0");
         return NULL;
     }
     
@@ -222,41 +232,50 @@ OnlineLearner* online_learner_create(const OnlineLearningConfig* config,
     learner->lnn_attached = 0;
     learner->attached_lnn = NULL;
     
-    // 分配权重数组
-    learner->weights = (float*)safe_malloc(weights_size * sizeof(float));
-    if (!learner->weights) {
-        safe_free((void**)&learner);
-        selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
-                              "创建在线学习器：权重内存分配失败");
-        return NULL;
-    }
-    
-    // 复制初始权重
-    memcpy(learner->weights, model_weights, weights_size * sizeof(float));
-    
-    // 分配动量缓冲区（如果启用）
-    if (config->enable_momentum) {
-        learner->weight_momentum = (float*)safe_calloc(weights_size, sizeof(float));
-        if (!learner->weight_momentum) {
-            safe_free((void**)&learner->weights);
+    /* DEFECT-013修复: 零权重初始化时跳过权重分配和动量/速度缓冲区分配 */
+    if (weights_size > 0 && model_weights != NULL) {
+        /* 分配权重数组 */
+        learner->weights = (float*)safe_malloc(weights_size * sizeof(float));
+        if (!learner->weights) {
             safe_free((void**)&learner);
             selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
-                                  "创建在线学习器：动量内存分配失败");
+                                  "创建在线学习器：权重内存分配失败");
             return NULL;
         }
-    }
-    
-    // 分配速度缓冲区（用于自适应方法）
-    if (config->enable_adaptive_rate) {
-        learner->weight_velocity = (float*)safe_calloc(weights_size, sizeof(float));
-        if (!learner->weight_velocity) {
-            safe_free((void**)&learner->weight_momentum);
-            safe_free((void**)&learner->weights);
-            safe_free((void**)&learner);
-            selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
-                                  "创建在线学习器：速度内存分配失败");
-            return NULL;
+        /* 复制初始权重 */
+        memcpy(learner->weights, model_weights, weights_size * sizeof(float));
+        learner->weights_owned = 1;
+
+        /* 分配动量缓冲区（如果启用） */
+        if (config->enable_momentum) {
+            learner->weight_momentum = (float*)safe_calloc(weights_size, sizeof(float));
+            if (!learner->weight_momentum) {
+                safe_free((void**)&learner->weights);
+                safe_free((void**)&learner);
+                selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
+                                      "创建在线学习器：动量内存分配失败");
+                return NULL;
+            }
         }
+
+        /* 分配速度缓冲区（用于自适应方法） */
+        if (config->enable_adaptive_rate) {
+            learner->weight_velocity = (float*)safe_calloc(weights_size, sizeof(float));
+            if (!learner->weight_velocity) {
+                safe_free((void**)&learner->weight_momentum);
+                safe_free((void**)&learner->weights);
+                safe_free((void**)&learner);
+                selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
+                                      "创建在线学习器：速度内存分配失败");
+                return NULL;
+            }
+        }
+    } else {
+        /* 零权重初始化：所有权重相关指针保持NULL，后续通过set_weights或attach_lnn注入 */
+        learner->weights = NULL;
+        learner->weights_owned = 0;
+        learner->weight_momentum = NULL;
+        learner->weight_velocity = NULL;
     }
     
     // 分配输入/目标缓冲区（动态调整，不预先分配大块内存）

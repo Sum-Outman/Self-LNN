@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file reinforcement_learning.c
  * @brief 强化学习算法实现
  *
@@ -3845,22 +3845,64 @@ int rl_save(RLAgent* agent, const char* filepath)
     FILE* fp = fopen(filepath, "wb");
     if (!fp) return -1;
 
-    fwrite(&agent->config, sizeof(RLConfig), 1, fp);
-    fwrite(&agent->epsilon, sizeof(float), 1, fp);
-    fwrite(&agent->total_steps, sizeof(int), 1, fp);
-    fwrite(&agent->total_episodes, sizeof(int), 1, fp);
-    fwrite(&agent->best_return, sizeof(float), 1, fp);
+    /* 写入RL配置 */
+    if (fwrite(&agent->config, sizeof(RLConfig), 1, fp) != 1) {
+        log_error("[RL保存] 写入配置失败");
+        fclose(fp);
+        return -2;
+    }
+    /* 写入探索率 */
+    if (fwrite(&agent->epsilon, sizeof(float), 1, fp) != 1) {
+        log_error("[RL保存] 写入探索率失败");
+        fclose(fp);
+        return -2;
+    }
+    /* 写入总步数 */
+    if (fwrite(&agent->total_steps, sizeof(int), 1, fp) != 1) {
+        log_error("[RL保存] 写入总步数失败");
+        fclose(fp);
+        return -2;
+    }
+    /* 写入总回合数 */
+    if (fwrite(&agent->total_episodes, sizeof(int), 1, fp) != 1) {
+        log_error("[RL保存] 写入总回合数失败");
+        fclose(fp);
+        return -2;
+    }
+    /* 写入最佳回报 */
+    if (fwrite(&agent->best_return, sizeof(float), 1, fp) != 1) {
+        log_error("[RL保存] 写入最佳回报失败");
+        fclose(fp);
+        return -2;
+    }
 
     for (int i = 0; i < RL_NETWORK_COUNT; i++)
     {
         int active = agent->network_active[i];
-        fwrite(&active, sizeof(int), 1, fp);
+        /* 写入网络激活状态 */
+        if (fwrite(&active, sizeof(int), 1, fp) != 1) {
+            log_error("[RL保存] 写入第%d个网络激活状态失败", i);
+            fclose(fp);
+            return -2;
+        }
         if (active && agent->networks[i])
         {
             size_t nparams = lnn_get_parameter_count(agent->networks[i]);
-            fwrite(&nparams, sizeof(size_t), 1, fp);
+            /* 写入网络参数数量 */
+            if (fwrite(&nparams, sizeof(size_t), 1, fp) != 1) {
+                log_error("[RL保存] 写入第%d个网络参数数量失败（nparams=%zu）", i, nparams);
+                fclose(fp);
+                return -2;
+            }
             float* params = lnn_get_parameters(agent->networks[i]);
-            if (params) fwrite(params, sizeof(float), nparams, fp);
+            if (params) {
+                /* 写入网络参数 */
+                if (fwrite(params, sizeof(float), nparams, fp) != nparams) {
+                    log_error("[RL保存] 写入第%d个网络参数失败（nparams=%zu）", i, nparams);
+                    fclose(fp);
+                    return -2;
+                }
+            }
         }
     }
     fclose(fp);
@@ -3876,31 +3918,79 @@ RLAgent* rl_load(const char* filepath)
     RLConfig config;
     if (fread(&config, sizeof(RLConfig), 1, fp) != 1)
     {
+        log_error("[RL加载] 读取配置失败");
         fclose(fp);
         return NULL;
     }
 
     RLAgent* agent = rl_agent_create(&config);
-    if (!agent) { fclose(fp); return NULL; }
+    if (!agent) {
+        log_error("[RL加载] 创建RL智能体失败");
+        fclose(fp);
+        return NULL;
+    }
 
-    fread(&agent->epsilon, sizeof(float), 1, fp);
-    fread(&agent->total_steps, sizeof(int), 1, fp);
-    fread(&agent->total_episodes, sizeof(int), 1, fp);
-    fread(&agent->best_return, sizeof(float), 1, fp);
+    /* 读取探索率 */
+    if (fread(&agent->epsilon, sizeof(float), 1, fp) != 1) {
+        log_error("[RL加载] 读取探索率失败");
+        rl_agent_free(agent);
+        fclose(fp);
+        return NULL;
+    }
+    /* 读取总步数 */
+    if (fread(&agent->total_steps, sizeof(int), 1, fp) != 1) {
+        log_error("[RL加载] 读取总步数失败");
+        rl_agent_free(agent);
+        fclose(fp);
+        return NULL;
+    }
+    /* 读取总回合数 */
+    if (fread(&agent->total_episodes, sizeof(int), 1, fp) != 1) {
+        log_error("[RL加载] 读取总回合数失败");
+        rl_agent_free(agent);
+        fclose(fp);
+        return NULL;
+    }
+    /* 读取最佳回报 */
+    if (fread(&agent->best_return, sizeof(float), 1, fp) != 1) {
+        log_error("[RL加载] 读取最佳回报失败");
+        rl_agent_free(agent);
+        fclose(fp);
+        return NULL;
+    }
 
     for (int i = 0; i < RL_NETWORK_COUNT; i++)
     {
         int active = 0;
-        fread(&active, sizeof(int), 1, fp);
+        /* 读取网络激活状态 */
+        if (fread(&active, sizeof(int), 1, fp) != 1) {
+            log_error("[RL加载] 读取第%d个网络激活状态失败", i);
+            rl_agent_free(agent);
+            fclose(fp);
+            return NULL;
+        }
         if (active && agent->network_active[i] && agent->networks[i])
         {
             size_t saved_nparams = 0;
-            fread(&saved_nparams, sizeof(size_t), 1, fp);
+            /* 读取网络参数数量 */
+            if (fread(&saved_nparams, sizeof(size_t), 1, fp) != 1) {
+                log_error("[RL加载] 读取第%d个网络参数数量失败", i);
+                rl_agent_free(agent);
+                fclose(fp);
+                return NULL;
+            }
             size_t actual_nparams = lnn_get_parameter_count(agent->networks[i]);
             size_t read_size = RL_MIN(saved_nparams, actual_nparams);
             float* params = lnn_get_parameters(agent->networks[i]);
-            if (params && read_size > 0)
-                fread(params, sizeof(float), read_size, fp);
+            if (params && read_size > 0) {
+                /* 读取网络参数 */
+                if (fread(params, sizeof(float), read_size, fp) != read_size) {
+                    log_error("[RL加载] 读取第%d个网络参数失败（read_size=%zu）", i, read_size);
+                    rl_agent_free(agent);
+                    fclose(fp);
+                    return NULL;
+                }
+            }
             else if (saved_nparams > 0)
                 fseek(fp, (long)(saved_nparams * sizeof(float)), SEEK_CUR);
         }

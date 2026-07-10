@@ -80,7 +80,8 @@ typedef enum {
     GPU_BACKEND_TPU = 7,        // 谷歌TPU后端
     GPU_BACKEND_ROCM = 8,       // AMD ROCm GPU后端
     GPU_BACKEND_INTEL = 9,      // Intel GPU后端
-    GPU_BACKEND_COUNT = 10      // K-009: 后端总数（用于数组索引）
+    GPU_BACKEND_AUTO = 10,      // P0-03修复: 自动检测GPU后端（语义上区别于CPU）
+    GPU_BACKEND_COUNT = 11      // K-009: 后端总数（用于数组索引）
 } GpuBackend;
 
 // 内存位置枚举

@@ -25,6 +25,13 @@
 #define LOADER_MAX_COLS 4096
 #define LOADER_MAX_TOKENS 4096
 
+/* P1修复: JSON解析器深度和长度限制。
+ * 防止恶意或畸形JSON数据导致递归栈溢出和内存耗尽。
+ * JSON_MAX_DEPTH: 最大嵌套深度64层，远超正常JSON使用场景。
+ * JSON_MAX_STRING_LEN: 单个字符串最大1MB，防止内存炸弹攻击。 */
+#define JSON_MAX_DEPTH 64
+#define JSON_MAX_STRING_LEN 1048576
+
 /** 安全释放并置空 */
 #define LOADER_SAFE_FREE(ptr) do { \
     if (*(ptr)) { safe_free((void**)(ptr)); } \
@@ -385,7 +392,7 @@ static int json_skip_whitespace(const char** p) {
     return (**p != '\0') ? 1 : 0;
 }
 
-static int json_parse_value(const char** p, JsonNode* node);
+static int json_parse_value(const char** p, JsonNode* node, int depth);
 
 static int json_parse_string(const char** p, char** out) {
     if (!json_skip_whitespace(p)) return -1;
@@ -428,7 +435,17 @@ static int json_parse_string(const char** p, char** out) {
         }
         (*p)++;
         if (len >= cap - 1) {
+            /* P1修复: 添加字符串长度上限，防止JSON字符串炸弹攻击。
+             * 超过JSON_MAX_STRING_LEN时释放已分配内存并返回错误。 */
+            if (cap >= JSON_MAX_STRING_LEN) {
+                log_error("[JSON解析器] 字符串长度超过上限(%zu > %d)，拒绝解析",
+                          cap, JSON_MAX_STRING_LEN);
+                safe_free((void**)&buf);
+                return -1;
+            }
             cap *= 2;
+            /* 若翻倍后仍超过上限，则限制为上限值 */
+            if (cap > JSON_MAX_STRING_LEN) cap = JSON_MAX_STRING_LEN;
             char* new_buf = (char*)safe_realloc(buf, cap);
             if (!new_buf) { safe_free((void**)&buf); return -1; }
             buf = new_buf;
@@ -463,7 +480,7 @@ static int json_parse_number(const char** p, double* out) {
     return 0;
 }
 
-static int json_parse_array(const char** p, JsonNode* node) {
+static int json_parse_array(const char** p, JsonNode* node, int depth) {
     if (!json_skip_whitespace(p)) return -1;
     if (**p != '[') return -1;
     (*p)++;
@@ -485,7 +502,7 @@ static int json_parse_array(const char** p, JsonNode* node) {
             node->array.items = new_items;
         }
         memset(&node->array.items[node->array.count], 0, sizeof(JsonNode));
-        if (json_parse_value(p, &node->array.items[node->array.count]) != 0) return -1;
+        if (json_parse_value(p, &node->array.items[node->array.count], depth) != 0) return -1;
         node->array.count++;
         json_skip_whitespace(p);
         if (**p == ',') { (*p)++; json_skip_whitespace(p); }
@@ -495,7 +512,7 @@ static int json_parse_array(const char** p, JsonNode* node) {
     return -1;
 }
 
-static int json_parse_object(const char** p, JsonNode* node) {
+static int json_parse_object(const char** p, JsonNode* node, int depth) {
     if (!json_skip_whitespace(p)) return -1;
     if (**p != '{') return -1;
     (*p)++;
@@ -524,7 +541,7 @@ static int json_parse_object(const char** p, JsonNode* node) {
         json_skip_whitespace(p);
         if (**p != ':') return -1;
         (*p)++;
-        if (json_parse_value(p, member) != 0) return -1;
+        if (json_parse_value(p, member, depth) != 0) return -1;
         node->object.count++;
         json_skip_whitespace(p);
         if (**p == ',') { (*p)++; json_skip_whitespace(p); }
@@ -534,16 +551,24 @@ static int json_parse_object(const char** p, JsonNode* node) {
     return -1;
 }
 
-static int json_parse_value(const char** p, JsonNode* node) {
+static int json_parse_value(const char** p, JsonNode* node, int depth) {
+    /* P1修复: 检查JSON嵌套深度，防止恶意深度嵌套导致栈溢出。
+     * 超过JSON_MAX_DEPTH时拒绝解析，记录错误日志。 */
+    if (depth > JSON_MAX_DEPTH) {
+        log_error("[JSON解析器] JSON嵌套深度超过上限(%d > %d)，拒绝解析以防护栈溢出",
+                  depth, JSON_MAX_DEPTH);
+        return -1;
+    }
+
     if (!json_skip_whitespace(p)) return -1;
 
     if (**p == '"') {
         node->type = JSON_STRING;
         return json_parse_string(p, &node->str_val);
     } else if (**p == '{') {
-        return json_parse_object(p, node);
+        return json_parse_object(p, node, depth + 1);
     } else if (**p == '[') {
-        return json_parse_array(p, node);
+        return json_parse_array(p, node, depth + 1);
     } else if (**p == 't' && strncmp(*p, "true", 4) == 0) {
         node->type = JSON_BOOL; node->bool_val = 1; *p += 4; return 0;
     } else if (**p == 'f' && strncmp(*p, "false", 5) == 0) {
@@ -621,7 +646,7 @@ TrainingDataset* data_load_json(const char* filepath, const char* input_field,
     JsonNode root;
     memset(&root, 0, sizeof(JsonNode));
 
-    if (json_parse_value(&p, &root) != 0) {
+    if (json_parse_value(&p, &root, 1) != 0) {
         safe_free((void**)&json_text);
         log_error("[JSON加载器] JSON解析失败: %s", filepath);
         return NULL;
@@ -1318,4 +1343,550 @@ TrainingDataset* data_load_audio_wav(const char* const* filepaths, size_t num_fi
     log_info("[音频加载器] 已加载: %zu个音频文件 (特征长度=%zu, %zu→%zu维)",
              num_files, feature_len, input_dim, output_dim_val);
     return ds;
+}
+
+/* ========================================================================
+ * 传感器数据加载器 (加速度计 + 陀螺仪 + 磁力计)
+ * 
+ * 文件格式: CSV, 每行10列
+ *   时间戳, 加速度X, 加速度Y, 加速度Z,
+ *   陀螺仪X, 陀螺仪Y, 陀螺仪Z,
+ *   磁力计X, 磁力计Y, 磁力计Z
+ * 
+ * 输出: 归一化到[-1, 1]范围的float数组, 每个样本10个值
+ *       加速度归一化除以16g(156.96 m/s^2), 陀螺仪除以2000 deg/s,
+ *       磁力计除以4800 uT, 时间戳保持原始值
+ * ======================================================================== */
+
+#define SENSOR_COLS_PER_ROW 10
+#define SENSOR_ACCEL_MAX     156.96f   /* 16g in m/s^2 */
+#define SENSOR_GYRO_MAX      2000.0f   /* 2000 deg/s */
+#define SENSOR_MAG_MAX       4800.0f   /* 4800 uT */
+
+int load_sensor_data(const char* filepath, float* output_buffer,
+                     size_t buffer_size, size_t* actual_count) {
+    if (!filepath || !output_buffer || !actual_count) return -1;
+    *actual_count = 0;
+
+    FILE* fp = fopen(filepath, "r");
+    if (!fp) {
+        log_error("[传感器加载器] 无法打开文件: %s", filepath);
+        return -1;
+    }
+
+    char line[LOADER_MAX_LINE];
+    size_t total_values = 0;
+
+    /* 逐行读取CSV数据 */
+    while (loader_read_line(line, sizeof(line), fp)) {
+        if (loader_is_blank_line(line)) continue;
+
+        char* tokens[SENSOR_COLS_PER_ROW];
+        int num_tokens = loader_parse_csv_line(line, ',', tokens, SENSOR_COLS_PER_ROW);
+        if (num_tokens < SENSOR_COLS_PER_ROW) {
+            /* 列数不足，跳过此行 */
+            loader_free_tokens(tokens, num_tokens);
+            continue;
+        }
+
+        /* 检查缓冲区空间：每行需要10个float */
+        if (total_values + SENSOR_COLS_PER_ROW > buffer_size) {
+            loader_free_tokens(tokens, num_tokens);
+            log_warn("[传感器加载器] 输出缓冲区已满(%zu/%zu)，停止读取",
+                     total_values, buffer_size);
+            break;
+        }
+
+        /* 列0: 时间戳（保持原始值，不做归一化） */
+        output_buffer[total_values + 0] = (float)atof(tokens[0]);
+
+        /* 列1-3: 加速度X/Y/Z, 归一化到[-1, 1] */
+        output_buffer[total_values + 1] = (float)atof(tokens[1]) / SENSOR_ACCEL_MAX;
+        output_buffer[total_values + 2] = (float)atof(tokens[2]) / SENSOR_ACCEL_MAX;
+        output_buffer[total_values + 3] = (float)atof(tokens[3]) / SENSOR_ACCEL_MAX;
+
+        /* 列4-6: 陀螺仪X/Y/Z, 归一化到[-1, 1] */
+        output_buffer[total_values + 4] = (float)atof(tokens[4]) / SENSOR_GYRO_MAX;
+        output_buffer[total_values + 5] = (float)atof(tokens[5]) / SENSOR_GYRO_MAX;
+        output_buffer[total_values + 6] = (float)atof(tokens[6]) / SENSOR_GYRO_MAX;
+
+        /* 列7-9: 磁力计X/Y/Z, 归一化到[-1, 1] */
+        output_buffer[total_values + 7] = (float)atof(tokens[7]) / SENSOR_MAG_MAX;
+        output_buffer[total_values + 8] = (float)atof(tokens[8]) / SENSOR_MAG_MAX;
+        output_buffer[total_values + 9] = (float)atof(tokens[9]) / SENSOR_MAG_MAX;
+
+        /* 边界裁剪：确保归一化值在[-1, 1]范围内 */
+        for (int c = 1; c < SENSOR_COLS_PER_ROW; c++) {
+            if (output_buffer[total_values + c] > 1.0f)  output_buffer[total_values + c] = 1.0f;
+            if (output_buffer[total_values + c] < -1.0f) output_buffer[total_values + c] = -1.0f;
+        }
+
+        loader_free_tokens(tokens, num_tokens);
+        total_values += SENSOR_COLS_PER_ROW;
+    }
+
+    fclose(fp);
+    *actual_count = total_values;
+
+    if (total_values == 0) {
+        log_error("[传感器加载器] 未读取到有效数据: %s", filepath);
+        return -1;
+    }
+
+    log_info("[传感器加载器] 已加载: %s (%zu个float值, %zu行)",
+             filepath, total_values, total_values / SENSOR_COLS_PER_ROW);
+    return 0;
+}
+
+/* ========================================================================
+ * 触觉数据加载器 (16x16压力阵列)
+ * 
+ * 文件格式: 二进制, 256个uint16_t值 (小端序), 每个2字节, 共512字节
+ *   排列顺序: 行优先 (row-major), 第0行第0列 → 第0行第1列 → ... → 第15行第15列
+ * 
+ * 压力值范围: 0-4095 (12位ADC), 归一化到[0, 1]
+ * 输出: 256个float值
+ * ======================================================================== */
+
+#define TACTILE_ROWS      16
+#define TACTILE_COLS      16
+#define TACTILE_CELLS     (TACTILE_ROWS * TACTILE_COLS)  /* 256 */
+#define TACTILE_RAW_BYTES (TACTILE_CELLS * 2)             /* 512字节 */
+#define TACTILE_PRESSURE_MAX 4095.0f
+
+int load_tactile_data(const char* filepath, float* output_buffer,
+                      size_t buffer_size, size_t* actual_count) {
+    if (!filepath || !output_buffer || !actual_count) return -1;
+    *actual_count = 0;
+
+    if (buffer_size < TACTILE_CELLS) {
+        log_error("[触觉加载器] 输出缓冲区不足: 需要%zu, 实际%zu",
+                  (size_t)TACTILE_CELLS, buffer_size);
+        return -1;
+    }
+
+    FILE* fp = fopen(filepath, "rb");
+    if (!fp) {
+        log_error("[触觉加载器] 无法打开文件: %s", filepath);
+        return -1;
+    }
+
+    /* 获取文件大小 */
+    fseek(fp, 0, SEEK_END);
+    long file_size = ftell(fp);
+    rewind(fp);
+
+    if (file_size < TACTILE_RAW_BYTES) {
+        log_error("[触觉加载器] 文件大小不足: 期望>=%d字节, 实际%ld字节",
+                  TACTILE_RAW_BYTES, file_size);
+        fclose(fp);
+        return -1;
+    }
+
+    /* 读取原始二进制数据 */
+    unsigned char* raw = (unsigned char*)safe_malloc(TACTILE_RAW_BYTES);
+    if (!raw) {
+        fclose(fp);
+        return -1;
+    }
+
+    size_t bytes_read = fread(raw, 1, TACTILE_RAW_BYTES, fp);
+    fclose(fp);
+
+    if (bytes_read != TACTILE_RAW_BYTES) {
+        log_error("[触觉加载器] 文件读取不完整: 期望%zu字节, 实际%zu字节",
+                  (size_t)TACTILE_RAW_BYTES, bytes_read);
+        safe_free((void**)&raw);
+        return -1;
+    }
+
+    /* 解析uint16_t小端序并归一化到[0, 1] */
+    for (int i = 0; i < TACTILE_CELLS; i++) {
+        uint16_t raw_val = (uint16_t)raw[i * 2] | ((uint16_t)raw[i * 2 + 1] << 8);
+        output_buffer[i] = (float)raw_val / TACTILE_PRESSURE_MAX;
+        /* 边界裁剪 */
+        if (output_buffer[i] > 1.0f) output_buffer[i] = 1.0f;
+        if (output_buffer[i] < 0.0f) output_buffer[i] = 0.0f;
+    }
+
+    safe_free((void**)&raw);
+    *actual_count = TACTILE_CELLS;
+
+    log_info("[触觉加载器] 已加载: %s (16x16=%d个压力值, 归一化到[0,1])",
+             filepath, TACTILE_CELLS);
+    return 0;
+}
+
+/* ========================================================================
+ * 本体感数据加载器 (关节角度)
+ * 
+ * 文件格式: CSV, 每行可变列数
+ *   第1列: 关节数N (整数)
+ *   第2列到第N+1列: 角度值 (浮点数, 度数)
+ * 
+ * 角度归一化到[-1, 1] (除以180度)
+ * 输出: 每行(1 + N)个float值 [关节数, 角度1, ..., 角度N]
+ *       不同行可能有不同的列数, 每行独立存储
+ * ======================================================================== */
+
+#define PROPRIOCEPTIVE_MAX_TOKENS 256
+#define PROPRIOCEPTIVE_ANGLE_MAX  180.0f
+
+int load_proprioceptive_data(const char* filepath, float* output_buffer,
+                             size_t buffer_size, size_t* actual_count) {
+    if (!filepath || !output_buffer || !actual_count) return -1;
+    *actual_count = 0;
+
+    FILE* fp = fopen(filepath, "r");
+    if (!fp) {
+        log_error("[本体感加载器] 无法打开文件: %s", filepath);
+        return -1;
+    }
+
+    char line[LOADER_MAX_LINE];
+    size_t total_values = 0;
+
+    while (loader_read_line(line, sizeof(line), fp)) {
+        if (loader_is_blank_line(line)) continue;
+
+        char* tokens[PROPRIOCEPTIVE_MAX_TOKENS];
+        int num_tokens = loader_parse_csv_line(line, ',', tokens, PROPRIOCEPTIVE_MAX_TOKENS);
+        if (num_tokens < 2) {
+            /* 至少需要: 关节数 + 至少1个角度 */
+            loader_free_tokens(tokens, num_tokens);
+            continue;
+        }
+
+        int joint_count = (int)atof(tokens[0]);
+        if (joint_count <= 0 || joint_count > num_tokens - 1) {
+            /* 关节数无效或与实际角度数量不匹配 */
+            loader_free_tokens(tokens, num_tokens);
+            continue;
+        }
+
+        /* 每行输出: 1(关节数) + joint_count(角度值) = joint_count + 1 个float */
+        size_t row_values = (size_t)(joint_count + 1);
+        if (total_values + row_values > buffer_size) {
+            log_warn("[本体感加载器] 输出缓冲区已满(%zu/%zu)，停止读取",
+                     total_values, buffer_size);
+            loader_free_tokens(tokens, num_tokens);
+            break;
+        }
+
+        /* 存储关节数（原始值，不做归一化） */
+        output_buffer[total_values] = (float)joint_count;
+
+        /* 存储角度值，归一化到[-1, 1] */
+        for (int i = 1; i <= joint_count && i < num_tokens; i++) {
+            float angle = (float)atof(tokens[i]) / PROPRIOCEPTIVE_ANGLE_MAX;
+            if (angle > 1.0f)  angle = 1.0f;
+            if (angle < -1.0f) angle = -1.0f;
+            output_buffer[total_values + (size_t)i] = angle;
+        }
+
+        loader_free_tokens(tokens, num_tokens);
+        total_values += row_values;
+    }
+
+    fclose(fp);
+    *actual_count = total_values;
+
+    if (total_values == 0) {
+        log_error("[本体感加载器] 未读取到有效数据: %s", filepath);
+        return -1;
+    }
+
+    log_info("[本体感加载器] 已加载: %s (%zu个float值)",
+             filepath, total_values);
+    return 0;
+}
+
+/* ========================================================================
+ * 热感数据加载器 (8x8热成像阵列)
+ * 
+ * 文件格式: 二进制, 64个float值 (IEEE 754单精度, 小端序)
+ *   排列顺序: 行优先 (row-major), 共256字节
+ * 
+ * 温度值范围: 假设-40°C到+300°C, 归一化到[0, 1]
+ * 输出: 64个float值
+ * ======================================================================== */
+
+#define THERMAL_ROWS       8
+#define THERMAL_COLS       8
+#define THERMAL_CELLS      (THERMAL_ROWS * THERMAL_COLS)  /* 64 */
+#define THERMAL_RAW_BYTES  (THERMAL_CELLS * 4)             /* 256字节 */
+#define THERMAL_TEMP_MIN   (-40.0f)
+#define THERMAL_TEMP_MAX   (300.0f)
+#define THERMAL_TEMP_RANGE (THERMAL_TEMP_MAX - THERMAL_TEMP_MIN)  /* 340.0f */
+
+int load_thermal_data(const char* filepath, float* output_buffer,
+                      size_t buffer_size, size_t* actual_count) {
+    if (!filepath || !output_buffer || !actual_count) return -1;
+    *actual_count = 0;
+
+    if (buffer_size < THERMAL_CELLS) {
+        log_error("[热感加载器] 输出缓冲区不足: 需要%zu, 实际%zu",
+                  (size_t)THERMAL_CELLS, buffer_size);
+        return -1;
+    }
+
+    FILE* fp = fopen(filepath, "rb");
+    if (!fp) {
+        log_error("[热感加载器] 无法打开文件: %s", filepath);
+        return -1;
+    }
+
+    /* 获取文件大小 */
+    fseek(fp, 0, SEEK_END);
+    long file_size = ftell(fp);
+    rewind(fp);
+
+    if (file_size < THERMAL_RAW_BYTES) {
+        log_error("[热感加载器] 文件大小不足: 期望>=%d字节, 实际%ld字节",
+                  THERMAL_RAW_BYTES, file_size);
+        fclose(fp);
+        return -1;
+    }
+
+    /* 读取原始二进制数据 */
+    unsigned char* raw = (unsigned char*)safe_malloc(THERMAL_RAW_BYTES);
+    if (!raw) {
+        fclose(fp);
+        return -1;
+    }
+
+    size_t bytes_read = fread(raw, 1, THERMAL_RAW_BYTES, fp);
+    fclose(fp);
+
+    if (bytes_read != THERMAL_RAW_BYTES) {
+        log_error("[热感加载器] 文件读取不完整: 期望%zu字节, 实际%zu字节",
+                  (size_t)THERMAL_RAW_BYTES, bytes_read);
+        safe_free((void**)&raw);
+        return -1;
+    }
+
+    /* 解析float32小端序并归一化到[0, 1] */
+    for (int i = 0; i < THERMAL_CELLS; i++) {
+        /* 小端序IEEE 754单精度浮点解析 */
+        uint32_t raw_bits = (uint32_t)raw[i * 4]
+                          | ((uint32_t)raw[i * 4 + 1] << 8)
+                          | ((uint32_t)raw[i * 4 + 2] << 16)
+                          | ((uint32_t)raw[i * 4 + 3] << 24);
+        float temp;
+        memcpy(&temp, &raw_bits, sizeof(float));
+
+        /* 检查是否为NaN或Inf */
+        if (isnan(temp) || isinf(temp)) {
+            output_buffer[i] = 0.0f;
+        } else {
+            /* 归一化到[0, 1] */
+            output_buffer[i] = (temp - THERMAL_TEMP_MIN) / THERMAL_TEMP_RANGE;
+            /* 边界裁剪 */
+            if (output_buffer[i] > 1.0f) output_buffer[i] = 1.0f;
+            if (output_buffer[i] < 0.0f) output_buffer[i] = 0.0f;
+        }
+    }
+
+    safe_free((void**)&raw);
+    *actual_count = THERMAL_CELLS;
+
+    log_info("[热感加载器] 已加载: %s (8x8=%d个温度值, 归一化到[0,1])",
+             filepath, THERMAL_CELLS);
+    return 0;
+}
+
+/* ========================================================================
+ * 雷达数据加载器 (点云)
+ * 
+ * 文件格式: CSV, 每行可变列数
+ *   第1列: 点数K (整数)
+ *   第2列到第(4K+1)列: X1, Y1, Z1, 强度1, X2, Y2, Z2, 强度2, ...
+ * 
+ * 空间坐标归一化: 除以最大探测距离(100m), 强度归一化到[0, 1]
+ * 输出: 每行(1 + 4K)个float值 [点数K, X1,Y1,Z1,I1, X2,Y2,Z2,I2, ...]
+ * ======================================================================== */
+
+#define RADAR_MAX_TOKENS      4096
+#define RADAR_MAX_RANGE       100.0f    /* 最大探测距离100米 */
+#define RADAR_INTENSITY_MAX   255.0f    /* 强度最大值 */
+
+int load_radar_data(const char* filepath, float* output_buffer,
+                    size_t buffer_size, size_t* actual_count) {
+    if (!filepath || !output_buffer || !actual_count) return -1;
+    *actual_count = 0;
+
+    FILE* fp = fopen(filepath, "r");
+    if (!fp) {
+        log_error("[雷达加载器] 无法打开文件: %s", filepath);
+        return -1;
+    }
+
+    char line[LOADER_MAX_LINE];
+    size_t total_values = 0;
+
+    while (loader_read_line(line, sizeof(line), fp)) {
+        if (loader_is_blank_line(line)) continue;
+
+        char* tokens[RADAR_MAX_TOKENS];
+        int num_tokens = loader_parse_csv_line(line, ',', tokens, RADAR_MAX_TOKENS);
+        if (num_tokens < 2) {
+            /* 至少需要: 点数 + 至少1个点的4个值 */
+            loader_free_tokens(tokens, num_tokens);
+            continue;
+        }
+
+        int point_count = (int)atof(tokens[0]);
+        if (point_count <= 0) {
+            loader_free_tokens(tokens, num_tokens);
+            continue;
+        }
+
+        /* 每行输出: 1(点数K) + point_count * 4(XYZI) */
+        int expected_tokens = 1 + point_count * 4;
+        int actual_points = num_tokens - 1;
+        /* 如果token数量不足，以实际可用数据为准 */
+        int effective_points = (actual_points / 4 < point_count) ? (actual_points / 4) : point_count;
+        if (effective_points <= 0) {
+            loader_free_tokens(tokens, num_tokens);
+            continue;
+        }
+
+        size_t row_values = (size_t)(1 + effective_points * 4);
+        if (total_values + row_values > buffer_size) {
+            log_warn("[雷达加载器] 输出缓冲区已满(%zu/%zu)，停止读取",
+                     total_values, buffer_size);
+            loader_free_tokens(tokens, num_tokens);
+            break;
+        }
+
+        /* 存储有效点数 */
+        output_buffer[total_values] = (float)effective_points;
+
+        /* 存储点云数据 */
+        for (int p = 0; p < effective_points; p++) {
+            size_t base = total_values + 1 + (size_t)p * 4;
+            /* X坐标: 归一化到[-1, 1] */
+            output_buffer[base + 0] = (float)atof(tokens[1 + p * 4 + 0]) / RADAR_MAX_RANGE;
+            if (output_buffer[base + 0] > 1.0f)  output_buffer[base + 0] = 1.0f;
+            if (output_buffer[base + 0] < -1.0f) output_buffer[base + 0] = -1.0f;
+            /* Y坐标 */
+            output_buffer[base + 1] = (float)atof(tokens[1 + p * 4 + 1]) / RADAR_MAX_RANGE;
+            if (output_buffer[base + 1] > 1.0f)  output_buffer[base + 1] = 1.0f;
+            if (output_buffer[base + 1] < -1.0f) output_buffer[base + 1] = -1.0f;
+            /* Z坐标 */
+            output_buffer[base + 2] = (float)atof(tokens[1 + p * 4 + 2]) / RADAR_MAX_RANGE;
+            if (output_buffer[base + 2] > 1.0f)  output_buffer[base + 2] = 1.0f;
+            if (output_buffer[base + 2] < -1.0f) output_buffer[base + 2] = -1.0f;
+            /* 强度: 归一化到[0, 1] */
+            output_buffer[base + 3] = (float)atof(tokens[1 + p * 4 + 3]) / RADAR_INTENSITY_MAX;
+            if (output_buffer[base + 3] > 1.0f) output_buffer[base + 3] = 1.0f;
+            if (output_buffer[base + 3] < 0.0f) output_buffer[base + 3] = 0.0f;
+        }
+
+        loader_free_tokens(tokens, num_tokens);
+        total_values += row_values;
+    }
+
+    fclose(fp);
+    *actual_count = total_values;
+
+    if (total_values == 0) {
+        log_error("[雷达加载器] 未读取到有效数据: %s", filepath);
+        return -1;
+    }
+
+    log_info("[雷达加载器] 已加载: %s (%zu个float值)",
+             filepath, total_values);
+    return 0;
+}
+
+/* ========================================================================
+ * 电机数据加载器 (PWM控制信号)
+ * 
+ * 文件格式: CSV, 每行可变列数
+ *   第1列: 时间戳
+ *   第2列到第N+1列: 电机1_PWM, 电机2_PWM, ..., 电机N_PWM
+ * 
+ * PWM值范围: 0-255 (8位), 归一化到[0, 1]
+ * 输出: 每行(1 + N)个float值 [时间戳, PWM1, PWM2, ..., PWM_N]
+ *       所有行必须有相同的电机数(列数), 以第一行有效数据为准
+ * ======================================================================== */
+
+#define MOTOR_MAX_TOKENS  256
+#define MOTOR_PWM_MAX     255.0f
+
+int load_motor_data(const char* filepath, float* output_buffer,
+                    size_t buffer_size, size_t* actual_count) {
+    if (!filepath || !output_buffer || !actual_count) return -1;
+    *actual_count = 0;
+
+    FILE* fp = fopen(filepath, "r");
+    if (!fp) {
+        log_error("[电机加载器] 无法打开文件: %s", filepath);
+        return -1;
+    }
+
+    char line[LOADER_MAX_LINE];
+    size_t total_values = 0;
+    int expected_motor_count = -1;  /* 首次读取有效行后确定电机数量 */
+
+    while (loader_read_line(line, sizeof(line), fp)) {
+        if (loader_is_blank_line(line)) continue;
+
+        char* tokens[MOTOR_MAX_TOKENS];
+        int num_tokens = loader_parse_csv_line(line, ',', tokens, MOTOR_MAX_TOKENS);
+        if (num_tokens < 2) {
+            /* 至少需要: 时间戳 + 至少1个PWM信号 */
+            loader_free_tokens(tokens, num_tokens);
+            continue;
+        }
+
+        int motor_count = num_tokens - 1;  /* 减去时间戳列 */
+
+        /* 以第一行有效数据为准，确定电机数量 */
+        if (expected_motor_count < 0) {
+            expected_motor_count = motor_count;
+        } else if (motor_count != expected_motor_count) {
+            /* 列数不一致，跳过此行 */
+            log_warn("[电机加载器] 跳过列数不一致的行: 期望%d列, 实际%d列",
+                     expected_motor_count + 1, motor_count + 1);
+            loader_free_tokens(tokens, num_tokens);
+            continue;
+        }
+
+        /* 每行输出: 1(时间戳) + motor_count(PWM值) */
+        size_t row_values = (size_t)(motor_count + 1);
+        if (total_values + row_values > buffer_size) {
+            log_warn("[电机加载器] 输出缓冲区已满(%zu/%zu)，停止读取",
+                     total_values, buffer_size);
+            loader_free_tokens(tokens, num_tokens);
+            break;
+        }
+
+        /* 时间戳: 保持原始值 */
+        output_buffer[total_values] = (float)atof(tokens[0]);
+
+        /* PWM值: 归一化到[0, 1] */
+        for (int i = 1; i <= motor_count; i++) {
+            float pwm = (float)atof(tokens[i]) / MOTOR_PWM_MAX;
+            if (pwm > 1.0f)  pwm = 1.0f;
+            if (pwm < 0.0f)  pwm = 0.0f;
+            output_buffer[total_values + (size_t)i] = pwm;
+        }
+
+        loader_free_tokens(tokens, num_tokens);
+        total_values += row_values;
+    }
+
+    fclose(fp);
+    *actual_count = total_values;
+
+    if (total_values == 0) {
+        log_error("[电机加载器] 未读取到有效数据: %s", filepath);
+        return -1;
+    }
+
+    log_info("[电机加载器] 已加载: %s (%zu个float值, 电机数=%d)",
+             filepath, total_values, expected_motor_count);
+    return 0;
 }

@@ -18,6 +18,14 @@
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/math_utils.h"
+
+/* DEFECT-014编译期修复: 确保SELFLNN_MAX_MODALITIES为9。
+ * multimodal_unified_input.h定义9，unified_signal_processor_advanced.h默认4。
+ * 若包含顺序错误导致值为4，训练时栈上modality数组仅4个元素，
+ * 但实际处理9个模态→栈缓冲区溢出→覆盖返回地址/相邻变量→内存损坏。 */
+#if SELFLNN_MAX_MODALITIES != 9
+#error "SELFLNN_MAX_MODALITIES must be 9. Check header include order: multimodal_unified_input.h must be included before unified_signal_processor_advanced.h"
+#endif
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/core/cfc_cell.h"
 #include <stdlib.h>
@@ -884,7 +892,17 @@ void unified_signal_processor_free(UnifiedSignalProcessor* processor) {
     safe_free((void**)&processor->temporal_feature_buffer);
     safe_free((void**)&processor->gradient_buffer);
     safe_free((void**)&processor->state_vector);
-    
+
+    /* DEFECT-014修复: 释放动量缓冲区。
+     * weight_momentum和bias_momentum在unified_signal_processor_train()中动态分配，
+     * 但unified_signal_processor_free()中未释放，导致内存泄漏和堆状态损坏。
+     * 损坏的堆元数据在后续adaptive_router_free()等操作中触发堆管理器写入错误位置，
+     * 最终破坏了g_system_state.unified_signal_processor_training指针。 */
+    safe_free((void**)&processor->weight_momentum);
+    safe_free((void**)&processor->bias_momentum);
+    processor->momentum_matrix_size = 0;
+    processor->momentum_bias_size = 0;
+
     // 释放处理器结构
     safe_free((void**)&processor);
 }

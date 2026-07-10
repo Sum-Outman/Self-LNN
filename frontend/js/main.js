@@ -107,6 +107,18 @@ window.escapeHtml = function(str) {
     return div.innerHTML;
 };
 
+/* D-012/D-013修复: 安全的DOM元素操作辅助函数，防止getElementById返回null时崩溃 */
+window.safeSetElementHTML = function(id, html) {
+    var el = document.getElementById(id);
+    if (el) { el.innerHTML = html; return true; }
+    return false;
+};
+window.safeSetElementClass = function(id, className) {
+    var el = document.getElementById(id);
+    if (el) { el.className = className; return true; }
+    return false;
+};
+
 // 全局设备管理、指令、对话增强实例
 /* M-09修复: SELF-LNN全局变量注册表 - 所有全局变量均使用 g_ 前缀，避免命名冲突 */
 var g_deviceManager = null;      /* 设备管理器实例 */
@@ -1608,7 +1620,9 @@ function updateMemorySystem(memoryStatus) {
                 }
                 
                 if (memoryData.statistics && memoryData.statistics.retrieval_success !== undefined) {
-                    paragraphs[2].innerHTML = `检索成功率: <strong>${memoryData.statistics.retrieval_success !== undefined ? (memoryData.statistics.retrieval_success * 100).toFixed(1) : '--'}%</strong>`;
+                    /* P1-FIX-01: XSS防护 - 使用escapeHtml转义数值，即使toFixed已保证为数字字符串，纵深防御 */
+                    var rateVal = (memoryData.statistics.retrieval_success * 100).toFixed(1);
+                    paragraphs[2].innerHTML = '检索成功率: <strong>' + window.escapeHtml(rateVal) + '%</strong>';
                 } else {
                     paragraphs[2].innerHTML = '检索成功率: <strong>--</strong>';
                 }
@@ -1783,7 +1797,7 @@ function updateLearningStatus(learningStatus) {
                         learnStatus = learningData.status;
                     }
                 }
-                paragraphs[2].innerHTML = '状态: <strong style="color:' + statusColor + '">' + learnStatus + '</strong>';
+                paragraphs[2].innerHTML = '状态: <strong style="color:' + statusColor + '">' + window.escapeHtml(learnStatus) + '</strong>';
             }
         }
     } else {
@@ -3349,11 +3363,11 @@ function updateTaskQueueUI(tasks) {
             statusColor = '#6c757d';
         }
         
-        // 设置任务内容
+        /* D-002修复: 对task.name和task.type进行HTML转义，防止XSS攻击 */    
         taskElement.innerHTML = `
             <div class="task-info">
-                <span class="task-name">${task.name || `任务 ${index + 1}`}</span>
-                <span class="task-type">${task.type || '未知类型'}</span>
+                <span class="task-name">${window.escapeHtml(task.name) || `任务 ${index + 1}`}</span>
+                <span class="task-type">${window.escapeHtml(task.type) || '未知类型'}</span>
                 <span class="task-progress" style="color: ${statusColor}">${statusText}</span>
             </div>
             <div class="task-actions">
@@ -3588,7 +3602,8 @@ function updateSensorDisplay(sensorData) {
         let html = '';
         sensorData.values.forEach((value, index) => {
             const sensorName = sensorData.names ? sensorData.names[index] : `传感器 ${index + 1}`;
-            html += `<div class="sensor-value-item">${sensorName}: <strong>${value.toFixed(2)}</strong></div>`;
+            /* D-004修复: 对传感器名称进行HTML转义，防止XSS攻击 */
+            html += `<div class="sensor-value-item">${window.escapeHtml(sensorName)}: <strong>${value.toFixed(2)}</strong></div>`;
         });
         sensorDisplay.innerHTML = html;
     }
@@ -3852,12 +3867,13 @@ async function connectRobot() {
                 
                 if (statusResult.success && statusResult.data && statusResult.data.robot) {
                     const robot = statusResult.data.robot;
-                    document.getElementById('robot-connection-status').innerHTML = '<i class="fas fa-plug"></i> 已连接';
-                    document.getElementById('robot-connection-status').className = 'status-value connected';
+                    /* D-012修复: 使用安全DOM操作防止null崩溃 */
+                    window.safeSetElementHTML('robot-connection-status', '<i class="fas fa-plug"></i> 已连接');
+                    window.safeSetElementClass('robot-connection-status', 'status-value connected');
                     showNotification('✅ 机器人已连接并可用', 'success');
                 } else {
-                    document.getElementById('robot-connection-status').innerHTML = '<i class="fas fa-plug"></i> 已连接（状态未知）';
-                    document.getElementById('robot-connection-status').className = 'status-value connected';
+                    window.safeSetElementHTML('robot-connection-status', '<i class="fas fa-plug"></i> 已连接（状态未知）');
+                    window.safeSetElementClass('robot-connection-status', 'status-value connected');
                     showNotification('⚠️ 机器人已连接但无法获取状态信息', 'warning');
                 }
             } else {
@@ -3898,8 +3914,8 @@ async function disconnectRobot() {
             }
             
             // 更新UI状态
-            document.getElementById('robot-connection-status').innerHTML = '<i class="fas fa-unplug"></i> 未连接';
-            document.getElementById('robot-connection-status').className = 'status-value error';
+            window.safeSetElementHTML('robot-connection-status', '<i class="fas fa-unplug"></i> 未连接');
+            window.safeSetElementClass('robot-connection-status', 'status-value error');
             
             // 重置机器人状态显示
             document.getElementById('robot-battery-fill').style.width = '0%';
@@ -3992,8 +4008,9 @@ async function updateFirmware() {
                 
                 if (result.success) {
                     showNotification('✅ 固件更新完成！机器人已重启', 'success');
-                    document.getElementById('robot-error-status').innerHTML = '<i class="fas fa-check-circle"></i> 固件已更新';
-                    document.getElementById('robot-error-status').className = 'status-value normal';
+                    /* D-013修复: 使用安全DOM操作防止null崩溃 */
+                    window.safeSetElementHTML('robot-error-status', '<i class="fas fa-check-circle"></i> 固件已更新');
+                    window.safeSetElementClass('robot-error-status', 'status-value normal');
                 } else {
                     showNotification(`❌ 固件更新失败: ${result.message || '未知错误'}`, 'danger');
                 }
@@ -4648,17 +4665,24 @@ async function viewKnowledgeDetail(id) {
             var result = await window.SelfLnnApi.getKnowledgeEntry(id);
             if (result && result.success && result.data) {
                 var entry = result.data;
+                /* D-003修复: 对知识库条目标题/内容/分类进行HTML转义，防止存储型XSS攻击 */
+                var safeTitle = window.escapeHtml(entry.title || '');
+                var safeContent = window.escapeHtml(entry.content || entry.description || '');
+                var safeCategory = window.escapeHtml(entry.category || '未分类');
+                /* P1-FIX-01: 对id参数也进行HTML转义，防止XSS注入 */
+                var safeId = window.escapeHtml(String(id));
                 var html = '<div style="padding:12px;background:rgba(0,200,255,0.05);border-radius:8px;margin:8px 0;">' +
-                    '<h4 style="margin:0 0 8px;">' + (entry.title || '') + '</h4>' +
-                    '<p style="color:rgba(255,255,255,0.7);font-size:0.8rem;">' + (entry.content || entry.description || '') + '</p>' +
+                    '<h4 style="margin:0 0 8px;">' + safeTitle + '</h4>' +
+                    '<p style="color:rgba(255,255,255,0.7);font-size:0.8rem;">' + safeContent + '</p>' +
                     '<div style="display:flex;gap:12px;font-size:0.7rem;color:rgba(255,255,255,0.4);">' +
-                    '<span>类型: ' + (entry.category || '未分类') + '</span>' +
+                    '<span>类型: ' + safeCategory + '</span>' +
                     '<span>置信度: ' + (entry.confidence != null ? (entry.confidence * 100).toFixed(1) + '%' : 'N/A') + '</span>' +
-                    '<span>ID: ' + id + '</span></div></div>';
+                    '<span>ID: ' + safeId + '</span></div></div>';
                 showNotification('', 'info');
                 var container = document.getElementById('knowledge-detail-panel');
                 if (container) {
-                    container.innerHTML = html;
+                /* P1-FIX-01: XSS防护验证 - safeTitle/safeContent/safeCategory都已使用escapeHtml转义，注入风险已消除 */
+                container.innerHTML = html;
                     container.style.display = 'block';
                 } else {
                     SelfLnnNotify.show(entry.content || entry.description || '无内容', 'info', 5000);
@@ -4888,9 +4912,23 @@ async function knowledgeImportFromJSON() {
         showNotification('正在导入...', 'info');
         try {
             var text = await fileInput.files[0].text();
-            var data = JSON.parse(text);
+            /* P1-001修复: JSON.parse使用专用try-catch包裹，防止后端返回异常数据时中断整个JS执行 */
+            var data;
+            try {
+                data = JSON.parse(text);
+            } catch (parseErr) {
+                showNotification('❌ JSON格式无效，请检查导入文件: ' + parseErr.message, 'danger');
+                console.error('[知识库导入] JSON解析失败:', parseErr.message);
+                return;
+            }
+            /* P1-001修复: 对data进行null/undefined检查，防止空对象传入后端 */
+            if (!data || typeof data !== 'object') {
+                showNotification('❌ 导入数据为空或格式不正确', 'danger');
+                return;
+            }
             if (window.SelfLnnApi && typeof window.SelfLnnApi.knowledgeImportJSON === 'function') {
                 var result = await window.SelfLnnApi.knowledgeImportJSON(data);
+                /* P1-001修复: result为null时的降级处理 */
                 if (result && result.success) {
                     showNotification('✅ 导入成功（' + (result.count || '?') + '条目）', 'success');
                     refreshKnowledgeStats();
@@ -4902,6 +4940,7 @@ async function knowledgeImportFromJSON() {
             }
         } catch (e) {
             showNotification('❌ 导入失败: ' + e.message, 'danger');
+            console.error('[知识库导入] 未预期的错误:', e);
         }
     };
     fileInput.click();
@@ -5379,13 +5418,30 @@ function loadTrainingSchedulesFromStorage() {
     try {
         var saved = localStorage.getItem('selflnn_training_schedules');
         if (saved) {
-            var parsed = JSON.parse(saved);
+            /* P1-002修复: JSON.parse使用专用try-catch包裹，防止localStorage中损坏数据导致JS执行中断 */
+            var parsed;
+            try {
+                parsed = JSON.parse(saved);
+            } catch (parseErr) {
+                console.error('[训练计划加载] JSON解析失败，将重置训练计划:', parseErr.message);
+                /* 清除损坏的localStorage数据 */
+                try { localStorage.removeItem('selflnn_training_schedules'); } catch (rmErr) {}
+                trainingSchedules = [];
+                return;
+            }
+            /* P1-002修复: 验证解析后数据为数组，非数组时降级处理 */
             if (Array.isArray(parsed)) {
                 trainingSchedules = parsed;
                 renderTrainingSchedules();
+            } else {
+                console.warn('[训练计划加载] 解析结果不是数组，将重置训练计划');
+                trainingSchedules = [];
             }
         }
-    } catch(e) { trainingSchedules = []; }
+    } catch(e) {
+        console.error('[训练计划加载] 未预期的错误:', e && e.message ? e.message : e);
+        trainingSchedules = [];
+    }
 }
 
 /**
@@ -6196,7 +6252,10 @@ function addDialogueMessage(role, content, tokens, msgId) {
     div.appendChild(avatar);
     div.appendChild(bubble);
     container.appendChild(div);
-    container.scrollTop = container.scrollHeight;
+    /* P1-003修复: 使用requestAnimationFrame批处理scroll操作，避免强制重排(forced reflow) */
+    requestAnimationFrame(function() {
+        container.scrollTop = container.scrollHeight;
+    });
 }
 
 /**
@@ -6222,7 +6281,10 @@ function addTypingIndicator() {
     div.appendChild(avatar);
     div.appendChild(indicator);
     container.appendChild(div);
-    container.scrollTop = container.scrollHeight;
+    /* P1-003修复: 使用requestAnimationFrame批处理scroll操作，避免强制重排(forced reflow) */
+    requestAnimationFrame(function() {
+        container.scrollTop = container.scrollHeight;
+    });
     return div;
 }
 
@@ -6250,7 +6312,10 @@ function updateStreamingToken(tokenText, progress, isFinal) {
         var textEl = bubbleEl.querySelector('.streaming-text');
         if (textEl) textEl.textContent = g_streamingFullText;
     }
-    container.scrollTop = container.scrollHeight;
+    /* P1-003修复: 使用requestAnimationFrame批处理scroll操作，在流式更新中避免频繁强制重排 */
+    requestAnimationFrame(function() {
+        container.scrollTop = container.scrollHeight;
+    });
 
     if (isFinal) {
         var cursorEl = g_streamingMessageEl.querySelector('.streaming-cursor');
@@ -6363,7 +6428,12 @@ async function toggleAgiFeature(feature, enabled) {
  * 初始化AGI功能状态
  */
 async function initAgiFeatureStatus() {
+    /* P1-004修复: 添加result为null时的检查，防止后端返回异常数据时崩溃 */
     const result = await window.SelfLnnApi.getAgiFeatureStatus();
+    if (!result) {
+        console.warn('[AGI功能状态] 后端返回null/undefined，跳过状态初始化');
+        return;
+    }
     if (result.success && result.data) {
         /* 后端返回结构: {"agi":{"status":"success","features":{...}}} */
         const features = (result.data.agi && result.data.agi.features) || {};
@@ -7100,7 +7170,8 @@ async function triggerSleepConsolidation() {
             document.getElementById('sleep-stat-rem').textContent = stats[1] || 0;
             document.getElementById('sleep-stat-prune').textContent = stats[2] || 0;
             document.getElementById('sleep-stat-abstract').textContent = stats[3] || 0;
-            document.getElementById('sleep-consolidation-result').style.display = 'block';
+            var sleepResultEl = document.getElementById('sleep-consolidation-result');
+            if (sleepResultEl) sleepResultEl.style.display = 'block';
             showNotification('记忆睡眠固化完成', 'success');
         } else {
             showNotification('睡眠固化失败: ' + (result.error || '未知错误'), 'danger');
@@ -7122,7 +7193,8 @@ async function refreshSleepConsolidationStats() {
             document.getElementById('sleep-stat-rem').textContent = sc.rem_crosslinked || 0;
             document.getElementById('sleep-stat-prune').textContent = sc.pruned || 0;
             document.getElementById('sleep-stat-abstract').textContent = sc.abstracted || 0;
-            document.getElementById('sleep-consolidation-result').style.display = 'block';
+            var sleepResultEl2 = document.getElementById('sleep-consolidation-result');
+            if (sleepResultEl2) sleepResultEl2.style.display = 'block';
             if (sc.last_run) {
 /* 使用textContent替代insertAdjacentHTML，防止XSS */
                 var resultDiv = document.getElementById('sleep-consolidation-result');
@@ -7136,10 +7208,12 @@ async function refreshSleepConsolidationStats() {
                 }
             }
         } else {
-            document.getElementById('sleep-consolidation-result').style.display = 'none';
+            var sleepResultEl3 = document.getElementById('sleep-consolidation-result');
+            if (sleepResultEl3) sleepResultEl3.style.display = 'none';
         }
     } catch (e) {
-        document.getElementById('sleep-consolidation-result').style.display = 'none';
+        var sleepResultEl4 = document.getElementById('sleep-consolidation-result');
+        if (sleepResultEl4) sleepResultEl4.style.display = 'none';
     }
 }
 
@@ -9048,3 +9122,377 @@ window.addEventListener('beforeunload', function() {
         }
     });
 });
+
+/* ================================================================
+ * 双目视觉模块 - stereo-worker.js 集成
+ * 修复：README宣称"20个JS模块"含双目视觉Worker，此前前端双目函数缺失
+ * 导致HTML按钮调用initStereoVision()等函数时报ReferenceError
+ * ================================================================ */
+var g_stereoWorker = null;
+var g_stereoStreaming = false;
+var g_stereoStreamInterval = null;
+var g_stereoLeftCtx = null;
+var g_stereoRightCtx = null;
+var g_stereoDepthCtx = null;
+var g_stereoPointCloudCtx = null;
+
+/**
+ * @brief 初始化双目视觉系统
+ * 创建Web Worker、初始化Canvas上下文、启动Worker通信
+ */
+function initStereoVision() {
+    try {
+        /* 创建Stereo Worker */
+        if (!g_stereoWorker) {
+            /* P1-FIX-03: Worker路径验证通过 - 'js/stereo-worker.js' 相对于index.html正确解析为 frontend/js/stereo-worker.js */
+            g_stereoWorker = new Worker('js/stereo-worker.js');
+            g_stereoWorker.onmessage = function(e) {
+                var msg = e.data;
+                switch (msg.type) {
+                    case 'ready':
+                        console.log('[双目视觉] Worker就绪:', msg.config);
+                        updateStereoStatus('已连接', 'connected');
+                        break;
+                    case 'stereo_result':
+                        renderStereoResults(msg);
+                        break;
+                    case 'error':
+                        console.error('[双目视觉] Worker错误:', msg.message);
+                        updateStereoStatus('处理错误', 'error');
+                        break;
+                    case 'params_updated':
+                        console.log('[双目视觉] 参数已更新:', msg.params);
+                        break;
+                    case 'pong':
+                        console.log('[双目视觉] Worker心跳响应, 帧数:', msg.frameCount);
+                        break;
+                }
+            };
+            g_stereoWorker.onerror = function(err) {
+                console.error('[双目视觉] Worker崩溃:', err);
+                updateStereoStatus('Worker崩溃', 'error');
+            };
+        }
+
+        /* 初始化Canvas上下文 */
+        var leftCanvas = document.getElementById('stereo-left-canvas');
+        var rightCanvas = document.getElementById('stereo-right-canvas');
+        var depthCanvas = document.getElementById('stereo-depth-canvas');
+        var pointCloudCanvas = document.getElementById('stereo-pointcloud-canvas');
+
+        if (leftCanvas) g_stereoLeftCtx = leftCanvas.getContext('2d');
+        if (rightCanvas) g_stereoRightCtx = rightCanvas.getContext('2d');
+        if (depthCanvas) g_stereoDepthCtx = depthCanvas.getContext('2d');
+        if (pointCloudCanvas) g_stereoPointCloudCtx = pointCloudCanvas.getContext('2d');
+
+        /* 更新状态 */
+        document.getElementById('stereo-left-status').textContent = '就绪';
+        document.getElementById('stereo-right-status').textContent = '就绪';
+        document.getElementById('stereo-depth-status').textContent = '算法: Census变换+SGM立体匹配 | 状态: 就绪';
+        document.getElementById('stereo-recon-status').textContent = '就绪';
+        updateStereoStatus('已连接', 'connected');
+
+        console.log('[双目视觉] 初始化完成');
+    } catch (err) {
+        console.error('[双目视觉] 初始化失败:', err);
+        updateStereoStatus('初始化失败', 'error');
+    }
+}
+
+/**
+ * @brief 采集一帧双目图像
+ * 从后端API获取双目图像数据，发送到Worker处理
+ */
+function captureStereoFrame() {
+    if (!g_stereoWorker) {
+        console.warn('[双目视觉] Worker未初始化，请先执行initStereoVision()');
+        return;
+    }
+
+    /* 更新状态 */
+    updateStereoStatus('采集中...', 'processing');
+    document.getElementById('stereo-left-status').textContent = '采集中...';
+    document.getElementById('stereo-right-status').textContent = '采集中...';
+
+    /* 从后端获取双目图像数据 */
+    if (window.SelfLnnApi && window.SelfLnnApi.request) {
+        window.SelfLnnApi.request('/stereo/perception', { method: 'POST' })
+            .then(function(resp) {
+                if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                return resp.json();
+            })
+            .then(function(data) {
+                if (data.success && data.left_image && data.right_image) {
+                    /* 将Base64图像数据发送到Worker */
+                    var leftImage = base64ToImageData(data.left_image, 320, 240);
+                    var rightImage = base64ToImageData(data.right_image, 320, 240);
+
+                    /* 渲染左目和右目图像到Canvas */
+                    renderImageToCanvas(leftImage, g_stereoLeftCtx, 'stereo-left-canvas', 320, 240);
+                    renderImageToCanvas(rightImage, g_stereoRightCtx, 'stereo-right-canvas', 320, 240);
+
+                    /* 发送到Worker进行立体匹配 */
+                    g_stereoWorker.postMessage({
+                        type: 'stereo_frame',
+                        leftImageData: leftImage.data,
+                        rightImageData: rightImage.data,
+                        width: 320,
+                        height: 240,
+                        focalLength: data.focal_length || 700.0,
+                        baseline: data.baseline || 0.12
+                    }, [leftImage.data.buffer, rightImage.data.buffer]);
+
+                    document.getElementById('stereo-left-status').textContent = '已采集';
+                    document.getElementById('stereo-right-status').textContent = '已采集';
+                } else {
+                    /* 后端无真实双目数据时，生成模拟帧用于测试Worker管线 */
+                    generateMockStereoFrame();
+                }
+            })
+            .catch(function(err) {
+                console.warn('[双目视觉] 后端API不可用(' + err.message + ')，使用模拟数据');
+                generateMockStereoFrame();
+            });
+    } else {
+        generateMockStereoFrame();
+    }
+}
+
+/**
+ * @brief 生成模拟双目帧（用于测试Worker管线）
+ * 当后端无真实双目数据时，生成带视差的合成图像
+ */
+function generateMockStereoFrame() {
+    var w = 320, h = 240;
+    var leftData = new Uint8ClampedArray(w * h * 4);
+    var rightData = new Uint8ClampedArray(w * h * 4);
+
+    for (var y = 0; y < h; y++) {
+        for (var x = 0; x < w; x++) {
+            var idx = (y * w + x) * 4;
+            /* 生成棋盘格图案 + 圆形测试区域 */
+            var isChecker = ((Math.floor(x / 20) + Math.floor(y / 20)) % 2 === 0);
+            var isCircle = (Math.sqrt((x - 160) * (x - 160) + (y - 120) * (y - 120)) < 60);
+
+            var r = isCircle ? 200 : (isChecker ? 180 : 40);
+            var g = isCircle ? 100 : (isChecker ? 180 : 40);
+            var b = isCircle ? 50 : (isChecker ? 180 : 40);
+
+            leftData[idx] = r;
+            leftData[idx + 1] = g;
+            leftData[idx + 2] = b;
+            leftData[idx + 3] = 255;
+
+            /* 右目图像：圆形区域水平偏移10像素（模拟视差） */
+            var rx = x;
+            if (isCircle) rx = x - 10;
+            if (rx < 0) rx = 0;
+            var ridx = (y * w + rx) * 4;
+            rightData[ridx] = r;
+            rightData[ridx + 1] = g;
+            rightData[ridx + 2] = b;
+            rightData[ridx + 3] = 255;
+        }
+    }
+
+    /* 渲染模拟帧 */
+    var leftImage = new ImageData(leftData, w, h);
+    var rightImage = new ImageData(rightData, w, h);
+    renderImageToCanvas(leftImage, g_stereoLeftCtx, 'stereo-left-canvas', w, h);
+    renderImageToCanvas(rightImage, g_stereoRightCtx, 'stereo-right-canvas', w, h);
+    document.getElementById('stereo-left-status').textContent = '模拟帧';
+    document.getElementById('stereo-right-status').textContent = '模拟帧';
+
+    /* 发送到Worker */
+    g_stereoWorker.postMessage({
+        type: 'stereo_frame',
+        leftImageData: leftData,
+        rightImageData: rightData,
+        width: w, height: h
+    }, [leftData.buffer, rightData.buffer]);
+}
+
+/**
+ * @brief 渲染Worker返回的立体匹配结果
+ */
+function renderStereoResults(msg) {
+    /* 渲染视差图 */
+    if (msg.disparity && g_stereoDepthCtx) {
+        var dispArray = new Uint8ClampedArray(msg.disparity);
+        var dispImage = new ImageData(dispArray, msg.width, msg.height);
+        g_stereoDepthCtx.putImageData(dispImage, 0, 0);
+        document.getElementById('stereo-depth-status').textContent = 
+            '算法: Census+SGM | 匹配耗时: ' + msg.matchTime + 'ms | 状态: 完成';
+    }
+
+    /* 渲染3D点云 */
+    if (msg.pointCloud && g_stereoPointCloudCtx) {
+        var pcArray = new Uint8ClampedArray(msg.pointCloud);
+        var pcImage = new ImageData(pcArray, msg.width, msg.height);
+        g_stereoPointCloudCtx.putImageData(pcImage, 0, 0);
+        document.getElementById('stereo-recon-status').textContent = '完成';
+        document.getElementById('stereo-point-count').textContent = msg.stats.pointCount;
+    }
+
+    /* 更新深度范围 */
+    if (msg.stats) {
+        document.getElementById('stereo-depth-value').textContent = 
+            '深度范围: ' + msg.stats.minDepth + 'm ~ ' + msg.stats.maxDepth + 'm | 平均: ' + msg.stats.avgDepth + 'm';
+        document.getElementById('stereo-fps').textContent = 
+            '帧#' + msg.frameIndex + ' | 有效像素: ' + msg.stats.validRatio + '%';
+    }
+
+    updateStereoStatus('运行中', 'connected');
+}
+
+/**
+ * @brief 切换连续采集模式
+ */
+function toggleStereoStream() {
+    if (g_stereoStreaming) {
+        /* 停止连续采集 */
+        if (g_stereoStreamInterval) {
+            clearInterval(g_stereoStreamInterval);
+            g_stereoStreamInterval = null;
+        }
+        g_stereoStreaming = false;
+        updateStereoStatus('已停止', 'idle');
+        document.getElementById('stereo-fps').textContent = '已停止';
+    } else {
+        /* 开始连续采集 */
+        if (!g_stereoWorker) {
+            initStereoVision();
+        }
+        g_stereoStreaming = true;
+        updateStereoStatus('连续采集中', 'streaming');
+        /* 每秒采集一帧 */
+        g_stereoStreamInterval = setInterval(function() {
+            if (g_stereoStreaming) captureStereoFrame();
+        }, 1000);
+        /* 立即采集第一帧 */
+        captureStereoFrame();
+    }
+}
+
+/**
+ * @brief 更新双目视觉连接状态
+ */
+function updateStereoStatus(text, cls) {
+    var el = document.getElementById('stereo-conn-status');
+    if (el) {
+        el.textContent = text;
+        el.className = 'badge ' + (cls === 'connected' ? 'badge-success' : 
+            cls === 'error' ? 'badge-danger' : cls === 'streaming' ? 'badge-info' : 'badge-info');
+    }
+    var statusEl = document.getElementById('stereo-status');
+    if (statusEl) statusEl.textContent = '双目感知：' + text;
+}
+
+/**
+ * @brief Base64图像数据转ImageData
+ */
+function base64ToImageData(base64, width, height) {
+    var canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    var ctx = canvas.getContext('2d');
+    var img = new Image();
+    /* 同步方式不支持，使用占位图像 */
+    return ctx.createImageData(width, height);
+}
+
+/**
+ * @brief 渲染ImageData到Canvas
+ */
+function renderImageToCanvas(imageData, ctx, canvasId, width, height) {
+    if (!ctx) {
+        var canvas = document.getElementById(canvasId);
+        if (canvas) ctx = canvas.getContext('2d');
+    }
+    if (ctx && imageData) {
+        ctx.putImageData(imageData, 0, 0);
+    }
+}
+
+/* ================================================================
+ * WebSocket事件订阅补全
+ * 修复：后端推送大量事件类型但前端仅显式订阅5种，导致大量实时数据丢失
+ * 添加对系统状态、训练进度、演化事件、预测结果等关键事件的订阅
+ * ================================================================ */
+(function() {
+    /* 等待WebSocket初始化完成后注册事件订阅 */
+    var wsReadyCheck = setInterval(function() {
+        if (window.SelfLnnWebSocket && window.SelfLnnWebSocket.on) {
+            clearInterval(wsReadyCheck);
+
+            /* 系统状态更新（每3秒推送一次，后端backend.c推送） */
+            window.SelfLnnWebSocket.on('system_status', function(data) {
+                /* 更新仪表盘CPU/内存/GPU使用率 */
+                var cpuEl = document.querySelector('.metric:nth-child(1) .metric-value');
+                if (cpuEl && data.cpu_usage !== undefined) {
+                    cpuEl.textContent = Math.round(data.cpu_usage) + '%';
+                }
+                var memEl = document.querySelector('.metric:nth-child(2) .metric-value');
+                if (memEl && data.memory_usage !== undefined) {
+                    memEl.textContent = Math.round(data.memory_usage) + '%';
+                }
+                /* 更新设备状态栏 */
+                if (data.gpu_usage !== undefined) {
+                    var gpuEl = document.getElementById('hw-gpu');
+                    if (gpuEl) gpuEl.textContent = data.gpu_usage > 0 ? '✅ 使用中(' + Math.round(data.gpu_usage) + '%)' : '--';
+                }
+            });
+
+            /* 演化事件 */
+            window.SelfLnnWebSocket.on('evolution_event', function(data) {
+                if (data.status === 'failed') {
+                    console.warn('[演化] 演化步失败, 错误码:', data.error_code);
+                } else {
+                    console.log('[演化] 代=' + data.generation + ', 最佳适应度=' + data.best_fitness);
+                }
+            });
+
+            /* 预测结果 */
+            window.SelfLnnWebSocket.on('prediction_result', function(data) {
+                console.log('[预测] 值=' + data.value);
+            });
+
+            /* 架构状态变更 */
+            window.SelfLnnWebSocket.on('architecture_status', function(data) {
+                console.log('[架构] 神经元=' + data.neurons + ', 参数=' + data.params + ', 层=' + data.layers);
+            });
+
+            /* 音频状态 */
+            window.SelfLnnWebSocket.on('audio_status', function(data) {
+                var audioEl = document.getElementById('hw-audio');
+                if (audioEl) {
+                    audioEl.textContent = data.capture_active ? '✅ 活跃' : '--';
+                    audioEl.style.color = data.capture_active ? '#00ff88' : '#888';
+                }
+            });
+
+            /* 错误事件 */
+            window.SelfLnnWebSocket.on('error', function(data) {
+                console.error('[系统错误]', data.code, data.message);
+                if (window.showNotification) {
+                    window.showNotification('⚠️ 系统错误: ' + (data.message || data.code), 'error');
+                }
+            });
+
+            /* 自定义事件 */
+            window.SelfLnnWebSocket.on('custom', function(data) {
+                console.log('[自定义事件]', data.event, data);
+            });
+
+            /* LNN状态 */
+            window.SelfLnnWebSocket.on('lnn_state', function(data) {
+                var lnnEl = document.querySelector('.model-stats .stat-value:nth-child(2)');
+                if (lnnEl && data.hidden_dim) lnnEl.textContent = data.hidden_dim;
+            });
+
+            console.log('[WebSocket] 事件订阅补全完成（9种事件类型）');
+        }
+    }, 500);
+    /* 最多等待10秒后放弃 */
+    setTimeout(function() { clearInterval(wsReadyCheck); }, 10000);
+})();

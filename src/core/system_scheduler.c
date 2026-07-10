@@ -644,13 +644,13 @@ const char* system_scheduler_module_state_str(ModuleState state) {
     }
 }
 
-const char* system_scheduler_priority_str(TaskPriority priority) {
+const char* system_scheduler_priority_str(SchedTaskPriority priority) {
     switch (priority) {
-        case TASK_PRIORITY_CRITICAL: return "关键";
-        case TASK_PRIORITY_HIGH: return "高";
-        case TASK_PRIORITY_NORMAL: return "普通";
-        case TASK_PRIORITY_LOW: return "低";
-        case TASK_PRIORITY_IDLE: return "空闲";
+        case SCHED_PRIORITY_CRITICAL: return "关键";
+        case SCHED_PRIORITY_HIGH: return "高";
+        case SCHED_PRIORITY_NORMAL: return "普通";
+        case SCHED_PRIORITY_LOW: return "低";
+        case SCHED_PRIORITY_IDLE: return "空闲";
         default: return "未知";
     }
 }

@@ -117,31 +117,39 @@ DialogueProcessor* dialogue_get_global_processor(void) {
     return g_dialogue_processor_global;
 }
 
-/* 初始化对话CfC权重（Xavier均匀分布，仅执行一次）
- * L-005修复说明：当hs或in_dim增大时，旧权重被直接释放，然后重新分配。
- * 这意味着之前的训练成果会丢失。如果需要在维度扩展时保留旧权重，
- * 应在此处增加"先分配新空间、复制旧权重、再释放旧空间"的逻辑。
- * 当前实现适用于原型快速迭代，生产环境应考虑权重迁移方案。 */
+/* 初始化对话CfC权重（Xavier均匀分布，权重迁移）
+ * P1-03修复：当hs或in_dim增大时，先保存旧权重，分配新空间后迁移旧权重
+ * 到对应位置，再初始化新增部分，最终释放旧空间，避免训练成果丢失。 */
 static void dialogue_cfc_weights_init(DialogueCfCWeights* w, size_t hs, size_t in_dim)
 {
     if (w->initialized && w->max_hs >= hs && w->max_in >= in_dim) return;
 
-    if (w->initialized) {
-        safe_free((void**)&w->w_gate_input);
-        safe_free((void**)&w->w_act_input);
-        safe_free((void**)&w->u_gate_hidden);
-        safe_free((void**)&w->u_act_hidden);
-        safe_free((void**)&w->b_gate);
-        safe_free((void**)&w->b_act);
-    }
+    /* P1-03修复：保存旧权重和维度，用于权重迁移 */
+    float* old_w_gate  = w->w_gate_input;
+    float* old_w_act   = w->w_act_input;
+    float* old_u_gate  = w->u_gate_hidden;
+    float* old_u_act   = w->u_act_hidden;
+    float* old_b_gate  = w->b_gate;
+    float* old_b_act   = w->b_act;
+    size_t old_hs      = w->max_hs;
+    size_t old_in      = w->max_in;
+    int was_initialized = w->initialized;
 
-    size_t hs_x_in = hs * in_dim;
-    size_t hs_x_hs = hs * hs;
+    /* 清零旧指针，防止safe_free误操作 */
+    w->w_gate_input  = NULL;
+    w->w_act_input   = NULL;
+    w->u_gate_hidden = NULL;
+    w->u_act_hidden  = NULL;
+    w->b_gate        = NULL;
+    w->b_act         = NULL;
 
-    w->w_gate_input   = (float*)safe_calloc(hs_x_in, sizeof(float));
-    w->w_act_input    = (float*)safe_calloc(hs_x_in, sizeof(float));
-    w->u_gate_hidden  = (float*)safe_calloc(hs_x_hs, sizeof(float));
-    w->u_act_hidden   = (float*)safe_calloc(hs_x_hs, sizeof(float));
+    size_t new_hs_x_in = hs * in_dim;
+    size_t new_hs_x_hs = hs * hs;
+
+    w->w_gate_input   = (float*)safe_calloc(new_hs_x_in, sizeof(float));
+    w->w_act_input    = (float*)safe_calloc(new_hs_x_in, sizeof(float));
+    w->u_gate_hidden  = (float*)safe_calloc(new_hs_x_hs, sizeof(float));
+    w->u_act_hidden   = (float*)safe_calloc(new_hs_x_hs, sizeof(float));
     w->b_gate         = (float*)safe_calloc(hs, sizeof(float));
     w->b_act          = (float*)safe_calloc(hs, sizeof(float));
 
@@ -153,24 +161,115 @@ static void dialogue_cfc_weights_init(DialogueCfCWeights* w, size_t hs, size_t i
         safe_free((void**)&w->u_act_hidden);
         safe_free((void**)&w->b_gate);
         safe_free((void**)&w->b_act);
+        /* 恢复旧指针引用，防止调用方丢失 */
+        w->w_gate_input  = old_w_gate;
+        w->w_act_input   = old_w_act;
+        w->u_gate_hidden = old_u_gate;
+        w->u_act_hidden  = old_u_act;
+        w->b_gate        = old_b_gate;
+        w->b_act         = old_b_act;
         return;
     }
 
-    /* Xavier均匀分布初始化: limit = sqrt(6/(fan_in+fan_out)) */
+    /* P1-03修复：权重迁移 —— 将旧权重复制到新空间的对应位置 */
+    if (was_initialized && old_hs > 0 && old_in > 0) {
+        size_t copy_hs = (old_hs < hs) ? old_hs : hs;
+        size_t copy_in = (old_in < in_dim) ? old_in : in_dim;
+
+        /* 迁移输入权重 W_gx [hs × in]：逐行复制 */
+        for (size_t r = 0; r < copy_hs; r++) {
+            memcpy(&w->w_gate_input[r * in_dim],
+                   &old_w_gate[r * old_in],
+                   copy_in * sizeof(float));
+            memcpy(&w->w_act_input[r * in_dim],
+                   &old_w_act[r * old_in],
+                   copy_in * sizeof(float));
+        }
+
+        /* 迁移隐藏权重 W_gh [hs × hs]：逐行复制 */
+        for (size_t r = 0; r < copy_hs; r++) {
+            memcpy(&w->u_gate_hidden[r * hs],
+                   &old_u_gate[r * old_hs],
+                   copy_hs * sizeof(float));
+            memcpy(&w->u_act_hidden[r * hs],
+                   &old_u_act[r * old_hs],
+                   copy_hs * sizeof(float));
+        }
+
+        /* 迁移偏置 b [hs] */
+        memcpy(w->b_gate, old_b_gate, copy_hs * sizeof(float));
+        memcpy(w->b_act,  old_b_act,  copy_hs * sizeof(float));
+
+        /* 释放旧权重空间 */
+        safe_free((void**)&old_w_gate);
+        safe_free((void**)&old_w_act);
+        safe_free((void**)&old_u_gate);
+        safe_free((void**)&old_u_act);
+        safe_free((void**)&old_b_gate);
+        safe_free((void**)&old_b_act);
+    }
+
+    /* Xavier均匀分布初始化新增部分（仅初始化未被迁移覆盖的位置） */
     float gate_limit = sqrtf(6.0f / (float)(in_dim + hs));
     float hidden_limit = sqrtf(6.0f / (float)(hs + hs));
 
-    for (size_t i = 0; i < hs_x_in; i++) {
-        w->w_gate_input[i] = (secure_random_float() * 2.0f - 1.0f) * gate_limit;
-        w->w_act_input[i]  = (secure_random_float() * 2.0f - 1.0f) * gate_limit;
-    }
-    for (size_t i = 0; i < hs_x_hs; i++) {
-        w->u_gate_hidden[i] = (secure_random_float() * 2.0f - 1.0f) * hidden_limit;
-        w->u_act_hidden[i]  = (secure_random_float() * 2.0f - 1.0f) * hidden_limit;
-    }
-    for (size_t i = 0; i < hs; i++) {
-        w->b_gate[i] = 0.0f;
-        w->b_act[i]  = 0.0f;
+    if (!was_initialized) {
+        /* 首次初始化：全部Xavier初始化 */
+        for (size_t i = 0; i < new_hs_x_in; i++) {
+            w->w_gate_input[i] = (secure_random_float() * 2.0f - 1.0f) * gate_limit;
+            w->w_act_input[i]  = (secure_random_float() * 2.0f - 1.0f) * gate_limit;
+        }
+        for (size_t i = 0; i < new_hs_x_hs; i++) {
+            w->u_gate_hidden[i] = (secure_random_float() * 2.0f - 1.0f) * hidden_limit;
+            w->u_act_hidden[i]  = (secure_random_float() * 2.0f - 1.0f) * hidden_limit;
+        }
+        for (size_t i = 0; i < hs; i++) {
+            w->b_gate[i] = 0.0f;
+            w->b_act[i]  = 0.0f;
+        }
+    } else {
+        /* 维度扩展：仅初始化新增的行/列 */
+        size_t copy_hs = (old_hs < hs) ? old_hs : hs;
+        size_t copy_in = (old_in < in_dim) ? old_in : in_dim;
+
+        /* 初始化输入权重中新增的列（旧行中的新列） */
+        if (in_dim > old_in) {
+            for (size_t r = 0; r < copy_hs; r++) {
+                for (size_t c = old_in; c < in_dim; c++) {
+                    size_t idx = r * in_dim + c;
+                    w->w_gate_input[idx] = (secure_random_float() * 2.0f - 1.0f) * gate_limit;
+                    w->w_act_input[idx]  = (secure_random_float() * 2.0f - 1.0f) * gate_limit;
+                }
+            }
+        }
+
+        /* 初始化输入权重中新增的行（全部列） */
+        if (hs > old_hs) {
+            for (size_t r = old_hs; r < hs; r++) {
+                for (size_t c = 0; c < in_dim; c++) {
+                    size_t idx = r * in_dim + c;
+                    w->w_gate_input[idx] = (secure_random_float() * 2.0f - 1.0f) * gate_limit;
+                    w->w_act_input[idx]  = (secure_random_float() * 2.0f - 1.0f) * gate_limit;
+                }
+            }
+        }
+
+        /* 初始化隐藏权重中新增的行 */
+        if (hs > old_hs) {
+            for (size_t r = 0; r < hs; r++) {
+                for (size_t c = (r < old_hs ? old_hs : 0); c < hs; c++) {
+                    size_t idx = r * hs + c;
+                    w->u_gate_hidden[idx] = (secure_random_float() * 2.0f - 1.0f) * hidden_limit;
+                    w->u_act_hidden[idx]  = (secure_random_float() * 2.0f - 1.0f) * hidden_limit;
+                }
+            }
+        }
+
+        /* 初始化新增的偏置 */
+        for (size_t i = old_hs; i < hs; i++) {
+            w->b_gate[i] = 0.0f;
+            w->b_act[i]  = 0.0f;
+        }
     }
 
     w->max_hs = hs;
@@ -234,34 +333,146 @@ DialogueProcessor* dialogue_processor_create(const DialogueConfig* config)
     return dp;
 }
 
+/**
+ * @brief 检查指针是否为规范的x64用户空间地址
+ * @param ptr 待检查的指针值
+ * @return 1=规范地址, 0=非规范地址（已损坏）
+ */
+static int is_canonical_ptr(const void* ptr) {
+    if (!ptr) return 0; /* NULL视为有效（不处理） */
+    uintptr_t val = (uintptr_t)ptr;
+    uintptr_t high = (val >> 47) & 0x1FFFF;
+    return (high == 0 || high == 0x1FFFF);
+}
+
 void dialogue_processor_free(DialogueProcessor* processor)
 {
     if (!processor) return;
 
+    /* 先验证processor自身指针是否为规范地址 */
+    if (!is_canonical_ptr(processor)) {
+        log_error("dialogue_processor_free: processor指针损坏(0x%016llX)，跳过释放",
+                  (unsigned long long)(uintptr_t)processor);
+        return;
+    }
+
+#ifdef _WIN32
+    __try {
+#endif
+    /* 逐个验证子指针的规范地址后再释放，避免在损坏指针上执行memset */
+    /* 每个子模块用独立SEH保护，精确定位损坏来源 */
+    
+    /* 1. deep_belief */
     if (processor->deep_belief) {
-        dialogue_belief_state_free(processor->deep_belief);
+        if (is_canonical_ptr(processor->deep_belief)) {
+#ifdef _WIN32
+            __try {
+                dialogue_belief_state_free(processor->deep_belief);
+            } __except(EXCEPTION_EXECUTE_HANDLER) {
+                log_error("dialogue_processor_free: deep_belief子资源异常 (0x%08lX)", GetExceptionCode());
+            }
+#else
+            dialogue_belief_state_free(processor->deep_belief);
+#endif
+        } else {
+            log_error("dialogue_processor_free: deep_belief指针损坏(0x%016llX)，跳过",
+                      (unsigned long long)(uintptr_t)processor->deep_belief);
+        }
         processor->deep_belief = NULL;
     }
+    
+    /* 2. deep_policy */
     if (processor->deep_policy) {
-        dialogue_policy_free(processor->deep_policy);
+        if (is_canonical_ptr(processor->deep_policy)) {
+#ifdef _WIN32
+            __try {
+                dialogue_policy_free(processor->deep_policy);
+            } __except(EXCEPTION_EXECUTE_HANDLER) {
+                log_error("dialogue_processor_free: deep_policy子资源异常 (0x%08lX)", GetExceptionCode());
+            }
+#else
+            dialogue_policy_free(processor->deep_policy);
+#endif
+        } else {
+            log_error("dialogue_processor_free: deep_policy指针损坏(0x%016llX)，跳过",
+                      (unsigned long long)(uintptr_t)processor->deep_policy);
+        }
         processor->deep_policy = NULL;
     }
+    
+    /* 3. deep_reasoner */
     if (processor->deep_reasoner) {
-        multi_turn_reasoner_free(processor->deep_reasoner);
+        if (is_canonical_ptr(processor->deep_reasoner)) {
+#ifdef _WIN32
+            __try {
+                multi_turn_reasoner_free(processor->deep_reasoner);
+            } __except(EXCEPTION_EXECUTE_HANDLER) {
+                log_error("dialogue_processor_free: deep_reasoner子资源异常 (0x%08lX)", GetExceptionCode());
+            }
+#else
+            multi_turn_reasoner_free(processor->deep_reasoner);
+#endif
+        } else {
+            log_error("dialogue_processor_free: deep_reasoner指针损坏(0x%016llX)，跳过",
+                      (unsigned long long)(uintptr_t)processor->deep_reasoner);
+        }
         processor->deep_reasoner = NULL;
     }
+    
+    /* 4. generator */
     if (processor->generator) {
-        dialogue_gen_free(processor->generator);
+        if (is_canonical_ptr(processor->generator)) {
+#ifdef _WIN32
+            __try {
+                dialogue_gen_free(processor->generator);
+            } __except(EXCEPTION_EXECUTE_HANDLER) {
+                log_error("dialogue_processor_free: generator子资源异常 (0x%08lX)", GetExceptionCode());
+            }
+#else
+            dialogue_gen_free(processor->generator);
+#endif
+        } else {
+            log_error("dialogue_processor_free: generator指针损坏(0x%016llX)，跳过",
+                      (unsigned long long)(uintptr_t)processor->generator);
+        }
         processor->generator = NULL;
     }
-
+    
+    /* 5. text_processor */
     if (processor->text_processor) {
-        text_processor_free(processor->text_processor);
+        if (is_canonical_ptr(processor->text_processor)) {
+#ifdef _WIN32
+            __try {
+                text_processor_free(processor->text_processor);
+            } __except(EXCEPTION_EXECUTE_HANDLER) {
+                log_error("dialogue_processor_free: text_processor子资源异常 (0x%08lX)", GetExceptionCode());
+            }
+#else
+            text_processor_free(processor->text_processor);
+#endif
+        } else {
+            log_error("dialogue_processor_free: text_processor指针损坏(0x%016llX)，跳过",
+                      (unsigned long long)(uintptr_t)processor->text_processor);
+        }
         processor->text_processor = NULL;
     }
-
-    safe_free((void**)&processor->dialogue_state_buffer);
-    memset(processor, 0, sizeof(DialogueProcessor));
+    
+    /* 6. dialogue_state_buffer */
+    if (processor->dialogue_state_buffer) {
+        if (is_canonical_ptr(processor->dialogue_state_buffer)) {
+            safe_free((void**)&processor->dialogue_state_buffer);
+        } else {
+            log_error("dialogue_processor_free: dialogue_state_buffer指针损坏(0x%016llX)，跳过",
+                      (unsigned long long)(uintptr_t)processor->dialogue_state_buffer);
+            processor->dialogue_state_buffer = NULL;
+        }
+    }
+#ifdef _WIN32
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        log_error("dialogue_processor_free 外层SEH捕获异常 (0x%08lX), 跳过子资源清理", GetExceptionCode());
+    }
+#endif
+    /* 安全释放结构体本身：safe_free内部有SEH保护，不在此处memset（避免损坏指针上写入） */
     safe_free((void**)&processor);
 }
 
@@ -1166,6 +1377,50 @@ DialogueResponse* dialogue_process_input_ext(DialogueProcessor* processor,
         if (response->confidence > 1.0f) response->confidence = 1.0f;
     }
     response->response_code = 0;
+
+    /* WS-001修复: 推送dialogue_response事件到WebSocket，前端实时接收对话回复。
+     * 此前仅推送dialogue_status状态事件，从未推送实际回复文本，
+     * 导致前端dialogue_response监听器永远收不到消息。 */
+    if (g_ws_push_server && response->text && response->length > 0) {
+        /* 计算JSON转义所需缓冲区大小：原文+转义开销+JSON包装
+         * 最坏情况：每个字符都是控制字符(0x00-0x1F)，需转义为\u00xx(6字节)
+         * 因此缓冲区 = 原文×6 + JSON包装开销(512) */
+        size_t text_len = response->length;
+        size_t buf_size = text_len * 6 + 512;
+        char* ws_buf = (char*)safe_malloc(buf_size);
+        if (ws_buf) {
+            /* 手动JSON转义：转义双引号、反斜杠、换行等控制字符 */
+            size_t wi = 0;
+            wi += (size_t)snprintf(ws_buf + wi, buf_size - wi,
+                "{\"type\":\"dialogue_response\",\"text\":\"");
+            for (size_t ti = 0; ti < text_len && wi < buf_size - 16; ti++) {
+                unsigned char c = (unsigned char)response->text[ti];
+                if (c == '"') {
+                    if (wi + 2 < buf_size) { ws_buf[wi++] = '\\'; ws_buf[wi++] = '"'; }
+                } else if (c == '\\') {
+                    if (wi + 2 < buf_size) { ws_buf[wi++] = '\\'; ws_buf[wi++] = '\\'; }
+                } else if (c == '\n') {
+                    if (wi + 2 < buf_size) { ws_buf[wi++] = '\\'; ws_buf[wi++] = 'n'; }
+                } else if (c == '\r') {
+                    if (wi + 2 < buf_size) { ws_buf[wi++] = '\\'; ws_buf[wi++] = 'r'; }
+                } else if (c == '\t') {
+                    if (wi + 2 < buf_size) { ws_buf[wi++] = '\\'; ws_buf[wi++] = 't'; }
+                } else if (c < 0x20) {
+                    /* 其他控制字符使用\\u00XX格式 */
+                    if (wi + 6 < buf_size) {
+                        wi += (size_t)snprintf(ws_buf + wi, 7, "\\u%04x", c);
+                    }
+                } else {
+                    ws_buf[wi++] = (char)c;
+                }
+            }
+            wi += (size_t)snprintf(ws_buf + wi, buf_size - wi,
+                "\",\"length\":%zu,\"confidence\":%.4f,\"done\":true}",
+                response->length, response->confidence);
+            ws_push_broadcast_json(g_ws_push_server, ws_buf);
+            safe_free((void**)&ws_buf);
+        }
+    }
 
     /* 更新上下文 */
     if (context && user_input) {

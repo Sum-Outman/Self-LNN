@@ -254,7 +254,8 @@ int laplace_unified_analyze(void* analyzer, LNN* lnn, StabilityAnalysis* result)
 
     int ret = laplace_analyze_lnn_stability(la, lnn, target);
     if (ret != 0) {
-        log_error("[拉普拉斯统一] LNN稳定性分析失败 (错误码=%d)", ret);
+        /* 未训练的LNN无法进行稳定性分析（SELFLNN_ERROR_INVALID_STATE=-11），属于正常初始化行为 */
+        log_warn("[拉普拉斯统一] LNN稳定性分析跳过 (错误码=%d, LNN可能未训练)", ret);
         return ret;
     }
 

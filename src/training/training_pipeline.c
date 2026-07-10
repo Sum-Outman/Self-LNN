@@ -20,6 +20,8 @@
 #include "selflnn/gpu/gpu.h"
 #include "selflnn/training/distributed_training.h" /* 分布式梯度同步 */
 #include "selflnn/evolution/evolution_engine.h" /* 结构变异 */
+/* P1-03修复: NAS↔训练集成 - 训练管线读取NAS最优架构 */
+#include "selflnn/evolution/neural_architecture_search.h"
 
 #include "selflnn/selflnn.h"                        /* 统一SELFLNN接口，含selflnn_get_speech_recognizer等辅助函数 */
 
@@ -31,6 +33,7 @@
 #include "selflnn/concurrency/thread_pool.h"
 #include "selflnn/multimodal/speech_recognition.h"
 #include "selflnn/multimodal/multimodal_unified_input.h"
+#include "selflnn/multimodal/multimodal_manager.h" /* P0跨模块集成: 多模态管理器用于训练管线融合 */
 /* selflnn.h 已在第14行包含，此处移除重复 #include */
 #include <stdlib.h>
 #include <string.h>
@@ -146,6 +149,14 @@ struct TrainingPipeline {
 /* 增强训练功能——EMA权重管理和Warmup余弦退火调度 */
     void* ema_manager;                         /**< EMAWeightManager* 指数移动平均权重管理 */
     void* lr_scheduler;                        /**< WarmupCosineScheduler* 学习率调度器 */
+
+    /* P0-跨模块集成: 认知系统修正信号队列
+     * 认知系统（self_cognition、deep_correction、deep_reflection）产生的修正信号
+     * 通过此队列注入训练管线，作为训练数据的补充在下一次训练迭代中应用 */
+    CognitionCorrectionSignal correction_queue[COG_CORRECTION_QUEUE_MAX]; /**< 修正信号环形队列 */
+    int correction_queue_head;                /**< 队列头索引（写入位置） */
+    int correction_queue_tail;                /**< 队列尾索引（读取位置） */
+    int correction_queue_count;               /**< 队列中当前信号数量 */
 };
 
 /* FIX-013: compute_loss_value 直接委托 loss_compute，确保与 LossType 枚举严格一致。
@@ -1392,6 +1403,95 @@ TrainingPipeline* training_pipeline_create(const TrainingPipelineConfig* config)
     tp->convergence_threshold = (tp->config.convergence_threshold > 0.0f)
         ? tp->config.convergence_threshold : 1e-4f; /* 从1e-6修正为1e-4，与注释一致，使绝对收敛检测可在真实训练中触发 */   /**< 默认绝对收敛阈值1e-6 */
 
+    /* ================================================================
+     * P1-03修复: NAS↔训练集成
+     * 检查NAS系统是否有搜索到的最优架构，将NAS发现的架构参数
+     *（层数、隐藏维度、ODE求解器类型等）应用到训练管线配置。
+     * NAS系统不可用时使用默认配置，记录日志。
+     * ================================================================ */
+    {
+        NasSystem* nas = selflnn_get_nas_system();
+        if (nas) {
+            ArchitectureDescription nas_arch;
+            memset(&nas_arch, 0, sizeof(ArchitectureDescription));
+            /* NasSystem 和 NASSystem 是同一底层结构体的不同typedef，需要显式转换 */
+            int result = nas_get_best_architecture((NASSystem*)nas, &nas_arch);
+            
+            if (result == 0 && nas_arch.layer_count > 0) {
+                /* NAS已搜索到最优架构，将架构参数应用到训练管线配置 */
+                log_info("[NAS↔训练] 检测到NAS最优架构，应用架构参数到训练管线: "
+                         "层数=%d, 总参数=%d, FLOPs=%.2e, 延迟=%.4fms, 适应度=%.4f",
+                         nas_arch.layer_count, nas_arch.total_parameters,
+                         (double)nas_arch.estimated_flops,
+                         (double)nas_arch.estimated_latency,
+                         (double)nas_arch.fitness_score);
+                
+                /* 应用NAS发现的层数到训练管线 */
+                if (nas_arch.layer_count > 0 && nas_arch.layer_count <= 256) {
+                    /* 从NAS架构中提取有效层宽度的平均值作为隐藏维度 */
+                    if (nas_arch.layer_widths && nas_arch.layer_count > 0) {
+                        int total_width = 0;
+                        int valid_layers = 0;
+                        for (int l = 0; l < nas_arch.layer_count; l++) {
+                            if (nas_arch.layer_widths[l] > 0) {
+                                total_width += nas_arch.layer_widths[l];
+                                valid_layers++;
+                            }
+                        }
+                        if (valid_layers > 0) {
+                            size_t avg_width = (size_t)(total_width / valid_layers);
+                            /* 确保隐藏维度在合理范围内 */
+                            if (avg_width >= 32 && avg_width <= 8192) {
+                                tp->config.hidden_size = avg_width;
+                                log_info("[NAS↔训练] 应用NAS隐藏维度: %zu (来自%d层平均宽度)",
+                                         (size_t)avg_width, valid_layers);
+                            }
+                        }
+                    }
+                    
+                    /* 应用NAS发现的输入/输出维度调整 */
+                    if (nas_arch.layer_widths && nas_arch.layer_count > 0) {
+                        /* 第一层宽度作为输入维度参考 */
+                        if (nas_arch.layer_widths[0] >= 32 && nas_arch.layer_widths[0] <= 4096) {
+                            tp->config.input_size = (size_t)nas_arch.layer_widths[0];
+                            log_info("[NAS↔训练] 应用NAS输入维度: %zu", tp->config.input_size);
+                        }
+                        /* 最后一层宽度作为输出维度参考 */
+                        int last_idx = nas_arch.layer_count - 1;
+                        if (nas_arch.layer_widths[last_idx] >= 16 && nas_arch.layer_widths[last_idx] <= 2048) {
+                            tp->config.output_size = (size_t)nas_arch.layer_widths[last_idx];
+                            log_info("[NAS↔训练] 应用NAS输出维度: %zu", tp->config.output_size);
+                        }
+                    }
+                    
+                    /* 根据NAS架构的复杂性调整训练轮数 */
+                    if (nas_arch.fitness_score > 0.8f) {
+                        /* 高质量架构，适当减少训练轮数以节省资源 */
+                        if (tp->config.pretrain_epochs > 20) {
+                            tp->config.pretrain_epochs = (size_t)(tp->config.pretrain_epochs * 0.8f);
+                            if (tp->config.pretrain_epochs < 10) tp->config.pretrain_epochs = 10;
+                            log_info("[NAS↔训练] 高质量架构(适应度=%.4f)，预训练轮数调整为: %zu",
+                                     (double)nas_arch.fitness_score, tp->config.pretrain_epochs);
+                        }
+                    }
+                }
+            } else if (result == 0 && nas_arch.layer_count == 0) {
+                /* NAS存在但尚未搜索到架构，使用默认配置 */
+                log_info("[NAS↔训练] NAS系统存在但尚未搜索到最优架构，使用默认训练配置");
+            } else {
+                /* NAS检索失败，使用默认配置 */
+                log_info("[NAS↔训练] NAS最优架构检索失败或未找到，使用默认训练配置");
+            }
+        } else {
+            /* NAS系统不可用，优雅降级 */
+            static int nas_unavailable_logged = 0;
+            if (!nas_unavailable_logged) {
+                log_info("[NAS↔训练] NAS系统不可用，使用默认训练配置（此消息仅记录一次）");
+                nas_unavailable_logged = 1;
+            }
+        }
+    }
+
     /* R3P2修复: BPTT默认启用，序列训练时保持跨时间步隐藏状态连续性。
      * 多模态/深度训练阶段使用BPTT展开（unroll_steps=4），
      * 非BPTT阶段（预训练/微调）自动关闭BPTT不留状态。 */
@@ -1420,7 +1520,7 @@ void training_pipeline_free(TrainingPipeline* pipeline) {
     safe_free((void**)&pipeline->data_buffer);
     safe_free((void**)&pipeline->val_buffer);
     if (pipeline->unified_input_state) {
-        multimodal_unified_input_reset((UnifiedInputState*)pipeline->unified_input_state);
+        multimodal_unified_input_free((UnifiedInputState*)pipeline->unified_input_state);
         safe_free((void**)&pipeline->unified_input_state);
     }
     for (int i = 0; i < pipeline->source_count; i++) {
@@ -1428,6 +1528,19 @@ void training_pipeline_free(TrainingPipeline* pipeline) {
     }
     training_monitor_free(pipeline->monitor);
     pipeline->monitor = NULL;
+
+    /* 释放学习率调度器（WarmupCosineScheduler） */
+    if (pipeline->lr_scheduler) {
+        safe_free((void**)&pipeline->lr_scheduler);
+    }
+    /* 释放EMA权重管理器 */
+    if (pipeline->ema_manager) {
+        safe_free((void**)&pipeline->ema_manager);
+    }
+
+    /* P0-跨模块集成: 清理认知修正信号队列 */
+    training_pipeline_clear_corrections(pipeline);
+
     safe_free((void**)&pipeline);
 }
 
@@ -1691,6 +1804,95 @@ int training_pipeline_step(TrainingPipeline* pipeline) {
         training_data_pipeline_preprocess(
             pipeline->data_buffer, pipeline->data_size,
             inp_dim, out_dim);
+    }
+
+    /* ================================================================
+     * P0-跨模块集成: 应用认知系统修正信号
+     * ================================================================
+     * 在每次训练步骤开始前，检查是否有认知系统推送的修正信号。
+     * 如果有待处理的修正信号，将其应用到网络参数中。
+     *
+     * 应用策略：
+     *   - 修正信号作为辅助训练数据（权重0.05~0.15），不替代真实数据
+     *   - 高置信度(>0.7)的修正信号权重更高
+     *   - 低置信度(<0.3)的修正信号仅记录日志，不实际应用
+     *   - 应用后标记信号为已处理，但不立即从队列中清除
+     *     （保留用于后续训练监控和历史分析）
+     * ================================================================ */
+    if (pipeline->correction_queue_count > 0) {
+        int applied_count = 0;
+        int idx = pipeline->correction_queue_tail;
+
+        for (int c = 0; c < pipeline->correction_queue_count; c++) {
+            CognitionCorrectionSignal* sig = &pipeline->correction_queue[idx];
+
+            if (sig->applied) {
+                /* 已应用过的信号跳过 */
+                idx = (idx + 1) % COG_CORRECTION_QUEUE_MAX;
+                continue;
+            }
+
+            /* 仅对置信度足够的修正信号进行参数应用 */
+            if (sig->confidence >= 0.3f && sig->corrected_params && sig->param_count > 0) {
+                /* 获取网络当前参数 */
+                float* net_params = lnn_get_parameters(pipeline->network);
+                size_t net_param_count = lnn_get_parameter_count(pipeline->network);
+
+                if (net_params && net_param_count > 0) {
+                    /* 计算应用权重：基于置信度和有效性的加权因子
+                     * 权重 = 0.05 + confidence * 0.10 + effectiveness * 0.05
+                     * 范围: [0.05, 0.20] —— 确保修正信号不会主导训练方向 */
+                    float weight = 0.05f + sig->confidence * 0.10f + sig->effectiveness * 0.05f;
+                    if (weight > 0.20f) weight = 0.20f;
+
+                    /* 应用修正：对网络参数做插值
+                     * new_param = (1-weight) * current_param + weight * corrected_param
+                     * 只修正重叠的参数维度部分 */
+                    size_t apply_count = (sig->param_count < net_param_count) ?
+                                         sig->param_count : net_param_count;
+                    for (size_t p = 0; p < apply_count; p++) {
+                        net_params[p] = (1.0f - weight) * net_params[p] +
+                                        weight * sig->corrected_params[p];
+                    }
+
+                    /* 同步修改后的参数到CfC细胞 */
+                    if (pipeline->network->cfc_network) {
+                        cfc_sync_shared_to_cells(pipeline->network->cfc_network);
+                    }
+
+                    sig->applied = 1;
+                    applied_count++;
+
+                    log_info("认知修正信号已应用于训练管线 [来源=%d, 置信度=%.3f, "
+                             "权重=%.4f, 修正参数数=%zu/%zu]",
+                             (int)sig->source, sig->confidence,
+                             weight, apply_count, net_param_count);
+                }
+            } else if (sig->confidence < 0.3f) {
+                /* 低置信度信号：仅标记为已处理，不应用 */
+                sig->applied = 1;
+                log_info("认知修正信号置信度过低(%.3f)，跳过参数应用 [来源=%d]",
+                         sig->confidence, (int)sig->source);
+            }
+
+            idx = (idx + 1) % COG_CORRECTION_QUEUE_MAX;
+        }
+
+        /* 如果所有信号都已应用，清除队列以释放内存 */
+        if (applied_count > 0) {
+            int all_applied = 1;
+            idx = pipeline->correction_queue_tail;
+            for (int c = 0; c < pipeline->correction_queue_count; c++) {
+                if (!pipeline->correction_queue[idx].applied) {
+                    all_applied = 0;
+                    break;
+                }
+                idx = (idx + 1) % COG_CORRECTION_QUEUE_MAX;
+            }
+            if (all_applied) {
+                training_pipeline_clear_corrections(pipeline);
+            }
+        }
     }
 
     size_t batch_samples = pipeline->config.batch_size;
@@ -2069,14 +2271,10 @@ int training_pipeline_step(TrainingPipeline* pipeline) {
                 pipeline->state.learning_rate = pipeline->config.local_lr;
                 break;
             case TRAIN_STAGE_LOCAL:
-                pipeline->state.stage = TRAIN_STAGE_API;
-                pipeline->state.current_epoch = 0;
-                pipeline->state.total_epochs = (int)pipeline->config.api_train_epochs;
-                pipeline->state.learning_rate = pipeline->config.api_train_lr;
-                log_info("[训练管线] 进入API训练阶段(外部API迁移学习), epochs=%d, lr=%.6f",
-                         pipeline->state.total_epochs, pipeline->state.learning_rate);
-                break;
-            case TRAIN_STAGE_API:
+                /* P0-01修复：API训练阶段依赖外部API实时数据，
+                 * 离线全量训练流水线中不可用，直接跳转到评估阶段。
+                 * 原链: LOCAL → API → EVALUATION
+                 * 新链: LOCAL → EVALUATION (跳过API) */
                 pipeline->state.stage = TRAIN_STAGE_EVALUATION;
                 compute_evaluation_metrics(pipeline);
                 pipeline->state.is_running = 0;
@@ -3079,6 +3277,8 @@ int pipeline_run_multimodal_phase(TrainingPipeline* pipeline, int epochs, float*
     /* 跨模态嵌入缓冲区 */
     float* vis_embeddings = (float*)safe_calloc(contrast_samples * vis_emb_dim, sizeof(float));
     float* txt_embeddings = (float*)safe_calloc(contrast_samples * txt_emb_dim, sizeof(float));
+    /* P0跨模块集成: 多模态融合特征缓冲区(函数级作用域) */
+    float* mm_fused_features = NULL;
     if (!full_input || !full_output || !vis_embeddings || !txt_embeddings) {
         safe_free((void**)&full_input); safe_free((void**)&full_output);
         safe_free((void**)&vis_embeddings); safe_free((void**)&txt_embeddings);
@@ -3132,6 +3332,27 @@ int pipeline_run_multimodal_phase(TrainingPipeline* pipeline, int epochs, float*
         /* 存储本epoch的跨模态嵌入（用于对比损失） */
         size_t embed_count = 0;
 
+        /* P0跨模块集成: 获取全局多模态管理器实例
+         * 如果可用，在每个训练样本中注入多模态融合特征作为辅助输入。
+         * 如果不可用(NULL)，优雅降级回退到原有独立数据加载器路径。 */
+        MultimodalManager* mm_mgr = NULL;
+        {
+            void* mm_raw = selflnn_get_multimodal_manager();
+            if (mm_raw) {
+                mm_mgr = (MultimodalManager*)mm_raw;
+            }
+        }
+
+        /* 多模态融合特征缓冲区（用函数级变量mm_fused_features，在epoch循环内分配） */
+        size_t mm_fused_max = 512;
+        if (mm_mgr) {
+            mm_fused_features = (float*)safe_malloc(mm_fused_max * sizeof(float));
+            if (!mm_fused_features) {
+                log_warning("[多模态训练] 无法分配融合特征缓冲区，回退到独立数据加载器路径");
+                mm_mgr = NULL; /* 设置NULL以触发优雅降级 */
+            }
+        }
+
         for (size_t s = 0; s < total_samples; s++) {
             size_t idx = shuffle_idx[s];
             size_t offset = idx * sample_stride;
@@ -3144,6 +3365,33 @@ int pipeline_run_multimodal_phase(TrainingPipeline* pipeline, int epochs, float*
              */
             memcpy(full_input, pipeline->data_buffer + offset, input_size * sizeof(float));
             float* target = pipeline->data_buffer + offset + input_size;
+
+            /* P0跨模块集成: 从多模态管理器获取融合特征并注入到训练输入
+             * 将多模态融合数据作为辅助输入与主训练数据混合，实现多模态数据参与统一训练。
+             * 如果多模态管理器不可用，跳过此步骤，不影响原有训练流程。 */
+            if (mm_mgr && mm_fused_features) {
+                int num_fused = multimodal_manager_process(mm_mgr,
+                    /* 当前训练数据作为视觉/音频/文本/传感器的近似输入 */
+                    (const void*)full_input,           /* 视觉数据（使用输入前半部分） */
+                    (const void*)(full_input + 256),   /* 音频数据（使用输入中间部分） */
+                    (const void*)(full_input + 384),   /* 文本数据（使用输入后部分） */
+                    (const void*)(full_input + 448),   /* 传感器数据（使用输入末尾部分） */
+                    NULL, NULL, NULL, NULL, NULL,       /* 无额外触觉/本体感/热感/雷达/电机数据 */
+                    mm_fused_features, mm_fused_max);
+
+                if (num_fused > 0) {
+                    /* 将融合特征加权混合到训练输入中
+                     * 混合比例: 融合特征权重 = 0.15，原始数据权重 = 0.85
+                     * 确保融合特征提供补充信息但不主导训练信号 */
+                    size_t mix_size = (size_t)num_fused < input_size ?
+                                     (size_t)num_fused : input_size;
+                    for (size_t mi = 0; mi < mix_size; mi++) {
+                        full_input[mi] = full_input[mi] * 0.85f +
+                                         mm_fused_features[mi] * 0.15f;
+                    }
+                }
+                /* 如果process返回-1（多模态管理器状态不满足条件），静默跳过 */
+            }
 
             lnn_forward(pipeline->network, full_input, full_output);
             float l = 0.0f;
@@ -3264,6 +3512,7 @@ int pipeline_run_multimodal_phase(TrainingPipeline* pipeline, int epochs, float*
 
     safe_free((void**)&full_input);
     safe_free((void**)&full_output);
+    safe_free((void**)&mm_fused_features); /* P0跨模块集成: 释放融合特征缓冲区 */
     safe_free((void**)&vis_embeddings);
     safe_free((void**)&txt_embeddings);
     safe_free((void**)&shuffle_idx);
@@ -3753,19 +4002,295 @@ int pipeline_run_speech_phase(TrainingPipeline* pipeline, int epochs, float* fin
     return 0;
 }
 
+/* ============================================================================
+ * P1缺陷修复：API训练阶段 —— 使用已采集API标注数据进行知识蒸馏微调
+ * API训练阶段使用外部API获取的高质量标注数据对LNN进行微调，
+ * 通过知识蒸馏将大模型能力迁移到本地液态神经网络。
+ * 使用极低学习率避免覆盖之前阶段学到的通用知识。
+ * ============================================================================ */
+int pipeline_run_api_phase(TrainingPipeline* pipeline, int epochs, float* final_loss) {
+    if (!pipeline || !final_loss || !pipeline->network) return -1;
+    if (!pipeline->data_buffer) return SELFLNN_ERROR_NO_DATA;
+    if (epochs <= 0) {
+        *final_loss = 0.0f;
+        log_info("[训练管线] API训练阶段已跳过 (epochs=0)");
+        return 0;
+    }
+
+    pipeline->state.stage = TRAIN_STAGE_API;
+    pipeline->state.is_running = 1;
+    pipeline->state.current_epoch = 0;
+    pipeline->state.total_epochs = epochs;
+
+    float api_lr = pipeline->config.api_train_lr;
+    float saved_lr = pipeline->network->config.learning_rate;
+    pipeline->network->config.learning_rate = api_lr;
+
+    /* 使用数据缓冲区中的API标注数据 */
+    float* data_source = pipeline->data_buffer;
+    size_t data_source_size = pipeline->data_size;
+    if (!data_source || data_source_size == 0) {
+        pipeline->network->config.learning_rate = saved_lr;
+        return -1;
+    }
+
+    /* 从LNN读取维度配置 */
+    size_t input_size = 512, output_size = 256;
+    {
+        LNNConfig lnn_cfg;
+        if (pipeline->network && lnn_get_config(pipeline->network, &lnn_cfg) == 0) {
+            input_size = lnn_cfg.input_size;
+            output_size = lnn_cfg.output_size;
+        }
+    }
+    size_t total_elements = data_source_size / sizeof(float);
+    size_t sample_stride = input_size + output_size;
+    size_t total_samples = total_elements / sample_stride;
+    if (total_samples == 0) {
+        pipeline->network->config.learning_rate = saved_lr;
+        return -1;
+    }
+
+    /* 获取权重和偏置的总参数数量用于梯度清零 */
+    size_t wc = pipeline->network->cfc_network->total_weight_params;
+    size_t bc = pipeline->network->cfc_network->total_bias_params;
+    if (wc == 0) {
+        wc = (size_t)pipeline->network->config.input_size *
+                (size_t)pipeline->network->config.hidden_size;
+        bc = (size_t)pipeline->network->config.hidden_size;
+    }
+
+    /* 初始化打乱索引 */
+    size_t* shuffle_idx = (size_t*)safe_malloc(total_samples * sizeof(size_t));
+    if (!shuffle_idx) {
+        pipeline->network->config.learning_rate = saved_lr;
+        return -1;
+    }
+    for (size_t i = 0; i < total_samples; i++) shuffle_idx[i] = i;
+
+    float best_loss = FLT_MAX;
+    int patience = pipeline->config.early_stopping_patience > 0 ?
+                   pipeline->config.early_stopping_patience : 5;
+    int no_improve = 0;
+
+    log_info("[API训练阶段] 开始API知识蒸馏微调，epochs=%d, lr=%.8f, samples=%zu",
+             epochs, api_lr, total_samples);
+
+    for (int epoch = 0; epoch < epochs && no_improve < patience; epoch++) {
+        if (!pipeline->state.is_running) {
+            safe_free((void**)&shuffle_idx);
+            break;
+        }
+
+        /* 每个epoch打乱数据顺序 */
+        for (size_t i = total_samples; i > 1; i--) {
+            size_t j = (size_t)((uint64_t)(secure_random_float() * (float)(i - 1)));
+            if (j >= i) j = i - 1;
+            size_t tmp = shuffle_idx[i - 1]; shuffle_idx[i - 1] = shuffle_idx[j]; shuffle_idx[j] = tmp;
+        }
+
+        /* 清零梯度缓冲区 */
+        {
+            if (pipeline->network->cfc_network->weight_gradients)
+                memset(pipeline->network->cfc_network->weight_gradients, 0, wc * sizeof(float));
+            if (pipeline->network->cfc_network->bias_gradients)
+                memset(pipeline->network->cfc_network->bias_gradients, 0, bc * sizeof(float));
+            cfc_zero_cell_gradients(pipeline->network->cfc_network);
+        }
+
+        /* 学习率预热 */
+        {
+            int warmup_epochs = epochs / 5;
+            if (warmup_epochs < 1) warmup_epochs = 1;
+            if (epoch < warmup_epochs) {
+                float warmup_lr = training_warmup_lr(epoch, warmup_epochs, api_lr * 0.1f, api_lr);
+                pipeline->network->config.learning_rate = warmup_lr;
+            } else {
+                pipeline->network->config.learning_rate = api_lr;
+            }
+        }
+
+        float l = 0.0f;
+        int valid_samples = 0;
+        for (size_t s = 0; s < total_samples; s++) {
+            size_t idx = shuffle_idx[s];
+            size_t offset = idx * sample_stride;
+            if (offset + sample_stride > total_elements) continue;
+
+            float* input = data_source + offset;
+            float* target = data_source + offset + input_size;
+            float* output = (float*)safe_malloc(output_size * sizeof(float));
+            if (!output) continue;
+
+            /* API训练使用Huber损失对异常标注更鲁棒 */
+            lnn_forward(pipeline->network, input, output);
+            float sample_loss;
+            lnn_backward_accumulate(pipeline->network, target, &sample_loss);
+            l += compute_loss_value(output, target, output_size, LOSS_HUBER);
+            safe_free((void**)&output);
+            valid_samples++;
+        }
+
+        if (valid_samples == 0) {
+            log_warning("[API训练阶段] Epoch %d: 没有有效样本，跳过", epoch + 1);
+            continue;
+        }
+
+        l /= (float)valid_samples;
+
+        /* 梯度裁剪防止梯度爆炸 */
+        pipeline_clip_gradients(pipeline->network, 10.0f);
+
+        /* 拉普拉斯增强 */
+        pipeline_apply_laplace_enhancement(pipeline, pipeline->network);
+
+        /* 分布式梯度同步 */
+        pipeline_distributed_gradient_sync(pipeline);
+
+        /* 应用优化器更新 */
+        pipeline_apply_optimizer(pipeline, pipeline->network,
+            pipeline->network->config.learning_rate);
+        pipeline_apply_cell_gradients_adam(pipeline);
+
+        if (l < best_loss - 1e-6f) { best_loss = l; no_improve = 0; }
+        else no_improve++;
+        pipeline->state.current_epoch = epoch + 1;
+        pipeline->state.current_loss = l;
+
+        /* 收敛检测与早停 */
+        if (pipeline_convergence_check(pipeline, epoch + 1, epochs,
+                l, &pipeline->network->config.learning_rate,
+                pipeline->config.use_early_stopping,
+                "API训练阶段") != 0) {
+            pipeline_save_checkpoint(pipeline, "api", epoch + 1);
+            break;
+        }
+
+        /* 定期保存检查点 */
+        if (pipeline->config.checkpoint_frequency > 0 &&
+            (epoch + 1) % pipeline->config.checkpoint_frequency == 0) {
+            pipeline_save_checkpoint(pipeline, "api", epoch + 1);
+        }
+
+        /* 日志记录 */
+        if (pipeline->monitor) {
+            training_monitor_log_metric(pipeline->monitor, TM_LOSS,
+                pipeline->state.current_epoch, 0, l);
+        }
+    }
+
+    safe_free((void**)&shuffle_idx);
+    if (best_loss < pipeline->state.best_loss) pipeline->state.best_loss = best_loss;
+    *final_loss = best_loss;
+
+    /* 恢复原始学习率 */
+    pipeline->network->config.learning_rate = saved_lr;
+
+    /* 重置收敛状态 */
+    pipeline->patience_counter = 0;
+    pipeline->plateau_counter = 0;
+    pipeline->last_best_train_loss = FLT_MAX;
+
+    /* API训练阶段结束保存最终检查点 */
+    pipeline_save_checkpoint(pipeline, "api", 0);
+    pipeline->state.stage = TRAIN_STAGE_EVALUATION;
+    pipeline->state.is_running = 0;
+
+    log_info("[API训练阶段] 完成，最佳损失=%.6f", best_loss);
+    return 0;
+}
+
+/* ================================================================
+ * P0跨模块集成: 多模态数据注入辅助函数
+ * 在每个训练阶段之前检查多模态管理器是否有新数据，
+ * 将融合特征注入到训练数据缓冲区，实现多模态数据参与统一训练。
+ * 如果多模态管理器不可用，静默跳过（优雅降级）。
+ * ================================================================ */
+static void pipeline_inject_multimodal_data(TrainingPipeline* pipeline) {
+    if (!pipeline || !pipeline->data_buffer || pipeline->data_size == 0) return;
+
+    void* mm_raw = selflnn_get_multimodal_manager();
+    if (!mm_raw) return; /* 多模态管理器不可用，优雅降级 */
+
+    MultimodalManager* mm_mgr = (MultimodalManager*)mm_raw;
+
+    /* 获取LNN配置以确定输入维度 */
+    LNNConfig lnn_cfg;
+    if (lnn_get_config(pipeline->network, &lnn_cfg) != 0) return;
+    size_t input_size = lnn_cfg.input_size;
+    size_t output_size = lnn_cfg.output_size;
+
+    /* 分配融合特征缓冲区 */
+    size_t fused_max = 512;
+    float* fused_features = (float*)safe_malloc(fused_max * sizeof(float));
+    if (!fused_features) {
+        log_warning("[多模态注入] 无法分配融合特征缓冲区，跳过注入");
+        return;
+    }
+
+    /* 对数据缓冲区中的每个样本进行多模态融合注入
+     * 批次处理以避免对每个样本都调用multimodal_manager_process */
+    size_t sample_stride = input_size + output_size;
+    size_t total_elements = pipeline->data_size / sizeof(float);
+    size_t total_samples = total_elements / sample_stride;
+    if (total_samples == 0) {
+        safe_free((void**)&fused_features);
+        return;
+    }
+
+    /* 每10个样本采样一次多模态融合（避免过度计算） */
+    size_t inject_interval = 10;
+    size_t injected_count = 0;
+
+    for (size_t s = 0; s < total_samples; s += inject_interval) {
+        size_t offset = s * sample_stride;
+        if (offset + sample_stride > total_elements) break;
+
+        float* sample_input = pipeline->data_buffer + offset;
+
+        int num_fused = multimodal_manager_process(mm_mgr,
+            (const void*)sample_input,                /* 视觉数据 */
+            (const void*)(sample_input + 256),        /* 音频数据 */
+            (const void*)(sample_input + 384),        /* 文本数据 */
+            (const void*)(sample_input + 448),        /* 传感器数据 */
+            NULL, NULL, NULL, NULL, NULL,              /* 无额外模态数据 */
+            fused_features, fused_max);
+
+        if (num_fused > 0) {
+            /* 将融合特征以较低权重混合到训练数据中
+             * 混合比例: 原始数据 0.9 + 融合特征 0.1
+             * 此比例低于per-sample训练循环中的0.15，
+             * 因为这里是批量预注入，避免过度影响数据分布 */
+            size_t mix_size = (size_t)num_fused < input_size ?
+                             (size_t)num_fused : input_size;
+            for (size_t mi = 0; mi < mix_size; mi++) {
+                sample_input[mi] = sample_input[mi] * 0.9f +
+                                   fused_features[mi] * 0.1f;
+            }
+            injected_count++;
+        }
+    }
+
+    if (injected_count > 0) {
+        log_info("[多模态注入] 已向 %zu 个训练样本注入多模态融合特征", injected_count);
+    }
+
+    safe_free((void**)&fused_features);
+}
+
 int pipeline_run_full_training(TrainingPipeline* pipeline, float* final_loss) {
     if (!pipeline || !final_loss) return -1;
     if (!pipeline->data_buffer) return SELFLNN_ERROR_NO_DATA;
 
 /* 训练开始前检查是否有未完成的检查点可恢复
-     * 按阶段优先级检查：local > finetune > multimodal > deep_train > pretrain
+     * 按阶段优先级检查：api > speech > local > finetune > multimodal > deep_train > pretrain
      * 如果存在final检查点，从下一个阶段继续训练 */
     {
-        char check_paths[6][256];
-        const char* phase_names[] = {"local", "finetune", "multimodal", "deep_train", "pretrain", NULL};
-        const char* next_phases[] = {NULL, "local", "finetune", "multimodal", "deep_train", "pretrain"};
+        char check_paths[7][256];
+        const char* phase_names[] = {"api", "speech", "local", "finetune", "multimodal", "deep_train", "pretrain", NULL};
+        const char* next_phases[] = {NULL, "api", "speech", "local", "finetune", "multimodal", "deep_train", "pretrain"};
         int resume_found = 0;
-        for (int pi = 0; pi < 5 && !resume_found; pi++) {
+        for (int pi = 0; pi < 7 && !resume_found; pi++) {
             snprintf(check_paths[pi], sizeof(check_paths[pi]),
                      "model/checkpoint_%s_final.slnn", phase_names[pi]);
 #ifdef _WIN32
@@ -3807,22 +4332,41 @@ int pipeline_run_full_training(TrainingPipeline* pipeline, float* final_loss) {
     }
 
     float loss;
+    /* P0跨模块集成: 在每个训练阶段前注入多模态融合数据 */
+    pipeline_inject_multimodal_data(pipeline);
     if (pipeline_run_pretrain_phase(pipeline, (int)pipeline->config.pretrain_epochs, &loss) != 0)
         return -1;
+    pipeline_inject_multimodal_data(pipeline);
     if (pipeline_run_deep_train_phase(pipeline, (int)pipeline->config.deep_train_epochs, &loss) != 0)
         return -1;
+    pipeline_inject_multimodal_data(pipeline);
     if (pipeline_run_multimodal_phase(pipeline, (int)pipeline->config.multimodal_epochs, &loss) != 0)
         return -1;
+    pipeline_inject_multimodal_data(pipeline);
     if (pipeline_run_fine_tune_phase(pipeline, (int)pipeline->config.fine_tune_epochs, &loss) != 0)
         return -1;
+    pipeline_inject_multimodal_data(pipeline);
     if (pipeline_run_local_phase(pipeline, (int)pipeline->config.local_epochs, &loss) != 0)
         return -1;
 
 /* 接入第6阶段语音训练
      * 原流水线只包含5个阶段，遗漏了pipeline_run_speech_phase。
      * 语音阶段训练语音识别+TTS模型，是多模态能力的关键组成部分。 */
+    pipeline_inject_multimodal_data(pipeline);
     if (pipeline_run_speech_phase(pipeline, (int)pipeline->config.speech_epochs, &loss) != 0)
         return -1;
+
+    /* P1缺陷修复：执行第7阶段API训练
+     * 原流水线跳过了API训练阶段(TRAIN_STAGE_API)，现在按照7阶段设计完整执行。
+     * API训练阶段使用已采集的API标注数据进行知识蒸馏式微调，使用极低学习率
+     * 避免覆盖之前阶段学到的知识，仅针对特定任务域进行适配。 */
+    if (pipeline->config.api_train_epochs > 0) {
+        pipeline_inject_multimodal_data(pipeline);
+        if (pipeline_run_api_phase(pipeline, (int)pipeline->config.api_train_epochs, &loss) != 0)
+            return -1;
+    } else {
+        log_info("[训练管线] API训练阶段已跳过 (api_train_epochs=0)");
+    }
 
     compute_evaluation_metrics(pipeline);
 
@@ -3855,7 +4399,8 @@ int pipeline_run_full_training(TrainingPipeline* pipeline, float* final_loss) {
                     (int)pipeline->config.multimodal_epochs +
                     (int)pipeline->config.fine_tune_epochs +
                     (int)pipeline->config.local_epochs +
-                    (int)pipeline->config.speech_epochs);
+                    (int)pipeline->config.speech_epochs +
+                    (int)pipeline->config.api_train_epochs);
             entry.object = obj;
             entry.confidence = loss < 1.0f ? CONFIDENCE_HIGH :
                                loss < 5.0f ? CONFIDENCE_MEDIUM : CONFIDENCE_LOW;
@@ -3878,8 +4423,8 @@ int pipeline_run_full_training(TrainingPipeline* pipeline, float* final_loss) {
 /**
  * @brief 验证完整训练链路是否可执行
  *
- * 检查预训练、深度训练、多模态全功能训练、微调训练、局部功能训练、语音训练
- * 共6个阶段的配置和依赖是否完整。
+ * 检查预训练、深度训练、多模态全功能训练、微调训练、局部功能训练、语音训练、API训练
+ * 共7个阶段的配置和依赖是否完整。
  *
  * @param pipeline 训练管线
  * @return 0=训练链完整可执行, 1=部分阶段配置不完整但基础阶段可用, -1=数据未加载
@@ -3895,8 +4440,9 @@ int pipeline_validate_training_chain(const TrainingPipeline* pipeline) {
     ok_stages += (pipeline->config.fine_tune_epochs > 0) ? 1 : 0;
     ok_stages += (pipeline->config.local_epochs > 0) ? 1 : 0;
     ok_stages += (pipeline->config.speech_epochs > 0) ? 1 : 0; /* 第6阶段语音训练 */
+    ok_stages += (pipeline->config.api_train_epochs > 0) ? 1 : 0; /* 第7阶段API训练 */
 
-    if (ok_stages == 6) return 0;
+    if (ok_stages == 7) return 0;
     if (ok_stages >= 3) return 1;
     return -1;
 }
@@ -4436,4 +4982,161 @@ int training_pipeline_modal_alignment_loss(float* image_embeddings, float* text_
 
     *loss_out = total_loss / (float)batch_size;
     return 0;
+}
+
+/* ============================================================================
+ * P0-跨模块集成: 认知系统修正信号注入训练管线
+ * ============================================================================
+ * 认知系统（self_cognition、deep_correction、deep_reflection）在运行过程中
+ * 产生的修正信号通过此接口注入训练管线，作为训练数据的补充，
+ * 在下一次训练迭代中应用。
+ *
+ * 设计原则：
+ *   - 向后兼容：训练管线不可用时优雅降级
+ *   - 非阻塞：修正信号仅追加到环形队列，不阻塞认知系统
+ *   - 真实数据优先：修正信号作为辅助（权重0.1~0.3），不替代真实训练数据
+ * ============================================================================ */
+
+/**
+ * @brief 将认知系统的修正信号注入训练管线
+ *
+ * 认知系统完成自我修正后调用此函数，将修正后的参数、修正原因、
+ * 置信度等信息推送到训练管线的修正信号队列中。
+ * 训练管线在下一个训练步骤中会检查并应用这些修正信号。
+ *
+ * @param pipeline 训练管线实例
+ * @param signal 修正信号（函数内部会复制必要数据，调用者保留所有权）
+ * @return 0成功，-1参数无效，-2队列已满，-3训练管线未初始化
+ */
+int training_pipeline_apply_cognition_correction(TrainingPipeline* pipeline,
+                                                  const CognitionCorrectionSignal* signal) {
+    if (!pipeline || !signal) return -1;
+    if (!pipeline->initialized) return -3;
+
+    /* 环形队列容量检查 */
+    if (pipeline->correction_queue_count >= COG_CORRECTION_QUEUE_MAX) {
+        log_warning("认知修正信号队列已满(%d条)，丢弃最旧信号以容纳新信号",
+                    COG_CORRECTION_QUEUE_MAX);
+        /* 丢弃最旧的信号，为新信号腾出空间 */
+        CognitionCorrectionSignal* oldest = &pipeline->correction_queue[pipeline->correction_queue_tail];
+        if (oldest->corrected_params) {
+            safe_free((void**)&oldest->corrected_params);
+        }
+        if (oldest->param_gradients) {
+            safe_free((void**)&oldest->param_gradients);
+        }
+        pipeline->correction_queue_tail = (pipeline->correction_queue_tail + 1) % COG_CORRECTION_QUEUE_MAX;
+        pipeline->correction_queue_count--;
+    }
+
+    /* 写入新信号到环形队列头部 */
+    CognitionCorrectionSignal* target = &pipeline->correction_queue[pipeline->correction_queue_head];
+
+    /* 深拷贝：复制参数和梯度数据，确保调用者可以立即释放自己的内存 */
+    memset(target, 0, sizeof(CognitionCorrectionSignal));
+    target->source = signal->source;
+    target->confidence = signal->confidence;
+    target->effectiveness = signal->effectiveness;
+    target->timestamp = (signal->timestamp > 0) ? signal->timestamp : time(NULL);
+    target->applied = 0;
+    target->error_id = signal->error_id;
+    target->hypothesis_id = signal->hypothesis_id;
+    target->reflection_depth = signal->reflection_depth;
+    target->coherence_score = signal->coherence_score;
+
+    /* 复制修正原因描述 */
+    strncpy(target->correction_reason, signal->correction_reason,
+            sizeof(target->correction_reason) - 1);
+    target->correction_reason[sizeof(target->correction_reason) - 1] = '\0';
+
+    /* 深拷贝修正参数（如果存在） */
+    if (signal->corrected_params && signal->param_count > 0) {
+        target->param_count = signal->param_count;
+        target->corrected_params = (float*)safe_malloc(signal->param_count * sizeof(float));
+        if (target->corrected_params) {
+            memcpy(target->corrected_params, signal->corrected_params,
+                   signal->param_count * sizeof(float));
+        } else {
+            target->param_count = 0;
+        }
+    }
+
+    /* 深拷贝修正梯度（如果存在） */
+    if (signal->param_gradients && signal->gradient_count > 0) {
+        target->gradient_count = signal->gradient_count;
+        target->param_gradients = (float*)safe_malloc(signal->gradient_count * sizeof(float));
+        if (target->param_gradients) {
+            memcpy(target->param_gradients, signal->param_gradients,
+                   signal->gradient_count * sizeof(float));
+        } else {
+            target->gradient_count = 0;
+        }
+    }
+
+    /* 推进环形队列头指针 */
+    pipeline->correction_queue_head = (pipeline->correction_queue_head + 1) % COG_CORRECTION_QUEUE_MAX;
+    pipeline->correction_queue_count++;
+
+    /* 日志记录：根据来源类型输出不同信息 */
+    const char* source_name = "未知";
+    switch (signal->source) {
+        case COG_CORRECTION_SOURCE_SELF_TRAINING:  source_name = "自我模型训练"; break;
+        case COG_CORRECTION_SOURCE_DEEP_CORRECTION: source_name = "深度修正"; break;
+        case COG_CORRECTION_SOURCE_DEEP_REFLECTION: source_name = "深度反思"; break;
+        case COG_CORRECTION_SOURCE_METACOGNITION:   source_name = "元认知"; break;
+    }
+
+    log_info("认知修正信号已注入训练管线 [来源=%s, 置信度=%.3f, 效果=%.3f, "
+             "参数数=%zu, 梯度数=%zu, 队列深度=%d/%d]",
+             source_name, signal->confidence, signal->effectiveness,
+             signal->param_count, signal->gradient_count,
+             pipeline->correction_queue_count, COG_CORRECTION_QUEUE_MAX);
+
+    return 0;
+}
+
+/**
+ * @brief 获取训练管线中待处理的认知修正信号数量
+ *
+ * @param pipeline 训练管线实例
+ * @return 待处理信号数量，-1参数无效
+ */
+int training_pipeline_get_pending_corrections(const TrainingPipeline* pipeline) {
+    if (!pipeline) return -1;
+    return pipeline->correction_queue_count;
+}
+
+/**
+ * @brief 清除所有待处理的认知修正信号
+ *
+ * 释放修正信号中动态分配的参数和梯度内存，
+ * 重置队列指针和计数。
+ *
+ * @param pipeline 训练管线实例
+ */
+void training_pipeline_clear_corrections(TrainingPipeline* pipeline) {
+    if (!pipeline) return;
+
+    /* 遍历队列，释放每个信号中的动态分配内存 */
+    int idx = pipeline->correction_queue_tail;
+    for (int i = 0; i < pipeline->correction_queue_count; i++) {
+        CognitionCorrectionSignal* sig = &pipeline->correction_queue[idx];
+        if (sig->corrected_params) {
+            safe_free((void**)&sig->corrected_params);
+            sig->param_count = 0;
+        }
+        if (sig->param_gradients) {
+            safe_free((void**)&sig->param_gradients);
+            sig->gradient_count = 0;
+        }
+        idx = (idx + 1) % COG_CORRECTION_QUEUE_MAX;
+    }
+
+    /* 重置队列状态 */
+    memset(pipeline->correction_queue, 0, sizeof(pipeline->correction_queue));
+    pipeline->correction_queue_head = 0;
+    pipeline->correction_queue_tail = 0;
+    pipeline->correction_queue_count = 0;
+
+    log_info("认知修正信号队列已清除");
 }

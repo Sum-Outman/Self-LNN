@@ -187,6 +187,12 @@ int multimodal_unified_input_get_weights(const UnifiedInputState* state,
 int multimodal_unified_input_reset(UnifiedInputState* state);
 
 /**
+ * @brief 释放统一输入状态（仅释放不重新分配，用于关闭清理）
+ * @param state 统一输入状态指针
+ */
+void multimodal_unified_input_free(UnifiedInputState* state);
+
+/**
  * @brief 获取统一输入处理统计信息
  * @param state 统一输入状态指针
  * @param active_method [输出] 当前激活的处理方法

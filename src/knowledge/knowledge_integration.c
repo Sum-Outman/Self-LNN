@@ -13,6 +13,9 @@
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/string_utils.h"
 #include "selflnn/core/errors.h"
+/* P1-02修复: 记忆↔知识双向集成 - 知识检索回退到记忆系统 */
+#include "selflnn/selflnn.h"
+#include "selflnn/memory/memory_manager.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -1065,6 +1068,73 @@ size_t knowledge_integration_unified_query(KnowledgeIntegrationSystem* system,
             entry->timestamp = (long)time(NULL);
             
             total_found++;
+        }
+    }
+    
+    /* ================================================================
+     * P1-02修复: 记忆↔知识双向集成
+     * 当知识图谱和语义网络检索结果为空或置信度低时，
+     * 回退到记忆系统进行语义记忆检索作为补充。
+     * 记忆系统不可用时优雅降级，不产生错误。
+     * ================================================================ */
+    if (total_found == 0) {
+        MemoryManager* mem_mgr = selflnn_get_memory_manager();
+        if (mem_mgr) {
+            /* 使用查询字符串作为检索键，尝试从记忆系统中检索相关记忆 */
+            /* 分配临时缓冲区存放检索到的记忆数据 */
+            #define MEM_RETRIEVAL_BUFFER_SIZE 256
+            float mem_data[MEM_RETRIEVAL_BUFFER_SIZE];
+            float mem_strength = 0.0f;
+            int mem_type = -1;
+            
+            int retrieve_result = memory_manager_retrieve(
+                mem_mgr, query,
+                mem_data, MEM_RETRIEVAL_BUFFER_SIZE,
+                &mem_strength, &mem_type);
+            
+            if (retrieve_result == 0 && mem_strength > 0.1f) {
+                /* 记忆系统中找到匹配项，创建知识条目并标注来源为记忆 */
+                KnowledgeEntry* entry = &results[total_found];
+                memset(entry, 0, sizeof(KnowledgeEntry));
+                
+                entry->subject = string_duplicate_nullable(query);
+                entry->predicate = string_duplicate_nullable("memory_retrieved");
+                entry->object = string_duplicate_nullable("episodic_semantic_memory");
+                entry->type = KNOWLEDGE_FACT;
+                entry->confidence = mem_strength;
+                entry->source = SOURCE_LEARNING;  /* 标注来源为学习/记忆 */
+                entry->weight = mem_strength;
+                entry->timestamp = (long)time(NULL);
+                
+                /* 将记忆数据嵌入到知识条目中 */
+                entry->embedding_size = (mem_data[0] < MEM_RETRIEVAL_BUFFER_SIZE) 
+                    ? (size_t)mem_data[0] : 64;
+                if (entry->embedding_size > 0 && entry->embedding_size <= MEM_RETRIEVAL_BUFFER_SIZE - 1) {
+                    entry->embedding = (float*)safe_malloc(entry->embedding_size * sizeof(float));
+                    if (entry->embedding) {
+                        memcpy(entry->embedding, &mem_data[1], entry->embedding_size * sizeof(float));
+                    }
+                }
+                
+                total_found++;
+                log_info("[记忆↔知识] 知识检索回退到记忆系统: 查询='%s', 记忆强度=%.3f, 类型=%d",
+                         query, (double)mem_strength, mem_type);
+            } else {
+                /* 记忆系统中也未找到匹配项，记录日志 */
+                static int mem_fallback_empty_logged = 0;
+                if (!mem_fallback_empty_logged) {
+                    log_info("[记忆↔知识] 知识检索和记忆回退均未找到匹配项: 查询='%s'"
+                             "（此消息仅记录一次，后续相同情况不再重复记录）", query);
+                    mem_fallback_empty_logged = 1;
+                }
+            }
+        } else {
+            /* 记忆管理器不可用，优雅降级 */
+            static int mem_unavailable_logged = 0;
+            if (!mem_unavailable_logged) {
+                log_info("[记忆↔知识] 记忆管理器不可用，知识检索回退跳过（此消息仅记录一次）");
+                mem_unavailable_logged = 1;
+            }
         }
     }
     

@@ -175,6 +175,7 @@ void cmaes_free(CMAESState* state) {
     safe_free((void**)&state->eigen_values);
     safe_free((void**)&state->eigen_vectors);
     safe_free((void**)&state->inv_sqrt_cov);
+    safe_free((void**)&state->sqrt_cov);    /* P1-05修复: 释放sqrt_cov缓冲区 */
     safe_free((void**)&state->best_solution);
     safe_free((void**)&state->lower_bounds);
     safe_free((void**)&state->upper_bounds);
@@ -237,13 +238,16 @@ int cmaes_init(CMAESState* state, size_t dimension, float sigma, int lambda, int
     state->eigen_values = (float*)safe_calloc(dimension, sizeof(float));
     state->eigen_vectors = (float*)safe_calloc(dimension * dimension, sizeof(float));
     state->inv_sqrt_cov = (float*)safe_calloc(dimension * dimension, sizeof(float));
+    /* P1-05修复: 新增sqrt_cov缓冲区，独立于eigen_vectors，
+     * 避免cmaes_sym_matrix_sqrt将sqrt(C)覆盖到eigen_vectors导致语义混淆。 */
+    state->sqrt_cov = (float*)safe_calloc(dimension * dimension, sizeof(float));
     state->best_solution = (float*)safe_calloc(dimension, sizeof(float));
 
     if (!state->mean || !state->covariance || !state->evolution_path_sigma ||
         !state->evolution_path_cov || !state->temp_vec || !state->temp_vec2 ||
         !state->weights || !state->sample_pop || !state->fitness ||
         !state->index_order || !state->eigen_values || !state->eigen_vectors ||
-        !state->inv_sqrt_cov || !state->best_solution) {
+        !state->inv_sqrt_cov || !state->sqrt_cov || !state->best_solution) {
         cmaes_free(state);
         return -1;
     }
@@ -323,11 +327,16 @@ void cmaes_sample_population(CMAESState* state) {
 
     size_t dim = state->dimension;
     size_t n = dim;
-    float* eigenvec = state->eigen_vectors;
+    /* P1-05修复: 使用独立的sqrt_cov缓冲区代替eigen_vectors，
+     * 避免cmaes_sym_matrix_sqrt将sqrt(C)覆盖到eigen_vectors。
+     * eigen_vectors保持其语义：存储协方差矩阵的特征向量。
+     * sqrt_cov存储协方差矩阵的平方根，用于采样公式:
+     * x = mean + sigma * sqrt(C) * z */
+    float* sqrt_cov = state->sqrt_cov;
     float* eigenval = state->eigen_values;
     (void)eigenval;
 
-    cmaes_sym_matrix_sqrt(state->covariance, n, eigenvec, state->inv_sqrt_cov);
+    cmaes_sym_matrix_sqrt(state->covariance, n, sqrt_cov, state->inv_sqrt_cov);
 
     for (int k = 0; k < state->lambda; k++) {
         float* x = state->sample_pop + (size_t)k * dim;
@@ -337,7 +346,8 @@ void cmaes_sample_population(CMAESState* state) {
         for (size_t i = 0; i < dim; i++) {
             x[i] = state->mean[i];
             for (size_t j = 0; j < dim; j++) {
-                x[i] += state->sigma * eigenvec[i * dim + j] * state->temp_vec[j];
+                /* 使用sqrt_cov（而非eigen_vectors）进行采样 */
+                x[i] += state->sigma * sqrt_cov[i * dim + j] * state->temp_vec[j];
             }
         }
         if (state->use_boundary) {
@@ -605,6 +615,9 @@ void cmaes_reset(CMAESState* state) {
     for (size_t i = 0; i < dim; i++) state->eigen_vectors[i * dim + i] = 1.0f;
     memset(state->inv_sqrt_cov, 0, dim * dim * sizeof(float));
     for (size_t i = 0; i < dim; i++) state->inv_sqrt_cov[i * dim + i] = 1.0f;
+    /* P1-05修复: 重置sqrt_cov缓冲区为初始值（单位矩阵） */
+    memset(state->sqrt_cov, 0, dim * dim * sizeof(float));
+    for (size_t i = 0; i < dim; i++) state->sqrt_cov[i * dim + i] = 1.0f;
     state->sigma = CMAES_DEFAULT_SIGMA;
     state->generation = 0;
     state->best_fitness = FLT_MAX;

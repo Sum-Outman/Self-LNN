@@ -54,6 +54,8 @@ typedef struct {
     float* eigen_values;
     float* eigen_vectors;
     float* inv_sqrt_cov;
+    float* sqrt_cov;          /**< P1-05修复: 协方差矩阵平方根缓冲区。
+                                   保持eigen_vectors语义不变，sqrt(C)写入此独立缓冲区。 */
     size_t dimension;
     int lambda;
     int mu;

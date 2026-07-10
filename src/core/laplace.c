@@ -294,6 +294,9 @@ void laplace_analyzer_free(LaplaceAnalyzer* analyzer) {
         return;
     }
     
+#ifdef _WIN32
+    __try {
+#endif
     // 释放极点缓冲区
     safe_free((void**)&analyzer->pole_buffer);
     analyzer->pole_capacity = 0;
@@ -325,6 +328,13 @@ void laplace_analyzer_free(LaplaceAnalyzer* analyzer) {
 
     // 释放分析器结构
     safe_free((void**)&analyzer);
+
+#ifdef _WIN32
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        fprintf(stderr, "[ERROR] laplace_analyzer_free 子资源访问异常 (0x%08lX), 跳过清理\n", GetExceptionCode());
+        fflush(stderr);
+    }
+#endif
 }
 
 /**

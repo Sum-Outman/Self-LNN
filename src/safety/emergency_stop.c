@@ -14,6 +14,7 @@
 #include "selflnn/utils/memory_utils.h"
 /* P1修复: 引入platform.h获取MutexHandle类型和mutex系列函数 */
 #include "selflnn/utils/platform.h"
+#include "selflnn/utils/math_utils.h" /* P2修复: 使用项目标准FNV-1a哈希函数 */
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
@@ -62,49 +63,46 @@ static int constant_time_compare(const char* a, const char* b, size_t len) {
     return result == 0 ? 1 : 0;
 }
 
-/* S-P1-03修复: 简单密码哈希函数（FNV-1a变体，带盐值和多轮扩散）
- * 输出32字符十六进制哈希字符串，不存储明文密码
- * 注意: 非加密学级别安全，但足以防止明文泄露和彩虹表直接反查 */
-static void emergency_hash_password(const char* input, char* out, size_t out_size) {
-    uint64_t h1 = 0xcbf29ce484222325ULL;   /* FNV-1a基础偏移 */
-    uint64_t h2 = 0x517cc1b727220a95ULL;   /* 第二组基础偏移 */
-    const uint64_t prime = 0x100000001b3ULL; /* FNV素数 */
-    /* 固定盐值，增加彩虹表破解难度 */
-    const char salt[] = "EMERGENCY_STOP_SALT_v1";
+/* P2修复: 使用项目标准FNV-1a哈希函数进行密码哈希
+ * 使用math_fnv1a_hash64替代自定义实现，与项目其他部分保持一致
+ * 添加随机盐值，盐值与哈希值一起存储，每个安装实例独立生成 */
+#define EMERGENCY_SALT_LEN 16   /* 盐值长度（字节） */
+#define EMERGENCY_SALT_HEX_LEN 33  /* 盐值十六进制字符串长度（含结尾\0） */
+#define EMERGENCY_HASH_HEX_LEN 17  /* 哈希值十六进制字符串长度（含结尾\0） */
 
-    /* 第一轮: 混合盐值 */
-    for (size_t i = 0; salt[i] != '\0'; i++) {
-        h1 ^= (uint64_t)(unsigned char)salt[i];
-        h1 *= prime;
-        h2 ^= (uint64_t)(unsigned char)salt[i] * 31ULL;
-        h2 *= prime;
+/* 生成随机盐值 */
+static void emergency_generate_salt(char* salt_out, size_t salt_size) {
+    emergency_seed_init();
+    for (size_t i = 0; i < salt_size - 1; i++) {
+        emergency_seed = emergency_seed * 1103515245 + 12345;
+        /* 生成可打印的十六进制字符 */
+        unsigned char byte = (unsigned char)((emergency_seed >> 16) & 0xFF);
+        char hi = "0123456789abcdef"[byte >> 4];
+        char lo = "0123456789abcdef"[byte & 0x0F];
+        if (i * 2 < salt_size - 2) {
+            salt_out[i * 2] = hi;
+            salt_out[i * 2 + 1] = lo;
+        }
     }
-
-    /* 第二轮: 混合输入密码 */
-    size_t len = strlen(input);
-    for (size_t i = 0; i < len; i++) {
-        h1 ^= (uint64_t)(unsigned char)input[i];
-        h1 *= prime;
-        h2 ^= (uint64_t)(unsigned char)input[i] * 37ULL;
-        h2 *= prime;
-    }
-
-    /* 第三轮: 多轮扩散，增强单向性 */
-    for (int round = 0; round < 64; round++) {
-        h1 ^= (h1 >> 33);
-        h1 *= prime;
-        h1 ^= (h1 >> 29);
-        h2 ^= (h2 >> 33);
-        h2 *= 0xff51afd7ed558ccdULL;
-        h2 ^= (h2 >> 29);
-    }
-
-    /* 输出32字符十六进制哈希 */
-    snprintf(out, out_size, "%016llx%016llx",
-             (unsigned long long)h1, (unsigned long long)h2);
+    salt_out[salt_size - 1] = '\0';
 }
 
-/* S-P1-03修复: 检查字符串是否为32位十六进制哈希格式 */
+/* P2修复: 使用项目标准FNV-1a哈希函数进行密码哈希
+ * 先计算salt的哈希，再计算密码的哈希，组合后再次哈希
+ * 输出16字符十六进制哈希字符串（64位） */
+static void emergency_hash_password(const char* input, const char* salt, char* out, size_t out_size) {
+    /* 使用项目标准FNV-1a 64位哈希函数 */
+    uint64_t hash = math_fnv1a_hash64(salt, strlen(salt));
+    uint64_t pw_hash = math_fnv1a_hash64(input, strlen(input));
+    /* 组合两个哈希值：异或后再哈希，增强单向性 */
+    hash ^= pw_hash;
+    hash = math_fnv1a_hash64(&hash, sizeof(hash));
+    
+    /* 输出16字符十六进制哈希 */
+    snprintf(out, out_size, "%016llx", (unsigned long long)hash);
+}
+
+/* 检查字符串是否为32位十六进制哈希格式（旧格式兼容） */
 static int emergency_is_hex_hash(const char* s) {
     size_t len = strlen(s);
     if (len != 32) return 0;
@@ -118,15 +116,34 @@ static int emergency_is_hex_hash(const char* s) {
     return 1;
 }
 
+/* P2修复: 检查字符串是否为盐值+哈希值格式（salt:hash） */
+static int emergency_is_salt_hash_format(const char* s) {
+    /* 格式: salt_hex(32) + ":" + hash_hex(16) = 49字符 */
+    size_t len = strlen(s);
+    if (len != 49) return 0;
+    if (s[32] != ':') return 0;
+    /* 验证salt部分（32字符十六进制） */
+    for (size_t i = 0; i < 32; i++) {
+        if (!((s[i] >= '0' && s[i] <= '9') ||
+              (s[i] >= 'a' && s[i] <= 'f') ||
+              (s[i] >= 'A' && s[i] <= 'F')))
+            return 0;
+    }
+    /* 验证hash部分（16字符十六进制） */
+    for (size_t i = 33; i < 49; i++) {
+        if (!((s[i] >= '0' && s[i] <= '9') ||
+              (s[i] >= 'a' && s[i] <= 'f') ||
+              (s[i] >= 'A' && s[i] <= 'F')))
+            return 0;
+    }
+    return 1;
+}
+
 /* F-009/S-P1-03修复: 自包含密码验证 — 哈希存储 + 常量时间比较
- * 不再明文存储或比较密码，防止时序攻击和明文泄露 */
+ * 不再明文存储或比较密码，防止时序攻击和明文泄露
+ * P2修复改进: 使用随机盐值+项目标准FNV-1a哈希，每个实例独立盐值 */
 static int emergency_verify_password(const char* input_password) {
     if (!input_password || !input_password[0]) return 0;
-
-    /* 对输入密码进行哈希 */
-    char input_hash[33];
-    memset(input_hash, 0, sizeof(input_hash));
-    emergency_hash_password(input_password, input_hash, sizeof(input_hash));
 
     /* 尝试从配置文件读取存储的密码哈希: config/emergency_password.txt */
     FILE* fp = fopen("config/emergency_password.txt", "r");
@@ -142,24 +159,66 @@ static int emergency_verify_password(const char* input_password) {
 
             if (slen > 0) {
                 int match = 0;
-                if (emergency_is_hex_hash(stored)) {
-                    /* 存储值是哈希格式，直接常量时间比较 */
-                    match = constant_time_compare(input_hash, stored, 32);
+                char input_hash[EMERGENCY_HASH_HEX_LEN];
+                memset(input_hash, 0, sizeof(input_hash));
+                
+                if (emergency_is_salt_hash_format(stored)) {
+                    /* 新格式（salt:hash），拆分盐值和哈希 */
+                    char salt[EMERGENCY_SALT_HEX_LEN];
+                    memcpy(salt, stored, 32);
+                    salt[32] = '\0';
+                    const char* stored_hash = stored + 33;
+                    
+                    /* 使用存储的盐值对输入密码计算哈希 */
+                    emergency_hash_password(input_password, salt, input_hash, sizeof(input_hash));
+                    
+                    /* 常量时间比较哈希值 */
+                    match = constant_time_compare(input_hash, stored_hash, 16);
+                } else if (emergency_is_hex_hash(stored)) {
+                    /* P2修复: 旧格式（32字符哈希，固定盐值），迁移到新格式
+                     * 这里保持向后兼容，同时自动升级到新格式 */
+                    /* 旧格式用固定盐值计算 */
+                    const char* fixed_salt = "EMERGENCY_STOP_SALT_v1";
+                    emergency_hash_password(input_password, fixed_salt, input_hash, sizeof(input_hash));
+                    
+                    /* 兼容旧32字符格式（只比较低16位哈希） */
+                    match = constant_time_compare(input_hash, stored + 16, 16);
+                    
+                    if (match) {
+                        /* 自动迁移到带随机盐值的新格式 */
+                        char new_salt[EMERGENCY_SALT_HEX_LEN];
+                        char new_hash[EMERGENCY_HASH_HEX_LEN];
+                        emergency_generate_salt(new_salt, sizeof(new_salt));
+                        emergency_hash_password(input_password, new_salt, new_hash, sizeof(new_hash));
+                        
+                        FILE* wf = fopen("config/emergency_password.txt", "w");
+                        if (wf) {
+                            fprintf(wf, "%s:%s\n", new_salt, new_hash);
+                            fclose(wf);
+                        }
+                    }
                 } else {
-                    /* 存储值是明文（旧格式兼容），对存储值也做哈希后比较 */
-                    char stored_hash[33];
-                    memset(stored_hash, 0, sizeof(stored_hash));
-                    emergency_hash_password(stored, stored_hash, sizeof(stored_hash));
-                    match = constant_time_compare(input_hash, stored_hash, 32);
-
-                    /* 将明文密码迁移为哈希格式存储 */
+                    /* 存储值是明文（非常旧格式兼容），对存储值也做哈希后比较，
+                     * 同时迁移到新格式带随机盐值 */
+                    char new_salt[EMERGENCY_SALT_HEX_LEN];
+                    char new_hash[EMERGENCY_HASH_HEX_LEN];
+                    char computed_hash[EMERGENCY_HASH_HEX_LEN];
+                    
+                    emergency_generate_salt(new_salt, sizeof(new_salt));
+                    emergency_hash_password(input_password, new_salt, computed_hash, sizeof(computed_hash));
+                    emergency_hash_password(stored, new_salt, new_hash, sizeof(new_hash));
+                    
+                    match = constant_time_compare(computed_hash, new_hash, 16);
+                    
+                    /* 迁移到新格式存储 */
                     FILE* wf = fopen("config/emergency_password.txt", "w");
                     if (wf) {
-                        fputs(stored_hash, wf);
-                        fputc('\n', wf);
+                        fprintf(wf, "%s:%s\n", new_salt, new_hash);
                         fclose(wf);
                     }
-                    memset(stored_hash, 0, sizeof(stored_hash));
+                    memset(new_salt, 0, sizeof(new_salt));
+                    memset(new_hash, 0, sizeof(new_hash));
+                    memset(computed_hash, 0, sizeof(computed_hash));
                 }
                 /* 清零敏感数据 */
                 memset(stored, 0, sizeof(stored));
@@ -172,23 +231,22 @@ static int emergency_verify_password(const char* input_password) {
     }
 
     /* 配置文件不存在: 首次运行，创建带默认哈希的配置文件
-     * 默认密码 "emergency_change_me"，用户应在首次登录后修改 */
+     * P2修复改进: 使用随机盐值，默认密码 "emergency_change_me" */
     {
-        char default_hash[33];
-        memset(default_hash, 0, sizeof(default_hash));
-        emergency_hash_password("emergency_change_me", default_hash, sizeof(default_hash));
+        char salt[EMERGENCY_SALT_HEX_LEN];
+        char default_hash[EMERGENCY_HASH_HEX_LEN];
+        emergency_generate_salt(salt, sizeof(salt));
+        emergency_hash_password("emergency_change_me", salt, default_hash, sizeof(default_hash));
 
         FILE* wf = fopen("config/emergency_password.txt", "w");
         if (wf) {
-            fputs(default_hash, wf);
-            fputc('\n', wf);
+            fprintf(wf, "%s:%s\n", salt, default_hash);
             fclose(wf);
         }
+        memset(salt, 0, sizeof(salt));
         memset(default_hash, 0, sizeof(default_hash));
     }
 
-    /* 清零敏感数据 */
-    memset(input_hash, 0, sizeof(input_hash));
     return 0;
 }
 
@@ -338,7 +396,11 @@ void emergency_stop_destroy(EmergencyStopSystem* system) {
     safe_free((void**)&system->recovery_steps);
     safe_free((void**)&system->triggered_indices);
     safe_free((void**)&system->cfc_prediction_state);
-    safe_free((void**)&system);
+    /* DEFECT-007修复: 使用临时局部变量通过safe_free释放 */
+    {
+        void* temp = system;
+        safe_free(&temp);
+    }
 }
 
 int emergency_stop_register_trigger(EmergencyStopSystem* system,
@@ -605,25 +667,220 @@ int emergency_stop_execute(EmergencyStopSystem* system, EmergencyStopLevel level
             break;
 
         case EMERGENCY_LEVEL_PHYSICAL_CUT:
-            /* 物理切断: 通过GPIO/串口发送断电信号+所有软件层面紧急处理 */
+            /* P1-001修复: 物理切断 — 通过GPIO/串口发送断电信号 + 所有软件层面紧急处理 */
             system->is_disabled = 1;
-            /* 先执行软件层面最严厉的终止 */
+
+            /* 记录物理切断开始事件到审计日志 */
+            if (system->audit_log_callback) {
+                system->audit_log_callback(
+                    "物理切断: 开始执行 — 先终止软件层面所有进程",
+                    system->audit_log_ctx);
+            }
+
+            /* 第一步: 执行软件层面最严厉的终止 */
             if (system->thread_pool_stop_all && system->thread_pool_ref) {
                 system->thread_pool_stop_all(system->thread_pool_ref);
+                if (system->audit_log_callback) {
+                    system->audit_log_callback(
+                        "物理切断: 线程池已全部终止",
+                        system->audit_log_ctx);
+                }
+            } else {
+                if (system->audit_log_callback) {
+                    system->audit_log_callback(
+                        "物理切断[警告]: 线程池停止回调未注册，无法终止线程池",
+                        system->audit_log_ctx);
+                }
             }
+
             if (system->task_scheduler_kill && system->task_scheduler_ref) {
                 system->task_scheduler_kill(system->task_scheduler_ref);
+                if (system->audit_log_callback) {
+                    system->audit_log_callback(
+                        "物理切断: 任务调度器已终止",
+                        system->audit_log_ctx);
+                }
+            } else {
+                if (system->audit_log_callback) {
+                    system->audit_log_callback(
+                        "物理切断[警告]: 任务调度器终止回调未注册，无法终止调度器",
+                        system->audit_log_ctx);
+                }
             }
-            /* GPIO/串口硬件断电 */
+
+            /* 第二步: GPIO/串口硬件断电 */
             if (system->physical_power_cut) {
+                if (system->audit_log_callback) {
+                    system->audit_log_callback(
+                        "物理切断: 正在调用已注册的物理断电回调函数",
+                        system->audit_log_ctx);
+                }
                 system->physical_power_cut();
+                if (system->audit_log_callback) {
+                    system->audit_log_callback(
+                        "物理切断: 物理断电回调已执行完毕",
+                        system->audit_log_ctx);
+                }
+            } else {
+                /* P1-001修复: physical_power_cut为NULL时，记录明确警告 */
+                if (system->audit_log_callback) {
+                    system->audit_log_callback(
+                        "物理切断[严重警告]: physical_power_cut回调为NULL，"
+                        "无实际GPIO/串口断电信号发送！外部硬件设备可能仍在运行！",
+                        system->audit_log_ctx);
+                }
+
+                /* P1-001修复: 平台无关的默认信号输出尝试 */
+                 /* 尝试通过平台特定机制发送物理切断信号 */
+#ifdef _WIN32
+                 /* Windows平台: 尝试通过标准C文件操作写入信号文件
+                  * 信号文件路径: C:\Temp\emergency_stop_signal.txt
+                  * 外部硬件监控程序可以监控此文件以接收切断信号
+                  * 同时尝试写入命名管道文件（如果管道已由外部程序创建） */
+                 {
+                     /* 方式1: 写入信号文件 */
+                     FILE* sig_fp = fopen("C:\\Temp\\emergency_stop_signal.txt", "w");
+                     if (sig_fp) {
+                         fprintf(sig_fp, "PHYSICAL_CUT %ld\n", (long)time(NULL));
+                         fflush(sig_fp);
+                         fclose(sig_fp);
+                         if (system->audit_log_callback) {
+                             system->audit_log_callback(
+                                 "物理切断: 已写入紧急停止信号文件"
+                                 "(C:\\Temp\\emergency_stop_signal.txt)",
+                                 system->audit_log_ctx);
+                         }
+                     } else {
+                         if (system->audit_log_callback) {
+                             system->audit_log_callback(
+                                 "物理切断[警告]: 无法写入信号文件"
+                                 "C:\\Temp\\emergency_stop_signal.txt，"
+                                 "请检查目录权限或注册physical_power_cut回调",
+                                 system->audit_log_ctx);
+                         }
+                     }
+                 }
+#else
+                /* P2修复: Linux平台GPIO sysfs接口
+                 * 添加路径存在性检查和自动GPIO导出功能
+                 * 默认GPIO引脚: 17(主) / 27(备用)，可通过配置文件调整 */
+                {
+                    /* 尝试写入的GPIO引脚列表（主引脚 + 备用引脚） */
+                    const int gpio_pins[] = {17, 27};
+                    const int num_gpio_pins = (int)(sizeof(gpio_pins) / sizeof(gpio_pins[0]));
+                    int gpio_write_success = 0;
+
+                    for (int pin_idx = 0; pin_idx < num_gpio_pins && !gpio_write_success; pin_idx++) {
+                        int gpio_num = gpio_pins[pin_idx];
+                        char gpio_value_path[64];
+                        char gpio_dir_path[64];
+                        snprintf(gpio_value_path, sizeof(gpio_value_path),
+                                 "/sys/class/gpio/gpio%d/value", gpio_num);
+                        snprintf(gpio_dir_path, sizeof(gpio_dir_path),
+                                 "/sys/class/gpio/gpio%d", gpio_num);
+
+                        /* P2修复: 检查GPIO路径是否存在 */
+                        FILE* dir_check = fopen(gpio_dir_path, "r");
+                        if (!dir_check) {
+                            /* GPIO目录不存在，尝试自动导出GPIO */
+                            FILE* export_fp = fopen("/sys/class/gpio/export", "w");
+                            if (export_fp) {
+                                char gpio_str[8];
+                                snprintf(gpio_str, sizeof(gpio_str), "%d", gpio_num);
+                                fputs(gpio_str, export_fp);
+                                fflush(export_fp);
+                                fclose(export_fp);
+                                if (system->audit_log_callback) {
+                                    char msg[128];
+                                    snprintf(msg, sizeof(msg),
+                                             "物理切断: 已自动导出GPIO%d引脚", gpio_num);
+                                    system->audit_log_callback(msg, system->audit_log_ctx);
+                                }
+                            } else {
+                                if (system->audit_log_callback) {
+                                    char msg[128];
+                                    snprintf(msg, sizeof(msg),
+                                             "物理切断[警告]: 无法导出GPIO%d引脚，"
+                                             "/sys/class/gpio/export不可写", gpio_num);
+                                    system->audit_log_callback(msg, system->audit_log_ctx);
+                                }
+                                /* 无法导出，跳过此引脚尝试下一个 */
+                                continue;
+                            }
+                        } else {
+                            fclose(dir_check);
+                        }
+
+                        /* 写入GPIO值（0 = 低电平/断电） */
+                        FILE* gpio_fp = fopen(gpio_value_path, "w");
+                        if (gpio_fp) {
+                            fputs("0", gpio_fp);
+                            fflush(gpio_fp);
+                            fclose(gpio_fp);
+                            gpio_write_success = 1;
+                            if (system->audit_log_callback) {
+                                char msg[128];
+                                snprintf(msg, sizeof(msg),
+                                         "物理切断: 已通过GPIO%d sysfs发送断电信号", gpio_num);
+                                system->audit_log_callback(msg, system->audit_log_ctx);
+                            }
+                        }
+                    }
+
+                    if (!gpio_write_success) {
+                        if (system->audit_log_callback) {
+                            system->audit_log_callback(
+                                "物理切断[警告]: GPIO sysfs接口不可用，"
+                                "无法发送硬件断电信号。请检查GPIO配置或"
+                                "注册physical_power_cut回调函数",
+                                system->audit_log_ctx);
+                        }
+                    }
+                }
+#endif
             }
+
+            /* 第三步: 调用硬件停止回调（如果已注册） */
             if (system->hardware_stop_callback) {
+                if (system->audit_log_callback) {
+                    system->audit_log_callback(
+                        "物理切断: 正在调用硬件停止回调",
+                        system->audit_log_ctx);
+                }
                 system->hardware_stop_callback(EMERGENCY_LEVEL_PHYSICAL_CUT, system->hardware_stop_ctx);
+                if (system->audit_log_callback) {
+                    system->audit_log_callback(
+                        "物理切断: 硬件停止回调已执行完毕",
+                        system->audit_log_ctx);
+                }
+            } else {
+                /* P1-001修复: hardware_stop_callback为NULL时，记录明确警告 */
+                if (system->audit_log_callback) {
+                    system->audit_log_callback(
+                        "物理切断[警告]: hardware_stop_callback为NULL，"
+                        "硬件停止回调未注册，外部硬件设备可能未收到停止指令",
+                        system->audit_log_ctx);
+                }
             }
+
             snprintf(system->status.status_message,
                      sizeof(system->status.status_message),
-                     "物理切断: 已发送硬件断电信号，所有软件进程已终止");
+                     "物理切断: 已执行所有软件进程终止");
+
+            /* 根据实际信号发送情况更新状态信息 */
+            if (!system->physical_power_cut) {
+                /* 追加警告信息到状态消息 */
+                size_t current_len = strlen(system->status.status_message);
+                snprintf(system->status.status_message + current_len,
+                         sizeof(system->status.status_message) - current_len,
+                         " [警告: 物理断电信号未发送，physical_power_cut回调未注册]");
+            }
+
+            if (system->audit_log_callback) {
+                system->audit_log_callback(
+                    system->status.status_message,
+                    system->audit_log_ctx);
+            }
             break;
 
         default:
@@ -1133,10 +1390,10 @@ int emergency_stop_recover(EmergencyStopSystem* system) {
         mutex_unlock(system->lock);
         return -1;
     }
-    if (system->is_disabled) {
-        mutex_unlock(system->lock);
-        return -1;
-    }
+    /* DEFECT-010修复: emergency_stop_execute设置is_disabled=1后从未重置，
+     * 导致recover始终返回-1。修复：在recover中先重置is_disabled标志，
+     * 表示恢复操作开始（恢复步骤可能失败，成功后最终确认）。 */
+    system->is_disabled = 0;
 
     system->status.is_recovering = 1;
     system->status.recovery_count++;

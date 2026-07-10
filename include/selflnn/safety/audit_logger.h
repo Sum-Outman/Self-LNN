@@ -50,7 +50,7 @@ typedef enum {
 
 /* 操作日志条目 */
 typedef struct {
-    long log_id;
+    uint64_t log_id;              /* P2-02修复: 使用uint64_t防止回绕溢出 */
     time_t timestamp;
     AuditOperationType op_type;
     char operation_name[64];
@@ -79,7 +79,7 @@ typedef enum {
 
 /* 变更日志条目 */
 typedef struct {
-    long change_id;
+    uint64_t change_id;           /* P2-02修复: 使用uint64_t防止回绕溢出 */
     time_t timestamp;
     AuditChangeType change_type;
     char change_name[64];
@@ -96,7 +96,7 @@ typedef struct {
 
 /* 决策日志条目（扩展自 decision_engine.h） */
 typedef struct {
-    long decision_id;
+    uint64_t decision_id;         /* P2-02修复: 使用uint64_t防止回绕溢出 */
     time_t timestamp;
     char decision_name[128];
     char context[512];
@@ -203,7 +203,7 @@ typedef enum {
 
 /* 统一审计日志记录（供M-004合规检查使用） */
 typedef struct {
-    long id;
+    uint64_t id;                  /* P2-02修复: 使用uint64_t防止回绕溢出 */
     time_t timestamp;
     AuditUnifiedEventType event_type;
     AuditDataCategory data_type; /**< 所属数据类别 */
@@ -260,7 +260,7 @@ void audit_logger_free(AuditLogger* logger);
 /**
  * @brief 记录操作日志
  */
-long audit_log_operation(AuditLogger* logger, AuditOperationType op_type,
+uint64_t audit_log_operation(AuditLogger* logger, AuditOperationType op_type,
                           const char* op_name, const char* operator_name,
                           const char* target, const char* before_state,
                           const char* after_state, const char* result,
@@ -291,7 +291,7 @@ int audit_query_operations_by_operator(const AuditLogger* logger, const char* op
 /**
  * @brief 记录决策日志
  */
-long audit_log_decision(AuditLogger* logger,
+uint64_t audit_log_decision(AuditLogger* logger,
                          const char* decision_name, const char* context,
                          float confidence, float utility,
                          int alternative_count, const char* chosen_alternative,
@@ -313,7 +313,7 @@ int audit_query_decisions(const AuditLogger* logger, time_t start, time_t end,
 /**
  * @brief 记录变更日志
  */
-long audit_log_change(AuditLogger* logger, AuditChangeType change_type,
+uint64_t audit_log_change(AuditLogger* logger, AuditChangeType change_type,
                        const char* change_name, const char* initiator,
                        const char* component, const char* old_value,
                        const char* new_value, const char* reason,
@@ -413,6 +413,47 @@ int audit_export_json(const AuditLogger* logger, time_t start, time_t end,
  * @brief 创建默认合规规则集
  */
 int audit_setup_default_compliance(AuditLogger* logger);
+
+/* ============================================================================
+ * P0-001修复: 文件持久化API
+ * ============================================================================ */
+
+/**
+ * @brief 将内存中的审计日志刷写到磁盘文件
+ *
+ * 将操作日志、决策日志、变更日志以JSON行格式写入
+ * logs/audit_YYYYMMDD.jsonl 文件。
+ * 使用追加模式(fopen "a")，每次写入后调用fflush确保数据落盘。
+ * 线程安全：内部持有锁读取缓冲区，文件I/O在锁外执行。
+ *
+ * @param logger 审计日志系统句柄
+ * @return int 成功返回写入的日志条数，失败返回-1
+ */
+int audit_flush_to_file(AuditLogger* logger);
+
+/**
+ * @brief 按日轮转审计日志文件
+ *
+ * 检查当前日期是否与上次刷写日期不同。
+ * 如果进入新的一天，清理超过7天的旧日志文件，
+ * 保留最近7天的审计日志。
+ *
+ * @param logger 审计日志系统句柄
+ * @return int 返回清理的文件数量，0表示无需清理
+ */
+int audit_log_rotate(AuditLogger* logger);
+
+/**
+ * @brief 记录系统启动事件并立即持久化
+ *
+ * 在系统启动时调用，记录一次"系统启动"操作日志，
+ * 并立即调用audit_flush_to_file()将日志刷写到磁盘。
+ * 确保系统崩溃后启动事件仍可追溯。
+ *
+ * @param logger 审计日志系统句柄
+ * @return int 成功返回操作日志ID，失败返回-1
+ */
+int audit_log_startup(AuditLogger* logger);
 
 #ifdef __cplusplus
 }

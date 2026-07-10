@@ -744,11 +744,11 @@ typedef struct {
  * @brief 任务优先级枚举
  */
 typedef enum {
-    TASK_PRIORITY_LOW = 0,
-    TASK_PRIORITY_NORMAL = 1,
-    TASK_PRIORITY_HIGH = 2,
-    TASK_PRIORITY_CRITICAL = 3
-} TaskPriority;
+    LF_PRIORITY_LOW = 0,
+    LF_PRIORITY_NORMAL = 1,
+    LF_PRIORITY_HIGH = 2,
+    LF_PRIORITY_CRITICAL = 3
+} LfTaskPriority;
 
 /**
  * @brief 任务函数类型
@@ -796,7 +796,7 @@ void lock_free_thread_pool_free(LockFreeThreadPool* pool);
 int64_t lock_free_thread_pool_submit(LockFreeThreadPool* pool,
                                        ThreadPoolTaskFunc func,
                                        void* arg,
-                                       TaskPriority priority);
+                                       LfTaskPriority priority);
 
 /**
  * @brief 等待指定任务完成

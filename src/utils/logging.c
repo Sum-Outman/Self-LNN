@@ -439,7 +439,10 @@ void logging_log_json(LogLevel level, const char* file, int line,
     // 结束JSON
     if (remaining >= 2)
     {
-        strcpy(ptr, "}");
+        /* P1-FIX-05: 安全修复 - strcpy替换为strncpy，防止缓冲区溢出 */
+        strncpy(ptr, "}", remaining - 1);
+        /* 确保正确的空终止符 */
+        ptr[remaining - 1] = '\0';
     }
     
     va_end(args);
@@ -450,30 +453,13 @@ void logging_log_json(LogLevel level, const char* file, int line,
 
 double logging_get_timestamp(void)
 {
-    static double epoch_offset = 0.0;
-    static int initialized = 0;
-    if (!initialized) {
-#if defined(_WIN32)
-        FILETIME ft;
-        GetSystemTimePreciseAsFileTime(&ft);
-        ULARGE_INTEGER uli;
-        uli.LowPart = ft.dwLowDateTime;
-        uli.HighPart = ft.dwHighDateTime;
-        double win_epoch = (double)(uli.QuadPart - 116444736000000000ULL) / 10000000.0;
-        epoch_offset = win_epoch;
-#else
-        struct timespec ts;
-        clock_gettime(CLOCK_REALTIME, &ts);
-        epoch_offset = (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
-#endif
-        initialized = 1;
-    }
 #if defined(_WIN32)
     FILETIME ft;
     GetSystemTimePreciseAsFileTime(&ft);
     ULARGE_INTEGER uli;
     uli.LowPart = ft.dwLowDateTime;
     uli.HighPart = ft.dwHighDateTime;
+    // 转换为自Unix纪元以来的秒数（116444736000000000是1601-1970年的偏移）
     double now = (double)(uli.QuadPart - 116444736000000000ULL) / 10000000.0;
     return now;
 #else

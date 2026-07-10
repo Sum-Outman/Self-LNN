@@ -24,6 +24,9 @@
 /* selflnn_get_evolution_engine前向声明 (避免引入selflnn.h导致TASK_PRIORITY枚举冲突) */
 void* selflnn_get_evolution_engine(void);
 void* selflnn_get_shared_lnn(void);
+/* P0修复: selflnn训练管线接口前向声明 */
+void* selflnn_get_training_pipeline(void);
+void  selflnn_trigger_training(void);
 void free_coordination_plan(void* plan);   /* DEEP-005: compat_link_stubs */
 int gpu_is_available(void);               /* DEEP-005: gpu.h兼容 */
 #define TASK_PRIORITY_AGI_RESOLVED  /* DEEP-005: 解决TASK_PRIORITY枚举冲突 */
@@ -55,6 +58,7 @@ int gpu_is_available(void);               /* DEEP-005: gpu.h兼容 */
 #include "selflnn/agi/task_scheduler.h"
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/laplace.h"
+#include "selflnn/training/training_pipeline.h" /* P0修复: 训练管线接口，用于AGI认知循环与训练系统协调 */
 #include <math.h>
 #include <time.h>
 
@@ -109,6 +113,9 @@ struct AGISystem {
     int owns_lnn;
     UnifiedLNNState* unified_lnn;
     int owns_unified_lnn;
+    /* P0修复: 训练管线引用 —— 由AGI认知循环在学习/修正阶段触发增量训练 */
+    TrainingPipeline* training_pipeline;
+    int owns_training_pipeline;  /* 0=仅持有引用(由main.c管理生命周期), 1=拥有所有权 */
     SystemScheduler* scheduler;
     int owns_scheduler;
 
@@ -827,6 +834,20 @@ AGISystem* agi_system_create(const AGIConfig* config)
 
     system->scheduler = system_scheduler_create(NULL);
     system->owns_scheduler = 1;
+
+    /* P0修复: 从全局selflnn状态获取训练管线引用。
+     * 训练管线由main.c创建和管理生命周期，AGI仅持有引用。
+     * 如果训练管线尚未创建（如系统启动早期），训练管线为NULL，
+     * 认知循环将优雅降级：不触发训练，仅记录日志。 */
+    system->training_pipeline = (TrainingPipeline*)selflnn_get_training_pipeline();
+    system->owns_training_pipeline = 0;
+    if (system->training_pipeline) {
+        selflnn_log(LOG_LEVEL_INFO, "AGI",
+                   "AGI系统已关联训练管线，认知循环可触发增量训练");
+    } else {
+        selflnn_log(LOG_LEVEL_DEBUG, "AGI",
+                   "训练管线尚未就绪，AGI认知循环将以降级模式运行（不触发训练）");
+    }
 
 /* 任务调度器初始为NULL（延迟初始化，按需创建） */
     system->task_scheduler = NULL;
@@ -2548,6 +2569,117 @@ int agi_system_cognitive_cycle(AGISystem* system, const float* sensory_input, in
         }
     }
 
+    /* ================================================================
+     * P0修复: AGI认知循环与训练管线协调
+     * 
+     * 在反思/修正阶段后，评估当前认知状态是否需要触发增量训练。
+     * 触发条件:
+     *   1. 连续低奖励 (consecutive_low_reward > 5) — 性能明显下降
+     *   2. 高新颖性 (novelty > 0.7) — 遇到新数据模式，需要适应
+     *   3. 修正次数累积 (corrections_applied > 2) — 修正系统频繁介入
+     *   4. 长期低置信度 (avg_reward < 0.05 && total_cycles > 50) — 系统性退化
+     * 
+     * 训练管线不可用时优雅降级，不阻塞认知循环。
+     * 使用非阻塞超时机制：training_pipeline_step 单步执行，
+     * 如果训练管线未运行或已暂停则跳过。
+     * ================================================================ */
+    if (system->training_pipeline && system->config.enable_self_learning) {
+        /* 评估是否需要触发训练 */
+        int should_trigger_training = 0;
+        const char* trigger_reason = NULL;
+
+        /* 条件1: 连续低奖励超过阈值 — 性能下降 */
+        if (system->consecutive_low_reward > 5) {
+            should_trigger_training = 1;
+            trigger_reason = "连续低奖励性能下降";
+        }
+        /* 条件2: 高新颖性 — 遇到新数据模式 */
+        else if (novelty > 0.7f) {
+            should_trigger_training = 1;
+            trigger_reason = "检测到高新颖性数据模式";
+        }
+        /* 条件3: 低置信度且周期数足够 — 推理链持续不稳定 */
+        else if (system->status.confidence < 0.25f && system->total_cycles > 10) {
+            should_trigger_training = 1;
+            trigger_reason = "推理链持续低置信度";
+        }
+        /* 条件4: 长期系统性退化 — 累积误差 */
+        else if (system->avg_reward < 0.05f && system->total_cycles > 50) {
+            should_trigger_training = 1;
+            trigger_reason = "长期系统性退化";
+        }
+
+        if (should_trigger_training) {
+            /* 获取训练管线当前状态，检查是否可执行训练步 */
+            TrainingPipelineState tp_state;
+            memset(&tp_state, 0, sizeof(tp_state));
+            if (training_pipeline_get_state(system->training_pipeline, &tp_state) == 0 &&
+                tp_state.is_running && !tp_state.is_paused) {
+
+                selflnn_log(LOG_LEVEL_INFO, "AGI",
+                    "[认知-训练协调] 触发增量训练: %s (周期=%d, 平均奖励=%.3f, 新颖性=%.3f)",
+                    trigger_reason, system->total_cycles, system->avg_reward, novelty);
+
+                /* P0修复: 设置训练触发标志，通知后台训练循环优先响应 */
+                selflnn_trigger_training();
+
+                /* 记录训练前认知状态用于对比 */
+                float pre_train_loss = tp_state.current_loss;
+                float pre_train_accuracy = tp_state.train_accuracy;
+
+                /* 执行单步训练 —— 非阻塞，training_pipeline_step是单步执行 */
+                int train_ret = training_pipeline_step(system->training_pipeline);
+
+                /* 获取训练后状态，提取损失值等指标 */
+                TrainingPipelineState post_state;
+                memset(&post_state, 0, sizeof(post_state));
+                if (training_pipeline_get_state(system->training_pipeline, &post_state) == 0) {
+                    /* 将训练结果反馈到认知状态 */
+                    if (train_ret == 0) {
+                        /* 训练步成功: 记录损失变化和收敛状态 */
+                        float loss_delta = pre_train_loss - post_state.current_loss;
+                        system->status.learning_progress = 
+                            (loss_delta > 0.0f) ? (loss_delta / (pre_train_loss + 1e-8f)) : 0.0f;
+
+                        selflnn_log(LOG_LEVEL_INFO, "AGI",
+                            "[认知-训练协调] 训练步完成: loss=%.6f (变化=%.6f), "
+                            "准确率=%.3f, 收敛率=%.3f, 阶段=%d",
+                            post_state.current_loss, loss_delta,
+                            post_state.train_accuracy, post_state.convergence_rate,
+                            (int)post_state.stage);
+
+                        /* 如果收敛率达到阈值，降低后续训练触发频率 */
+                        if (post_state.convergence_rate > 0.95f) {
+                            system->consecutive_low_reward = 0; /* 重置低奖励计数器 */
+                            selflnn_log(LOG_LEVEL_DEBUG, "AGI",
+                                "[认知-训练协调] 模型已收敛(收敛率%.3f)，重置性能下降计数器",
+                                post_state.convergence_rate);
+                        }
+                    } else {
+                        /* 训练步失败（如无数据）: 记录但不阻塞认知循环 */
+                        selflnn_log(LOG_LEVEL_WARNING, "AGI",
+                            "[认知-训练协调] 训练步执行失败(code=%d): %s",
+                            train_ret, trigger_reason);
+                        system->status.learning_progress = 0.0f;
+                    }
+
+                    /* 如果训练阶段发生变化（如从预训练进入深度训练），记录到认知状态 */
+                    if (post_state.stage != tp_state.stage) {
+                        selflnn_log(LOG_LEVEL_INFO, "AGI",
+                            "[认知-训练协调] 训练阶段转换: %d -> %d",
+                            (int)tp_state.stage, (int)post_state.stage);
+                    }
+                }
+            } else {
+                /* 训练管线未运行或已暂停，优雅降级 */
+                selflnn_log(LOG_LEVEL_DEBUG, "AGI",
+                    "[认知-训练协调] 训练管线未就绪(is_running=%d, is_paused=%d)，"
+                    "跳过本次训练触发: %s",
+                    (int)tp_state.is_running, (int)tp_state.is_paused, trigger_reason);
+            }
+        }
+    }
+
     system->status.cognitive_load = (float)system->task_count / (float)AGI_MAX_TASKS;
     system->status.cycle_count = system->total_cycles;
 
@@ -2854,6 +2986,81 @@ int agi_system_cognitive_cycle_multimodal(AGISystem* system,
                 entry.weight = 0.9f;
                 entry.timestamp = (long)time(NULL);
                 knowledge_base_add(system->knowledge, &entry);
+            }
+        }
+    }
+
+    /* ================================================================
+     * P0修复: 多模态认知循环与训练管线协调
+     * 
+     * 与单模态认知循环相同的训练触发逻辑，基于系统级状态评估。
+     * 触发条件:
+     *   1. 连续低奖励 (consecutive_low_reward > 5)
+     *   2. 低置信度 (confidence < 0.3f && total_cycles > 5)
+     *   3. 长期系统性退化 (avg_reward < 0.05f && total_cycles > 50)
+     * ================================================================ */
+    if (system->training_pipeline && system->config.enable_self_learning) {
+        int should_trigger_training = 0;
+        const char* trigger_reason = NULL;
+
+        if (system->consecutive_low_reward > 5) {
+            should_trigger_training = 1;
+            trigger_reason = "多模态:连续低奖励性能下降";
+        } else if (system->status.confidence < 0.3f && system->total_cycles > 5) {
+            should_trigger_training = 1;
+            trigger_reason = "多模态:低置信度模型退化";
+        } else if (system->avg_reward < 0.05f && system->total_cycles > 50) {
+            should_trigger_training = 1;
+            trigger_reason = "多模态:长期系统性退化";
+        }
+
+        if (should_trigger_training) {
+            TrainingPipelineState tp_state;
+            memset(&tp_state, 0, sizeof(tp_state));
+            if (training_pipeline_get_state(system->training_pipeline, &tp_state) == 0 &&
+                tp_state.is_running && !tp_state.is_paused) {
+
+                selflnn_log(LOG_LEVEL_INFO, "AGI",
+                    "[多模态认知-训练协调] 触发增量训练: %s (周期=%d, 平均奖励=%.3f, 置信度=%.3f)",
+                    trigger_reason, system->total_cycles, system->avg_reward,
+                    system->status.confidence);
+
+                /* P0修复: 设置训练触发标志，通知后台训练循环优先响应 */
+                selflnn_trigger_training();
+
+                float pre_train_loss = tp_state.current_loss;
+                int train_ret = training_pipeline_step(system->training_pipeline);
+
+                TrainingPipelineState post_state;
+                memset(&post_state, 0, sizeof(post_state));
+                if (training_pipeline_get_state(system->training_pipeline, &post_state) == 0) {
+                    if (train_ret == 0) {
+                        float loss_delta = pre_train_loss - post_state.current_loss;
+                        system->status.learning_progress = 
+                            (loss_delta > 0.0f) ? (loss_delta / (pre_train_loss + 1e-8f)) : 0.0f;
+
+                        selflnn_log(LOG_LEVEL_INFO, "AGI",
+                            "[多模态认知-训练协调] 训练步完成: loss=%.6f (变化=%.6f), "
+                            "准确率=%.3f, 收敛率=%.3f",
+                            post_state.current_loss, loss_delta,
+                            post_state.train_accuracy, post_state.convergence_rate);
+
+                        if (post_state.convergence_rate > 0.95f) {
+                            system->consecutive_low_reward = 0;
+                            selflnn_log(LOG_LEVEL_DEBUG, "AGI",
+                                "[多模态认知-训练协调] 模型已收敛，重置性能下降计数器");
+                        }
+                    } else {
+                        selflnn_log(LOG_LEVEL_WARNING, "AGI",
+                            "[多模态认知-训练协调] 训练步执行失败(code=%d): %s",
+                            train_ret, trigger_reason);
+                        system->status.learning_progress = 0.0f;
+                    }
+                }
+            } else {
+                selflnn_log(LOG_LEVEL_DEBUG, "AGI",
+                    "[多模态认知-训练协调] 训练管线未就绪，跳过训练触发: %s",
+                    trigger_reason);
             }
         }
     }

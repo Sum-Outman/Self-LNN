@@ -31,12 +31,12 @@ typedef enum {
 } ModuleType;
 
 typedef enum {
-    TASK_PRIORITY_CRITICAL = 0,
-    TASK_PRIORITY_HIGH = 1,
-    TASK_PRIORITY_NORMAL = 2,
-    TASK_PRIORITY_LOW = 3,
-    TASK_PRIORITY_IDLE = 4
-} TaskPriority;
+    SCHED_PRIORITY_CRITICAL = 0,
+    SCHED_PRIORITY_HIGH = 1,
+    SCHED_PRIORITY_NORMAL = 2,
+    SCHED_PRIORITY_LOW = 3,
+    SCHED_PRIORITY_IDLE = 4
+} SchedTaskPriority;
 
 typedef enum {
     MODULE_STATE_UNINITIALIZED = 0,
@@ -80,7 +80,7 @@ typedef struct SystemModule {
     module_process_fn process;
     module_cleanup_fn cleanup;
     module_status_fn get_status;
-    TaskPriority priority;
+    SchedTaskPriority priority;
     int enabled;
     int auto_restart;
     int restart_count;
@@ -104,7 +104,7 @@ typedef struct SystemModule {
 typedef struct {
     char name[SCHEDULER_NAME_LEN];
     char description[256];
-    TaskPriority priority;
+    SchedTaskPriority priority;
     int (*task_func)(void* arg);
     void* arg;
     uint64_t max_exec_time_ms;
@@ -190,7 +190,7 @@ int system_scheduler_get_module_by_name(SystemScheduler* scheduler, const char* 
 
 const char* system_scheduler_module_type_str(ModuleType type);
 const char* system_scheduler_module_state_str(ModuleState state);
-const char* system_scheduler_priority_str(TaskPriority priority);
+const char* system_scheduler_priority_str(SchedTaskPriority priority);
 
 int system_scheduler_get_dependency_order(SystemScheduler* scheduler, char ordered_names[SCHEDULER_MAX_MODULES][SCHEDULER_NAME_LEN], size_t* count);
 int system_scheduler_check_deadlock(SystemScheduler* scheduler);

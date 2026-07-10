@@ -44,6 +44,7 @@
 #include "selflnn/selflnn.h"
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/cfc_network.h"
+#include "selflnn/training/training_pipeline.h"  /* P0-跨模块集成: 修正信号注入训练管线 */
 
 #include <stdlib.h>
 #include <string.h>
@@ -1676,6 +1677,77 @@ int dc_run_full_correction_pipeline(DCCorrectionSystem* dcs,
     }
 
     if (out_effectiveness) *out_effectiveness = effectiveness;
+
+    /* ================================================================
+     * P0-跨模块集成: 将深度修正结果注入训练管线
+     * ================================================================
+     * 在修正流水线完成后，将修正假设、修正效果、置信度等信息
+     * 推送到全局训练管线。训练管线将这些信号作为训练数据的补充，
+     * 在下一次训练迭代中应用。
+     *
+     * 流程：
+     *   1. 通过 selflnn_get_training_pipeline() 获取训练管线实例
+     *   2. 如果管线可用，获取共享LNN的当前参数作为修正后参数
+     *   3. 构建 CognitionCorrectionSignal 并调用注入函数
+     *   4. 如果管线不可用，优雅降级（向后兼容）
+     *
+     * 注意：仅当修正有效性 >= 阈值时才推送，避免低质量修正污染训练管线
+     * ================================================================ */
+    if (effectiveness >= 0.3f) {
+        TrainingPipeline* tp = selflnn_get_training_pipeline();
+        if (tp) {
+            /* 获取共享LNN当前参数（修正后的参数） */
+            LNN* shared_lnn = (LNN*)selflnn_get_shared_lnn();
+            float* shared_params = NULL;
+            size_t shared_param_count = 0;
+
+            if (shared_lnn) {
+                shared_params = lnn_get_parameters(shared_lnn);
+                shared_param_count = lnn_get_parameter_count(shared_lnn);
+            }
+
+            /* 构建修正信号 */
+            CognitionCorrectionSignal signal;
+            memset(&signal, 0, sizeof(signal));
+
+            signal.source = COG_CORRECTION_SOURCE_DEEP_CORRECTION;
+            signal.corrected_params = shared_params;      /* 修正后的共享LNN参数 */
+            signal.param_count = shared_param_count;
+            signal.param_gradients = NULL;                 /* 无梯度信息 */
+            signal.gradient_count = 0;
+            signal.confidence = hyps[0].confidence;        /* 修正假设的置信度 */
+            signal.effectiveness = effectiveness;          /* 修正有效性 */
+            signal.timestamp = time(NULL);
+            signal.applied = 0;
+            signal.error_id = error_id;                    /* 关联的错误ID */
+            signal.hypothesis_id = hyps[0].hypothesis_id;  /* 关联的假设ID */
+            signal.reflection_depth = 0.0f;                /* 非反思来源 */
+            signal.coherence_score = 0.0f;
+
+            /* 构建修正原因描述 */
+            snprintf(signal.correction_reason, sizeof(signal.correction_reason),
+                "深度修正流水线完成 [错误ID=%d, 假设ID=%d, "
+                "错误类型=%d, 严重度=%.2f, 置信度=%.3f, 有效性=%.3f, "
+                "修正方案=%s]",
+                error_id, hyps[0].hypothesis_id,
+                (int)error_type, severity,
+                hyps[0].confidence, effectiveness,
+                hyps[0].proposed_fix[0] ? hyps[0].proposed_fix : "标准修正");
+
+            /* 注入训练管线 */
+            int result = training_pipeline_apply_cognition_correction(tp, &signal);
+            if (result == 0) {
+                log_info("深度修正结果已成功注入训练管线 [错误ID=%d, 置信度=%.3f, 有效性=%.3f]",
+                         error_id, hyps[0].confidence, effectiveness);
+            } else {
+                log_warning("深度修正结果注入训练管线失败，错误码=%d [错误ID=%d]",
+                            result, error_id);
+            }
+        } else {
+            /* 训练管线不可用，优雅降级 */
+            log_info("训练管线不可用，深度修正结果仅保留在修正系统内部 [错误ID=%d]", error_id);
+        }
+    }
 
     return (effectiveness > 0.5f) ? 0 : -1;
 }

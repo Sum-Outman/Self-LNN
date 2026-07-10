@@ -3,6 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- P1-FIX-02: Clickjacking防护 - 禁止页面被嵌入iframe，防止点击劫持攻击 -->
+    <meta http-equiv="Content-Security-Policy" content="frame-ancestors 'none';">
     <title>SELF-LNN 全液态神经网络AGI</title>
     <link rel="stylesheet" href="css/style.css">
     <link rel="stylesheet" href="css/api-docs.css" media="print" onload="this.media='all';this.onload=null;">
@@ -112,18 +114,19 @@
 <body>
     <div class="container">
         <!-- 顶部导航栏 -->
-        <header class="header">
+        <header class="header" role="banner">
             <div class="logo">
                 <h1>SELF-LNN</h1>
             </div>
-            <div id="hamburger-menu" onclick="window.toggleHamburgerMenu()">
+            <!-- P1-007修复: 添加ARIA属性和tabindex，支持无障碍访问和键盘导航 -->
+            <div id="hamburger-menu" role="button" aria-label="导航菜单" tabindex="0" onclick="window.toggleHamburgerMenu()" onkeydown="if(event.key==='Enter'||event.key===' ') { event.preventDefault(); window.toggleHamburgerMenu(); }">
                  <span></span><span></span><span></span>
              </div>
-            <nav class="nav" id="main-nav">
+            <nav class="nav" id="main-nav" role="navigation" aria-label="主导航">
                 <ul>
-                    <li><a href="#dashboard" class="active">仪表盘</a></li>
+                    <li><a href="#dashboard" class="active" tabindex="0" aria-label="仪表盘页面">仪表盘</a></li>
                     <li class="nav-dropdown">
-                        <a href="#" class="dropdown-toggle">AGI核心 ▾</a>
+                        <a href="#" class="dropdown-toggle" tabindex="0" aria-label="AGI核心功能菜单" aria-haspopup="true" aria-expanded="false">AGI核心 ▾</a>
                         <ul class="dropdown-menu">
                             <li><a href="#lnn-control">LNN控制面板</a></li>
                             <li><a href="#multimodal">多模态处理</a></li>
@@ -138,7 +141,7 @@
                         </ul>
                     </li>
                     <li class="nav-dropdown">
-                        <a href="#" class="dropdown-toggle">功能中心 ▾</a>
+                        <a href="#" class="dropdown-toggle" tabindex="0" aria-label="功能中心菜单" aria-haspopup="true" aria-expanded="false">功能中心 ▾</a>
                         <ul class="dropdown-menu">
                             <li><a href="#training-center">训练中心</a></li>
                             <li><a href="#training">机器人训练</a></li>
@@ -153,7 +156,7 @@
                         </ul>
                     </li>
                     <li class="nav-dropdown">
-                        <a href="#" class="dropdown-toggle">可视化 ▾</a>
+                        <a href="#" class="dropdown-toggle" tabindex="0" aria-label="可视化菜单" aria-haspopup="true" aria-expanded="false">可视化 ▾</a>
                         <ul class="dropdown-menu">
                             <li><a href="#knowledge-graph">知识图谱</a></li>
                             <li><a href="#skills">技能库</a></li>
@@ -165,7 +168,7 @@
                         </ul>
                     </li>
                     <li class="nav-dropdown">
-                        <a href="#" class="dropdown-toggle">管理 ▾</a>
+                        <a href="#" class="dropdown-toggle" tabindex="0" aria-label="管理菜单" aria-haspopup="true" aria-expanded="false">管理 ▾</a>
                         <ul class="dropdown-menu">
                             <li><a href="#settings">系统设置</a></li>
                             <li><a href="#hardware-setup">硬件设置</a></li>
@@ -184,9 +187,9 @@
         </header>
 
         <!-- 主要内容区域 -->
-        <main class="main-content">
+        <main class="main-content" role="main" aria-label="主内容区域">
             <!-- 仪表盘 -->
-            <section id="dashboard" class="section active">
+            <section id="dashboard" class="section active" role="region" aria-label="系统仪表盘">
                 <div class="dashboard-grid">
                     <!-- 系统状态卡片 -->
                     <div class="card status-card">
@@ -4911,12 +4914,23 @@ response = requests.get(
             var statusEl = document.getElementById('feature-status');
             var panel = document.getElementById('feature-panel');
             
+            /* P1-008修复: 添加SelfLnnApi存在性检查，防止API未就绪时同步抛出TypeError */
+            if (!window.SelfLnnApi || typeof window.SelfLnnApi.request !== 'function') {
+                if (statusEl) {
+                    statusEl.textContent = '服务未连接';
+                    statusEl.style.color = '#ff4444';
+                }
+                if (grid) grid.innerHTML = '<div class="feature-loading">API服务未就绪，请稍后刷新页面</div>';
+                return;
+            }
+            
             Promise.all([
                 window.SelfLnnApi.request('/agi/features', {method:'GET'}).catch(function() { return null; }),
                 window.SelfLnnApi.request('/agi/feature_list', {method:'GET'}).catch(function() { return null; }),
                 window.SelfLnnApi.request('/knowledge', {method:'GET'}).catch(function() { return null; }),
                 window.SelfLnnApi.request('/status', {method:'GET'}).catch(function() { return null; })
             ]).then(function(results) {
+                /* P1-008修复: 对results数组中的每个元素进行null检查，防止后端返回异常数据时崩溃 */
                 var features = results[0];
                 var featureList = results[1];
                 var knowledge = results[2];
@@ -7072,7 +7086,7 @@ response = requests.get(
         // UI辅助函数
         function showLoading(message) {
             // 实现加载状态显示
-            const loadingEl = document.getElementById('loading-overlay') || createLoadingOverlay;
+            const loadingEl = document.getElementById('loading-overlay') || createLoadingOverlay();
             loadingEl.querySelector('.loading-message').textContent = message;
             loadingEl.style.display = 'flex';
         }
@@ -7475,7 +7489,7 @@ response = requests.get(
                 updateConnectionStatus(event.detail.connected, event.detail.message);
                 if (event.detail.connected) {
                     clearConnectionTimeout();
-                    hideReconnectToast;
+                    hideReconnectToast();
                 } else {
                     startConnectionTimeout();
                 }
@@ -7547,7 +7561,7 @@ response = requests.get(
                 banner.className = 'connection-banner disconnected';
                 indicator.className = 'connection-dot disconnected';
                 const elapsed = disconnectStartTime ? 
-                    Math.floor((Date.now - disconnectStartTime) / 1000) : 0;
+                    Math.floor((Date.now() - disconnectStartTime) / 1000) : 0;
                 text.textContent = '系统离线' + (message ? ' — ' + message : '') + 
                     (elapsed > 0 ? '（已离线 ' + elapsed + ' 秒）' : '');
                 banner.style.display = 'flex';
@@ -7575,7 +7589,7 @@ response = requests.get(
                 justify-content: center;
                 font-size: 14px;
                 font-weight: 500;
-                transition: all 0.3s ease;
+                transition: opacity 0.3s ease, background 0.3s ease;
                 cursor: pointer;
             `;
             banner.innerHTML = `
@@ -7615,13 +7629,13 @@ response = requests.get(
             
             // 手动重连按钮
             document.getElementById('connection-retry-btn').addEventListener('click', function(e) {
-                e.stopPropagation;
-                manualReconnect;
+                e.stopPropagation();
+                manualReconnect();
             });
             
             // 关闭按钮 - 断开时不能关闭，连接时可关闭
             document.getElementById('connection-close-btn').addEventListener('click', function(e) {
-                e.stopPropagation;
+                e.stopPropagation();
                 const banner2 = document.getElementById('connection-banner');
                 if (banner2.classList.contains('connected')) {
                     banner2.style.display = 'none';
@@ -7631,7 +7645,7 @@ response = requests.get(
             // 点击横幅也触发重连
             banner.addEventListener('click', function() {
                 if (this.classList.contains('disconnected')) {
-                    manualReconnect;
+                    manualReconnect();
                 }
             });
             
@@ -7698,21 +7712,21 @@ response = requests.get(
             document.body.appendChild(toast);
             
             document.getElementById('reconnect-now-btn').addEventListener('click', function() {
-                manualReconnect;
+                manualReconnect();
             });
             
             document.getElementById('reconnect-cancel-btn').addEventListener('click', function() {
-                hideReconnectToast;
+                hideReconnectToast();
             });
         }
         
         function startConnectionTimeout() {
             if (!disconnectStartTime) {
-                disconnectStartTime = Date.now;
+                disconnectStartTime = Date.now();
             }
             if (!connectionTimeoutTimer) {
                 connectionTimeoutTimer = setInterval(function() {
-                    const elapsed = Math.floor((Date.now - disconnectStartTime) / 1000);
+                    const elapsed = Math.floor((Date.now() - disconnectStartTime) / 1000);
                     updateConnectionStatus(false, '正在尝试重连...');
                     
                     // 更新已离线时间
@@ -7813,8 +7827,8 @@ response = requests.get(
                 const status = await apiService.checkConnection();
                 if (status.connected) {
                     updateConnectionStatus(true);
-                    clearConnectionTimeout;
-                    hideReconnectToast;
+                    clearConnectionTimeout();
+                    hideReconnectToast();
                     if (btn) {
                         btn.disabled = false;
                         btn.textContent = '立即重连';
@@ -7835,7 +7849,7 @@ response = requests.get(
                 }
                 // 自动重试
                 if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-                    setTimeout(() => manualReconnect, 15000);
+                    setTimeout(() => manualReconnect(), 15000);
                 }
             }
         }

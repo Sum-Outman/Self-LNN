@@ -16,6 +16,34 @@
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
+#include <time.h>
+/* P2-02修复: 引入stdint.h提供uint64_t类型，用于审计日志ID的无回绕递增 */
+#include <stdint.h>
+
+/* P2-02修复: 原子递增uint64_t，跨平台支持
+ * Windows: 使用InterlockedIncrement64
+ * Linux/POSIX: 使用__sync_fetch_and_add */
+#ifdef _WIN32
+#include <windows.h>
+/* 使用InterlockedIncrement64进行64位原子递增，返回递增后的值 */
+static __inline uint64_t audit_atomic_inc64(uint64_t volatile* p) {
+    return (uint64_t)InterlockedIncrement64((LONG64 volatile*)p);
+}
+#else
+static __inline uint64_t audit_atomic_inc64(uint64_t volatile* p) {
+    return (uint64_t)__sync_add_and_fetch(p, (uint64_t)1);
+}
+#endif
+#define AUDIT_ATOMIC_INC64(p) audit_atomic_inc64(p)
+
+/* P0-001修复: 文件持久化所需的目录创建支持 */
+#ifdef _WIN32
+#include <direct.h>
+#define audit_mkdir(path) _mkdir(path)
+#else
+#include <sys/stat.h>
+#define audit_mkdir(path) mkdir(path, 0755)
+#endif
 
 /* ============================================================================
  * 内部数据结构
@@ -27,21 +55,21 @@ struct AuditLogger {
     size_t operation_count;
     size_t operation_capacity;
     size_t operation_next_id;
-    long operation_seq;
+    uint64_t operation_seq;       /* P2-02修复: 使用uint64_t防止回绕溢出 */
 
     /* A09.3.1 决策日志环形缓冲区 */
     AuditDecisionEntry* decision_log;
     size_t decision_count;
     size_t decision_capacity;
     size_t decision_next_id;
-    long decision_seq;
+    uint64_t decision_seq;       /* P2-02修复: 使用uint64_t防止回绕溢出 */
 
     /* A09.3.1 变更日志环形缓冲区 */
     AuditChangeEntry* change_log;
     size_t change_count;
     size_t change_capacity;
     size_t change_next_id;
-    long change_seq;
+    uint64_t change_seq;         /* P2-02修复: 使用uint64_t防止回绕溢出 */
 
     /* A09.3.2 合规规则 */
     AuditComplianceRule* compliance_rules;
@@ -58,14 +86,19 @@ struct AuditLogger {
      * 防止并发线程导致operation_next_id/decision_next_id/change_next_id
      * 竞态越界写入和环形缓冲区数据损坏 */
     MutexHandle lock;
+
+    /* P0-001修复: 文件持久化相关字段 */
+    char last_flush_date[16];    /**< 上次刷新日期，格式YYYYMMDD，用于日志轮转判断 */
+    int last_flush_day;           /**< 上次刷新日期在年内的编号(0-365)，用于快速比较 */
+    char log_dir[256];           /**< 审计日志输出目录路径 */
 };
 
 /* ============================================================================
  * 内部辅助函数
  * ============================================================================ */
 
-static long audit_timestamp_now(void) {
-    return (long)time(NULL);
+static uint64_t audit_timestamp_now(void) {
+    return (uint64_t)time(NULL);
 }
 
 static int audit_str_contains(const char* str, const char* substr) {
@@ -121,7 +154,7 @@ static void audit_logs_append(AuditLogger* logger, AuditUnifiedEventType event_t
     int idx = logger->logs_next_id;
     AuditUnifiedLogRecord* rec = &logger->logs[idx];
 
-    rec->id = (long)audit_timestamp_now();
+    rec->id = (uint64_t)audit_timestamp_now();
     rec->timestamp = audit_timestamp_now();
     rec->event_type = event_type;
     rec->data_type = data_type;
@@ -303,10 +336,16 @@ AuditLogger* audit_logger_create(void) {
         return NULL;
     }
 
-    logger->operation_seq = 1;
-    logger->decision_seq = 1;
-    logger->change_seq = 1;
-    
+    logger->operation_seq = 1ULL;
+    logger->decision_seq = 1ULL;
+    logger->change_seq = 1ULL;
+
+    /* P0-001修复: 初始化文件持久化字段 */
+    memset(logger->last_flush_date, 0, sizeof(logger->last_flush_date));
+    logger->last_flush_day = -1;
+    strncpy(logger->log_dir, "logs", sizeof(logger->log_dir) - 1);
+    logger->log_dir[sizeof(logger->log_dir) - 1] = '\0';
+
     return logger;
 }
 
@@ -319,20 +358,24 @@ void audit_logger_free(AuditLogger* logger) {
     safe_free((void**)&logger->change_log);
     safe_free((void**)&logger->compliance_rules);
     safe_free((void**)&logger->logs);
-    safe_free((void**)&logger);
+    /* DEFECT-007修复: 使用临时局部变量通过safe_free释放 */
+    {
+        void* temp = logger;
+        safe_free(&temp);
+    }
 }
 
 /* ============================================================================
  * A09.3.1 操作日志
  * ============================================================================ */
 
-long audit_log_operation(AuditLogger* logger, AuditOperationType op_type,
+uint64_t audit_log_operation(AuditLogger* logger, AuditOperationType op_type,
                           const char* op_name, const char* operator_name,
                           const char* target, const char* before_state,
                           const char* after_state, const char* result,
                           int success, float duration_ms, const char* detail)
 {
-    if (!logger) return -1;
+    if (!logger) return 0;
 
     /* P1修复: 加锁保护operation_next_id的读-改-写操作，防止并发写入导致越界 */
     mutex_lock(logger->lock);
@@ -340,7 +383,8 @@ long audit_log_operation(AuditLogger* logger, AuditOperationType op_type,
     size_t idx = logger->operation_next_id;
     AuditOperationEntry* entry = &logger->operation_log[idx];
 
-    entry->log_id = logger->operation_seq++;
+    /* P2-02修复: 使用原子递增uint64_t替代long++，防止回绕溢出和并发竞态 */
+    entry->log_id = AUDIT_ATOMIC_INC64(&logger->operation_seq);
     entry->timestamp = audit_timestamp_now();
     entry->op_type = op_type;
 
@@ -403,8 +447,20 @@ long audit_log_operation(AuditLogger* logger, AuditOperationType op_type,
     }
 
     /* P1修复: 在锁内保存返回值，释放锁后返回 */
-    long ret_log_id = entry->log_id;
+    uint64_t ret_log_id = entry->log_id;
     mutex_unlock(logger->lock);
+
+    /* P0-001修复: 关键操作后自动将内存日志刷写到磁盘文件
+     * 以下操作类型触发自动刷写：系统停止(紧急停止)、配置变更、熔断触发 */
+    if (op_type == AUDIT_OP_SYSTEM_STOP ||
+        op_type == AUDIT_OP_CONFIG_CHANGE ||
+        (op_name && (strstr(op_name, "熔断") != NULL ||
+                     strstr(op_name, "circuit_breaker") != NULL ||
+                     strstr(op_name, "紧急停止") != NULL ||
+                     strstr(op_name, "emergency_stop") != NULL))) {
+        audit_flush_to_file(logger);
+    }
+
     return ret_log_id;
 }
 
@@ -472,7 +528,7 @@ int audit_query_operations_by_operator(const AuditLogger* logger, const char* op
  * A09.3.1 决策日志
  * ============================================================================ */
 
-long audit_log_decision(AuditLogger* logger,
+uint64_t audit_log_decision(AuditLogger* logger,
                          const char* decision_name, const char* context,
                          float confidence, float utility,
                          int alternative_count, const char* chosen_alternative,
@@ -481,7 +537,7 @@ long audit_log_decision(AuditLogger* logger,
                          const char* error_message, int human_override,
                          const char* override_reason)
 {
-    if (!logger) return -1;
+    if (!logger) return 0;
 
     /* P1修复: 加锁保护decision_next_id的读-改-写操作，防止并发写入导致越界 */
     mutex_lock(logger->lock);
@@ -489,7 +545,8 @@ long audit_log_decision(AuditLogger* logger,
     size_t idx = logger->decision_next_id;
     AuditDecisionEntry* entry = &logger->decision_log[idx];
 
-    entry->decision_id = logger->decision_seq++;
+    /* P2-02修复: 使用原子递增uint64_t替代long++，防止回绕溢出 */
+    entry->decision_id = AUDIT_ATOMIC_INC64(&logger->decision_seq);
     entry->timestamp = audit_timestamp_now();
 
     if (decision_name) strncpy(entry->decision_name, decision_name, sizeof(entry->decision_name) - 1);
@@ -551,8 +608,17 @@ long audit_log_decision(AuditLogger* logger,
     }
 
     /* P1修复: 在锁内保存返回值，释放锁后返回 */
-    long ret_decision_id = entry->decision_id;
+    uint64_t ret_decision_id = entry->decision_id;
     mutex_unlock(logger->lock);
+
+    /* P0-001修复: 关键决策(熔断/紧急停止)后自动将内存日志刷写到磁盘 */
+    if (decision_name && (strstr(decision_name, "熔断") != NULL ||
+                          strstr(decision_name, "circuit_breaker") != NULL ||
+                          strstr(decision_name, "紧急停止") != NULL ||
+                          strstr(decision_name, "emergency_stop") != NULL)) {
+        audit_flush_to_file(logger);
+    }
+
     return ret_decision_id;
 }
 
@@ -580,14 +646,14 @@ int audit_query_decisions(const AuditLogger* logger, time_t start, time_t end,
  * A09.3.1 变更日志
  * ============================================================================ */
 
-long audit_log_change(AuditLogger* logger, AuditChangeType change_type,
+uint64_t audit_log_change(AuditLogger* logger, AuditChangeType change_type,
                        const char* change_name, const char* initiator,
                        const char* component, const char* old_value,
                        const char* new_value, const char* reason,
                        int approved, const char* approver,
                        int rollback_possible, const char* rollback_instruction)
 {
-    if (!logger) return -1;
+    if (!logger) return 0;
 
     /* P1修复: 加锁保护change_next_id的读-改-写操作，防止并发写入导致越界 */
     mutex_lock(logger->lock);
@@ -595,7 +661,8 @@ long audit_log_change(AuditLogger* logger, AuditChangeType change_type,
     size_t idx = logger->change_next_id;
     AuditChangeEntry* entry = &logger->change_log[idx];
 
-    entry->change_id = logger->change_seq++;
+    /* P2-02修复: 使用原子递增uint64_t替代long++，防止回绕溢出 */
+    entry->change_id = AUDIT_ATOMIC_INC64(&logger->change_seq);
     entry->timestamp = audit_timestamp_now();
     entry->change_type = change_type;
 
@@ -643,8 +710,12 @@ long audit_log_change(AuditLogger* logger, AuditChangeType change_type,
     }
 
     /* P1修复: 在锁内保存返回值，释放锁后返回 */
-    long ret_change_id = entry->change_id;
+    uint64_t ret_change_id = entry->change_id;
     mutex_unlock(logger->lock);
+
+    /* P0-001修复: 配置变更后自动将内存日志刷写到磁盘文件 */
+    audit_flush_to_file(logger);
+
     return ret_change_id;
 }
 
@@ -1605,6 +1676,326 @@ int audit_export_json(const AuditLogger* logger, time_t start, time_t end,
     }
 
     return (int)(pos - json_buffer);
+}
+
+/* ============================================================================
+ * P0-001修复: 文件持久化 — 日志轮转
+ *
+ * 按日轮转审计日志文件：
+ *   - 检查当前日期是否与上次刷写日期不同
+ *   - 如果进入新的一天，清理超过7天的旧日志文件
+ *   - 保留最近7天的审计日志文件
+ * ============================================================================ */
+int audit_log_rotate(AuditLogger* logger) {
+    if (!logger) return -1;
+
+    /* 获取当前日期信息 */
+    time_t now = time(NULL);
+    struct tm* tm_now = localtime(&now);
+    if (!tm_now) return -1;
+
+    char current_date[16];
+    snprintf(current_date, sizeof(current_date), "%04d%02d%02d",
+             tm_now->tm_year + 1900, tm_now->tm_mon + 1, tm_now->tm_mday);
+
+    int current_day = tm_now->tm_yday;
+
+    /* 如果日期未变化，无需轮转 */
+    if (logger->last_flush_day == current_day) {
+        return 0;
+    }
+
+    /* 日期已变化，更新记录 */
+    strncpy(logger->last_flush_date, current_date, sizeof(logger->last_flush_date) - 1);
+    logger->last_flush_date[sizeof(logger->last_flush_date) - 1] = '\0';
+    logger->last_flush_day = current_day;
+
+    /* 清理超过7天的旧日志文件 */
+    int purged_count = 0;
+    for (int days_ago = 7; days_ago <= 30; days_ago++) {
+        /* 计算目标日期 */
+        time_t target_time = now - (time_t)(days_ago * 86400);
+        struct tm* tm_target = localtime(&target_time);
+        if (!tm_target) continue;
+
+        char target_date[16];
+        snprintf(target_date, sizeof(target_date), "%04d%02d%02d",
+                 tm_target->tm_year + 1900, tm_target->tm_mon + 1, tm_target->tm_mday);
+
+        char filepath[512];
+        snprintf(filepath, sizeof(filepath), "%s/audit_%s.jsonl",
+                 logger->log_dir, target_date);
+
+        /* 尝试删除旧文件 */
+        if (remove(filepath) == 0) {
+            purged_count++;
+        }
+        /* 如果文件不存在，说明已经清理过了，可以提前退出 */
+        /* 继续尝试更早的日期，以防有遗漏 */
+    }
+
+    /* 返回清理的文件数量（0表示无需清理或无旧文件） */
+    return purged_count;
+}
+
+/* ============================================================================
+ * P0-001修复: 文件持久化 — 将内存审计日志刷写到磁盘
+ *
+ * 将内存环形缓冲区中的所有操作日志、决策日志、变更日志
+ * 以JSON行格式写入磁盘文件。
+ *
+ * 文件格式: logs/audit_YYYYMMDD.jsonl (每行一个JSON对象)
+ * 写入模式: fopen("a") 追加模式
+ * 数据安全: 每次写入后调用 fflush 确保数据落盘
+ *
+ * 线程安全: 内部持有锁读取缓冲区数据，文件I/O在锁外执行
+ * ============================================================================ */
+int audit_flush_to_file(AuditLogger* logger) {
+    if (!logger) return -1;
+
+    /* 获取当前日期 */
+    time_t now = time(NULL);
+    struct tm* tm_now = localtime(&now);
+    if (!tm_now) return -1;
+
+    char date_str[16];
+    snprintf(date_str, sizeof(date_str), "%04d%02d%02d",
+             tm_now->tm_year + 1900, tm_now->tm_mon + 1, tm_now->tm_mday);
+
+    /* 日志轮转检查（如果日期已变化，清理旧文件） */
+    audit_log_rotate(logger);
+
+    /* 构建文件路径 */
+    char filepath[512];
+    snprintf(filepath, sizeof(filepath), "%s/audit_%s.jsonl",
+             logger->log_dir, date_str);
+
+    /* 确保日志目录存在 */
+    audit_mkdir(logger->log_dir);
+
+    /* 打开文件（追加模式，如不存在则创建） */
+    FILE* fp = fopen(filepath, "a");
+    if (!fp) {
+        /* 目录可能不存在，尝试创建后重试 */
+        audit_mkdir(logger->log_dir);
+        fp = fopen(filepath, "a");
+        if (!fp) {
+            return -1;  /* 无法打开文件，静默失败（不阻塞日志记录） */
+        }
+    }
+
+    int total_written = 0;
+    size_t cap, count;
+
+    /* ================================================================
+     * 第一阶段: 在锁内读取缓冲区数据，拷贝到临时缓冲区后释放锁
+     * 避免在文件I/O期间持有锁（I/O可能很慢）
+     * ================================================================ */
+
+    /* 估算需要的临时缓冲区大小: 每条日志约1KB */
+    size_t total_entries = logger->operation_count + logger->decision_count + logger->change_count;
+    size_t max_entries = total_entries > 0 ? total_entries : 1;
+
+    /* 为三种日志分配临时拷贝数组 */
+    AuditOperationEntry* op_copy = NULL;
+    AuditDecisionEntry* dec_copy = NULL;
+    AuditChangeEntry* chg_copy = NULL;
+    size_t op_copy_count = 0, dec_copy_count = 0, chg_copy_count = 0;
+
+    mutex_lock(logger->lock);
+
+    /* 拷贝操作日志 */
+    cap = logger->operation_capacity;
+    count = logger->operation_count;
+    if (count > 0) {
+        op_copy = (AuditOperationEntry*)malloc(count * sizeof(AuditOperationEntry));
+        if (op_copy) {
+            for (size_t i = 0; i < count; i++) {
+                size_t idx = (logger->operation_next_id + cap - count + i) % cap;
+                op_copy[i] = logger->operation_log[idx];
+            }
+            op_copy_count = count;
+        }
+    }
+
+    /* 拷贝决策日志 */
+    cap = logger->decision_capacity;
+    count = logger->decision_count;
+    if (count > 0) {
+        dec_copy = (AuditDecisionEntry*)malloc(count * sizeof(AuditDecisionEntry));
+        if (dec_copy) {
+            for (size_t i = 0; i < count; i++) {
+                size_t idx = (logger->decision_next_id + cap - count + i) % cap;
+                dec_copy[i] = logger->decision_log[idx];
+            }
+            dec_copy_count = count;
+        }
+    }
+
+    /* 拷贝变更日志 */
+    cap = logger->change_capacity;
+    count = logger->change_count;
+    if (count > 0) {
+        chg_copy = (AuditChangeEntry*)malloc(count * sizeof(AuditChangeEntry));
+        if (chg_copy) {
+            for (size_t i = 0; i < count; i++) {
+                size_t idx = (logger->change_next_id + cap - count + i) % cap;
+                chg_copy[i] = logger->change_log[idx];
+            }
+            chg_copy_count = count;
+        }
+    }
+
+    mutex_unlock(logger->lock);
+
+    /* ================================================================
+     * 第二阶段: 在锁外执行文件I/O写入
+     * ================================================================ */
+
+    /* 写入操作日志 */
+    for (size_t i = 0; i < op_copy_count; i++) {
+        AuditOperationEntry* e = &op_copy[i];
+
+        /* 转义可能包含特殊字符的字符串字段 */
+        char esc_op_name[256] = {0};
+        char esc_oper[256] = {0};
+        char esc_target[512] = {0};
+        char esc_before[512] = {0};
+        char esc_after[512] = {0};
+        char esc_result[256] = {0};
+        char esc_detail[1024] = {0};
+
+        json_escape_string(e->operation_name, esc_op_name, sizeof(esc_op_name));
+        json_escape_string(e->operator_name, esc_oper, sizeof(esc_oper));
+        json_escape_string(e->target, esc_target, sizeof(esc_target));
+        json_escape_string(e->before_state, esc_before, sizeof(esc_before));
+        json_escape_string(e->after_state, esc_after, sizeof(esc_after));
+        json_escape_string(e->result, esc_result, sizeof(esc_result));
+        json_escape_string(e->detail, esc_detail, sizeof(esc_detail));
+
+        fprintf(fp,
+            "{\"type\":\"operation\",\"log_id\":%ld,\"timestamp\":%ld,"
+            "\"op_type\":%d,\"op_name\":\"%s\",\"operator\":\"%s\","
+            "\"target\":\"%s\",\"before\":\"%s\",\"after\":\"%s\","
+            "\"result\":\"%s\",\"success\":%d,\"duration_ms\":%.3f,"
+            "\"detail\":\"%s\"}\n",
+            e->log_id, (long)e->timestamp, (int)e->op_type,
+            esc_op_name, esc_oper, esc_target, esc_before, esc_after,
+            esc_result, e->success, (double)e->duration_ms, esc_detail);
+        total_written++;
+    }
+
+    /* 写入决策日志 */
+    for (size_t i = 0; i < dec_copy_count; i++) {
+        AuditDecisionEntry* e = &dec_copy[i];
+
+        char esc_name[256] = {0};
+        char esc_context[1024] = {0};
+        char esc_alt[256] = {0};
+        char esc_path[2048] = {0};
+        char esc_error[512] = {0};
+        char esc_override[512] = {0};
+
+        json_escape_string(e->decision_name, esc_name, sizeof(esc_name));
+        json_escape_string(e->context, esc_context, sizeof(esc_context));
+        json_escape_string(e->chosen_alternative, esc_alt, sizeof(esc_alt));
+        json_escape_string(e->reasoning_path, esc_path, sizeof(esc_path));
+        json_escape_string(e->error_message, esc_error, sizeof(esc_error));
+        json_escape_string(e->override_reason, esc_override, sizeof(esc_override));
+
+        fprintf(fp,
+            "{\"type\":\"decision\",\"decision_id\":%ld,\"timestamp\":%ld,"
+            "\"name\":\"%s\",\"context\":\"%s\",\"confidence\":%.4f,"
+            "\"utility\":%.4f,\"alternatives\":%d,\"chosen\":\"%s\","
+            "\"reasoning\":\"%s\",\"autonomous\":%d,\"exec_ms\":%.3f,"
+            "\"has_error\":%d,\"error\":\"%s\",\"human_override\":%d,"
+            "\"override_reason\":\"%s\"}\n",
+            e->decision_id, (long)e->timestamp,
+            esc_name, esc_context, (double)e->confidence,
+            (double)e->utility, e->alternative_count, esc_alt,
+            esc_path, e->is_autonomous, (double)e->execution_time_ms,
+            e->has_error, esc_error, e->human_override, esc_override);
+        total_written++;
+    }
+
+    /* 写入变更日志 */
+    for (size_t i = 0; i < chg_copy_count; i++) {
+        AuditChangeEntry* e = &chg_copy[i];
+
+        char esc_name[256] = {0};
+        char esc_initiator[256] = {0};
+        char esc_component[256] = {0};
+        char esc_old[1024] = {0};
+        char esc_new[1024] = {0};
+        char esc_reason[512] = {0};
+        char esc_approver[256] = {0};
+        char esc_rollback[512] = {0};
+
+        json_escape_string(e->change_name, esc_name, sizeof(esc_name));
+        json_escape_string(e->change_initiator, esc_initiator, sizeof(esc_initiator));
+        json_escape_string(e->component, esc_component, sizeof(esc_component));
+        json_escape_string(e->old_value, esc_old, sizeof(esc_old));
+        json_escape_string(e->new_value, esc_new, sizeof(esc_new));
+        json_escape_string(e->reason, esc_reason, sizeof(esc_reason));
+        json_escape_string(e->approver, esc_approver, sizeof(esc_approver));
+        json_escape_string(e->rollback_instruction, esc_rollback, sizeof(esc_rollback));
+
+        fprintf(fp,
+            "{\"type\":\"change\",\"change_id\":%ld,\"timestamp\":%ld,"
+            "\"change_type\":%d,\"name\":\"%s\",\"initiator\":\"%s\","
+            "\"component\":\"%s\",\"old_value\":\"%s\",\"new_value\":\"%s\","
+            "\"reason\":\"%s\",\"approved\":%d,\"approver\":\"%s\","
+            "\"rollback_possible\":%d,\"rollback\":\"%s\"}\n",
+            e->change_id, (long)e->timestamp, (int)e->change_type,
+            esc_name, esc_initiator, esc_component, esc_old, esc_new,
+            esc_reason, e->approved, esc_approver,
+            e->rollback_possible, esc_rollback);
+        total_written++;
+    }
+
+    /* 确保数据落盘 */
+    fflush(fp);
+    fclose(fp);
+
+    /* 释放临时拷贝缓冲区 */
+    if (op_copy) free(op_copy);
+    if (dec_copy) free(dec_copy);
+    if (chg_copy) free(chg_copy);
+
+    /* 更新最后刷新日期 */
+    strncpy(logger->last_flush_date, date_str, sizeof(logger->last_flush_date) - 1);
+    logger->last_flush_date[sizeof(logger->last_flush_date) - 1] = '\0';
+    logger->last_flush_day = tm_now->tm_yday;
+
+    return total_written;
+}
+
+/* ============================================================================
+ * P0-001修复: 文件持久化 — 系统启动审计事件
+ *
+ * 在系统启动时调用，记录一次"系统启动"操作日志，并立即刷写到磁盘。
+ * 这确保了即使系统在启动后不久崩溃，启动事件也已持久化。
+ * ============================================================================ */
+int audit_log_startup(AuditLogger* logger) {
+    if (!logger) return -1;
+
+    /* 记录系统启动操作日志 */
+    long log_id = audit_log_operation(logger,
+        AUDIT_OP_SYSTEM_START,
+        "系统启动",           /* 操作名称 */
+        "SYSTEM",             /* 操作者 */
+        "全模态AGI系统",       /* 目标 */
+        "已停止",              /* 操作前状态 */
+        "运行中",              /* 操作后状态 */
+        "启动成功",            /* 结果 */
+        1,                    /* 成功 */
+        0.0f,                 /* 耗时 */
+        "系统正常启动，审计日志系统已初始化");  /* 详情 */
+
+    /* 立即将启动日志刷写到磁盘 */
+    audit_flush_to_file(logger);
+
+    return (int)log_id;
 }
 
 int audit_setup_default_compliance(AuditLogger* logger) {

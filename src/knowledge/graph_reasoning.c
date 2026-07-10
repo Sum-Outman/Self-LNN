@@ -41,6 +41,20 @@ static int gr_rand_int(int min, int max) {
     return min + (int)(gr_rand_float() * (max - min + 1));
 }
 
+/* P1-04修复：qsort比较函数 —— 替代O(N^2)冒泡排序
+ * 使用静态指针传递分数数组，供qsort回调使用 */
+static const float* g_qsort_scores = NULL;
+
+static int gr_qsort_score_cmp(const void* a, const void* b) {
+    int ia = *(const int*)a;
+    int ib = *(const int*)b;
+    float sa = g_qsort_scores[ia];
+    float sb = g_qsort_scores[ib];
+    if (sa < sb) return -1;
+    if (sa > sb) return 1;
+    return 0;
+}
+
 static float gr_rand_normal(void) {
     float u1 = gr_rand_float();
     float u2 = gr_rand_float();
@@ -1267,15 +1281,10 @@ int graph_reasoner_multi_hop_reason(GraphReasoner* reasoner,
         }
         for (int i = 0; i < reasoner->entity_count; i++) indices[i] = i;
 
-        for (int i = 0; i < reasoner->entity_count - 1; i++) {
-            for (int j = i + 1; j < reasoner->entity_count; j++) {
-                if (all_scores[indices[i]] > all_scores[indices[j]]) {
-                    int tmp = indices[i];
-                    indices[i] = indices[j];
-                    indices[j] = tmp;
-                }
-            }
-        }
+        /* P1-04修复：使用qsort替代O(N^2)冒泡排序 */
+        g_qsort_scores = all_scores;
+        qsort(indices, reasoner->entity_count, sizeof(int), gr_qsort_score_cmp);
+        g_qsort_scores = NULL;
 
         int ret_cnt = reasoner->entity_count < max_results
                       ? reasoner->entity_count : max_results;
@@ -1323,15 +1332,10 @@ int graph_reasoner_multi_hop_reason(GraphReasoner* reasoner,
     }
     for (int i = 0; i < reasoner->entity_count; i++) indices[i] = i;
 
-    for (int i = 0; i < reasoner->entity_count - 1; i++) {
-        for (int j = i + 1; j < reasoner->entity_count; j++) {
-            if (all_scores[indices[i]] > all_scores[indices[j]]) {
-                int tmp = indices[i];
-                indices[i] = indices[j];
-                indices[j] = tmp;
-            }
-        }
-    }
+    /* P1-04修复：使用qsort替代O(N^2)冒泡排序 */
+    g_qsort_scores = all_scores;
+    qsort(indices, reasoner->entity_count, sizeof(int), gr_qsort_score_cmp);
+    g_qsort_scores = NULL;
 
     int ret_cnt = reasoner->entity_count < max_results
                   ? reasoner->entity_count : max_results;

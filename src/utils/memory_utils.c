@@ -162,10 +162,8 @@ static volatile LONG g_alloc_track_lock_initialized = 0;
 static pthread_mutex_t g_alloc_track_lock = PTHREAD_MUTEX_INITIALIZER;
 #endif
 
-/**
- * @brief atexit 已注册标志
- */
-static int g_atexit_registered = 0;
+/** @brief atexit 已注册标志（D-3修复: LONG类型支持InterlockedCompareExchange原子操作） */
+static volatile LONG g_atexit_registered = 0;
 
 /**
  * @brief 程序退出时自动清理：检测泄漏 + 销毁锁
@@ -203,8 +201,15 @@ static void alloc_track_lock_init(void) {
     // pthread 静态初始化不需要额外初始化
 #endif
     if (!g_atexit_registered) {
-        g_atexit_registered = 1;
-        atexit(memory_auto_cleanup);
+        /* D-3修复: 使用InterlockedCompareExchange原子保护g_atexit_registered，
+         * 防止多线程首次调用safe_malloc时并发通过检查导致atexit多次注册。 */
+#ifdef _WIN32
+        if (InterlockedCompareExchange(&g_atexit_registered, 1, 0) == 0) {
+#else
+        if (__sync_bool_compare_and_swap(&g_atexit_registered, 0, 1)) {
+#endif
+            atexit(memory_auto_cleanup);
+        }
     }
 }
 
@@ -439,8 +444,32 @@ void* _safe_malloc(size_t size, const char* file, int line) {
 #endif
     
     // 添加块头部、尾部、保护字节和额外保护空间
+    /* P1缺陷修复: 整数溢出检查
+     * 1. align_size(size, 16) = (size + 15) & ~15, 若 size > SIZE_MAX - 15 则加法回绕
+     * 2. total_size = BLOCK_OVERHEAD + aligned_size + guard_size, 三值相加可能溢出
+     * 3. 溢出后 total_size 变小, malloc 分配不足, 后续 memset/头尾写入越界导致堆破坏 */
+    if (size > SIZE_MAX - 15) {
+        fprintf(stderr, "[错误] _safe_malloc: 对齐大小溢出 size=%zu (文件: %s, 行: %d)\n",
+                size, file ? file : "未知", line);
+        return NULL;
+    }
     size_t aligned_size = align_size(size, 16);
+    
+    /* 验证 aligned_size 未因对齐回绕（双重保险） */
+    if (aligned_size < size) {
+        fprintf(stderr, "[错误] _safe_malloc: 对齐后大小回绕 aligned_size=%zu < size=%zu (文件: %s, 行: %d)\n",
+                aligned_size, size, file ? file : "未知", line);
+        return NULL;
+    }
+    
     size_t guard_size = 16;  // 额外保护字节
+    
+    /* 检查 total_size = BLOCK_OVERHEAD + aligned_size + guard_size 是否溢出 */
+    if (aligned_size > SIZE_MAX - BLOCK_OVERHEAD - guard_size) {
+        fprintf(stderr, "[错误] _safe_malloc: 总大小溢出 aligned_size=%zu BLOCK_OVERHEAD=%zu guard_size=%zu (文件: %s, 行: %d)\n",
+                aligned_size, (size_t)BLOCK_OVERHEAD, guard_size, file ? file : "未知", line);
+        return NULL;
+    }
     size_t total_size = BLOCK_OVERHEAD + aligned_size + guard_size;
     
     // 分配内存
@@ -532,13 +561,17 @@ void* _safe_calloc(size_t num, size_t size, const char* file, int line) {
     if (g_bypass_safe_alloc) { return calloc(num, size); }
     size_t total_size;
     
-    // 检查溢出
+    // 零值检查：任一参数为零时不分配内存
     if (num == 0 || size == 0) {
         return NULL;
     }
     
-    if (size > SIZE_MAX / num) {
-        // 乘法溢出
+    /* 乘法溢出检查：当 size != 0 且 count > SIZE_MAX / size 时，
+     * count * size 会回绕(wrap around)，导致分配过小的缓冲区，
+     * 进而引发堆缓冲区溢出漏洞。使用 SIZE_MAX / size 作为安全上限。 */
+    if (size != 0 && num > SIZE_MAX / size) {
+        fprintf(stderr, "[错误] _safe_calloc: 乘法溢出 num=%zu size=%zu (文件: %s, 行: %d)\n",
+                num, size, file ? file : "未知", line);
         return NULL;
     }
     
@@ -732,8 +765,37 @@ void safe_free(void** ptr) {
      * - 已跟踪指针: 确属本工具分配, 读取头部安全, 继续执行原有的完整性校验逻辑
      *   (对齐/magic/保护字节/尾部), 在检测到损坏时仍跳过 free 以避免堆损坏扩散。 */
     if (!alloc_track_contains(data_ptr, NULL)) {
-        fprintf(stderr, "警告: 指针 %p 非safe_malloc分配, 使用系统free释放(避免静默泄漏)\n", data_ptr);
-        free(data_ptr);
+        /* DEFECT-009修复: 回退路径中的free(data_ptr)风险分析：
+         * 1. 若指针由malloc分配: data_ptr == raw_ptr, free(data_ptr)正确
+         * 2. 若指针由safe_malloc分配但跟踪丢失: data_ptr = raw_ptr + HEADER_SIZE,
+         *    free(data_ptr)会因传递给CRT的指针非原始malloc指针而堆损坏。
+         * 修复策略: 尝试读取前导头部的magic, 若匹配则使用header->raw_ptr释放;
+         * 否则假定为malloc指针直接释放。使用SEH保护防止读取无效内存。 */
+        int freed = 0;
+#ifdef _WIN32
+        __try {
+            /* 尝试读取safe_malloc头部（最小化风险窗口） */
+            MemoryBlockHeader* maybe_header = (MemoryBlockHeader*)((char*)data_ptr - BLOCK_HEADER_SIZE);
+            if (maybe_header->magic == MEMORY_MAGIC && maybe_header->raw_ptr) {
+                free(maybe_header->raw_ptr);
+                freed = 1;
+            }
+        } __except(EXCEPTION_EXECUTE_HANDLER) {
+            /* 头部不可读，回退到直接free */
+        }
+#endif
+        if (!freed) {
+            fprintf(stderr, "警告: 指针 %p 非safe_malloc分配, 使用系统free释放(避免静默泄漏)\n", data_ptr);
+#ifdef _WIN32
+            __try {
+                free(data_ptr);
+            } __except(EXCEPTION_EXECUTE_HANDLER) {
+                fprintf(stderr, "错误: free(%p) 崩溃, 指针可能已损坏, 跳过释放\n", data_ptr);
+            }
+#else
+            free(data_ptr);
+#endif
+        }
         *ptr = NULL;
         return;
     }

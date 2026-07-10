@@ -70,6 +70,11 @@ typedef struct {
     int enable_reconsolidation;    /**< 是否启用再巩固机制 */
     float reconsolidation_boost;   /**< 再巩固强度提升值 */
 
+    /* P1-02修复: 持久性因子 —— 用于Ebbinghaus遗忘曲线的时间常数计算。
+     * 值越大，记忆保留时间越长。与long_term.c的ltm_ebbinghaus_decay公式统一。
+     * 默认值1.0，对应标准记忆持久性。 */
+    float persistence;
+
     /* 睡眠巩固（记忆的睡眠模拟算法） */
     int enable_sleep_consolidation;      /**< 是否启用睡眠巩固 */
     float sleep_cycle_hours;             /**< 睡眠周期时长（模拟小时） */

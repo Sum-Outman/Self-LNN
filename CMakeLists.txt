@@ -417,6 +417,54 @@ if(BUILD_TESTS)
         target_link_libraries(diag_mem PRIVATE uuid ole32 winmm mmdevapi propsys)
     endif()
     add_test(NAME diag_mem COMMAND diag_mem WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+    # comprehensive_test: 全系统综合测试（20+子系统）
+    add_executable(comprehensive_test tests/comprehensive_test.c)
+    target_include_directories(comprehensive_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(MINGW)
+        target_link_options(comprehensive_test PRIVATE "-Wl,--start-group" "-Wl,--end-group")
+    endif()
+    target_link_libraries(comprehensive_test PRIVATE
+        selflnn_backend
+        selflnn_multisystem
+        selflnn_multimodal
+        selflnn_core
+        selflnn_math
+        selflnn_memory
+        selflnn_reasoning
+        selflnn_learning
+        selflnn_training
+        selflnn_knowledge
+        selflnn_robot
+        selflnn_concurrency
+        selflnn_cognition
+        selflnn_agi
+        selflnn_evolution
+        selflnn_programming
+        selflnn_product_design
+        selflnn_safety
+        selflnn_distributed
+        selflnn_gpu
+        utils
+    )
+    set_target_properties(comprehensive_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+    )
+    if(MSVC)
+        target_link_libraries(comprehensive_test PRIVATE uuid ole32 winmm mmdevapi propsys)
+        set_target_properties(comprehensive_test PROPERTIES LINK_FLAGS "/STACK:67108864")
+        target_compile_definitions(comprehensive_test PRIVATE
+            _CRT_SECURE_NO_WARNINGS _USE_MATH_DEFINES
+            WIN32_LEAN_AND_MEAN _WINSOCK_DEPRECATED_NO_WARNINGS)
+    elseif(WIN32)
+        target_link_libraries(comprehensive_test PRIVATE uuid ole32 winmm mmdevapi propsys setupapi pdh bcrypt)
+        target_link_options(comprehensive_test PRIVATE "-Wl,--end-group")
+    else()
+        find_package(Threads REQUIRED)
+        target_link_libraries(comprehensive_test PRIVATE Threads::Threads m dl)
+    endif()
+    add_test(NAME comprehensive_test COMMAND comprehensive_test WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+    
 endif()
 
 if(BUILD_EXAMPLES AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/examples/CMakeLists.txt)

@@ -19,6 +19,10 @@
 #include <string.h>
 #include <ctype.h>
 #include <math.h>
+#include <stdint.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 /**
  * @brief LNN文本编码默认维度
@@ -206,17 +210,74 @@ TextProcessor* text_processor_create(const TextConfig* config) {
     return processor;
 }
 
+/**
+ * @brief 检查x64指针是否为规范地址
+ */
+static int text_ptr_is_canonical(const void* ptr) {
+    if (!ptr) return 0;
+    uintptr_t val = (uintptr_t)ptr;
+    uintptr_t high = (val >> 47) & 0x1FFFF;
+    return (high == 0 || high == 0x1FFFF);
+}
+
 void text_processor_free(TextProcessor* processor) {
     if (!processor) return;
 
+    /* 验证processor自身指针 */
+    if (!text_ptr_is_canonical(processor)) {
+        log_error("text_processor_free: processor指针损坏(0x%016llX)，跳过释放",
+                  (unsigned long long)(uintptr_t)processor);
+        return;
+    }
+
+#ifdef _WIN32
+    __try {
+#endif
+    /* 释放text_lnn（带规范地址验证） */
     if (processor->owns_lnn && processor->text_lnn) {
-        lnn_free(processor->text_lnn);
+        if (text_ptr_is_canonical(processor->text_lnn)) {
+            lnn_free(processor->text_lnn);
+        } else {
+            log_error("text_processor_free: text_lnn指针损坏(0x%016llX)，跳过",
+                      (unsigned long long)(uintptr_t)processor->text_lnn);
+        }
         processor->text_lnn = NULL;
     }
 
-    safe_free((void**)&processor->hidden_state);
-    safe_free((void**)&processor->cell_state);
-    safe_free((void**)&processor->temp_input);
+    /* 逐个释放float数组指针（带规范地址验证） */
+    if (processor->hidden_state) {
+        if (text_ptr_is_canonical(processor->hidden_state)) {
+            safe_free((void**)&processor->hidden_state);
+        } else {
+            log_error("text_processor_free: hidden_state指针损坏(0x%016llX)，跳过",
+                      (unsigned long long)(uintptr_t)processor->hidden_state);
+            processor->hidden_state = NULL;
+        }
+    }
+    if (processor->cell_state) {
+        if (text_ptr_is_canonical(processor->cell_state)) {
+            safe_free((void**)&processor->cell_state);
+        } else {
+            log_error("text_processor_free: cell_state指针损坏(0x%016llX)，跳过",
+                      (unsigned long long)(uintptr_t)processor->cell_state);
+            processor->cell_state = NULL;
+        }
+    }
+    if (processor->temp_input) {
+        if (text_ptr_is_canonical(processor->temp_input)) {
+            safe_free((void**)&processor->temp_input);
+        } else {
+            log_error("text_processor_free: temp_input指针损坏(0x%016llX)，跳过",
+                      (unsigned long long)(uintptr_t)processor->temp_input);
+            processor->temp_input = NULL;
+        }
+    }
+#ifdef _WIN32
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        log_error("text_processor_free 子资源访问异常 (0x%08lX), 跳过清理", GetExceptionCode());
+    }
+#endif
+
     safe_free((void**)&processor);
 }
 
@@ -244,6 +305,16 @@ int text_process_string(TextProcessor* processor,
         size_t input_dim = processor->input_dim;
         size_t hidden_dim = processor->hidden_dim;
 
+        /* 防御性校验：防止损坏的维度值导致缓冲区越界 */
+        if (input_dim == 0 || input_dim > 4096) {
+            log_error("text_process_string: input_dim损坏(%zu)，跳过LNN编码", input_dim);
+            goto fallback_simple;
+        }
+        if (hidden_dim == 0 || hidden_dim > 4096) {
+            log_error("text_process_string: hidden_dim损坏(%zu)，跳过LNN编码", hidden_dim);
+            goto fallback_simple;
+        }
+
         /* 重置LNN隐藏状态（新文本，新编码） */
         memset(processor->hidden_state, 0, hidden_dim * sizeof(float));
         memset(processor->cell_state, 0, hidden_dim * sizeof(float));
@@ -266,19 +337,31 @@ int text_process_string(TextProcessor* processor,
             codepoint_to_lnn_input(cp, char_position,
                                    processor->temp_input, input_dim);
 
-            /* LNN前向传播：时序状态演化 */
-            float* lnn_output = (float*)safe_calloc(hidden_dim, sizeof(float));
+            /* LNN前向传播：时序状态演化
+             * 关键修复：使用LNN的实际output_size分配输出缓冲区，
+             * 而不是TextProcessor的hidden_dim。
+             * 当单一LNN策略激活时，text_lnn是全局共享LNN，
+             * 其output_size可能大于hidden_dim，导致堆溢出。 */
+            LNNConfig lnn_cfg;
+            memset(&lnn_cfg, 0, sizeof(lnn_cfg));
+            size_t lnn_output_size = hidden_dim; /* 默认使用hidden_dim */
+            if (lnn_get_config(processor->text_lnn, &lnn_cfg) == 0) {
+                lnn_output_size = lnn_cfg.output_size;
+                if (lnn_output_size > 4096) lnn_output_size = 4096; /* 安全上限 */
+            }
+            float* lnn_output = (float*)safe_calloc(lnn_output_size, sizeof(float));
             if (!lnn_output) return -1;
 
             int fwd_ret = lnn_forward(processor->text_lnn,
                                       processor->temp_input,
                                       lnn_output);
             if (fwd_ret == 0) {
-                /* 使用LNN输出更新隐藏状态 */
+                /* 使用LNN输出更新隐藏状态（仅复制hidden_dim个元素） */
+                size_t copy_count = (hidden_dim < lnn_output_size) ? hidden_dim : lnn_output_size;
                 memcpy(processor->hidden_state, lnn_output,
-                       hidden_dim * sizeof(float));
+                       copy_count * sizeof(float));
                 memcpy(processor->cell_state, lnn_output,
-                       hidden_dim * sizeof(float));
+                       copy_count * sizeof(float));
             }
 
             safe_free((void**)&lnn_output);
@@ -314,7 +397,8 @@ int text_process_string(TextProcessor* processor,
 
 /* LNN不可用时返回0特征维度，不再使用Unicode码点哈希降级
      * 系统要求液态神经网络模型全部功能，不允许降级到非LNN编码 */
-    log_warning("[文本] LNN不可用，文本特征提取返回0维度。请确保系统LNN已初始化。");
+fallback_simple:
+    log_warning("[文本] LNN不可用或维度损坏，文本特征提取返回0维度。请确保系统LNN已初始化。");
     return 0;
 }
 

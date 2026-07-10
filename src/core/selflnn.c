@@ -1,4 +1,4 @@
-/**
+﻿/**
  * SELF-LNN 主系统实现
  * 
  * K-003: 角色定义 —— selflnn.c 是整个系统的【系统级入口层】
@@ -305,12 +305,14 @@ static struct {
     void* security_monitor_deep;    /* 深度安全监控 */
     void* teaching_loop_system; /* 教学闭环系统 */
     void* multimodal_teaching; /* 多模态教学系统 */
+    void* multimodal_manager;  /* P0跨模块集成: 多模态管理器（训练管线通过全局状态访问） */
     void* dialogue_memory_manager; /* 对话记忆管理器 */
     void* rw_lock_map_system;    /* F-009修复: 读写锁映射 (替代粗粒度全局锁) */
     void* pbft_system;           /* F-006修复: PBFT拜占庭容错共识系统 */
     void* arch_controller;       /* P0-001: 动态架构控制器（运行时安全地修改LNN结构） */
     int dcpipeline_immediate_check_requested; /* 事件驱动即时自检标志 */
     int knowledge_refresh_needed; /* 知识库更新后触发LNN嵌入重编码标志 */
+    int training_trigger_requested; /* P0修复: AGI认知循环→训练管线触发标志 */
     int last_error;
 } g_system_state = {0};
 
@@ -347,6 +349,7 @@ void selflnn_unlock_lnn(void) {
 void selflnn_enforce_single_lnn(void) {
     if (g_system_state.lnn_instance) {
         g_global_singleton_lnn = (LNN*)g_system_state.lnn_instance;
+        lnn_set_global_address(g_global_singleton_lnn);  /* 持久记录，用于lnn_free保护 */
         g_single_lnn_enforced = 1;
         log_info("[单一LNN] 全局唯一液态神经网络已锁定，禁止子系统创建独立LNN");
     }
@@ -388,6 +391,7 @@ LNN* selflnn_get_or_create_lnn(const LNNConfig* config) {
 
     /* CAS成功: 我们独占地设置了全局单例 */
     g_single_lnn_enforced = 1;
+    lnn_set_global_address(lnn);  /* 持久记录，用于lnn_free保护 */
     log_info("[单一LNN] 创建并锁定全局唯一液态神经网络");
     return lnn;
 }
@@ -615,8 +619,24 @@ int selflnn_shutdown(void)
     
     log_info("开始关闭SELF-LNN系统...");
     
-    // 关闭子系统
+    /* DEFECT-009修复: 关闭子系统使用SEH保护，防止单个子系统崩溃导致整个关闭失败 */
+    /* DEFECT-011改进: 异常后强制清理关键指针，防止悬空指针导致后续重新初始化时误用 */
+#ifdef _WIN32
+    __try {
+        shutdown_subsystems();
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        log_error("关闭子系统时发生异常 (0x%08lX), 强制清理关键指针...",
+                  GetExceptionCode());
+        /* 强制置空关键指针，防止悬空指针问题 */
+        g_system_state.unified_signal_processor = NULL;
+        g_system_state.unified_signal_processor_advanced = NULL;
+        g_system_state.unified_signal_processor_training = NULL;
+        g_system_state.lnn_instance = NULL;
+        g_global_singleton_lnn = NULL;
+    }
+#else
     shutdown_subsystems();
+#endif
     
     // 清理配置
     memset(&g_system_state.config, 0, sizeof(SystemConfig));
@@ -1302,6 +1322,19 @@ UnifiedSignalProcessorTraining* selflnn_get_unified_signal_processor_training(vo
     return g_system_state.unified_signal_processor_training;
 }
 
+/* ================================================================
+ * P0跨模块集成: 多模态管理器全局getter/setter
+ * 训练管线通过此接口获取多模态管理器实例，实现训练与多模态融合的深度集成。
+ * 当多模态管理器不可用时返回NULL，调用方需优雅降级。
+ * ================================================================ */
+void* selflnn_get_multimodal_manager(void) {
+    return g_system_state.multimodal_manager;
+}
+
+void selflnn_set_multimodal_manager(void* manager) {
+    g_system_state.multimodal_manager = manager;
+}
+
 /* selflnn_get_lnn 已在F-017单LNN强制执行区定义 */
 
 LNN* selflnn_get_shared_lnn(void) {
@@ -1464,6 +1497,22 @@ void selflnn_trigger_knowledge_refresh(void) {
 int selflnn_check_and_reset_knowledge_refresh(void) {
     if (g_system_state.knowledge_refresh_needed) {
         g_system_state.knowledge_refresh_needed = 0;
+        return 1;
+    }
+    return 0;
+}
+
+/* P0修复: AGI认知循环→训练管线触发机制
+ * 当AGI认知循环检测到性能下降、高新颖性数据模式或修正频繁介入时，
+ * 调用selflnn_trigger_training()设置触发标志，后台训练循环在下次迭代中
+ * 优先响应此标志，跳过定时间隔检查直接执行训练步。 */
+void selflnn_trigger_training(void) {
+    g_system_state.training_trigger_requested = 1;
+}
+
+int selflnn_check_and_reset_training_trigger(void) {
+    if (g_system_state.training_trigger_requested) {
+        g_system_state.training_trigger_requested = 0;
         return 1;
     }
     return 0;
@@ -2027,6 +2076,7 @@ static int initialize_subsystems(const SystemConfig* config)
         g_system_state.unified_signal_processor_advanced = (void*)adaptive_router_create(&router_config);
         if (g_system_state.unified_signal_processor_advanced) {
             log_info("高级信号处理器（自适应路由器）初始化成功");
+            SUBSYS_INIT(SUBSYS_IDX_SIGNAL_ADVANCED);  /* DEFECT-011修复: 添加缺失的SUBSYS_INIT */
         } else {
             log_warning("高级信号处理器创建失败，跳过（基础处理器仍可用）");
         }
@@ -2042,6 +2092,7 @@ static int initialize_subsystems(const SystemConfig* config)
             memcpy(mixing_state, &mixing_config, sizeof(DataMixingConfig));
             g_system_state.unified_signal_processor_training = (void*)mixing_state;
             log_info("训练信号处理器（数据混合策略）初始化成功");
+            SUBSYS_INIT(SUBSYS_IDX_SIGNAL_TRAINING);  /* DEFECT-011修复: 添加缺失的SUBSYS_INIT */
         } else {
             log_warning("训练信号处理器状态分配失败，跳过");
         }
@@ -2060,10 +2111,8 @@ static int initialize_subsystems(const SystemConfig* config)
             /* H-1修复：恢复GPU后端自动检测，不再强制锁定为CPU
              * GPU初始化失败时自动安全回退到CPU，不影响系统运行 */
             GpuBackend configured_backend = g_system_state.config.gpu_backend;
-            /* DEEP-005修复: GPU_BACKEND_AUTO不存在，GPU_BACKEND_CPU即自动检测模式
-             * (gpu.h L274: "backend传入GPU_BACKEND_CPU触发自动检测模式").
-             * gpu_get_available_backends需2参数、gpu_context_create需2参数。 */
-            if (configured_backend == GPU_BACKEND_CPU) {
+            /* P0-03修复: GPU_BACKEND_AUTO已新增枚举值，与GPU_BACKEND_CPU(old)均触发自动检测模式 */
+            if (configured_backend == GPU_BACKEND_CPU || configured_backend == GPU_BACKEND_AUTO) {
                 /* 自动检测最佳可用GPU后端 */
                 GpuBackendAvailability avail_infos[10];
                 int available_backends = (int)gpu_get_available_backends(avail_infos, 10);
@@ -2946,163 +2995,111 @@ static void shutdown_subsystems(void)
     }
     
     /* Z5-003: 销毁规划系统（与创建对应） */
-    if (g_system_state.planning_system) {
-        planning_system_free((PlanningSystem*)g_system_state.planning_system);
-        g_system_state.planning_system = NULL;
-    }
+    if (g_system_state.planning_system) { planning_system_free((PlanningSystem*)g_system_state.planning_system); g_system_state.planning_system = NULL; }
     
-    // 4. 销毁统一信号处理器
-    if (g_system_state.unified_signal_processor) {
-        unified_signal_processor_free((UnifiedSignalProcessor*)g_system_state.unified_signal_processor);
-        g_system_state.unified_signal_processor = NULL;
+    /* DEFECT-014修复: 先释放训练信号处理器状态(独立分配，不依赖信号处理器)，
+     * 再释放统一信号处理器。原顺序在unified_signal_processor_free的堆操作后
+     * 再访问unified_signal_processor_training，可能因堆状态损坏读到野指针。 */
+    if (g_system_state.unified_signal_processor_training) {
+        uintptr_t ptr_val = (uintptr_t)g_system_state.unified_signal_processor_training;
+        uintptr_t high_bits = (ptr_val >> 47) & 0x1FFFF;
+        if (high_bits != 0 && high_bits != 0x1FFFF) {
+            log_error("unified_signal_processor_training 指针损坏(0x%016llX)，跳过释放",
+                      (unsigned long long)ptr_val);
+            g_system_state.unified_signal_processor_training = NULL;
+        } else {
+            safe_free((void**)&g_system_state.unified_signal_processor_training);
+        }
     }
+
+    // 4. 销毁统一信号处理器
+    if (g_system_state.unified_signal_processor) { unified_signal_processor_free((UnifiedSignalProcessor*)g_system_state.unified_signal_processor); g_system_state.unified_signal_processor = NULL; }
     
     /* P2-003: 销毁高级信号处理器（自适应路由器） */
-    if (g_system_state.unified_signal_processor_advanced) {
-        adaptive_router_free((AdaptiveRouter*)g_system_state.unified_signal_processor_advanced);
-        g_system_state.unified_signal_processor_advanced = NULL;
-    }
-    
-    /* P2-003: 销毁训练信号处理器状态（数据混合配置） */
-    if (g_system_state.unified_signal_processor_training) {
-        safe_free((void**)&g_system_state.unified_signal_processor_training);
-    }
+    if (g_system_state.unified_signal_processor_advanced) { adaptive_router_free((AdaptiveRouter*)g_system_state.unified_signal_processor_advanced); g_system_state.unified_signal_processor_advanced = NULL; }
     
     // 5. 销毁元认知系统（在LNN之前，因为它引用了LNN）
-    if (g_system_state.metacognition_system) {
-        metacognition_system_free((MetacognitionSystem*)g_system_state.metacognition_system);
-        g_system_state.metacognition_system = NULL;
-    }
+    if (g_system_state.metacognition_system) { metacognition_system_free((MetacognitionSystem*)g_system_state.metacognition_system); g_system_state.metacognition_system = NULL; }
     
     // 5.1 销毁统一LNN状态（在LNN之前）
-    if (g_system_state.unified_lnn_state) {
-        unified_lnn_state_free((UnifiedLNNState*)g_system_state.unified_lnn_state);
-        g_system_state.unified_lnn_state = NULL;
-    }
+    if (g_system_state.unified_lnn_state) { unified_lnn_state_free((UnifiedLNNState*)g_system_state.unified_lnn_state); g_system_state.unified_lnn_state = NULL; }
     
     // 6. 销毁自我认知系统
-    if (g_system_state.self_cognition_system) {
-        self_cognition_free((SelfCognitionSystem*)g_system_state.self_cognition_system);
-        g_system_state.self_cognition_system = NULL;
-    }
+    if (g_system_state.self_cognition_system) { self_cognition_free((SelfCognitionSystem*)g_system_state.self_cognition_system); g_system_state.self_cognition_system = NULL; }
     
     // 6.5. P0-001: 销毁架构控制器（在LNN之前销毁，因为架构变更依赖LNN）
-    if (g_system_state.arch_controller) {
-        arch_controller_free((ArchitectureController*)g_system_state.arch_controller);
-        g_system_state.arch_controller = NULL;
-        log_info("动态架构控制器已销毁");
-    }
+    if (g_system_state.arch_controller) { arch_controller_free((ArchitectureController*)g_system_state.arch_controller); g_system_state.arch_controller = NULL; log_info("动态架构控制器已销毁"); }
+    
+    // 6.6. 销毁教学循环系统（在LNN之前销毁，因为teaching_loop持有全局LNN引用）
+    if (g_system_state.teaching_loop_system) { teaching_loop_free((TeachingLoopSystem*)g_system_state.teaching_loop_system); g_system_state.teaching_loop_system = NULL; }
+    if (g_system_state.multimodal_teaching) { multimodal_teaching_destroy((MultimodalTeachingSystem*)g_system_state.multimodal_teaching); g_system_state.multimodal_teaching = NULL; }
     
     // 7. 销毁LNN液态神经网络
-    if (g_system_state.lnn_instance) {
-        lnn_free((LNN*)g_system_state.lnn_instance);
-        g_system_state.lnn_instance = NULL;
-        g_global_singleton_lnn = NULL;  /* FIX-004: 防止悬空指针 */
-    }
+    if (g_system_state.lnn_instance) { lnn_free((LNN*)g_system_state.lnn_instance); g_system_state.lnn_instance = NULL; g_global_singleton_lnn = NULL; }
     
     // 8. 销毁自我编程引擎
-    if (g_system_state.programming_engine) {
-        self_programming_engine_destroy((SelfProgrammingEngine*)g_system_state.programming_engine);
-        g_system_state.programming_engine = NULL;
-    }
+    if (g_system_state.programming_engine) { self_programming_engine_destroy((SelfProgrammingEngine*)g_system_state.programming_engine); g_system_state.programming_engine = NULL; }
     
     // 9. 销毁产品设计引擎
-    if (g_system_state.product_design_engine) {
-        product_design_engine_destroy((ProductDesignEngine*)g_system_state.product_design_engine);
-        g_system_state.product_design_engine = NULL;
-    }
+    if (g_system_state.product_design_engine) { product_design_engine_destroy((ProductDesignEngine*)g_system_state.product_design_engine); g_system_state.product_design_engine = NULL; }
     
     // 10. 销毁多系统控制器
-    if (g_system_state.multisystem_controller) {
-        multisystem_control_engine_destroy((MultiSystemControlEngine*)g_system_state.multisystem_controller);
-        g_system_state.multisystem_controller = NULL;
-    }
+    if (g_system_state.multisystem_controller) { multisystem_control_engine_destroy((MultiSystemControlEngine*)g_system_state.multisystem_controller); g_system_state.multisystem_controller = NULL; }
     
     // 11. 销毁GPU上下文
-    if (g_system_state.gpu_context) {
-        gpu_context_free((GpuContext*)g_system_state.gpu_context);
-        g_system_state.gpu_context = NULL;
-    }
+    if (g_system_state.gpu_context) { gpu_context_free((GpuContext*)g_system_state.gpu_context); g_system_state.gpu_context = NULL; }
     
     // 12. 销毁线程池（先于其他依赖线程池的子系统）
-    if (g_system_state.thread_pool) {
-        thread_pool_free((ThreadPool*)g_system_state.thread_pool);
-        g_system_state.thread_pool = NULL;
-    }
+    if (g_system_state.thread_pool) { thread_pool_free((ThreadPool*)g_system_state.thread_pool); g_system_state.thread_pool = NULL; }
     
     // 13. 销毁分布式训练系统
-    if (g_system_state.distributed_training) {
-        distributed_cleanup((DistributedContext*)g_system_state.distributed_training);
-        g_system_state.distributed_training = NULL;
-    }
+    if (g_system_state.distributed_training) { distributed_cleanup((DistributedContext*)g_system_state.distributed_training); g_system_state.distributed_training = NULL; }
     
     // 14. 销毁对话系统
     if (g_system_state.dialogue_processor) {
-        dialogue_processor_free((DialogueProcessor*)g_system_state.dialogue_processor);
-        g_system_state.dialogue_processor = NULL;
+        uintptr_t dp_val = (uintptr_t)g_system_state.dialogue_processor;
+        /* 检测x64非规范地址：位48-63必须等于位47（符号扩展） */
+        uintptr_t dp_high = (dp_val >> 47) & 0x1FFFF;
+        if (dp_high != 0 && dp_high != 0x1FFFF) {
+            log_error("dialogue_processor 指针损坏(0x%016llX)，跳过释放", (unsigned long long)dp_val);
+            g_system_state.dialogue_processor = NULL;
+        } else {
+            dialogue_processor_free((DialogueProcessor*)g_system_state.dialogue_processor);
+            g_system_state.dialogue_processor = NULL;
+        }
     }
 /* P0修复 - 销毁对话记忆管理器，防止内存泄漏。
      * 对话记忆管理器在初始化时由dialogue_memory_create()创建(L1951)，
      * 此前shutdown中遗漏释放，导致内存泄漏。 */
-    if (g_system_state.dialogue_memory_manager) {
-        dialogue_memory_free((DialogueMemoryManager*)g_system_state.dialogue_memory_manager);
-        g_system_state.dialogue_memory_manager = NULL;
-    }
+    if (g_system_state.dialogue_memory_manager) { dialogue_memory_free((DialogueMemoryManager*)g_system_state.dialogue_memory_manager); g_system_state.dialogue_memory_manager = NULL; }
     
     // 15. 销毁自我演化引擎
-    if (g_system_state.evolution_engine) {
-        evolution_engine_free((EvolutionEngine*)g_system_state.evolution_engine);
-        g_system_state.evolution_engine = NULL;
-    }
+    if (g_system_state.evolution_engine) { evolution_engine_free((EvolutionEngine*)g_system_state.evolution_engine); g_system_state.evolution_engine = NULL; }
     
     /* 16. 销毁安全监控系统 */
-    if (g_system_state.safety_monitor) {
-        safety_monitor_free((SafetyMonitor*)g_system_state.safety_monitor);
-        g_system_state.safety_monitor = NULL;
-    }
+    if (g_system_state.safety_monitor) { safety_monitor_free((SafetyMonitor*)g_system_state.safety_monitor); g_system_state.safety_monitor = NULL; }
 
     /* 17. 销毁自动知识学习系统 */
-    if (g_system_state.auto_learning) {
-        auto_learning_free((AutoLearningSystem*)g_system_state.auto_learning);
-        g_system_state.auto_learning = NULL;
-    }
+    if (g_system_state.auto_learning) { auto_learning_free((AutoLearningSystem*)g_system_state.auto_learning); g_system_state.auto_learning = NULL; }
 
     /* 17.1 销毁知识推理增强引擎 */
-    if (g_system_state.knowledge_inference) {
-        ki_engine_free((KnowledgeInferenceEngine*)g_system_state.knowledge_inference);
-        g_system_state.knowledge_inference = NULL;
-    }
+    if (g_system_state.knowledge_inference) { ki_engine_free((KnowledgeInferenceEngine*)g_system_state.knowledge_inference); g_system_state.knowledge_inference = NULL; }
 
     /* 17.2 销毁多智能体系统 (H-015集成) */
-    if (g_system_state.multi_agent_system) {
-        multi_agent_system_destroy((MultiAgentSystem*)g_system_state.multi_agent_system);
-        g_system_state.multi_agent_system = NULL;
-    }
+    if (g_system_state.multi_agent_system) { multi_agent_system_destroy((MultiAgentSystem*)g_system_state.multi_agent_system); g_system_state.multi_agent_system = NULL; }
 
 /* 销毁机器人控制模块（MODULE_ID_ROBOT=20）
      * 如果机器人实例为NULL（硬件模块未连接），跳过销毁。 */
-    if (g_system_state.robot_instance) {
-        robot_free((Robot*)g_system_state.robot_instance);
-        g_system_state.robot_instance = NULL;
-    }
+    if (g_system_state.robot_instance) { robot_free((Robot*)g_system_state.robot_instance); g_system_state.robot_instance = NULL; }
 
     /* 18. 销毁数据采集流水线 */
-    if (g_system_state.data_pipeline) {
-        dcpipeline_free((DataCollectionPipeline*)g_system_state.data_pipeline);
-        g_system_state.data_pipeline = NULL;
-    }
+    if (g_system_state.data_pipeline) { dcpipeline_free((DataCollectionPipeline*)g_system_state.data_pipeline); g_system_state.data_pipeline = NULL; }
 
     /* Z3-002: 销毁在线学习器（之前被遗漏，造成内存泄漏） */
-    if (g_system_state.online_learner) {
-        online_learner_free((OnlineLearner*)g_system_state.online_learner);
-        g_system_state.online_learner = NULL;
-    }
+    if (g_system_state.online_learner) { online_learner_free((OnlineLearner*)g_system_state.online_learner); g_system_state.online_learner = NULL; }
 
     /* FIX-008: 销毁语音识别器（生命周期管理） */
-    if (g_system_state.speech_recognizer) {
-        speech_recognizer_free(g_system_state.speech_recognizer);
-        g_system_state.speech_recognizer = NULL;
-    }
+    if (g_system_state.speech_recognizer) { speech_recognizer_free(g_system_state.speech_recognizer); g_system_state.speech_recognizer = NULL; }
 
 /* 销毁10个新增模块 */
     if (g_system_state.nas_system) { nas_system_free((NASSystem*)g_system_state.nas_system); g_system_state.nas_system = NULL; }
@@ -3117,8 +3114,8 @@ static void shutdown_subsystems(void)
     if (g_system_state.rw_lock_map_system) { rw_lock_map_destroy((RwLockMap*)g_system_state.rw_lock_map_system); g_system_state.rw_lock_map_system = NULL; }  /* F-009 */
     if (g_system_state.training_pipeline) { training_pipeline_free((TrainingPipeline*)g_system_state.training_pipeline); g_system_state.training_pipeline = NULL; }
     if (g_system_state.security_monitor_deep) { sec_behavior_monitor_free((SecBehaviorMonitor*)g_system_state.security_monitor_deep); g_system_state.security_monitor_deep = NULL; }
-    if (g_system_state.teaching_loop_system) { teaching_loop_free((TeachingLoopSystem*)g_system_state.teaching_loop_system); g_system_state.teaching_loop_system = NULL; }
-    if (g_system_state.multimodal_teaching) { multimodal_teaching_destroy((MultimodalTeachingSystem*)g_system_state.multimodal_teaching); g_system_state.multimodal_teaching = NULL; }
+    /* P0跨模块集成: 多模态管理器生命周期由backend管理，此处仅清除全局引用 */
+    if (g_system_state.multimodal_manager) { g_system_state.multimodal_manager = NULL; }
 
     log_info("所有子系统已关闭（含12个新增模块）");
 }

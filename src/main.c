@@ -188,10 +188,24 @@ static volatile LONG g_training_interval_sec     = 300;
 
 static BackendServer* g_server = NULL;
 WSPushServer* g_ws_push_server = NULL;
+/* WS-004修复: 保存WS轮询线程句柄，用于关闭时join等待线程安全退出。
+ * 原代码Windows下CreateThread后立即CloseHandle无法join，
+ * Linux下pthread_detach后无法join，存在资源泄漏和use-after-free风险。 */
+#ifdef _WIN32
+static HANDLE g_ws_poll_thread = NULL;
+#else
+static pthread_t g_ws_poll_thread;
+static int g_ws_poll_thread_valid = 0;
+#endif
 static void* g_online_learner_handle = NULL;
 static void* g_evolution_engine_handle = NULL;
 static void* g_unified_lnn_state = NULL;
 static volatile sig_atomic_t g_agi_running = 1;
+/* P0修复: AGI认知循环→训练管线触发标志。
+ * 由AGI认知循环通过selflnn_trigger_training()设置，
+ * 由后台训练循环通过selflnn_check_and_reset_training_trigger()检查并重置。
+ * sig_atomic_t保证信号处理和普通线程间的基本原子性。 */
+static volatile sig_atomic_t g_training_trigger_flag = 0;
 static time_t g_start_time = 0;  /* 仅启动时写入一次,无需原子保护 */
 /* P1-3修复: 时间戳改为volatile LONG64并用原子操作保护跨线程读写(保持64位精度) */
 static volatile LONG64 g_last_online_learn = 0;
@@ -372,7 +386,10 @@ static float lnn_weights_fitness_function(const float* chromosome, size_t chrom_
             size_t input_dim = ullnn_input_dimension_estimate(lnn);
             if (input_dim == 0) input_dim = 64;
             float* real_input = (float*)safe_calloc(input_dim, sizeof(float));
-            float* output = (float*)safe_malloc(128 * sizeof(float));
+            /* 修复: 使用lnn_get_output_size动态获取输出维度，避免128 vs 256不匹配导致堆溢出 */
+            size_t lnn_out_dim = lnn_get_output_size(lnn);
+            if (lnn_out_dim == 0) lnn_out_dim = 256;
+            float* output = (float*)safe_malloc(lnn_out_dim * sizeof(float));
             if (real_input && output) {
                 int real_samples = 0;
                 /* 遍历9种模态的最近原始信号，构建真实输入批次 */
@@ -381,12 +398,12 @@ static float lnn_weights_fitness_function(const float* chromosome, size_t chrom_
                         memset(real_input, 0, input_dim * sizeof(float));
                         memcpy(real_input, uis->last_raw_signals[m],
                                uis->last_raw_sizes[m] * sizeof(float));
-                        memset(output, 0, 128 * sizeof(float));
+                        memset(output, 0, lnn_out_dim * sizeof(float));
                         if (lnn_forward(lnn, real_input, output) != 0) continue;
                         /* 评估真实数据响应：计算输出有效幅值和稳定性 */
                         float sum = 0.0f, sq_sum = 0.0f;
                         size_t count = 0;
-                        for (size_t i = 0; i < 128 && count < 64; i++) {
+                        for (size_t i = 0; i < lnn_out_dim && count < 64; i++) {
                             if (fabsf(output[i]) > 1e-10f) {
                                 sum += output[i]; sq_sum += output[i] * output[i]; count++;
                             }
@@ -767,8 +784,30 @@ static void agi_bg_evolution_step(void) {
             log_info("[AGI后台] 演化最优个体已写入LNN权重，适应度=%.6f",
                      stats.final_best_fitness);
         }
+        /* WS-002修复: 推送evolution_event到WebSocket，前端实时展示演化进展。
+         * 此前evolution_step执行后从未推送事件，前端evolution_event监听器永远收不到消息。 */
+        if (g_ws_push_server) {
+            char evo_buf[512];
+            snprintf(evo_buf, sizeof(evo_buf),
+                "{\"type\":\"evolution_event\",\"generation\":%zu,"
+                "\"best_fitness\":%.6f,\"convergence_speed\":%.4f,"
+                "\"improvement\":%.4f,\"applied_to_lnn\":%s,\"timestamp\":%lld}",
+                stats.total_generations, stats.final_best_fitness,
+                stats.convergence_speed, stats.improvement,
+                (applied == 0) ? "true" : "false", (long long)time(NULL));
+            ws_push_broadcast_json(g_ws_push_server, evo_buf);
+        }
     } else {
         log_warning("[AGI后台] 演化步执行失败，错误码=%d", result);
+        /* 演化失败也推送事件，让前端了解失败状态 */
+        if (g_ws_push_server) {
+            char evo_buf[256];
+            snprintf(evo_buf, sizeof(evo_buf),
+                "{\"type\":\"evolution_event\",\"status\":\"failed\","
+                "\"error_code\":%d,\"timestamp\":%lld}",
+                result, (long long)time(NULL));
+            ws_push_broadcast_json(g_ws_push_server, evo_buf);
+        }
     }
     /* APP11: 每5个演化周期触发一次神经架构搜索(NAS) */
     static int nas_trigger_counter = 0;
@@ -1077,8 +1116,9 @@ static int verify_lnn_initialized(void* h) {
     return (lnn_get_config((LNN*)h, &cfg) == 0);
 }
 
-/* AGI后台训练步 —— 自动创建训练管线并执行训练步 */
-static void agi_bg_training_step(void) {
+/* P0修复: AGI后台训练步 —— 支持认知循环触发和定时两种模式
+ * @param triggered_by_agi 1=由AGI认知循环触发(优先响应), 0=定时触发(默认行为) */
+static void agi_bg_training_step(int triggered_by_agi) {
     if (!g_training_pipeline) {
         TrainingPipelineConfig tp_cfg;
         memset(&tp_cfg, 0, sizeof(tp_cfg));
@@ -1206,6 +1246,12 @@ static void agi_bg_training_step(void) {
         training_pipeline_load_data(g_training_pipeline, "data/training");
     }
     if (!g_training_pipeline) return;
+    /* P0修复: 根据触发模式记录不同的日志 */
+    if (triggered_by_agi) {
+        log_info("[AGI后台] 执行AGI认知循环触发的训练步（优先响应模式）");
+    } else {
+        log_debug("[AGI后台] 执行定时训练步（默认模式）");
+    }
     training_pipeline_step(g_training_pipeline);
 }
 
@@ -1317,12 +1363,32 @@ static void agi_background_loop_iteration(void) {
         }
     }
 
-/* 训练步（受自我学习 + 自主执行能力开关双重控制，每5分钟执行一步） */
+/* P0修复: 训练步协调机制
+     * 
+     * 两层触发:
+     *   1. 优先响应: 检查AGI认知循环设置的训练触发标志。
+     *      如果AGI认知循环检测到性能下降/新模式/修正频繁，
+     *      通过selflnn_trigger_training()设置标志，此处立即响应，
+     *      跳过定时间隔检查，直接执行训练步。
+     *   2. 定时备用: 保留原有的每5分钟定时训练作为fallback。
+     *      当AGI认知循环未触发训练时，按定时器执行训练步。
+     * 
+     * 两种模式互不冲突: 优先响应将重置触发标志并更新定时器，
+     * 避免同一训练步被重复执行。 */
     if (capability_is_enabled(CAP_SELF_LEARNING) &&
-        capability_is_enabled(CAP_AUTONOMOUS_EXECUTION) &&
-        now - (time_t)ATOMIC_LOAD_64(&g_last_training_step) >= (int)ATOMIC_LOAD_32(&g_training_interval_sec)) {
-        agi_bg_training_step();
-        ATOMIC_STORE_64(&g_last_training_step, (LONG64)now);
+        capability_is_enabled(CAP_AUTONOMOUS_EXECUTION)) {
+        int training_triggered = selflnn_check_and_reset_training_trigger();
+        if (training_triggered) {
+            /* 优先响应: AGI认知循环触发的训练 */
+            agi_bg_training_step(1);
+            ATOMIC_STORE_64(&g_last_training_step, (LONG64)now);
+            log_info("[AGI后台] 已响应AGI认知循环训练触发，重置定时器");
+        } else if (now - (time_t)ATOMIC_LOAD_64(&g_last_training_step) >= 
+                   (int)ATOMIC_LOAD_32(&g_training_interval_sec)) {
+            /* 定时备用: 每5分钟执行一次训练步 */
+            agi_bg_training_step(0);
+            ATOMIC_STORE_64(&g_last_training_step, (LONG64)now);
+        }
     }
 
     /* Z8-003: 认知更新（受自我认知能力开关控制 — 之前直接执行无人检查） */
@@ -1537,8 +1603,11 @@ static void agi_background_loop_iteration(void) {
                 TrainingPipelineState tps;
                 memset(&tps, 0, sizeof(tps));
                 if (training_pipeline_get_state(g_training_pipeline, &tps) == 0) {
+                    /* WS-003修复: 事件名从training_log改为log，与前端training-push.js订阅一致。
+                     * 前端使用window.SelfLnnWebSocket.on('log', ...)订阅，
+                     * 后端此前推送training_log导致事件永远无法被前端接收。 */
                     snprintf(buf, sizeof(buf),
-                        "{\"type\":\"training_log\",\"timestamp\":%lld,"
+                        "{\"type\":\"log\",\"timestamp\":%lld,"
                         "\"message\":\"训练步 %d/%d, 损失=%.6f, 准确率=%.4f\","
                         "\"level\":\"info\",\"epoch\":%d,\"loss\":%.6f}",
                         (long long)now,
@@ -1740,7 +1809,9 @@ static void agi_background_loop_iteration(void) {
                 }
             }
             if (ws_broadcast_counter % 55 == 0) {
-                /* knowledge_update: 前端knowledge-graph.js订阅 — 从知识库读取真实统计 */
+                /* 4.3修复: knowledge_update + knowledge_added/knowledge_deleted事件推送。
+                 * 前端knowledge-graph.js订阅knowledge_added和knowledge_deleted进行增量更新，
+                 * 此前仅推送knowledge_update导致增量UI更新功能完全失效。 */
                 {
                     char kupd_json[512];
                     size_t kb_total = 0, kb_recent = 0;
@@ -1748,11 +1819,19 @@ static void agi_background_loop_iteration(void) {
                     if (kb) {
                         knowledge_base_get_stats((KnowledgeBase*)kb, &kb_total, &kb_recent);
                     }
+                    /* 推送统一的knowledge_update */
                     snprintf(kupd_json, sizeof(kupd_json),
                         "{\"type\":\"knowledge_update\",\"timestamp\":%lld,\"total\":%zu,"
                         "\"added\":%zu,\"deleted\":0}",
                         (long long)now, kb_total, kb_recent);
                     ws_push_broadcast_json(g_ws_push_server, kupd_json);
+                    /* 如果有新增条目，推送knowledge_added */
+                    if (kb_recent > 0) {
+                        snprintf(kupd_json, sizeof(kupd_json),
+                            "{\"type\":\"knowledge_added\",\"timestamp\":%lld,\"count\":%zu}",
+                            (long long)now, kb_recent);
+                        ws_push_broadcast_json(g_ws_push_server, kupd_json);
+                    }
                 }
             }
             /* prediction_result: 前端main.js订阅 — 从LNN读取最近预测 */
@@ -2299,6 +2378,7 @@ static void print_usage(const char* prog)
     printf("  --no-cognition             禁用自我认知\n");
     printf("  --no-evolution             禁用自我演化\n");
     printf("  --no-gpu                   禁用GPU加速\n");
+    printf("  --no-lnn                   降级模式：即使LNN未初始化也允许启动（仅用于诊断）\n");
     printf("  --generate-api-key         生成随机API密钥\n");
     printf("  --help                     显示此帮助信息\n");
     printf("\n");
@@ -2356,19 +2436,165 @@ static void generate_random_key(char* key, size_t key_size)
     }
 }
 
+/* P1-01修复: 启动自检诊断函数
+ * 在服务器启动前对所有关键子系统进行统一诊断，输出通过/失败状态。
+ * 诊断内容包括: LNN前向传播测试、内存分配测试、线程池创建测试、GPU可用性检测。
+ * 诊断失败不阻塞启动（非致命），但会记录详细错误信息到日志。 */
+static void selflnn_startup_diagnostics(void) {
+    printf("\n========== 启动自检诊断 ==========\n");
+
+    /* 诊断项1: LNN前向传播测试 —— 输入全零向量，验证输出不包含NaN */
+    {
+        printf("[诊断] LNN前向传播测试... ");
+        void* lnn_ptr = selflnn_get_shared_lnn();
+        if (lnn_ptr) {
+            LNN* lnn = (LNN*)lnn_ptr;
+            size_t input_dim = ullnn_input_dimension_estimate(lnn);
+            if (input_dim > 0 && input_dim <= 4096) {
+                float* zero_input = (float*)safe_calloc(input_dim, sizeof(float));
+                float* output = (float*)safe_malloc(256 * sizeof(float));
+                if (zero_input && output) {
+                    memset(output, 0, 256 * sizeof(float));
+                    int fwd_ret = lnn_forward(lnn, zero_input, output);
+                    if (fwd_ret == 0) {
+                        int has_nan = 0;
+                        int has_inf = 0;
+                        int valid_count = 0;
+                        for (int i = 0; i < 256; i++) {
+                            if (isnan(output[i])) { has_nan = 1; break; }
+                            if (isinf(output[i])) { has_inf = 1; break; }
+                            if (fabsf(output[i]) > 1e-10f) valid_count++;
+                        }
+                        if (!has_nan && !has_inf) {
+                            printf("通过 (输入维度=%zu, 有效输出=%d/256, 无NaN/Inf)\n",
+                                   input_dim, valid_count);
+                            log_info("[诊断] LNN前向传播测试通过: input_dim=%zu, valid_outputs=%d",
+                                     input_dim, valid_count);
+                        } else if (has_nan) {
+                            printf("失败: 输出包含NaN值\n");
+                            log_error("[诊断] LNN前向传播测试失败: 输出包含NaN值");
+                        } else {
+                            printf("失败: 输出包含Inf值\n");
+                            log_error("[诊断] LNN前向传播测试失败: 输出包含Inf值");
+                        }
+                    } else {
+                        printf("失败: 前向传播返回错误码%d\n", fwd_ret);
+                        log_error("[诊断] LNN前向传播测试失败: 返回错误码%d", fwd_ret);
+                    }
+                } else {
+                    printf("失败: 内存分配失败\n");
+                    log_error("[诊断] LNN前向传播测试失败: 无法分配输入/输出缓冲区");
+                }
+                safe_free((void**)&zero_input);
+                safe_free((void**)&output);
+            } else {
+                printf("跳过: 无法获取有效输入维度 (input_dim=%zu)\n", input_dim);
+                log_warning("[诊断] LNN前向传播测试跳过: 无效输入维度=%zu", input_dim);
+            }
+        } else {
+            printf("跳过: 共享LNN未初始化\n");
+            log_warning("[诊断] LNN前向传播测试跳过: 共享LNN指针为空");
+        }
+    }
+
+    /* 诊断项2: 内存分配测试 —— 分配1MB内存，写入0xAA并验证，然后释放 */
+    {
+        printf("[诊断] 内存分配测试... ");
+        size_t test_size = 1024 * 1024; /* 1MB */
+        void* test_mem = safe_malloc(test_size);
+        if (test_mem) {
+            memset(test_mem, 0xAA, test_size);
+            /* 验证写入的字节 */
+            const unsigned char* verify = (const unsigned char*)test_mem;
+            int mismatch = 0;
+            for (size_t i = 0; i < test_size; i += 16384) {
+                if (verify[i] != 0xAA) { mismatch = 1; break; }
+            }
+            safe_free((void**)&test_mem);
+            if (!mismatch) {
+                printf("通过 (1MB分配/写入/验证/释放)\n");
+                log_info("[诊断] 内存分配测试通过: 1MB分配/写入/验证/释放成功");
+            } else {
+                printf("失败: 内存写入验证不匹配\n");
+                log_error("[诊断] 内存分配测试失败: 写入验证不匹配");
+            }
+        } else {
+            printf("失败: 无法分配1MB内存\n");
+            log_error("[诊断] 内存分配测试失败: 1MB内存分配返回NULL");
+        }
+    }
+
+    /* 诊断项3: 线程池创建测试 —— 创建2线程池并立即销毁 */
+    {
+        printf("[诊断] 线程池创建测试... ");
+        ThreadPoolConfig tpc;
+        memset(&tpc, 0, sizeof(tpc));
+        tpc.num_threads = 2;
+        tpc.max_tasks = 64;
+        ThreadPool* pool = thread_pool_create(&tpc);
+        if (pool) {
+            thread_pool_free(pool);
+            printf("通过 (2线程池创建/销毁)\n");
+            log_info("[诊断] 线程池创建测试通过: 2线程池创建/销毁成功");
+        } else {
+            printf("失败: 线程池创建失败\n");
+            log_error("[诊断] 线程池创建测试失败: 线程池创建返回NULL");
+        }
+    }
+
+    /* 诊断项4: GPU可用性检测 —— 检测所有支持的GPU后端 */
+    {
+        printf("[诊断] GPU可用性检测... ");
+        int gpu_count = gpu_get_device_count(GPU_BACKEND_AUTO);  /* P0-03修复: 使用GPU_BACKEND_AUTO触发自动检测 */
+        if (gpu_count > 0) {
+            printf("通过 (检测到%d个GPU设备)\n", gpu_count);
+            log_info("[诊断] GPU可用性检测: 检测到%d个GPU设备", gpu_count);
+        } else {
+            printf("信息: 未检测到GPU设备 (将使用CPU计算)\n");
+            log_info("[诊断] GPU可用性检测: 未检测到GPU设备，使用CPU计算");
+        }
+    }
+
+    /* 诊断项5: 系统时间戳一致性检查 */
+    {
+        printf("[诊断] 系统时间戳检查... ");
+        time_t t1 = time(NULL);
+        time_t t2 = time(NULL);
+        if (t1 > 0 && t2 >= t1) {
+            printf("通过 (系统时钟正常, timestamp=%lld)\n", (long long)t2);
+            log_info("[诊断] 系统时间戳检查通过: timestamp=%lld", (long long)t2);
+        } else {
+            printf("警告: 系统时钟可能异常\n");
+            log_warning("[诊断] 系统时间戳检查警告: t1=%lld, t2=%lld", (long long)t1, (long long)t2);
+        }
+    }
+
+    printf("========== 启动自检完成 ==========\n\n");
+}
+
 static void signal_handler(int sig)
 {
     /* P0修复: SIGSEGV/SIGFPE/SIGILL/SIGBUS等不可恢复的硬件异常，
      * 从信号处理器返回是C标准未定义行为——程序会在导致异常的指令处
-     * 重新执行，导致无限循环。必须调用_exit()终止进程。
-     * 使用_exit而非exit，避免执行atexit处理函数和stdio刷新
-     * （在已损坏的内存状态下这些操作本身可能引发二次崩溃）。 */
+     * 重新执行，导致无限循环。必须立即终止进程。
+     * 
+     * P1修复: Windows平台上，_exit()在信号处理器中不是异步信号安全的
+     * （_exit()内部可能调用CRT锁和atexit处理器，在已损坏的内存状态下
+     * 可能引发二次崩溃）。改用TerminateProcess()，这是Windows上信号
+     * 处理器中唯一安全的进程终止方式，直接调用内核级API不经过CRT。
+     * POSIX平台上_exit()是异步信号安全的，保留原实现。 */
     if (sig == SIGSEGV || sig == SIGFPE || sig == SIGILL
 #ifndef _WIN32
         || sig == SIGBUS   /* SIGBUS仅POSIX系统定义，Windows不存在 */
 #endif
         ) {
-        _exit(128 + sig);  /* 不可恢复的硬件异常，立即终止进程，不返回 */
+#ifdef _WIN32
+        /* 使用TerminateProcess替代_exit: 直接调用Windows内核API，
+         * 不经过CRT、不触发atexit、不使用任何锁，在信号处理器中绝对安全。 */
+        TerminateProcess(GetCurrentProcess(), (UINT)(128 + sig));
+#else
+        _exit(128 + sig);  /* POSIX: _exit是异步信号安全的，立即终止进程 */
+#endif
     }
 
     /* P1修复: 信号处理器中禁止使用非异步信号安全函数（strlen/printf/sprintf等）。
@@ -2453,6 +2679,7 @@ int main(int argc, char** argv)
     config.api_key[0] = '\0';
 
     int generate_key = 0;
+    int no_lnn = 0;  /* P0-04修复: 是否允许不加载LNN即可启动（降级模式） */
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--port") == 0 && i + 1 < argc) {
@@ -2492,6 +2719,8 @@ int main(int argc, char** argv)
 #else
             setenv("SELFLNN_DISABLE_GPU", "1", 1);
 #endif
+        } else if (strcmp(argv[i], "--no-lnn") == 0) {
+            no_lnn = 1;  /* P0-04修复: 降级模式，允许系统启动即使LNN未初始化 */
         } else if (strcmp(argv[i], "--generate-api-key") == 0) {
             generate_key = 1;
         } else if (strcmp(argv[i], "--help") == 0) {
@@ -2556,7 +2785,12 @@ int main(int argc, char** argv)
     sigaction(SIGQUIT, &sa, NULL);         /* Ctrl+\ 触发 */
 #endif
 
-    print_system_info(config.port, SELFLNN_WEBSOCKET_PORT);
+    /* P1-02修复: 使用config中的websocket_port，若无效则回退到默认端口 */
+    {
+        int ws_info_port = config.websocket_port;
+        if (ws_info_port <= 0 || ws_info_port > 65535) ws_info_port = SELFLNN_WEBSOCKET_PORT;
+        print_system_info(config.port, ws_info_port);
+    }
 
     printf("正在初始化SELF-LNN AGI系统...\n");
     printf("  多模态:       %s\n", config.enable_multimodal ? "启用" : "禁用");
@@ -2573,106 +2807,35 @@ int main(int argc, char** argv)
 #endif
     printf("\n");
 
-/* ZSFKKK-修复(MED-07): 使用json_parser.c正规解析替代手写JSON解析器。
- * 原手写解析器无嵌套对象/数组支持、无反斜杠转义处理、键名严格匹配，
- * 配置文件格式变化时可能静默失败。json_parser.c是项目内置的完整递归下降解析器。 */
+/* P0-01修复: 删除内嵌重复JSON解析逻辑，统一使用selflnn_config_load_from_file
+ * 统一配置入口，消除两个解析器不同默认值导致的配置冲突 */
     {
-        int sysjson_state_dim = 0, sysjson_mm_channels = 0;
-        int sysjson_mem_cap = 0, sysjson_max_tasks = 0;
-        char sysjson_model_path[512] = {0};
-        int sysjson_power_mode = -1, sysjson_gpu_backend = -1;
-        int sysjson_mixed_precision = -1;  /* ZSF-003: 混合精度模式 */
-
-        FILE* sysfp = fopen("config/system_config.json", "r");
-        if (sysfp) {
-            fseek(sysfp, 0, SEEK_END);
-            long fsize = ftell(sysfp);
-            if (fsize > 0 && fsize < 65536) {
-                rewind(sysfp);
-                char* syscontent = (char*)safe_malloc((size_t)fsize + 1);
-                if (syscontent) {
-                    size_t rdsz = fread(syscontent, 1, (size_t)fsize, sysfp);
-                    syscontent[rdsz] = '\0';
-                    /* 使用项目内置的完整JSON解析器 */
-                    JsonValue* root = json_parse(syscontent);
-                    if (root) {
-                        const char* model_path_str = json_get_string(root, "model_path");
-                        if (model_path_str && model_path_str[0]) {
-                            strncpy(sysjson_model_path, model_path_str, sizeof(sysjson_model_path) - 1);
-                        }
-                        sysjson_state_dim = (int)json_get_number(root, "state_dimension");
-                        sysjson_mm_channels = (int)json_get_number(root, "multimodal_channels");
-                        sysjson_mem_cap = (int)json_get_number(root, "memory_capacity");
-                        sysjson_max_tasks = (int)json_get_number(root, "max_concurrent_tasks");
-                        /* power_mode: 字符串解析 */
-                        const char* pm_str = json_get_string(root, "power_mode");
-                        if (pm_str) {
-                            if (strcmp(pm_str, "power_saving") == 0 || strcmp(pm_str, "low") == 0)
-                                sysjson_power_mode = POWER_MODE_POWER_SAVING;
-                            else if (strcmp(pm_str, "high") == 0 || strcmp(pm_str, "performance") == 0)
-                                sysjson_power_mode = POWER_MODE_PERFORMANCE;
-                            else
-                                sysjson_power_mode = POWER_MODE_BALANCED;
-                        }
-                        /* gpu_backend: 字符串解析 */
-                        const char* gb_str = json_get_string(root, "gpu_backend");
-                        if (gb_str) {
-                            if (strcmp(gb_str, "cuda") == 0) sysjson_gpu_backend = GPU_BACKEND_CUDA;
-                            else if (strcmp(gb_str, "rocm") == 0) sysjson_gpu_backend = GPU_BACKEND_ROCM;
-                            else if (strcmp(gb_str, "opencl") == 0) sysjson_gpu_backend = GPU_BACKEND_OPENCL;
-                            else if (strcmp(gb_str, "vulkan") == 0) sysjson_gpu_backend = GPU_BACKEND_VULKAN;
-                            else if (strcmp(gb_str, "metal") == 0) sysjson_gpu_backend = GPU_BACKEND_METAL;
-                            else if (strcmp(gb_str, "cpu") == 0) sysjson_gpu_backend = GPU_BACKEND_CPU;
-                            else if (strcmp(gb_str, "auto") == 0) sysjson_gpu_backend = GPU_BACKEND_CPU;
-                            else sysjson_gpu_backend = GPU_BACKEND_CPU;
-                        }
-                        /* ZSF-003 修复: 解析training子对象中的mixed_precision配置
-                         * 此前仅解析了gpu_backend，training子对象完全被忽略，
-                         * 导致混合精度训练配置从JSON文件无法生效。 */
-                        {
-                            JsonValue* training_obj = json_get(root, "training");
-                            if (training_obj) {
-                                const char* mp_str = json_get_string(training_obj, "mixed_precision");
-                                if (mp_str) {
-                                    if (strcmp(mp_str, "fp16") == 0)
-                                        sysjson_mixed_precision = 2;
-                                    else if (strcmp(mp_str, "bf16") == 0)
-                                        sysjson_mixed_precision = 3;
-                                    else if (strcmp(mp_str, "auto") == 0)
-                                        sysjson_mixed_precision = 1;
-                                    else if (strcmp(mp_str, "off") == 0 || strcmp(mp_str, "none") == 0)
-                                        sysjson_mixed_precision = 0;
-                                }
-                            }
-                        }
-                        json_free(root);
-                    } else {
-                        fprintf(stderr, "警告: system_config.json JSON解析失败，使用默认参数\n");
-                    }
-                    safe_free((void**)&syscontent);
-                    printf("[D8] 从 config/system_config.json 读取到参数:\n");
-                    printf("  state_dimension=%d, multimodal_channels=%d, memory_capacity=%d\n",
-                           sysjson_state_dim, sysjson_mm_channels, sysjson_mem_cap);
-                    printf("  max_concurrent_tasks=%d, power_mode=%d, gpu_backend=%d\n",
-                           sysjson_max_tasks, sysjson_power_mode, sysjson_gpu_backend);
-                }
-            }
-            fclose(sysfp);
+        SystemConfig sys_config;
+        memset(&sys_config, 0, sizeof(SystemConfig));
+        /* 使用统一配置加载器从config/system_config.json读取 */
+        if (selflnn_config_load_from_file("config/system_config.json", &sys_config) != 0) {
+            fprintf(stderr, "警告: 无法从config/system_config.json加载配置，使用默认参数\n");
+            /* 无法加载文件时使用默认值（与system_config.json一致） */
+            sys_config.state_dimension = 256;
+            sys_config.multimodal_channels = 64;
+            sys_config.memory_capacity = 10000;
+            sys_config.max_concurrent_tasks = 100;
+            sys_config.power_mode = POWER_MODE_BALANCED;
+            sys_config.gpu_backend = GPU_BACKEND_AUTO;  /* P0-03修复: 默认自动检测GPU */
+            sys_config.mixed_precision_mode = 1;  /* 默认auto混合精度 */
+            sys_config.model_path = NULL;
+            sys_config.http_port = SELFLNN_DEFAULT_PORT;
+            sys_config.websocket_port = SELFLNN_WEBSOCKET_PORT;
+            sys_config.distributed_port = 8765;
+        } else {
+            printf("[D8] 从 config/system_config.json 加载系统结构配置成功:\n");
+            printf("  state_dimension=%d, multimodal_channels=%d, memory_capacity=%d\n",
+                   sys_config.state_dimension, sys_config.multimodal_channels, sys_config.memory_capacity);
+            printf("  max_concurrent_tasks=%d, power_mode=%d, gpu_backend=%d\n",
+                   sys_config.max_concurrent_tasks, sys_config.power_mode, sys_config.gpu_backend);
         }
 
 /* 初始化SELF-LNN核心系统（为AGI后台任务提供子系统支持） */
-        {
-            SystemConfig sys_config;
-            memset(&sys_config, 0, sizeof(SystemConfig));
-            /* 优先使用JSON中的值，JSON中未提供则使用硬编码默认值 */
-            sys_config.state_dimension = (sysjson_state_dim > 0) ? sysjson_state_dim : 256;
-            sys_config.multimodal_channels = (sysjson_mm_channels > 0) ? sysjson_mm_channels : 64;
-            sys_config.memory_capacity = (sysjson_mem_cap > 0) ? sysjson_mem_cap : 10000;
-            sys_config.max_concurrent_tasks = (sysjson_max_tasks > 0) ? sysjson_max_tasks : 100;
-            sys_config.power_mode = (sysjson_power_mode >= 0) ? sysjson_power_mode : POWER_MODE_BALANCED;
-            sys_config.gpu_backend = (sysjson_gpu_backend >= 0) ? sysjson_gpu_backend : GPU_BACKEND_CPU;
-            sys_config.mixed_precision_mode = (sysjson_mixed_precision >= 0) ? sysjson_mixed_precision : 1; /* ZSF-003: 默认auto */
-            sys_config.model_path = (sysjson_model_path[0] != '\0') ? sysjson_model_path : NULL;
 
         if (selflnn_init(&sys_config) == 0) {
             printf("  SELF-LNN核心系统初始化成功\n");
@@ -2680,8 +2843,21 @@ int main(int argc, char** argv)
             GLOBAL_LNN_LOCK();
             g_global_lnn = selflnn_get_shared_lnn();
             GLOBAL_LNN_UNLOCK();
+            /* P0-04修复: LNN是AGI系统的核心依赖，NULL时系统无法正常运行。
+             * 仅当显式指定--no-lnn降级模式时才允许继续启动（用于诊断/调试）。
+             * 正常模式下，LNN获取失败必须终止系统，避免运行时崩溃。 */
             if (!g_global_lnn) {
-                fprintf(stderr, "警告: 共享LNN获取失败，GPU回退功能将不可用\n");
+                if (no_lnn) {
+                    fprintf(stderr, "警告: 共享LNN获取失败（--no-lnn降级模式），GPU回退功能将不可用\n");
+                    fprintf(stderr, "警告: 系统将以后端服务器模式运行，但AGI核心功能（推理/学习/决策）将不可用\n");
+                    log_warning("[MAIN] LNN未初始化，系统在降级模式下运行");
+                } else {
+                    fprintf(stderr, "错误: 共享LNN获取失败！LNN是AGI系统的核心神经网络，无法继续启动。\n");
+                    fprintf(stderr, "错误: 请检查系统配置和日志。如需仅启动后端服务器，请使用 --no-lnn 降级模式。\n");
+                    log_error("[MAIN] LNN初始化后获取共享实例失败，系统终止");
+                    selflnn_shutdown();
+                    return 1;
+                }
             }
             {
                 void* unified_state = selflnn_get_unified_lnn_state();
@@ -3051,36 +3227,11 @@ int main(int argc, char** argv)
                         printf("  AGI认知系统创建成功但LNN注入失败\n");
                     }
                     goto skip_agi_injection;  /* 跳过子系统注入但保留backend */
+                    /* P2修复: 移除不可达的子系统注入代码（C4702警告）。
+                     * 子系统注入已在selflnn初始化时由selflnn_create统一完成，
+                     * 此处重复注入代码因goto skip_agi_injection而不可达，
+                     * 移除后消除编译警告，不影响现有功能。 */
 
-/* 注入所有共享子系统（替换AGISystem自建的独立副本）
-                     * 确保"使用单一液态神经网络模型"原则：
-                     * 所有子系统均使用selflnn的共享实例，禁止AGISystem持有独立副本。
-                     * agi_system_set_xxx 内部会先释放AGISystem自建副本，再替换为共享实例。
-                     * 对于名称不完全匹配的getter，使用最接近的已有函数并显式强制类型转换。
-                     * 注：selflnn中无独立DCCorrectionSystem实例（g_system_state无correction字段），
-                     *     深度修正能力由自我认知子系统和元认知子系统内部协同处理，
-                     *     已通过上方的self_cognition/meta_cognition注入覆盖。 */
-                    agi_system_set_knowledge_base(g_agi_system, (KnowledgeBase*)selflnn_get_knowledge_base());
-                    { void* re = selflnn_get_reasoning_engine(); if (re) agi_system_set_reasoning_engine(g_agi_system, (ReasoningEngine*)re); }
-                    { void* ps = selflnn_get_planning_system(); if (ps) agi_system_set_planning_system(g_agi_system, (PlanningSystem*)ps); }
-                    { void* le = selflnn_get_online_learner(); if (le) agi_system_set_learning_engine(g_agi_system, (LearningEngine*)le); }
-                    { void* mm = selflnn_get_memory_manager(); if (mm) agi_system_set_memory_manager(g_agi_system, (MemoryManager*)mm); }
-                    agi_system_set_metacognition(g_agi_system, (MetacognitionSystem*)selflnn_get_metacognition());
-                    agi_system_set_self_cognition(g_agi_system, (SelfCognitionSystem*)selflnn_get_self_cognition());
-                    agi_system_set_dialogue(g_agi_system, (DialogueProcessor*)selflnn_get_dialogue_processor());
-                    printf("  AGI认知系统共享子系统注入完成（8个子系统已替换，单一LNN原则）\n");
-
-/* 注册知识库更新事件通知回调
-                     * 当 knowledge_base_add 写入新知识后，通过此回调
-                     * 主动触发LNN知识嵌入重新编码（替代原来的定时轮询），
-                     * 消除知识写入与嵌入更新之间的延迟。 */
-                    {
-                        KnowledgeBase* shared_kb = (KnowledgeBase*)selflnn_get_knowledge_base();
-                        if (shared_kb) {
-                            knowledge_base_set_update_callback(kb_update_nofify_callback, NULL);
-                            printf("  知识库更新事件通知回调已注册\n");
-                        }
-                    }
                 } else {
                     printf("  AGI认知系统创建失败\n");
                 }
@@ -3099,8 +3250,7 @@ skip_agi_injection:
             fprintf(stderr, "错误: 核心系统初始化失败（LNN/知识库/推理引擎等关键模块未就绪）\n");
             return 1;
         }
-        } /* 内层sys_config初始化块结束 */
-    } /* 外层system_config.json读取块结束 */
+    } /* 外层配置加载块结束 */
 
 #ifdef _MSC_VER
     __try {
@@ -3135,6 +3285,10 @@ skip_agi_injection:
     }
 
     printf("正在启动后端服务器...\n");
+
+    /* P1-01修复: 启动统一自检诊断 */
+    selflnn_startup_diagnostics();
+
     if (backend_server_start(g_server) != 0) {
         fprintf(stderr, "错误: 无法启动后端服务器\n");
         backend_server_free(g_server);
@@ -3143,29 +3297,46 @@ skip_agi_injection:
         return 1;
     }
 
-    /* 启动WebSocket推送服务器（独立端口8081） */
+    /* 启动WebSocket推送服务器（从配置文件读取端口，支持运行时修改） */
     {
-        WSPushServer* ws_push = ws_push_server_create(SELFLNN_WEBSOCKET_PORT);
+        /* P1-02修复: 从配置结构体读取websocket_port，不再硬编码SELFLNN_WEBSOCKET_PORT
+         * 如果配置值为0或无效，回退到SELFLNN_WEBSOCKET_PORT默认值 */
+        int ws_port = config.websocket_port;
+        if (ws_port <= 0 || ws_port > 65535) {
+            ws_port = SELFLNN_WEBSOCKET_PORT;
+        }
+        /* 确保WebSocket端口与HTTP端口不冲突，若冲突则自动偏移 */
+        if (ws_port == config.port) {
+            ws_port = config.port + 1;
+            if (ws_port > 65535) ws_port = SELFLNN_WEBSOCKET_PORT;
+            log_warning("[启动] WebSocket端口与HTTP端口冲突，自动调整为%d", ws_port);
+        }
+        WSPushServer* ws_push = ws_push_server_create(ws_port);
         if (ws_push) {
             if (ws_push_server_start(ws_push) == 0) {
-                printf("  WebSocket推送服务器已启动 (端口:%d)\n", SELFLNN_WEBSOCKET_PORT);
+                printf("  WebSocket推送服务器已启动 (端口:%d)\n", ws_port);
                 g_ws_push_server = ws_push;
                 /* P0-001: 将WSPushServer注入后端，实现统一WebSocket架构 */
                 backend_server_set_ws_push_server(g_server, ws_push);
                 printf("  WebSocket推送服务器已注入后端（统一架构）\n");
             } else {
-                printf("  WebSocket推送服务器启动失败 (端口:%d)，系统将继续运行但无实时推送功能\n", SELFLNN_WEBSOCKET_PORT);
+                printf("  WebSocket推送服务器启动失败 (端口:%d)，系统将继续运行但无实时推送功能\n", ws_port);
                 ws_push_server_destroy(ws_push);
             }
         } else {
-            printf("  WebSocket推送服务器创建失败 (端口:%d)\n", SELFLNN_WEBSOCKET_PORT);
+            printf("  WebSocket推送服务器创建失败 (端口:%d)\n", ws_port);
         }
     }
 
     printf("\n========================================\n");
     printf("SELF-LNN AGI 系统已成功启动!\n");
     printf("  API地址: http://localhost:%d/api\n", config.port);
-    printf("  WebSocket: ws://localhost:%d/ws\n", SELFLNN_WEBSOCKET_PORT);
+    {
+        /* P1-02修复: 使用实际WebSocket端口显示 */
+        int ws_display_port = config.websocket_port;
+        if (ws_display_port <= 0 || ws_display_port > 65535) ws_display_port = SELFLNN_WEBSOCKET_PORT;
+        printf("  WebSocket: ws://localhost:%d/ws\n", ws_display_port);
+    }
     printf("  前端地址: http://localhost:%d\n", config.port);
     if (config.api_key[0] != '\0') {
         printf("  API密钥: %s\n", config.api_key);
@@ -3213,12 +3384,15 @@ main_loop_restart:
     /* P1-7修复：启动WebSocket独立轮询线程，与AGI 10秒主循环解耦。
      * 原架构ws_push_server_poll仅在主循环中每10秒调用一次，
      * 导致客户端消息处理延迟高达10秒，WebSocket实时推送名存实亡。
-     * 独立线程以100ms高频轮询，确保消息实时处理、心跳及时发送。 */
+     * 独立线程以100ms高频轮询，确保消息实时处理、心跳及时发送。
+     * WS-004修复: 保存线程句柄，关闭时join等待安全退出，替代立即CloseHandle/detach。 */
 #ifdef _WIN32
     {
         /* DEEP-005修复: ws_poll_thread_func已外置为静态函数 */
-        HANDLE ws_thread = CreateThread(NULL, 0, ws_poll_thread_func, NULL, 0, NULL);
-        if (ws_thread) CloseHandle(ws_thread);
+        g_ws_poll_thread = CreateThread(NULL, 0, ws_poll_thread_func, NULL, 0, NULL);
+        if (!g_ws_poll_thread) {
+            log_error("WS轮询线程创建失败");
+        }
     }
 #else
     {
@@ -3233,9 +3407,10 @@ main_loop_restart:
             }
             return NULL;
         }
-        pthread_t ws_thread;
-        if (pthread_create(&ws_thread, NULL, ws_poll_thread_func, NULL) == 0) {
-            pthread_detach(ws_thread);
+        if (pthread_create(&g_ws_poll_thread, NULL, ws_poll_thread_func, NULL) == 0) {
+            g_ws_poll_thread_valid = 1;
+        } else {
+            log_error("WS轮询线程创建失败");
         }
     }
 #endif
@@ -3377,6 +3552,34 @@ main_loop_restart:
         g_arch_controller = NULL;
         printf("  动态架构控制器已释放\n");
     }
+    /* WS-004修复: 等待WS轮询线程安全退出。
+     * 先设置g_agi_running=0（已在前面完成），然后join等待线程退出。
+     * 原代码Windows下CreateThread后立即CloseHandle无法join，
+     * Linux下pthread_detach后无法join，存在资源泄漏和use-after-free风险。 */
+#ifdef _WIN32
+    if (g_ws_poll_thread) {
+        printf("  等待WS轮询线程退出...\n");
+        DWORD wait_result = WaitForSingleObject(g_ws_poll_thread, 5000); /* 最多等5秒 */
+        if (wait_result == WAIT_TIMEOUT) {
+            printf("  WS轮询线程超时，强制终止\n");
+            TerminateThread(g_ws_poll_thread, 0);
+        }
+        CloseHandle(g_ws_poll_thread);
+        g_ws_poll_thread = NULL;
+        printf("  WS轮询线程已退出\n");
+    }
+#else
+    if (g_ws_poll_thread_valid) {
+        printf("  等待WS轮询线程退出...\n");
+        struct timespec timeout;
+        clock_gettime(CLOCK_REALTIME, &timeout);
+        timeout.tv_sec += 5; /* 最多等5秒 */
+        /* pthread_timedjoin_np非POSIX标准，使用简单pthread_join */
+        pthread_join(g_ws_poll_thread, NULL);
+        g_ws_poll_thread_valid = 0;
+        printf("  WS轮询线程已退出\n");
+    }
+#endif
     /* 以下4个资源由selflnn_shutdown统一管理释放，main.c不应重复释放 */
     /* g_online_learner_handle → 由selflnn shutdown_subsystems L2099释放 */
     /* g_evolution_engine_handle → 由selflnn shutdown_subsystems L2063释放 */

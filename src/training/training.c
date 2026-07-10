@@ -35,6 +35,7 @@
 #include "selflnn/utils/secure_random.h"
 #include "selflnn/core/evolutionary_algorithms.h"
 #include "selflnn/core/loss.h" /* 统一损失函数接口 */
+#include "selflnn/multimodal/multimodal_manager.h" /* P0跨模块集成: 多模态管理器用于训练融合 */
 
 /* MSVC false positive: parameters/gradients always set via conditional branches */
 #pragma warning(disable: 4703)
@@ -189,13 +190,15 @@ typedef struct {
 
 #define CKPT_MAGIC_STRING    "SELF-LNN-CKPT"
 #define CKPT_MAGIC_LEN       13
+#define CKPT_VERSION_0       0
+#define CKPT_VERSION_1       1
 #define CKPT_VERSION_CURRENT 1
-#define CKPT_VERSION_MIN     1
+#define CKPT_VERSION_MIN     0
 #define CKPT_SIGNATURE_LEN   32   /* SHA-256签名长度 */
 #define CKPT_HMAC_KEY        "SELF-LNN-CKPT-SIGN-V1"  /* 检查点签名密钥 */
 
-/* 支持的版本列表 */
-static const uint32_t g_ckpt_supported_versions[] = {1};
+/* 支持的版本列表：包含旧版本0以支持迁移 */
+static const uint32_t g_ckpt_supported_versions[] = {0, 1};
 #define CKPT_NUM_SUPPORTED_VERSIONS (sizeof(g_ckpt_supported_versions) / sizeof(g_ckpt_supported_versions[0]))
 
 /**
@@ -405,6 +408,56 @@ static int ckpt_is_version_supported(uint32_t version) {
         if (g_ckpt_supported_versions[i] == version) return 1;
     }
     return 0;
+}
+
+/**
+ * @brief P2修复: 检查点版本迁移
+ * 
+ * 从旧版本格式迁移到新版本格式:
+ * - CKPT_VERSION_0 -> CKPT_VERSION_1: 结构字段变化适配
+ * 
+ * @param version 旧版本号
+ * @param loaded_checkpoint 已加载的旧格式检查点数据
+ * @param output_checkpoint 输出新格式检查点数据
+ * @return int 0表示迁移成功，-1表示不支持迁移
+ */
+static int ckpt_migrate_version(uint32_t version, ModelCheckpoint* loaded_checkpoint,
+                                 ModelCheckpoint* output_checkpoint) {
+    if (!loaded_checkpoint || !output_checkpoint) {
+        return -1;
+    }
+    
+    switch (version) {
+        case CKPT_VERSION_0:
+            /* CKPT_VERSION_0 -> CKPT_VERSION_1迁移:
+             * CKPT_VERSION_0: ModelCheckpoint缺少timestamp、total_iterations、
+             * current_batch和learning_rate字段
+             * 需要补全默认值 */
+            memcpy(output_checkpoint, loaded_checkpoint, sizeof(ModelCheckpoint));
+            
+            /* 补全缺失字段默认值 */
+            if (output_checkpoint->timestamp == 0) {
+                output_checkpoint->timestamp = (uint64_t)time(NULL);
+            }
+            if (output_checkpoint->total_iterations == 0) {
+                output_checkpoint->total_iterations = output_checkpoint->epoch * output_checkpoint->current_batch;
+            }
+            if (output_checkpoint->learning_rate == 0.0f) {
+                output_checkpoint->learning_rate = 0.001f; /* 默认学习率 */
+            }
+            /* current_batch已有默认值0，无需额外处理 */
+            
+            return 0;
+            
+        case CKPT_VERSION_1:
+            /* 已是当前版本，直接复制无需迁移 */
+            memcpy(output_checkpoint, loaded_checkpoint, sizeof(ModelCheckpoint));
+            return 0;
+            
+        default:
+            /* 不支持其他版本 */
+            return -1;
+    }
 }
 
 /* ================================================================
@@ -810,7 +863,7 @@ typedef struct Trainer {
     // ---- 需求20.4a: 紧急检查点（崩溃恢复） ----
     char* emergency_checkpoint_path;          /**< 紧急检查点文件路径 */
     int emergency_checkpoint_enabled;         /**< 是否启用紧急检查点 */
-    _Atomic int emergency_save_requested; /**< volatile→_Atomic，紧急保存请求标志（信号处理中设置） */
+    volatile sig_atomic_t emergency_save_requested; /**< 紧急保存请求标志（信号处理中设置，sig_atomic_t保证异步信号安全读写） */
     char* crash_checkpoint_dir;               /**< 崩溃检查点目录 */
     
     // ---- 需求20.4b: 检查点保留策略 ----
@@ -5669,7 +5722,44 @@ int trainer_train(Trainer* trainer, const float* inputs, const float* targets,
                 batch_inputs = aug_inputs;
                 batch_targets = aug_targets;
             }
-            
+
+            /* P0跨模块集成: 多模态训练阶段注入融合特征数据
+             * 当训练阶段为多模态对齐(phase=3)且多模态管理器可用时，
+             * 从多模态管理器获取融合特征并混合到训练输入中。
+             * 如果多模态管理器不可用，优雅降级回退到原有路径。 */
+            if (trainer->training_phase == 3) {
+                void* mm_raw = selflnn_get_multimodal_manager();
+                if (mm_raw) {
+                    MultimodalManager* mm_mgr = (MultimodalManager*)mm_raw;
+                    /* 为批次中的每个样本获取融合特征并混合 */
+                    float* mm_fused = (float*)safe_malloc(512 * sizeof(float));
+                    if (mm_fused) {
+                        for (size_t si = 0; si < batch_size; si++) {
+                            float* sample_input = actual_inputs + si * input_dim;
+                            int num_fused = multimodal_manager_process(mm_mgr,
+                                (const void*)sample_input,                /* 视觉数据 */
+                                (const void*)(sample_input + 256),        /* 音频数据 */
+                                (const void*)(sample_input + 384),        /* 文本数据 */
+                                (const void*)(sample_input + 448),        /* 传感器数据 */
+                                NULL, NULL, NULL, NULL, NULL,              /* 无额外模态 */
+                                mm_fused, 512);
+
+                            if (num_fused > 0) {
+                                /* 融合特征权重 = 0.1，原始数据权重 = 0.9
+                                 * 低权重确保融合特征提供补充信息但不主导训练信号 */
+                                size_t mix_size = (size_t)num_fused < input_dim ?
+                                                 (size_t)num_fused : input_dim;
+                                for (size_t mi = 0; mi < mix_size; mi++) {
+                                    sample_input[mi] = sample_input[mi] * 0.9f +
+                                                       mm_fused[mi] * 0.1f;
+                                }
+                            }
+                        }
+                        safe_free((void**)&mm_fused);
+                    }
+                }
+            }
+
             // 前向传播路径选择：GPU → 混合精度 → 标准CPU
             int forward_done = 0;
 
@@ -8619,11 +8709,15 @@ int load_model_checkpoint(Trainer* trainer, const char* filename) {
     
     if (!ckpt_is_version_supported(header.version)) {
         if (trainer->config.verbose) {
-            printf("错误：不支持的检查点版本 %u，当前支持版本: 1\n", header.version);
+            printf("错误：不支持的检查点版本 %u，当前支持版本: %d\n", header.version, CKPT_VERSION_CURRENT);
         }
         fclose(file);
         return -1;
     }
+    
+    /* P2修复: 记录原始版本号，用于加载后迁移 */
+    uint32_t original_version = header.version;
+    int need_migration = (original_version < CKPT_VERSION_CURRENT);
     
     // 验证header_size和checkpoint_size的合理性
     if (header.header_size < 28 || header.header_size > 512 ||
@@ -8638,11 +8732,61 @@ int load_model_checkpoint(Trainer* trainer, const char* filename) {
     
     // 2. 读取检查点信息
     ModelCheckpoint checkpoint;
-    if (fread(&checkpoint, sizeof(ModelCheckpoint), 1, file) != 1) {
-        fclose(file);
-        return -1;
+    ModelCheckpoint migrated_checkpoint;
+    if (original_version == CKPT_VERSION_0) {
+        /* CKPT_VERSION_0读取: 旧版本ModelCheckpoint结构较小，只读取实际存在的字段 */
+        /* V0只包含: filename[256], loss, accuracy, epoch (总共256+4+4+4 = 268字节) */
+        char v0_buffer[268];
+        if (fread(v0_buffer, 1, 268, file) != 268) {
+            fclose(file);
+            return -1;
+        }
+        /* 复制到新结构并补全缺失字段 */
+        ModelCheckpoint v0_checkpoint;
+        memset(&v0_checkpoint, 0, sizeof(v0_checkpoint));
+        memcpy(v0_checkpoint.filename, v0_buffer, 256);
+        memcpy(&v0_checkpoint.loss, v0_buffer + 256, 4);
+        memcpy(&v0_checkpoint.accuracy, v0_buffer + 260, 4);
+        memcpy(&v0_checkpoint.epoch, v0_buffer + 264, 4);
+        /* 进行版本迁移 */
+        if (ckpt_migrate_version(CKPT_VERSION_0, &v0_checkpoint, &migrated_checkpoint) != 0) {
+            if (trainer->config.verbose) {
+                printf("错误：无法从版本0迁移检查点到版本1\n");
+            }
+            fclose(file);
+            return -1;
+        }
+        if (trainer->config.verbose) {
+            printf("信息：已完成检查点版本迁移 %u -> %d\n", original_version, CKPT_VERSION_CURRENT);
+        }
+        /* 更新CRC */
+        crc = ckpt_crc32c(crc, &migrated_checkpoint, sizeof(ModelCheckpoint));
+        /* 将迁移后的数据赋值给checkpoint */
+        checkpoint = migrated_checkpoint;
+    } else {
+        /* 新版本直接读取 */
+        if (fread(&checkpoint, sizeof(ModelCheckpoint), 1, file) != 1) {
+            fclose(file);
+            return -1;
+        }
+        crc = ckpt_crc32c(crc, &checkpoint, sizeof(ModelCheckpoint));
+        if (need_migration) {
+            /* 对其他需要迁移的版本进行处理 */
+            ModelCheckpoint migrated;
+            if (ckpt_migrate_version(original_version, &checkpoint, &migrated) != 0) {
+                if (trainer->config.verbose) {
+                    printf("错误：无法从版本%u迁移检查点到版本%d\n", original_version, CKPT_VERSION_CURRENT);
+                }
+                fclose(file);
+                return -1;
+            }
+            checkpoint = migrated;
+            if (trainer->config.verbose) {
+                printf("信息：已完成检查点版本迁移 %u -> %d\n", original_version, CKPT_VERSION_CURRENT);
+            }
+            crc = ckpt_crc32c(crc, &checkpoint, sizeof(ModelCheckpoint));
+        }
     }
-    crc = ckpt_crc32c(crc, &checkpoint, sizeof(ModelCheckpoint));
     
     // 3. 读取训练配置
     TrainingConfig saved_config;
@@ -8667,6 +8811,12 @@ int load_model_checkpoint(Trainer* trainer, const char* filename) {
         return -1;
     }
     crc = ckpt_crc32c(crc, &network_flag, sizeof(uint32_t));
+    
+    /* P2-01修复：先用临时变量存储加载的网络和优化器状态，
+     * CRC验证通过后再交换到trainer，避免损坏的训练器状态 */
+    LNN* loaded_network = NULL;
+    int opt_state_loaded = 0;
+    float opt_m_v_saved[4] = {0};
     
     if (network_flag == 0x4E455457) {
         uint32_t name_length;
@@ -8699,13 +8849,13 @@ int load_model_checkpoint(Trainer* trainer, const char* filename) {
         }
         crc = ckpt_crc32c(crc, &network_size, sizeof(uint64_t));
         
-        // 实际加载网络权重
+        /* P2-01修复：加载网络到临时变量，暂不交换到trainer */
         if (trainer->network && name_length > 0) {
             if (trainer->config.verbose) {
                 printf("检查点包含网络数据，加载网络文件: %s\n", network_filename);
             }
             
-            // 检查网络文件是否存在
+            /* 检查网络文件是否存在 */
             FILE* nf = fopen(network_filename, "rb");
             if (nf) {
                 fseek(nf, 0, SEEK_END);
@@ -8719,14 +8869,10 @@ int load_model_checkpoint(Trainer* trainer, const char* filename) {
                 }
             }
             
-            LNN* loaded = lnn_load(network_filename);
-            int load_result = (loaded != NULL) ? 0 : -1;
-            if (load_result == 0 && loaded) {
-                LNN* old_net = trainer->network;
-                trainer->network = loaded;
-                lnn_free(old_net);
+            loaded_network = lnn_load(network_filename);
+            if (loaded_network) {
                 if (trainer->config.verbose) {
-                    printf("网络权重加载成功: %s\n", network_filename);
+                    printf("网络权重加载成功（待CRC验证）: %s\n", network_filename);
                 }
             } else {
                 if (trainer->config.verbose) {
@@ -8741,7 +8887,7 @@ int load_model_checkpoint(Trainer* trainer, const char* filename) {
     }
     
     /* Z4-003: 5.5 读取优化器状态（Adam m/v动量）—— 断点续训恢复
-     * 尝试读取优化器标志，根据标志决定是否恢复动量状态 */
+     * P2-01修复：先读取到临时变量，CRC验证通过后再恢复到trainer */
     {
         uint32_t opt_flag = 0;
         if (fread(&opt_flag, sizeof(uint32_t), 1, file) == 1) {
@@ -8750,14 +8896,9 @@ int load_model_checkpoint(Trainer* trainer, const char* filename) {
                 float opt_m_v[4] = {0};
                 if (fread(opt_m_v, sizeof(opt_m_v), 1, file) == 1) {
                     crc = ckpt_crc32c(crc, opt_m_v, sizeof(opt_m_v));
-                    if (trainer->optimizer.m_buffer) {
-/* 使用正式API恢复优化器状态 */
-                        optimizer_set_internal_state(&trainer->optimizer, opt_m_v);
-                        if (trainer->config.verbose) {
-                            printf("优化器状态恢复: beta1=%.4f beta2=%.4f eps=%.6f steps=%d\n",
-                                   opt_m_v[0], opt_m_v[1], opt_m_v[2], (int)opt_m_v[3]);
-                        }
-                    }
+                    /* P2-01修复：暂存优化器状态，CRC验证通过后再恢复 */
+                    memcpy(opt_m_v_saved, opt_m_v, sizeof(opt_m_v));
+                    opt_state_loaded = 1;
                 }
             } else if (opt_flag == 0x4E4F5054) {
                 /* "NOPT" - 无优化器状态，正常情况 */
@@ -8767,7 +8908,7 @@ int load_model_checkpoint(Trainer* trainer, const char* filename) {
         /* 如果 fread 完全失败（EOF），说明这是旧格式检查点，忽略即可 */
     }
     
-    // 6. 读取并验证真实CRC32校验和
+    // 6. 读取并验证CRC32校验和
     {
         uint32_t saved_crc = 0;
         if (fread(&saved_crc, sizeof(uint32_t), 1, file) == 1) {
@@ -8790,9 +8931,31 @@ int load_model_checkpoint(Trainer* trainer, const char* filename) {
     
     fclose(file);
     
-    // CRC验证失败时返回错误
+    // CRC验证失败时释放临时资源并返回错误
     if (!crc_valid) {
+        if (loaded_network) {
+            lnn_free(loaded_network);
+        }
         return -1;
+    }
+    
+    /* P2-01修复：CRC验证通过后，安全地交换网络和恢复优化器状态 */
+    if (loaded_network) {
+        LNN* old_net = trainer->network;
+        trainer->network = loaded_network;
+        lnn_free(old_net);
+        if (trainer->config.verbose) {
+            printf("网络权重已交换到训练器（CRC验证通过）\n");
+        }
+    }
+    
+    if (opt_state_loaded && trainer->optimizer.m_buffer) {
+        optimizer_set_internal_state(&trainer->optimizer, opt_m_v_saved);
+        if (trainer->config.verbose) {
+            printf("优化器状态恢复: beta1=%.4f beta2=%.4f eps=%.6f steps=%d\n",
+                   opt_m_v_saved[0], opt_m_v_saved[1],
+                   opt_m_v_saved[2], (int)opt_m_v_saved[3]);
+        }
     }
 
 /* 检查点维度交叉验证 — 分布式路径有此检查但标准路径缺少
@@ -8867,14 +9030,14 @@ static Trainer* g_emergency_trainer = NULL;
 static void emergency_signal_handler(int signum) {
     (void)signum; // 未使用参数
     
-    // 设置请求标志
+    // 设置请求标志（volatile sig_atomic_t 保证异步信号安全）
     if (g_emergency_trainer) {
         g_emergency_trainer->emergency_save_requested = 1;
     }
-    
-    // 恢复默认信号处理，下次触发时执行默认行为（终止进程）
-    signal(SIGINT, SIG_DFL);
-    signal(SIGTERM, SIG_DFL);
+    /* 注意：不在信号处理器中调用 signal() 或 sigaction()，
+     * 因为 POSIX 未保证这些函数是异步信号安全的。
+     * 信号处理器由程序启动时通过 sigaction() 一次性注册，
+     * 无需在处理器内部重新注册。 */
 }
 
 #ifdef _WIN32
@@ -9121,9 +9284,21 @@ int trainer_enable_emergency_checkpoint(Trainer* trainer, const char* path) {
         // 设置全局训练器指针供信号处理使用
         g_emergency_trainer = trainer;
         
-        // 注册信号处理函数
+        // 注册信号处理函数（Linux/macOS使用sigaction，Windows回退到signal）
+#ifdef _WIN32
         signal(SIGINT, emergency_signal_handler);
         signal(SIGTERM, emergency_signal_handler);
+#else
+        {
+            struct sigaction sa;
+            memset(&sa, 0, sizeof(sa));
+            sa.sa_handler = emergency_signal_handler;
+            sigemptyset(&sa.sa_mask);
+            sa.sa_flags = SA_RESTART;  /* 自动重启被信号中断的系统调用 */
+            sigaction(SIGINT, &sa, NULL);
+            sigaction(SIGTERM, &sa, NULL);
+        }
+#endif
         
 #ifdef _WIN32
         // Windows 控制台事件处理
@@ -9138,8 +9313,21 @@ int trainer_enable_emergency_checkpoint(Trainer* trainer, const char* path) {
         }
     } else {
         // 禁用紧急检查点
+        // 恢复默认信号处理（Linux/macOS使用sigaction，Windows回退到signal）
+#ifdef _WIN32
         signal(SIGINT, SIG_DFL);
         signal(SIGTERM, SIG_DFL);
+#else
+        {
+            struct sigaction sa_default;
+            memset(&sa_default, 0, sizeof(sa_default));
+            sa_default.sa_handler = SIG_DFL;
+            sigemptyset(&sa_default.sa_mask);
+            sa_default.sa_flags = 0;
+            sigaction(SIGINT, &sa_default, NULL);
+            sigaction(SIGTERM, &sa_default, NULL);
+        }
+#endif
 #ifdef _WIN32
         SetConsoleCtrlHandler(emergency_console_handler, FALSE);
 #endif
@@ -15135,6 +15323,20 @@ int trainer_pretrain_autoencoder(Trainer* trainer, const float* data,
     float best_loss = 1e10f;
     int best_epoch = 0;
 
+    /* P2-02修复：将每样本malloc/free移到循环外，避免高频分配开销 */
+    size_t param_count = lnn_get_parameter_count(net);
+    float* noisy_input = (float*)safe_malloc(input_dim * sizeof(float));
+    float* param_grad  = (float*)safe_malloc(param_count * sizeof(float));
+    if (!noisy_input || !param_grad) {
+        safe_free((void**)&noisy_input);
+        safe_free((void**)&param_grad);
+        safe_free((void**)&encoded);
+        safe_free((void**)&reconstructed);
+        safe_free((void**)&loss_buffer);
+        safe_free((void**)&output_grad);
+        return -1;
+    }
+
     for (size_t epoch = 0; epoch < config->num_epochs; epoch++) {
         float total_loss = 0.0f;
         size_t total_batches = 0;
@@ -15149,64 +15351,54 @@ int trainer_pretrain_autoencoder(Trainer* trainer, const float* data,
                 const float* sample = data + idx * input_dim;
 
                 /* 去噪自动编码器添加输入噪声 */
-                float* noisy_input = (float*)safe_malloc(input_dim * sizeof(float));
-                if (noisy_input) {
-                    if (config->type == PRETRAIN_DENOISING_AE) {
-                        for (size_t d = 0; d < input_dim; d++)
-                            noisy_input[d] = sample[d] + rng_normal(0.0f, config->noise_level);
-                    } else {
-                        memcpy(noisy_input, sample, input_dim * sizeof(float));
+                if (config->type == PRETRAIN_DENOISING_AE) {
+                    for (size_t d = 0; d < input_dim; d++)
+                        noisy_input[d] = sample[d] + rng_normal(0.0f, config->noise_level);
+                } else {
+                    memcpy(noisy_input, sample, input_dim * sizeof(float));
+                }
+
+                /* 掩码自动编码器 */
+                if (config->type == PRETRAIN_MASKED) {
+                    for (size_t d = 0; d < input_dim; d++) {
+                        if (rng_uniform(0.0f, 1.0f) < config->mask_ratio)
+                            noisy_input[d] = 0.0f;
                     }
+                }
 
-                    /* 掩码自动编码器 */
-                    if (config->type == PRETRAIN_MASKED) {
-                        for (size_t d = 0; d < input_dim; d++) {
-                            if (rng_uniform(0.0f, 1.0f) < config->mask_ratio)
-                                noisy_input[d] = 0.0f;
-                        }
-                    }
+                /* 前向传播：编码（输入→隐藏） */
+                memcpy(net->input_buffer, noisy_input, input_dim * sizeof(float));
+                lnn_forward(net, net->input_buffer, net->output_buffer);
+                memcpy(encoded, net->hidden_state, hidden_size * sizeof(float));
 
-                    /* 前向传播：编码（输入→隐藏） */
-                    memcpy(net->input_buffer, noisy_input, input_dim * sizeof(float));
-                    lnn_forward(net, net->input_buffer, net->output_buffer);
-                    memcpy(encoded, net->hidden_state, hidden_size * sizeof(float));
+                /* 解码：用输出作为重建 */
+                memcpy(reconstructed, net->output_buffer, output_dim_saved * sizeof(float));
 
-                    /* 解码：用输出作为重建 */
-                    memcpy(reconstructed, net->output_buffer, output_dim_saved * sizeof(float));
+                /* 计算重建损失 */
+                float sample_loss = 0.0f;
+                for (size_t d = 0; d < input_dim && d < output_dim_saved; d++) {
+                    float diff = reconstructed[d] - sample[d];
+                    sample_loss += diff * diff;
+                }
+                sample_loss /= (float)(input_dim < output_dim_saved ? input_dim : output_dim_saved);
+                total_loss += sample_loss;
+                total_batches++;
 
-                    /* 计算重建损失 */
-                    float sample_loss = 0.0f;
-                    for (size_t d = 0; d < input_dim && d < output_dim_saved; d++) {
-                        float diff = reconstructed[d] - sample[d];
-                        sample_loss += diff * diff;
-                    }
-                    sample_loss /= (float)(input_dim < output_dim_saved ? input_dim : output_dim_saved);
-                    total_loss += sample_loss;
-                    total_batches++;
+                /* 计算输出梯度用于反向传播 */
+                for (size_t d = 0; d < output_dim_saved; d++) {
+                    output_grad[d] = (d < input_dim) ?
+                        (reconstructed[d] - sample[d]) * 2.0f / (float)input_dim : 0.0f;
+                }
 
-                    /* 计算输出梯度用于反向传播 */
-                    for (size_t d = 0; d < output_dim_saved; d++) {
-                        output_grad[d] = (d < input_dim) ?
-                            (reconstructed[d] - sample[d]) * 2.0f / (float)input_dim : 0.0f;
-                    }
+                /* 反向传播 */
+                lnn_backward_batch(net, noisy_input, output_grad, param_grad, 1);
 
-                    /* 反向传播 */
-                    size_t param_count = lnn_get_parameter_count(net);
-                    float* param_grad = (float*)safe_malloc(param_count * sizeof(float));
-                    if (param_grad) {
-                        lnn_backward_batch(net, noisy_input, output_grad, param_grad, 1);
-
-                        /* 简单SGD更新 */
-                        float lr = config->learning_rate;
-                        float* params = lnn_get_parameters(net);
-                        if (params) {
-                            for (size_t p = 0; p < param_count; p++)
-                                params[p] -= lr * param_grad[p];
-                        }
-                        safe_free((void**)&param_grad);
-                    }
-
-                    safe_free((void**)&noisy_input);
+                /* 简单SGD更新 */
+                float lr = config->learning_rate;
+                float* params = lnn_get_parameters(net);
+                if (params) {
+                    for (size_t p = 0; p < param_count; p++)
+                        params[p] -= lr * param_grad[p];
                 }
             }
         }
@@ -15238,6 +15430,9 @@ int trainer_pretrain_autoencoder(Trainer* trainer, const float* data,
     safe_free((void**)&reconstructed);
     safe_free((void**)&loss_buffer);
     safe_free((void**)&output_grad);
+    /* P2-02修复：释放循环外分配的缓冲区 */
+    safe_free((void**)&noisy_input);
+    safe_free((void**)&param_grad);
 
     if (verbose)
         printf("=== 自动编码器预训练完成，最佳损失: %.6f ===\n", best_loss);
@@ -15280,11 +15475,46 @@ int trainer_pretrain_contrastive(Trainer* trainer,
         return -1;
     }
 
+    /* P0-02修复：分配L2范数保存缓冲区，用于反向传播时还原原始嵌入梯度 */
+    float* vis_norms = (float*)safe_malloc(num_samples * sizeof(float));
+    float* txt_norms = (float*)safe_malloc(num_samples * sizeof(float));
+    /* 分配嵌入梯度缓冲区（用于InfoNCE损失对嵌入向量的梯度） */
+    float* vis_emb_grad = (float*)safe_malloc(num_samples * embed_bytes);
+    float* txt_emb_grad = (float*)safe_malloc(num_samples * embed_bytes);
+    /* 分配softmax概率矩阵缓冲区 */
+    float* sim_matrix = (float*)safe_malloc(num_samples * num_samples * sizeof(float));
+    if (!vis_norms || !txt_norms || !vis_emb_grad || !txt_emb_grad || !sim_matrix) {
+        safe_free((void**)&vis_norms);
+        safe_free((void**)&txt_norms);
+        safe_free((void**)&vis_emb_grad);
+        safe_free((void**)&txt_emb_grad);
+        safe_free((void**)&sim_matrix);
+        safe_free((void**)&vision_embeddings);
+        safe_free((void**)&text_embeddings);
+        safe_free((void**)&proj_buffer);
+        return -1;
+    }
+
+    /* 获取参数数量和参数指针，用于优化器更新 */
+    size_t num_params = lnn_get_parameter_count(trainer->network);
+    float* temp_param_grads = (float*)safe_malloc(num_params * sizeof(float));
+    if (!temp_param_grads) {
+        safe_free((void**)&vis_norms);
+        safe_free((void**)&txt_norms);
+        safe_free((void**)&vis_emb_grad);
+        safe_free((void**)&txt_emb_grad);
+        safe_free((void**)&sim_matrix);
+        safe_free((void**)&vision_embeddings);
+        safe_free((void**)&text_embeddings);
+        safe_free((void**)&proj_buffer);
+        return -1;
+    }
+
     for (size_t epoch = 0; epoch < config->num_epochs; epoch++) {
         /* ============================================================
          * 第1步：通过单一CfC液态神经网络获取所有样本的嵌入向量
-         * 视觉 → LNN → vision_embeddings[i]
-         * 文本 → LNN → text_embeddings[i]
+         * 视觉 → LNN → vision_embeddings[i]（原始嵌入，未归一化）
+         * 文本 → LNN → text_embeddings[i]（原始嵌入，未归一化）
          * ============================================================ */
         for (size_t i = 0; i < num_samples; i++) {
             float* vis_emb = vision_embeddings + i * embed_dim;
@@ -15306,7 +15536,25 @@ int trainer_pretrain_contrastive(Trainer* trainer,
         }
 
         /* ============================================================
-         * 第2步：完整InfoNCE (NT-Xent) 损失计算
+         * P0-02修复：保存L2范数（归一化前），用于反向传播时
+         * 将归一化嵌入的梯度还原为原始嵌入的梯度。
+         * dL/d(x_raw) = (dL/d(x_norm) - (x_norm·dL/d(x_norm))*x_norm) / ||x_raw||
+         * ============================================================ */
+        for (size_t i = 0; i < num_samples; i++) {
+            float* vis_emb = vision_embeddings + i * embed_dim;
+            float* txt_emb = text_embeddings + i * embed_dim;
+
+            float vsq = 0.0f, tsq = 0.0f;
+            for (size_t d = 0; d < embed_dim; d++) {
+                vsq += vis_emb[d] * vis_emb[d];
+                tsq += txt_emb[d] * txt_emb[d];
+            }
+            vis_norms[i] = sqrtf(vsq) + 1e-8f;
+            txt_norms[i] = sqrtf(tsq) + 1e-8f;
+        }
+
+        /* ============================================================
+         * 第2步：完整InfoNCE (NT-Xent) 损失计算 + 梯度计算
          * L_{ij} = -log( exp(sim(z_i^V, z_i^T)/τ) / Σ_{k} exp(sim(z_i^V, z_k^T)/τ) )
          * 其中 sim(u,v) = cos(u,v) = (u·v) / (|u|·|v|)
          * 双向对称损失 = L_{V→T} + L_{T→V}
@@ -15318,57 +15566,241 @@ int trainer_pretrain_contrastive(Trainer* trainer,
             float* vis_emb = vision_embeddings + i * embed_dim;
             float* txt_emb = text_embeddings + i * embed_dim;
 
-            float vis_norm = 0.0f, txt_norm = 0.0f;
             for (size_t d = 0; d < embed_dim; d++) {
-                vis_norm += vis_emb[d] * vis_emb[d];
-                txt_norm += txt_emb[d] * txt_emb[d];
-            }
-            vis_norm = sqrtf(vis_norm) + 1e-8f;
-            txt_norm = sqrtf(txt_norm) + 1e-8f;
-            for (size_t d = 0; d < embed_dim; d++) {
-                vis_emb[d] /= vis_norm;
-                txt_emb[d] /= txt_norm;
+                vis_emb[d] /= vis_norms[i];
+                txt_emb[d] /= txt_norms[i];
             }
         }
 
-        /* 对称InfoNCE：视觉→文本 + 文本→视觉 */
+        /* 预计算所有相似度矩阵 sim_matrix[i][j] = vis_i · txt_j，
+         * 用于损失计算和梯度计算，避免重复计算 */
         for (size_t i = 0; i < num_samples; i++) {
             float* vis_emb = vision_embeddings + i * embed_dim;
-            float* txt_emb_i = text_embeddings + i * embed_dim;
-
-            /* 正样本相似度：匹配对 (i,i) */
-            float pos_sim = 0.0f;
-            for (size_t d = 0; d < embed_dim; d++) {
-                pos_sim += vis_emb[d] * txt_emb_i[d];
-            }
-
-            /* 视觉→文本方向：分母 = exp(pos/τ) + Σ_{j≠i} exp(sim(vis_i, txt_j)/τ) */
-            float denominator_v2t = 0.0f;
             for (size_t j = 0; j < num_samples; j++) {
                 float* txt_emb_j = text_embeddings + j * embed_dim;
                 float sim = 0.0f;
                 for (size_t d = 0; d < embed_dim; d++) {
                     sim += vis_emb[d] * txt_emb_j[d];
                 }
-                denominator_v2t += expf(sim / temperature);
+                sim_matrix[i * num_samples + j] = sim;
+            }
+        }
+
+        /* 对称InfoNCE：视觉→文本 + 文本→视觉，同时计算softmax概率用于梯度 */
+        for (size_t i = 0; i < num_samples; i++) {
+            float* vis_emb = vision_embeddings + i * embed_dim;
+            float* txt_emb_i = text_embeddings + i * embed_dim;
+
+            float pos_sim = sim_matrix[i * num_samples + i];
+
+            /* 视觉→文本方向：计算分母和softmax概率 p_ij */
+            float denominator_v2t = 0.0f;
+            for (size_t j = 0; j < num_samples; j++) {
+                denominator_v2t += expf(sim_matrix[i * num_samples + j] / temperature);
             }
             total_loss += -logf(expf(pos_sim / temperature) / (denominator_v2t + 1e-8f));
 
-            /* 文本→视觉方向：分母 = exp(pos/τ) + Σ_{j≠i} exp(sim(txt_i, vis_j)/τ) */
+            /* 文本→视觉方向：计算分母和softmax概率 q_ij */
             float denominator_t2v = 0.0f;
             for (size_t j = 0; j < num_samples; j++) {
-                float* vis_emb_j = vision_embeddings + j * embed_dim;
-                float sim = 0.0f;
-                for (size_t d = 0; d < embed_dim; d++) {
-                    sim += txt_emb_i[d] * vis_emb_j[d];
-                }
-                denominator_t2v += expf(sim / temperature);
+                denominator_t2v += expf(sim_matrix[j * num_samples + i] / temperature);
             }
             total_loss += -logf(expf(pos_sim / temperature) / (denominator_t2v + 1e-8f));
         }
 
         /* 对称损失需要除以2*num_samples */
         total_loss /= (2.0f * (float)num_samples);
+
+        /* ============================================================
+         * P0-02修复：第3步——计算InfoNCE损失对归一化嵌入的梯度
+         *
+         * 对称InfoNCE损失梯度公式：
+         * dL/d(vis_norm[i]) = (1/(N*τ)) * [ Σ_j (p_ij + q_ji) * txt_norm[j] - 2*txt_norm[i] ]
+         * dL/d(txt_norm[i]) = (1/(N*τ)) * [ Σ_j (p_ji + q_ij) * vis_norm[j] - 2*vis_norm[i] ]
+         *
+         * 其中 p_ij = exp(s_ij/τ) / Σ_k exp(s_ik/τ)  (视觉→文本softmax)
+         *       q_ij = exp(s_ij/τ) / Σ_k exp(s_kj/τ)  (文本→视觉softmax)
+         * ============================================================ */
+        /* 清零嵌入梯度缓冲区 */
+        memset(vis_emb_grad, 0, num_samples * embed_bytes);
+        memset(txt_emb_grad, 0, num_samples * embed_bytes);
+
+        float grad_scale = 1.0f / ((float)num_samples * temperature);
+
+        for (size_t i = 0; i < num_samples; i++) {
+            /* 计算视觉→文本softmax概率 p_ij (j=0..N-1) */
+            float denom_v2t = 0.0f;
+            for (size_t j = 0; j < num_samples; j++) {
+                denom_v2t += expf(sim_matrix[i * num_samples + j] / temperature);
+            }
+            denom_v2t += 1e-8f;
+
+            /* 计算文本→视觉softmax概率 q_ji (j=0..N-1) */
+            float denom_t2v = 0.0f;
+            for (size_t j = 0; j < num_samples; j++) {
+                denom_t2v += expf(sim_matrix[j * num_samples + i] / temperature);
+            }
+            denom_t2v += 1e-8f;
+
+            /* 累加梯度: dL/d(vis_norm[i]) */
+            float* vis_grad_i = vis_emb_grad + i * embed_dim;
+            for (size_t j = 0; j < num_samples; j++) {
+                float p_ij = expf(sim_matrix[i * num_samples + j] / temperature) / denom_v2t;
+                float q_ji = expf(sim_matrix[j * num_samples + i] / temperature) / denom_t2v;
+                float weight = (p_ij + q_ji) * grad_scale;
+                float* txt_emb_j = text_embeddings + j * embed_dim;
+                for (size_t d = 0; d < embed_dim; d++) {
+                    vis_grad_i[d] += weight * txt_emb_j[d];
+                }
+            }
+            /* 减去正样本项: -2*txt_norm[i] */
+            float* txt_emb_i = text_embeddings + i * embed_dim;
+            for (size_t d = 0; d < embed_dim; d++) {
+                vis_grad_i[d] -= 2.0f * grad_scale * txt_emb_i[d];
+            }
+
+            /* 累加梯度: dL/d(txt_norm[i]) */
+            float* txt_grad_i = txt_emb_grad + i * embed_dim;
+            for (size_t j = 0; j < num_samples; j++) {
+                float p_ji = expf(sim_matrix[j * num_samples + i] / temperature) / denom_t2v;
+                float q_ij = expf(sim_matrix[i * num_samples + j] / temperature) / denom_v2t;
+                float weight = (p_ji + q_ij) * grad_scale;
+                float* vis_emb_j = vision_embeddings + j * embed_dim;
+                for (size_t d = 0; d < embed_dim; d++) {
+                    txt_grad_i[d] += weight * vis_emb_j[d];
+                }
+            }
+            /* 减去正样本项: -2*vis_norm[i] */
+            float* vis_emb_i = vision_embeddings + i * embed_dim;
+            for (size_t d = 0; d < embed_dim; d++) {
+                txt_grad_i[d] -= 2.0f * grad_scale * vis_emb_i[d];
+            }
+        }
+
+        /* ============================================================
+         * P0-02修复：第4步——反向传播通过L2归一化层
+         * 将归一化嵌入的梯度转换为原始嵌入的梯度。
+         *
+         * dL/d(x_raw) = (dL/d(x_norm) - (x_norm · dL/d(x_norm)) * x_norm) / ||x_raw||
+         * ============================================================ */
+        for (size_t i = 0; i < num_samples; i++) {
+            float* vis_norm_emb = vision_embeddings + i * embed_dim;
+            float* vis_grad_i = vis_emb_grad + i * embed_dim;
+
+            /* 计算点积: x_norm · dL/d(x_norm) */
+            float vis_dot = 0.0f;
+            for (size_t d = 0; d < embed_dim; d++) {
+                vis_dot += vis_norm_emb[d] * vis_grad_i[d];
+            }
+            /* 投影并除以原始范数 */
+            float inv_vis_norm = 1.0f / vis_norms[i];
+            for (size_t d = 0; d < embed_dim; d++) {
+                vis_grad_i[d] = (vis_grad_i[d] - vis_dot * vis_norm_emb[d]) * inv_vis_norm;
+            }
+
+            float* txt_norm_emb = text_embeddings + i * embed_dim;
+            float* txt_grad_i = txt_emb_grad + i * embed_dim;
+
+            float txt_dot = 0.0f;
+            for (size_t d = 0; d < embed_dim; d++) {
+                txt_dot += txt_norm_emb[d] * txt_grad_i[d];
+            }
+            float inv_txt_norm = 1.0f / txt_norms[i];
+            for (size_t d = 0; d < embed_dim; d++) {
+                txt_grad_i[d] = (txt_grad_i[d] - txt_dot * txt_norm_emb[d]) * inv_txt_norm;
+            }
+        }
+
+        /* ============================================================
+         * P0-02修复：第5步——反向传播通过网络并累积参数梯度
+         * 对每个样本分别进行反向传播，将嵌入梯度传回网络参数，
+         * 累积所有样本的梯度后取平均，然后调用优化器更新。
+         * ============================================================ */
+        /* 清零累积梯度缓冲区 */
+        if (trainer->gradients && trainer->gradients_size >= num_params) {
+            memset(trainer->gradients, 0, num_params * sizeof(float));
+        }
+        /* 清零临时梯度缓冲区 */
+        memset(temp_param_grads, 0, num_params * sizeof(float));
+
+        for (size_t i = 0; i < num_samples; i++) {
+            /* 视觉样本反向传播：将 vis_emb_grad[i] 作为输出梯度 */
+            lnn_backward_batch(trainer->network,
+                               vision_data + i * vision_dim,
+                               vis_emb_grad + i * embed_dim,
+                               temp_param_grads, 1);
+            /* 累加到主梯度缓冲区 */
+            if (trainer->gradients && trainer->gradients_size >= num_params) {
+                for (size_t p = 0; p < num_params; p++) {
+                    trainer->gradients[p] += temp_param_grads[p];
+                }
+            }
+
+            /* 文本样本反向传播：将 txt_emb_grad[i] 作为输出梯度 */
+            lnn_backward_batch(trainer->network,
+                               text_data + i * text_dim,
+                               txt_emb_grad + i * embed_dim,
+                               temp_param_grads, 1);
+            /* 累加到主梯度缓冲区 */
+            if (trainer->gradients && trainer->gradients_size >= num_params) {
+                for (size_t p = 0; p < num_params; p++) {
+                    trainer->gradients[p] += temp_param_grads[p];
+                }
+            }
+        }
+
+        /* 梯度平均：除以 (2 * num_samples) */
+        if (trainer->gradients && trainer->gradients_size >= num_params) {
+            float inv_total = 1.0f / (2.0f * (float)num_samples);
+            for (size_t p = 0; p < num_params; p++) {
+                trainer->gradients[p] *= inv_total;
+            }
+        }
+
+        /* ============================================================
+         * P0-02修复：第6步——梯度裁剪、NaN过滤、优化器更新
+         * 参考 trainer_train 中的标准模式：
+         * gradient_clip → NaN/Inf检测 → optimizer_update
+         * ============================================================ */
+        if (trainer->gradients && trainer->gradients_size >= num_params && num_params > 0) {
+            /* 梯度裁剪 */
+            if (trainer->config.gradient_clip != GRADIENT_CLIP_NONE) {
+                gradient_clip(trainer->gradients, num_params,
+                              trainer->config.gradient_clip,
+                              trainer->config.gradient_clip_value,
+                              trainer->config.gradient_clip_norm);
+            }
+
+            /* NaN/Inf检测：若梯度包含异常值，跳过本轮更新保留上一轮权重 */
+            int has_nan_inf = 0;
+            size_t check_size = num_params < 10000 ? num_params : 10000;
+            for (size_t p = 0; p < check_size; p++) {
+                if (!isfinite(trainer->gradients[p])) {
+                    has_nan_inf = 1;
+                    break;
+                }
+            }
+
+            if (!has_nan_inf) {
+                /* 使用已有的优化器实例进行参数更新 */
+                float* parameters = lnn_get_parameters(trainer->network);
+                if (parameters) {
+                    /* 设置对比学习的学习率（通常比标准训练低） */
+                    float saved_lr = trainer->optimizer.learning_rate;
+                    if (config->learning_rate > 0.0f) {
+                        trainer->optimizer.learning_rate = config->learning_rate;
+                    }
+                    optimizer_update(&trainer->optimizer, parameters,
+                                     trainer->gradients, num_params);
+                    trainer->optimizer.learning_rate = saved_lr;
+                }
+            } else {
+                if (verbose) {
+                    printf("  对比 Epoch %zu/%zu: 梯度包含NaN/Inf，跳过本轮更新\n",
+                           epoch + 1, config->num_epochs);
+                }
+            }
+        }
 
         if (verbose && (epoch % 10 == 0 || epoch == config->num_epochs - 1))
             printf("  对比 Epoch %zu/%zu, InfoNCE(Sym)损失: %.6f, 温度=%.4f\n",
@@ -15384,6 +15816,13 @@ int trainer_pretrain_contrastive(Trainer* trainer,
             if (callback(&ev, user_data) != 0) break;
         }
     }
+
+    safe_free((void**)&temp_param_grads);
+    safe_free((void**)&vis_norms);
+    safe_free((void**)&txt_norms);
+    safe_free((void**)&vis_emb_grad);
+    safe_free((void**)&txt_emb_grad);
+    safe_free((void**)&sim_matrix);
 
     safe_free((void**)&vision_embeddings);
     safe_free((void**)&text_embeddings);
@@ -15452,10 +15891,28 @@ int trainer_progressive_train(Trainer* trainer,
                     float* pgrad = (float*)safe_malloc(pcnt * sizeof(float));
                     if (pgrad) {
                         lnn_backward_batch(net, net->input_buffer, output_grad, pgrad, cur_bs);
-                        float* params = lnn_get_parameters(net);
-                        if (params) {
-                            for (size_t p = 0; p < pcnt; p++)
-                                params[p] -= trainer->config.learning_rate * pgrad[p];
+
+                        /* P0-03修复：使用完整优化器(Adam/AdamW/Momentum等)替代手动SGD。
+                         * 手动SGD params[p] -= lr * grad[p] 无动量、无自适应学习率、
+                         * 无梯度裁剪、无NaN过滤，会导致训练不稳定和收敛缓慢。 */
+                        /* 梯度裁剪 */
+                        if (trainer->config.gradient_clip != GRADIENT_CLIP_NONE) {
+                            gradient_clip(pgrad, pcnt,
+                                          trainer->config.gradient_clip,
+                                          trainer->config.gradient_clip_value,
+                                          trainer->config.gradient_clip_norm);
+                        }
+                        /* NaN/Inf过滤：若梯度包含异常值，跳过本轮更新保留上一轮权重 */
+                        int has_nan = 0;
+                        size_t check_n = pcnt < 10000 ? pcnt : 10000;
+                        for (size_t p = 0; p < check_n; p++) {
+                            if (!isfinite(pgrad[p])) { has_nan = 1; break; }
+                        }
+                        if (!has_nan) {
+                            float* params = lnn_get_parameters(net);
+                            if (params) {
+                                optimizer_update(&trainer->optimizer, params, pgrad, pcnt);
+                            }
                         }
                         safe_free((void**)&pgrad);
                     }
@@ -15485,6 +15942,33 @@ int trainer_progressive_train(Trainer* trainer,
         trainer_set_training_phase(trainer, 2);
         if (verbose) printf("=== 阶段2：多模态训练 (%zu epochs) ===\n", multi_epochs);
 
+        /* P0跨模块集成: 获取全局多模态管理器实例
+         * 如果可用，在每个批次中注入多模态融合特征作为辅助训练数据。
+         * 如果不可用(NULL)，优雅降级回退到原有独立数据加载器路径。 */
+        MultimodalManager* mm_mgr = NULL;
+        float* mm_fused_batch = NULL;
+        size_t mm_fused_dim = 512;
+        {
+            void* mm_raw = selflnn_get_multimodal_manager();
+            if (mm_raw) {
+                mm_mgr = (MultimodalManager*)mm_raw;
+                mm_fused_batch = (float*)safe_malloc(mm_fused_dim * sizeof(float));
+                if (!mm_fused_batch) {
+                    log_warning("[渐进式训练] 多模态融合缓冲区分配失败，回退到独立数据路径");
+                    mm_mgr = NULL; /* 触发优雅降级 */
+                }
+            }
+        }
+        /* 临时输入缓冲区（用于混合多模态融合特征） */
+        float* augmented_input = NULL;
+        if (mm_mgr) {
+            augmented_input = (float*)safe_malloc(multi_dim * sizeof(float));
+            if (!augmented_input) {
+                log_warning("[渐进式训练] 增强输入缓冲区分配失败，回退到独立数据路径");
+                mm_mgr = NULL;
+            }
+        }
+
         for (size_t e = 0; e < multi_epochs; e++) {
             float total_loss = 0.0f;
             size_t batches = 0;
@@ -15496,7 +15980,33 @@ int trainer_progressive_train(Trainer* trainer,
                 if (b + cur_bs > num_samples_multi)
                     cur_bs = num_samples_multi - b;
 
-                lnn_forward(net, multi_inputs + b * multi_dim, net->output_buffer);
+                /* P0跨模块集成: 从多模态管理器获取融合特征并混合到输入数据
+                 * 使用批次起始样本作为多模态管理器输入的代表性样本 */
+                const float* batch_input = multi_inputs + b * multi_dim;
+                if (mm_mgr && mm_fused_batch && augmented_input) {
+                    int num_fused = multimodal_manager_process(mm_mgr,
+                        (const void*)batch_input,                /* 视觉数据 */
+                        (const void*)(batch_input + 256),        /* 音频数据 */
+                        (const void*)(batch_input + 384),        /* 文本数据 */
+                        (const void*)(batch_input + 448),        /* 传感器数据 */
+                        NULL, NULL, NULL, NULL, NULL,             /* 无额外模态 */
+                        mm_fused_batch, mm_fused_dim);
+
+                    if (num_fused > 0) {
+                        /* 将融合特征混合到批次输入中
+                         * 融合权重 = 0.12，原始数据权重 = 0.88 */
+                        size_t mix_size = (size_t)num_fused < multi_dim ?
+                                         (size_t)num_fused : multi_dim;
+                        memcpy(augmented_input, batch_input, multi_dim * sizeof(float));
+                        for (size_t mi = 0; mi < mix_size; mi++) {
+                            augmented_input[mi] = augmented_input[mi] * 0.88f +
+                                                  mm_fused_batch[mi] * 0.12f;
+                        }
+                        batch_input = augmented_input; /* 使用增强后的输入 */
+                    }
+                }
+
+                lnn_forward(net, batch_input, net->output_buffer);
 
                 float batch_loss = 0.0f;
                 for (size_t i = 0; i < cur_bs; i++) {
@@ -15517,11 +16027,27 @@ int trainer_progressive_train(Trainer* trainer,
                     size_t pcnt = lnn_get_parameter_count(net);
                     float* pgrad = (float*)safe_malloc(pcnt * sizeof(float));
                     if (pgrad) {
-                        lnn_backward_batch(net, multi_inputs + b * multi_dim, output_grad, pgrad, cur_bs);
-                        float* params = lnn_get_parameters(net);
-                        if (params) {
-                            for (size_t p = 0; p < pcnt; p++)
-                                params[p] -= trainer->config.learning_rate * pgrad[p];
+                        lnn_backward_batch(net, batch_input, output_grad, pgrad, cur_bs);
+
+                        /* P0-03修复：使用完整优化器替代手动SGD */
+                        /* 梯度裁剪 */
+                        if (trainer->config.gradient_clip != GRADIENT_CLIP_NONE) {
+                            gradient_clip(pgrad, pcnt,
+                                          trainer->config.gradient_clip,
+                                          trainer->config.gradient_clip_value,
+                                          trainer->config.gradient_clip_norm);
+                        }
+                        /* NaN/Inf过滤 */
+                        int has_nan = 0;
+                        size_t check_n = pcnt < 10000 ? pcnt : 10000;
+                        for (size_t p = 0; p < check_n; p++) {
+                            if (!isfinite(pgrad[p])) { has_nan = 1; break; }
+                        }
+                        if (!has_nan) {
+                            float* params = lnn_get_parameters(net);
+                            if (params) {
+                                optimizer_update(&trainer->optimizer, params, pgrad, pcnt);
+                            }
                         }
                         safe_free((void**)&pgrad);
                     }
@@ -15544,6 +16070,9 @@ int trainer_progressive_train(Trainer* trainer,
                 if (callback(&ev, user_data) != 0) { result = -1; break; }
             }
         }
+        /* P0跨模块集成: 释放多模态融合缓冲区 */
+        safe_free((void**)&mm_fused_batch);
+        safe_free((void**)&augmented_input);
     }
 
     /* 阶段3：联合微调 */
@@ -15589,10 +16118,31 @@ int trainer_progressive_train(Trainer* trainer,
                     float* pgrad = (float*)safe_malloc(pcnt * sizeof(float));
                     if (pgrad) {
                         lnn_backward_batch(net, joint_inputs + b * joint_dim, output_grad, pgrad, cur_bs);
-                        float* params = lnn_get_parameters(net);
-                        if (params) {
-                            for (size_t p = 0; p < pcnt; p++)
-                                params[p] -= trainer->config.learning_rate * pgrad[p] * 0.5f;
+
+                        /* P0-03修复：使用完整优化器替代手动SGD。
+                         * 联合微调阶段使用0.5倍学习率，通过临时调整优化器学习率实现。 */
+                        /* 梯度裁剪 */
+                        if (trainer->config.gradient_clip != GRADIENT_CLIP_NONE) {
+                            gradient_clip(pgrad, pcnt,
+                                          trainer->config.gradient_clip,
+                                          trainer->config.gradient_clip_value,
+                                          trainer->config.gradient_clip_norm);
+                        }
+                        /* NaN/Inf过滤 */
+                        int has_nan = 0;
+                        size_t check_n = pcnt < 10000 ? pcnt : 10000;
+                        for (size_t p = 0; p < check_n; p++) {
+                            if (!isfinite(pgrad[p])) { has_nan = 1; break; }
+                        }
+                        if (!has_nan) {
+                            float* params = lnn_get_parameters(net);
+                            if (params) {
+                                /* 联合微调阶段使用半倍学习率，保存并恢复原始学习率 */
+                                float saved_lr = trainer->optimizer.learning_rate;
+                                trainer->optimizer.learning_rate *= 0.5f;
+                                optimizer_update(&trainer->optimizer, params, pgrad, pcnt);
+                                trainer->optimizer.learning_rate = saved_lr;
+                            }
                         }
                         safe_free((void**)&pgrad);
                     }

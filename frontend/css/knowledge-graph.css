@@ -68,7 +68,7 @@
     color: rgba(255,255,255,0.4);
     font-size: 0.78rem;
     cursor: pointer;
-    transition: all 0.2s;
+    transition: color 0.2s, border-color 0.2s;
     border-bottom: 2px solid transparent;
 }
 .knowledge-graph-page .tab-btn:hover { color: rgba(255,255,255,0.7); }
@@ -110,7 +110,7 @@
     border-radius: 4px;
     font-size: 0.78rem;
     cursor: pointer;
-    transition: all 0.2s;
+    transition: background 0.2s, color 0.2s, border-color 0.2s;
     background: rgba(0,200,255,0.1);
     color: #00c8ff;
 }

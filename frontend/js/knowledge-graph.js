@@ -28,6 +28,8 @@
     };
 
     var knowledgeEntries = [];
+    /* P1-005修复: 缓存canvas.getBoundingClientRect()结果，仅在resize时更新，避免mousemove中频繁触发强制重排 */
+    var cachedRect = { left: 0, top: 0, width: 0, height: 0 };
 
     /* BUG-19修复：canvas和ctx是模块级变量，在initCanvas()中初始化，被drawGraph()等2D渲染函数共享使用 */
     var canvas, ctx;
@@ -88,6 +90,8 @@
             ws.on('knowledge_added', function() { fetchKnowledgeFromBackend(); });
             ws.on('knowledge_deleted', function() { fetchKnowledgeFromBackend(); });
             document.addEventListener('websocket-connection-status', function(e) {
+                /* D-006修复: 保存事件处理器引用,用于destroyKnowledgeGraph中移除 */
+                graphState._kgWsConnectionHandler = arguments.callee;
                 if (e.detail && e.detail.connected) {
                     graphState.backendOnline = true;
                     showConnectionBanner('已连接知识图谱服务', 'connected');
@@ -517,7 +521,8 @@
         canvas.addEventListener('touchstart', function(e) {
             e.preventDefault();
             var touch = e.touches[0];
-            var rect = canvas.getBoundingClientRect();
+            /* P1-005修复: 使用缓存的Rect代替实时getBoundingClientRect() */
+            var rect = cachedRect;
             var mx = (touch.clientX - rect.left) / graphState.zoom - graphState.offsetX;
             var my = (touch.clientY - rect.top) / graphState.zoom - graphState.offsetY;
             var node = findNodeAt(mx, my);
@@ -538,7 +543,8 @@
             e.preventDefault();
             var touch = e.touches[0];
             if (graphState.dragNode) {
-                var rect = canvas.getBoundingClientRect();
+                /* P1-005修复: 使用缓存的Rect代替实时getBoundingClientRect() */
+                var rect = cachedRect;
                 graphState.dragNode.x = (touch.clientX - rect.left) / graphState.zoom - graphState.offsetX - graphState.dragOffsetX;
                 graphState.dragNode.y = (touch.clientY - rect.top) / graphState.zoom - graphState.offsetY - graphState.dragOffsetY;
             } else if (isPanning) {
@@ -562,6 +568,8 @@
         if (!parent) return;
         canvas.width = parent.clientWidth;
         canvas.height = parent.clientHeight;
+        /* P1-005修复: 在resize时更新缓存的Rect，避免每次mousemove都调用getBoundingClientRect()触发强制重排 */
+        cachedRect = canvas.getBoundingClientRect();
         drawGraph();
     }
 
@@ -577,7 +585,8 @@
     }
 
     function onMouseDown(e) {
-        var rect = canvas.getBoundingClientRect();
+        /* P1-005修复: 使用缓存的Rect代替实时getBoundingClientRect()，避免每次鼠标事件触发强制重排 */
+        var rect = cachedRect;
         var mx = (e.clientX - rect.left) / graphState.zoom - graphState.offsetX;
         var my = (e.clientY - rect.top) / graphState.zoom - graphState.offsetY;
 
@@ -597,7 +606,8 @@
     }
 
     function onMouseMove(e) {
-        var rect = canvas.getBoundingClientRect();
+        /* P1-005修复: 使用缓存的Rect代替实时getBoundingClientRect()，避免mousemove中频繁触发强制重排 */
+        var rect = cachedRect;
         var mx = (e.clientX - rect.left) / graphState.zoom - graphState.offsetX;
         var my = (e.clientY - rect.top) / graphState.zoom - graphState.offsetY;
 
@@ -627,7 +637,8 @@
                 var edgeInfo = '';
                 graphState.edges.forEach(function(ed) {
                     if (ed.source === node.id || ed.target === node.id) {
-                        edgeInfo += '<div>' + ed.source + ' ──' + ed.label + '──> ' + ed.target + '</div>';
+                        /* D-005修复: 对知识图谱边缘的source/label/target进行HTML转义,防止XSS */
+                        edgeInfo += '<div>' + window.escapeHtml(ed.source) + ' ──' + window.escapeHtml(ed.label) + '──> ' + window.escapeHtml(ed.target) + '</div>';
                     }
                 });
                 tooltip.innerHTML = '<b>' + window.escapeHtml(node.id) + '</b><br>连接: ' + node.connections + '<br>' + edgeInfo;
@@ -648,7 +659,8 @@
     function onWheel(e) {
         e.preventDefault();
         var delta = e.deltaY > 0 ? 0.9 : 1.1;
-        var rect = canvas.getBoundingClientRect();
+        /* P1-005修复: 使用缓存的Rect代替实时getBoundingClientRect() */
+        var rect = cachedRect;
         var mx = (e.clientX - rect.left) / graphState.zoom - graphState.offsetX;
         var my = (e.clientY - rect.top) / graphState.zoom - graphState.offsetY;
         graphState.zoom *= delta;
@@ -658,7 +670,8 @@
     }
 
     function onDoubleClick(e) {
-        var rect = canvas.getBoundingClientRect();
+        /* P1-005修复: 使用缓存的Rect代替实时getBoundingClientRect() */
+        var rect = cachedRect;
         var mx = (e.clientX - rect.left) / graphState.zoom - graphState.offsetX;
         var my = (e.clientY - rect.top) / graphState.zoom - graphState.offsetY;
         var node = findNodeAt(mx, my);
@@ -1346,6 +1359,11 @@
 /* 清理WebGL 3D动画帧 */
         if (gl3d.animId) { cancelAnimationFrame(gl3d.animId); gl3d.animId = null; }
         gl3d.running = false;
+        /* D-006修复: 移除websocket-connection-status事件监听器，防止内存泄漏 */
+        if (graphState._kgWsConnectionHandler) {
+            try { document.removeEventListener('websocket-connection-status', graphState._kgWsConnectionHandler); } catch(e) {}
+            graphState._kgWsConnectionHandler = null;
+        }
         console.log('[知识图谱] 资源已清理');
     };
 

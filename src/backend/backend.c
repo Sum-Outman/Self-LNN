@@ -1714,9 +1714,11 @@ struct BackendServer {
     uint64_t last_minute_tick;              /**< 上次分钟刻度（毫秒） */
     
     volatile LONG connection_count;         /**< 当前连接数（原子操作） */
-    int total_requests;                     /**< 总请求数 */
+    /* D-1/D-2修复: total_requests和error_count改为volatile LONG，
+     * 所有读写均使用Interlocked原子操作，消除多线程撕裂读取和竞态条件。 */
+    volatile LONG total_requests;           /**< 总请求数（原子操作） */
+    volatile LONG error_count;              /**< 错误计数（原子操作） */
     int request_count;                      /**< 请求计数 */
-    int error_count;                        /**< 错误计数 */
     int memory_consolidation_counter;       /**< 记忆整合计数器（每N次AGI执行触发一次整合） */
     
     /* 限流系统字段 */
@@ -2506,8 +2508,8 @@ static void* system_status_push_thread(void* arg) {
                 "\"memory\":%s,\"reasoning\":%s,\"training\":%s,"
                 "\"robotics\":%s,\"metacognition\":%s}",
                 (long)time(NULL),
-                (int)server->connection_count, server->total_requests, server->error_count,
-                (long)(time(NULL) - server->start_time),
+                (int)server->connection_count, (int)InterlockedExchangeAdd(&server->total_requests, 0),
+                (int)InterlockedExchangeAdd(&server->error_count, 0),
                 lnn_active ? "true" : "false",
                 (server->cognition_system != NULL) ? "true" : "false",
                 (server->learning_engine != NULL) ? "true" : "false",
@@ -3313,7 +3315,8 @@ static void* server_thread_func(void* param) {
                 reasoning_engine_reset(server->reasoning_engine);
             }
             server->requests_last_hour = 0;
-            server->error_count = 0;
+            /* D-2修复: 使用InterlockedExchange原子清零error_count */
+            InterlockedExchange(&server->error_count, 0);
             server->start_time = time(NULL);
             /* P1-001修复: 软重启时保留线程池，不置NULL */
             /* server->thread_pool 保持现有值不变，支持持续高并发 */
@@ -4643,6 +4646,15 @@ static void* server_thread_func(void* param) {
 #ifdef _MSC_VER
                 } __except(EXCEPTION_EXECUTE_HANDLER) {
                     InterlockedIncrement(&server->error_count);  /* DEEP-FIX */
+                    /* 4.2修复: 推送error事件到WebSocket，前端可实时接收错误通知 */
+                    if (server->ws_push_server) {
+                        char err_buf[256];
+                        snprintf(err_buf, sizeof(err_buf),
+                            "{\"type\":\"error\",\"code\":\"INTERNAL_CRASH\","
+                            "\"message\":\"内部处理崩溃\",\"timestamp\":%lld}",
+                            (long long)time(NULL));
+                        ws_push_broadcast_json(server->ws_push_server, err_buf);
+                    }
                     if (response) backend_response_free(response);
                     safe_free((void**)&request_body_copy);
                     const char* crash_safe = "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nConnection: close\r\nAccess-Control-Allow-Origin: http://localhost:8080\r\nServer: SELF-LNN-AGI/1.0\r\n\r\n{\"status\":\"error\",\"error_code\":\"INTERNAL_CRASH\",\"message\":\"内部处理崩溃，请检查系统日志\"}";
@@ -4977,8 +4989,11 @@ int backend_load_config(BackendConfig* config, const char* path) {
     int bool_count = sizeof(bool_fields) / sizeof(bool_fields[0]);
 
     /* 标量字段 */
+    /* P1-07修复: 统一端口字段命名为http_port，保留旧port键名作为向后兼容别名
+     * http_port在port之后解析，同名键覆盖旧值，确保新命名优先 */
     struct { const char* name; int* field; } int_fields[] = {
-        {"port",                &config->port},
+        {"port",                &config->port},              /* 向后兼容旧键名 */
+        {"http_port",           &config->port},              /* P1-07: 统一命名，与system_config.json一致 */
         {"max_connections",     &config->max_connections},
         {"rate_limit_per_minute", &config->rate_limit_per_minute}
     };
@@ -5024,9 +5039,26 @@ int backend_load_config(BackendConfig* config, const char* path) {
         }
     }
 
-    /* 解析 IP 白名单 */
+    /* P0-05修复: IP白名单解析改为嵌套JSON访问，优先从security子对象中查找，
+ * 避免json_find_key扁平搜索在同名键冲突时解析错误。
+ * 兼容两种格式：selflnn_config.json（嵌套security.ip_whitelist_entries）
+ * 和旧版扁平格式（顶层ip_whitelist_entries）。 */
     {
-        const char* v = json_find_key(p, "ip_whitelist_entries");
+        const char* v = NULL;
+        /* 优先在security嵌套对象中查找 */
+        const char* sec_obj = json_find_key(p, "security");
+        if (sec_obj) {
+            sec_obj = json_skip_ws(sec_obj);
+            if (*sec_obj == '{') {
+                v = json_find_key(sec_obj, "ip_whitelist_entries");
+                if (v) log_info("backend_load_config: 从security.ip_whitelist_entries读取IP白名单（嵌套格式）");
+            }
+        }
+        /* 扁平格式兜底（向后兼容旧版配置文件） */
+        if (!v) {
+            v = json_find_key(p, "ip_whitelist_entries");
+            if (v) log_info("backend_load_config: 从顶层ip_whitelist_entries读取IP白名单（扁平格式）");
+        }
         if (v) {
             v = json_skip_ws(v);
             if (*v == '[') {
@@ -5053,9 +5085,23 @@ int backend_load_config(BackendConfig* config, const char* path) {
         }
     }
 
-    /* 解析 IP 黑名单 */
+    /* P0-05修复: IP黑名单解析同上，优先从security嵌套对象中查找 */
     {
-        const char* v = json_find_key(p, "ip_blacklist_entries");
+        const char* v = NULL;
+        /* 优先在security嵌套对象中查找 */
+        const char* sec_obj = json_find_key(p, "security");
+        if (sec_obj) {
+            sec_obj = json_skip_ws(sec_obj);
+            if (*sec_obj == '{') {
+                v = json_find_key(sec_obj, "ip_blacklist_entries");
+                if (v) log_info("backend_load_config: 从security.ip_blacklist_entries读取IP黑名单（嵌套格式）");
+            }
+        }
+        /* 扁平格式兜底（向后兼容旧版配置文件） */
+        if (!v) {
+            v = json_find_key(p, "ip_blacklist_entries");
+            if (v) log_info("backend_load_config: 从顶层ip_blacklist_entries读取IP黑名单（扁平格式）");
+        }
         if (v) {
             v = json_skip_ws(v);
             if (*v == '[') {
@@ -5078,6 +5124,218 @@ int backend_load_config(BackendConfig* config, const char* path) {
                     if (*v == ',') v++;
                 }
                 loaded++;
+            }
+        }
+    }
+
+    /* P0-02修复: 读取thread_pool_size字段（BackendConfig中已存在但从未被配置加载） */
+    {
+        const char* v = json_find_key(p, "thread_pool_size");
+        if (v) {
+            int val;
+            const char* end = json_parse_int(v, &val);
+            if (end && val >= 0) {
+                config->thread_pool_size = val;
+                loaded++;
+                log_info("backend_load_config: thread_pool_size=%d", val);
+            }
+        }
+    }
+
+    /* P0-02修复: 读取gpu_preferred_backend字段（字段已识别，当前无对应运行时配置槽位） */
+    {
+        const char* v = json_find_key(p, "gpu_preferred_backend");
+        if (v) {
+            char buf[64] = {0};
+            const char* end = json_parse_string(v, buf, sizeof(buf));
+            if (end && buf[0]) {
+                log_info("backend_load_config: gpu_preferred_backend=%s (字段已识别，GPU后端选择由SystemConfig管理)", buf);
+                loaded++;
+            }
+        }
+    }
+
+    /* P0-02修复: 读取strict_real_data_mode字段（字段已识别，当前无对应运行时配置槽位） */
+    {
+        const char* v = json_find_key(p, "strict_real_data_mode");
+        if (v) {
+            int val;
+            const char* end = json_parse_int(v, &val);
+            if (end) {
+                log_info("backend_load_config: strict_real_data_mode=%d (字段已识别，数据验证由multimodal模块管理)", val);
+                loaded++;
+            }
+        }
+    }
+
+    /* P0-02修复: 读取power_mode字段（字段已识别，电源模式由SystemConfig管理） */
+    {
+        const char* v = json_find_key(p, "power_mode");
+        if (v) {
+            char buf[32] = {0};
+            const char* end = json_parse_string(v, buf, sizeof(buf));
+            if (end && buf[0]) {
+                log_info("backend_load_config: power_mode=%s (字段已识别，电源模式由SystemConfig管理)", buf);
+                loaded++;
+            }
+        }
+    }
+
+    /* P0-02修复: 读取security嵌套对象中的api_key_auth_enabled字段 */
+    {
+        const char* sec_obj = json_find_key(p, "security");
+        if (sec_obj) {
+            sec_obj = json_skip_ws(sec_obj);
+            if (*sec_obj == '{') {
+                /* 读取security.api_key_auth_enabled */
+                const char* auth_v = json_find_key(sec_obj, "api_key_auth_enabled");
+                if (auth_v) {
+                    int val;
+                    const char* end = json_parse_int(auth_v, &val);
+                    if (end) {
+                        log_info("backend_load_config: security.api_key_auth_enabled=%d (字段已识别，API认证由后端路由层管理)", val);
+                        loaded++;
+                    }
+                }
+                /* 读取security.rate_limit_enabled (映射到enable_rate_limiting) */
+                const char* rl_v = json_find_key(sec_obj, "rate_limit_enabled");
+                if (rl_v) {
+                    int val;
+                    const char* end = json_parse_int(rl_v, &val);
+                    if (end) {
+                        config->enable_rate_limiting = val;
+                        log_info("backend_load_config: security.rate_limit_enabled=%d → enable_rate_limiting", val);
+                        loaded++;
+                    }
+                }
+                /* 读取security.rate_limit_per_minute (映射到rate_limit_per_minute) */
+                const char* rpm_v = json_find_key(sec_obj, "rate_limit_per_minute");
+                if (rpm_v) {
+                    int val;
+                    const char* end = json_parse_int(rpm_v, &val);
+                    if (end && val > 0) {
+                        config->rate_limit_per_minute = val;
+                        log_info("backend_load_config: security.rate_limit_per_minute=%d → rate_limit_per_minute", val);
+                        loaded++;
+                    }
+                }
+            }
+        }
+    }
+
+    /* P0-02修复: 读取logging嵌套对象中的字段（字段已识别，日志系统由logging模块管理） */
+    {
+        const char* log_obj = json_find_key(p, "logging");
+        if (log_obj) {
+            log_obj = json_skip_ws(log_obj);
+            if (*log_obj == '{') {
+                const char* level_v = json_find_key(log_obj, "level");
+                if (level_v) {
+                    char buf[32] = {0};
+                    const char* end = json_parse_string(level_v, buf, sizeof(buf));
+                    if (end && buf[0]) {
+                        log_info("backend_load_config: logging.level=%s (字段已识别，日志级别由logging模块管理)", buf);
+                        loaded++;
+                    }
+                }
+                const char* ltf_v = json_find_key(log_obj, "log_to_file");
+                if (ltf_v) {
+                    int val;
+                    const char* end = json_parse_int(ltf_v, &val);
+                    if (end) {
+                        log_info("backend_load_config: logging.log_to_file=%d (字段已识别，文件日志由logging模块管理)", val);
+                        loaded++;
+                    }
+                }
+                const char* lfp_v = json_find_key(log_obj, "log_file_path");
+                if (lfp_v) {
+                    char buf[256] = {0};
+                    const char* end = json_parse_string(lfp_v, buf, sizeof(buf));
+                    if (end && buf[0]) {
+                        log_info("backend_load_config: logging.log_file_path=%s (字段已识别，日志路径由logging模块管理)", buf);
+                        loaded++;
+                    }
+                }
+                const char* lfs_v = json_find_key(log_obj, "max_log_file_size_mb");
+                if (lfs_v) {
+                    int val;
+                    const char* end = json_parse_int(lfs_v, &val);
+                    if (end && val > 0) {
+                        log_info("backend_load_config: logging.max_log_file_size_mb=%d (字段已识别，日志大小限制由logging模块管理)", val);
+                        loaded++;
+                    }
+                }
+            }
+        }
+    }
+
+    /* P0-02修复: 读取self_cognition嵌套对象中的字段（字段已识别，自我认知由self_cognition模块管理） */
+    {
+        const char* sc_obj = json_find_key(p, "self_cognition");
+        if (sc_obj) {
+            sc_obj = json_skip_ws(sc_obj);
+            if (*sc_obj == '{') {
+                const char* sen_v = json_find_key(sc_obj, "enabled");
+                if (sen_v) {
+                    int val;
+                    const char* end = json_parse_int(sen_v, &val);
+                    if (end) {
+                        config->enable_cognition = val;
+                        log_info("backend_load_config: self_cognition.enabled=%d → enable_cognition", val);
+                        loaded++;
+                    }
+                }
+                const char* sri_v = json_find_key(sc_obj, "self_reflection_interval_minutes");
+                if (sri_v) {
+                    int val;
+                    const char* end = json_parse_int(sri_v, &val);
+                    if (end && val > 0) {
+                        log_info("backend_load_config: self_cognition.self_reflection_interval_minutes=%d (字段已识别，反射间隔由self_cognition模块管理)", val);
+                        loaded++;
+                    }
+                }
+                const char* sce_v = json_find_key(sc_obj, "self_correction_enabled");
+                if (sce_v) {
+                    int val;
+                    const char* end = json_parse_int(sce_v, &val);
+                    if (end) {
+                        config->enable_self_correction = val;
+                        log_info("backend_load_config: self_cognition.self_correction_enabled=%d → enable_self_correction", val);
+                        loaded++;
+                    }
+                }
+            }
+        }
+    }
+
+    /* P1-02修复: 解析WebSocket端口 —— 支持扁平"websocket_port"和嵌套"websocket.port"两种格式
+     * 兼容 selflnn_config.json（嵌套格式）和 system_config.json（扁平格式） */
+    {
+        int ws_port = 0;
+        /* 优先尝试扁平格式: "websocket_port" */
+        const char* v = json_find_key(p, "websocket_port");
+        if (v) {
+            const char* end = json_parse_int(v, &ws_port);
+            if (end && ws_port > 0 && ws_port <= 65535) {
+                config->websocket_port = ws_port;
+                loaded++;
+            }
+        }
+        /* 如果扁平格式未找到，尝试嵌套格式: "websocket" → "port" */
+        if (ws_port == 0) {
+            const char* ws_obj = json_find_key(p, "websocket");
+            if (ws_obj) {
+                ws_obj = json_skip_ws(ws_obj);
+                if (*ws_obj == '{') {
+                    const char* port_v = json_find_key(ws_obj, "port");
+                    if (port_v) {
+                        const char* end = json_parse_int(port_v, &ws_port);
+                        if (end && ws_port > 0 && ws_port <= 65535) {
+                            config->websocket_port = ws_port;
+                            loaded++;
+                        }
+                    }
+                }
             }
         }
     }
@@ -5132,8 +5390,9 @@ BackendServer* backend_server_create(const BackendConfig* config) {
     
     server->is_running = 0;
     server->connection_count = 0;
-    server->total_requests = 0;
-    server->error_count = 0;
+    /* D-1/D-2修复: 使用原子操作初始化计数变量 */
+    InterlockedExchange(&server->total_requests, 0);
+    InterlockedExchange(&server->error_count, 0);
     server->start_time = time(NULL);
     server->thread_pool = NULL; /* 线程池延迟创建 */
     server->evolution_generation = 0;  /* P0-003修复: 显式初始化进化代数 */
@@ -5158,6 +5417,10 @@ BackendServer* backend_server_create(const BackendConfig* config) {
             .unified_dimension = 512,
         };
         server->multimodal_manager = multimodal_manager_create(&multimodal_config);
+        /* P0跨模块集成: 将多模态管理器注册到全局状态，使训练管线可访问 */
+        if (server->multimodal_manager) {
+            selflnn_set_multimodal_manager(server->multimodal_manager);
+        }
     }
     
     if (config->enable_reasoning) {
@@ -5674,8 +5937,9 @@ BackendServer* backend_server_create(const BackendConfig* config) {
     
     // 创建并连接拉普拉斯分析器到LNN（实现频域梯度优化和稳定性分析）
     // 拉普拉斯深度集成：在训练时对误差信号进行频域滤波，提升训练稳定性和收敛速度
+    // 修复: 原代码缺少 () 调用括号，导致函数指针地址被写入 laplace_analyzer 字段
     if (server->lnn_instance) {
-        void* laplace_analyzer = lnn_laplace_create_default_analyzer;
+        void* laplace_analyzer = lnn_laplace_create_default_analyzer();
         if (laplace_analyzer) {
             lnn_set_laplace_analyzer(server->lnn_instance, laplace_analyzer, 0.15f);
         }
@@ -6110,6 +6374,8 @@ void backend_server_free(BackendServer* server) {
     
     // 释放子系统
     if (server->multimodal_manager) {
+        /* P0跨模块集成: 释放前从全局状态注销 */
+        selflnn_set_multimodal_manager(NULL);
         multimodal_manager_free(server->multimodal_manager);
     }
     
@@ -6753,8 +7019,8 @@ static char* get_detailed_system_status(const BackendServer* server) {
         "}}",
         (int)(time(NULL) - server->start_time),
         cpu_usage,
-        server->total_requests,
-        server->error_count,
+        (int)InterlockedExchangeAdd(&server->total_requests, 0),
+        (int)InterlockedExchangeAdd(&server->error_count, 0),
         server->connection_count,
         server->total_requests > 0 ? (server->total_requests * 60) / ((int)(time(NULL) - server->start_time) + 1) : 0,
         server->config.enable_multimodal ? "true" : "false",
@@ -8506,8 +8772,9 @@ static int handle_api_post_reset(BackendServer* server,
         server->memory_manager = memory_manager_create(&mem_config);
     }
 
-    server->error_count = 0;
-    server->total_requests = 0;
+    /* D-1/D-2修复: 使用原子操作清零计数 */
+    InterlockedExchange(&server->error_count, 0);
+    InterlockedExchange(&server->total_requests, 0);
 
     json_data = (char*)safe_malloc(256);
     if (json_data) {
@@ -10997,6 +11264,8 @@ static int handle_api_post_agi_execute(BackendServer* server,
             response->data_length = strlen(json_data);
             response->status_code = 400;
         }
+        /* P0修复: 任务描述为空时必须返回，防止后续代码空指针解引用 */
+        return 0;
     }
             
     /* 注册AGI任务到跟踪系统，生成真实任务ID */
@@ -12583,7 +12852,20 @@ static int handle_api_post_computer_screenshot(BackendServer* server,
         bi.biBitCount = 24;
         bi.biCompression = BI_RGB;
 
-        DWORD dwBmpSize = (DWORD)(((size_t)screenX * (size_t)bi.biBitCount + 31) / 32) * 4 * (size_t)screenY;
+        /* D-10修复: 检查dwBmpSize计算值是否超过DWORD最大值，防止超大分辨率截断导致GlobalAlloc分配不足 */
+        size_t calc_bmp_size = ((size_t)screenX * (size_t)bi.biBitCount + 31) / 32 * 4 * (size_t)screenY;
+        if (calc_bmp_size > 0xFFFFFFFFu) {
+            /* B4-C01: 恢复旧位图后释放GDI资源 */
+            SelectObject(hdcMem, hOldBitmap);
+            DeleteObject(hBitmap);
+            DeleteDC(hdcMem);
+            ReleaseDC(NULL, hdcScreen);
+            response->data = string_duplicate("{\"success\":false,\"error\":\"屏幕分辨率过大，位图大小超过4GB限制\"}");
+            response->data_length = strlen(response->data);
+            response->status_code = 500;
+            return 0;
+        }
+        DWORD dwBmpSize = (DWORD)calc_bmp_size;
         HANDLE hDIB = GlobalAlloc(GHND, dwBmpSize);
         if (!hDIB) {
             /* B4-C01: 恢复旧位图后释放GDI资源 */
@@ -12633,6 +12915,19 @@ static int handle_api_post_computer_screenshot(BackendServer* server,
             fwrite(&bi, 1, sizeof(BITMAPINFOHEADER), fp);
             fwrite(lpbitmap, 1, dwBmpSize, fp);
             fclose(fp);
+            /* D-5/D-9/D-12修复: 截图成功时设置响应数据，之前所有路径均未设置响应 */
+            char success_json[256];
+            snprintf(success_json, sizeof(success_json),
+                "{\"success\":true,\"message\":\"截图已保存\",\"file\":\"%s\",\"width\":%d,\"height\":%d}",
+                screenshot_path, screenX, screenY);
+            response->data = string_duplicate(success_json);
+            response->data_length = strlen(response->data);
+            response->status_code = 200;
+        } else {
+            /* D-5修复: fopen失败时设置错误响应 */
+            response->data = string_duplicate("{\"success\":false,\"error\":\"无法创建截图文件\"}");
+            response->data_length = strlen(response->data);
+            response->status_code = 500;
         }
 
         GlobalUnlock(hDIB);
@@ -12659,47 +12954,183 @@ static int handle_api_post_computer_execute(BackendServer* server,
     char exec_cmd[4096] = {0};
     parse_json_string(request_data, "command", exec_cmd, sizeof(exec_cmd));
     int exec_result = -1;
+    const char* reject_reason = NULL;
+    
     if (strlen(exec_cmd) > 0) {
-        /* 安全校验：拒绝包含危险模式的命令 */
+        /* ================================================================
+         * P0-001修复: 命令执行多层安全防护
+         * 层级1: 命令长度限制（防止缓冲区溢出）
+         * 层级2: Shell元字符过滤（阻断命令拼接注入）
+         * 层级3: 危险模式黑名单（阻断已知攻击向量）
+         * 层级4: 命令白名单（只允许安全的只读命令）
+         * 层级5: 审计日志记录（所有执行尝试均记录）
+         * ================================================================ */
         int safe_cmd = 1;
-        const char* danger_patterns[] = {
-            "rm -rf /", "dd if=", "mkfs.", "format ",
-            ":{ :|:& };:", "chmod 777 /", "> /dev/sda",
-            "shutdown", "reboot", "halt",
-            "DEL /F /S /Q C:", "del /f /s /q C:",
-            "cmd ", "powershell", "pwsh", "COMSPEC",
-            "del ", "rmdir ", "format", "fdisk",
-            NULL
-        };
-        char cmd_lower[4096];
-        for (size_t i = 0; i < strlen(exec_cmd) + 1 && i < sizeof(cmd_lower); i++) {
-            cmd_lower[i] = (char)((exec_cmd[i] >= 'A' && exec_cmd[i] <= 'Z') ?
-                          exec_cmd[i] + 32 : exec_cmd[i]);
+        
+        /* 层级1: 命令长度限制（最大1024字符） */
+        if (strlen(exec_cmd) > 1024) {
+            safe_cmd = 0;
+            reject_reason = "命令长度超过限制（最大1024字符）";
         }
-        for (int i = 0; danger_patterns[i]; i++) {
-            if (strstr(cmd_lower, danger_patterns[i])) {
+        
+        /* 层级2: Shell元字符过滤 */
+        if (safe_cmd) {
+            if (strchr(exec_cmd, ';') || strchr(exec_cmd, '|') ||
+                strchr(exec_cmd, '&') || strchr(exec_cmd, '>') ||
+                strchr(exec_cmd, '<') || strchr(exec_cmd, '\n') ||
+                strchr(exec_cmd, '\r') || strchr(exec_cmd, '`') ||
+                strchr(exec_cmd, '%') || strchr(exec_cmd, '$') ||
+                strchr(exec_cmd, '!') || strchr(exec_cmd, '^') ||
+                strchr(exec_cmd, '*') || strchr(exec_cmd, '?') ||
+                strchr(exec_cmd, '~') || strchr(exec_cmd, '#') ||
+                strchr(exec_cmd, '\'') || strchr(exec_cmd, '\"') ||
+                strchr(exec_cmd, '\\')) {
                 safe_cmd = 0;
-                break;
+                reject_reason = "命令包含非法Shell元字符";
             }
         }
-        /* 校验：禁止包含shell元字符组合（管道、反引号、变量展开）和环境变量展开 */
-        if (strchr(exec_cmd, '`') || strchr(exec_cmd, '%') ||
-            strstr(exec_cmd, "$(") || strstr(exec_cmd, "${")) {
-            safe_cmd = 0;
+        
+        /* 层级3: 危险模式黑名单（增强版） */
+        if (safe_cmd) {
+            const char* danger_patterns[] = {
+                /* 文件系统破坏 */
+                "rm -rf", "rmdir", "del ", "deltree", "format",
+                "dd if=", "mkfs", "fdisk", "fsutil",
+                "chmod 777", "chmod -R", "chown",
+                "> /dev/", "mv /", "cp /",
+                /* 系统破坏 */
+                "shutdown", "reboot", "halt", "poweroff", "init ",
+                "systemctl stop", "systemctl disable",
+                "sc stop", "sc delete", "sc config",
+                "bcdedit", "diskpart", "mountvol",
+                /* 进程/服务操作 */
+                "taskkill", "kill ", "killall", "pkill",
+                "wmic process", "wmic service",
+                "Stop-Process", "Stop-Service",
+                /* 脚本和解释器 */
+                "cmd", "powershell", "pwsh", "bash", "sh ",
+                "python", "perl", "ruby", "lua", "php", "node",
+                "wscript", "cscript", "mshta", "rundll32",
+                "regsvr32", "reg ", "regedit",
+                /* 网络下载执行 */
+                "wget ", "curl ", "certutil -url", "bitsadmin",
+                "Invoke-WebRequest", "Invoke-Expression",
+                "iex ", "Start-Process",
+                /* 编译执行 */
+                "gcc ", "g++", "make ", "nmake", "msbuild",
+                "csc ", "vbc ", "jsc ",
+                /* 编码/加密绕过 */
+                "base64", "frombase64", "eval",
+                "exec(", "system(", "popen(",
+                "COMSPEC", "SYSTEMROOT",
+                /* 权限提升 */
+                "sudo ", "su ", "runas",
+                NULL
+            };
+            char cmd_lower[4096];
+            size_t cmd_len = strlen(exec_cmd);
+            for (size_t i = 0; i < cmd_len + 1 && i < sizeof(cmd_lower); i++) {
+                cmd_lower[i] = (char)((exec_cmd[i] >= 'A' && exec_cmd[i] <= 'Z') ?
+                              exec_cmd[i] + 32 : exec_cmd[i]);
+            }
+            for (int i = 0; danger_patterns[i]; i++) {
+                if (strstr(cmd_lower, danger_patterns[i])) {
+                    safe_cmd = 0;
+                    reject_reason = "命令匹配危险模式，已被拒绝";
+                    break;
+                }
+            }
         }
-        /* P0修复: 禁止所有shell元字符，防止命令注入（;|&><等可拼接任意命令） */
-        if (strchr(exec_cmd, ';') || strchr(exec_cmd, '|') ||
-            strchr(exec_cmd, '&') || strchr(exec_cmd, '>') ||
-            strchr(exec_cmd, '<') || strchr(exec_cmd, '\n') ||
-            strchr(exec_cmd, '\r')) {
-            safe_cmd = 0;
+        
+        /* 层级4: 命令白名单（只允许安全的只读信息查询命令） */
+        if (safe_cmd) {
+            /* 提取命令名（第一个空格前的部分） */
+            char cmd_name[128] = {0};
+            const char* space_pos = strchr(exec_cmd, ' ');
+            size_t name_len = space_pos ? (size_t)(space_pos - exec_cmd) : strlen(exec_cmd);
+            if (name_len >= sizeof(cmd_name)) name_len = sizeof(cmd_name) - 1;
+            memcpy(cmd_name, exec_cmd, name_len);
+            cmd_name[name_len] = '\0';
+            
+            /* 转为小写进行比较 */
+            char cmd_name_lower[128];
+            for (size_t i = 0; i < name_len + 1; i++) {
+                cmd_name_lower[i] = (char)((cmd_name[i] >= 'A' && cmd_name[i] <= 'Z') ?
+                                   cmd_name[i] + 32 : cmd_name[i]);
+            }
+            
+            /* 安全命令白名单：仅允许只读信息查询命令 */
+            const char* safe_commands[] = {
+                /* 文件/目录浏览 */
+                "dir", "ls", "tree",
+                /* 文件内容查看 */
+                "type", "cat", "more", "head", "tail", 
+                /* 文本输出 */
+                "echo", "printf",
+                /* 路径/工作目录 */
+                "pwd", "cd",
+                /* 用户/主机信息 */
+                "whoami", "hostname", "uname", "id", "users",
+                "logname", "groups",
+                /* 日期/时间 */
+                "date", "time", "uptime",
+                /* 环境变量 */
+                "set", "env", "printenv", "path",
+                /* 系统信息（只读） */
+                "ver", "systeminfo", "winver",
+                /* 网络诊断（只读） */
+                "ping", "nslookup", "ipconfig", "ifconfig",
+                "netstat", "arp", "tracert", "traceroute",
+                "pathping", "getmac", "route",
+                /* 进程/任务查看 */
+                "tasklist", "ps", "top", "htop", "w",
+                /* 磁盘/内存查看 */
+                "df", "du", "free", "mem",
+                /* 文件查找 */
+                "find", "grep", "where", "which", "locate",
+                NULL
+            };
+            
+            int cmd_allowed = 0;
+            for (int i = 0; safe_commands[i]; i++) {
+                if (strcmp(cmd_name_lower, safe_commands[i]) == 0) {
+                    cmd_allowed = 1;
+                    break;
+                }
+            }
+            
+            if (!cmd_allowed) {
+                safe_cmd = 0;
+                reject_reason = "命令不在安全白名单中";
+            }
         }
+        
+        /* 执行或拒绝 */
         if (safe_cmd) {
             exec_result = system(exec_cmd);
         } else {
             exec_result = -1;
         }
+        
+        /* 层级5: 审计日志记录（所有执行尝试均记录） */
+        AuditLogger* audit = selflnn_get_audit_logger();
+        if (audit) {
+            char audit_detail[512];
+            snprintf(audit_detail, sizeof(audit_detail),
+                    "命令: %s | 结果: %s | 退出码: %d | 拒绝原因: %s",
+                    exec_cmd,
+                    safe_cmd ? (exec_result == 0 ? "成功" : "失败") : "已拒绝",
+                    exec_result,
+                    reject_reason ? reject_reason : "无");
+            audit_log_operation(audit, AUDIT_OP_CUSTOM,
+                "computer_execute", "API",
+                "system_command", "pending",
+                safe_cmd ? "executed" : "rejected",
+                safe_cmd ? (exec_result == 0 ? "success" : "failed") : "rejected",
+                safe_cmd ? 1 : 0, 0.0f, audit_detail);
+        }
     }
+    
     json_data = (char*)safe_malloc(1024);
     if (json_data) {
         /* B-S04: 对exec_cmd进行JSON字符串转义 */
@@ -12728,9 +13159,11 @@ static int handle_api_post_computer_execute(BackendServer* server,
         }
         json_escaped_cmd[di] = '\0';
         snprintf(json_data, 1024,
-                "{\"success\":%s,\"command\":\"%s\",\"exit_code\":%d}",
+                "{\"success\":%s,\"command\":\"%s\",\"exit_code\":%d,\"safe\":%s,\"reject_reason\":\"%s\"}",
                 exec_result == 0 ? "true" : "false",
-                json_escaped_cmd, exec_result);
+                json_escaped_cmd, exec_result,
+                reject_reason ? "false" : "true",
+                reject_reason ? reject_reason : "");
         response->data = json_data;
         response->data_length = strlen(json_data);
         response->status_code = 200;
@@ -13615,6 +14048,22 @@ static int handle_api_post_audio_stream(BackendServer* server,
                         decoded_len = j;
                     }
                     audio_sample_count = (int)(decoded_len / 2);
+
+                    /* P1修复: 当sample_count为0时，继续进行VAD处理会导致
+                     * 除零错误（sum_sq/audio_sample_count）和无效的VAD帧处理。
+                     * 添加提前返回，清理已分配资源并返回错误响应。 */
+                    if (audio_sample_count <= 0) {
+                        log_error("[音频流] 解码后音频采样数为0，无法进行VAD处理");
+                        if (decoded_buf) safe_free((void**)&decoded_buf);
+                        safe_free((void**)&audio_data_b64);
+                        snprintf(json_data, 2048,
+                            "{\"success\":false,\"error\":\"音频数据为空或解码失败\"}");
+                        response->data = json_data;
+                        response->data_length = strlen(json_data);
+                        response->status_code = 400;
+                        return 0;
+                    }
+
                     if (audio_sample_count > 0) {
                         short* samples = (short*)decoded_buf;
                         double sum_sq = 0.0;
@@ -14353,6 +14802,22 @@ static int handle_api_post_ros_publish(BackendServer* server,
     int real_publish_ok = 0;
     int actual_published = 0;
     char result_msg[256] = {0};
+
+    /* P1修复: request_data为NULL时直接解引用会导致崩溃。
+     * 在函数开头添加显式NULL检查，返回错误响应，避免后续代码访问空指针。 */
+    if (!request_data) {
+        log_error("[ROS] ros_publish: request_data为空指针，无法处理请求");
+        json_data = (char*)safe_malloc(256);
+        if (json_data) {
+            snprintf(json_data, 256,
+                "{\"success\":false,\"error\":\"请求数据为空，缺少ROS话题信息\"}");
+            response->data = json_data;
+            response->data_length = strlen(json_data);
+            response->status_code = 400;
+        }
+        return 0;
+    }
+
     if (request_data && request_length > 0) {
         parse_json_string(request_data, "topic", ros_topic, sizeof(ros_topic));
         parse_json_string(request_data, "message_type", ros_msg_type, sizeof(ros_msg_type));
@@ -14410,6 +14875,22 @@ static int handle_api_post_ros_subscribe(BackendServer* server,
     char ros_topic[256] = {0}, ros_msg_type[128] = {0}, ros_callback_str[256] = {0};
     int actual_subscribed = 0;
     char result_msg[256] = {0};
+
+    /* P1修复: request_data为NULL时直接解引用会导致崩溃。
+     * 在函数开头添加显式NULL检查，返回错误响应，避免后续代码访问空指针。 */
+    if (!request_data) {
+        log_error("[ROS] ros_subscribe: request_data为空指针，无法处理请求");
+        json_data = (char*)safe_malloc(256);
+        if (json_data) {
+            snprintf(json_data, 256,
+                "{\"success\":false,\"error\":\"请求数据为空，缺少ROS话题信息\"}");
+            response->data = json_data;
+            response->data_length = strlen(json_data);
+            response->status_code = 400;
+        }
+        return 0;
+    }
+
     if (request_data && request_length > 0) {
         parse_json_string(request_data, "topic", ros_topic, sizeof(ros_topic));
         parse_json_string(request_data, "message_type", ros_msg_type, sizeof(ros_msg_type));
@@ -16430,7 +16911,7 @@ static int handle_api_get_api_stats(BackendServer* server,
                 "\"api_key_enabled\":%s,"
                 "\"uptime_seconds\":%lld"
                 "}}",
-                server->total_requests,
+                (int)InterlockedExchangeAdd(&server->total_requests, 0),
                 server->api_key_count,
                 active_keys,
                 auth_key_count,
@@ -16438,7 +16919,7 @@ static int handle_api_get_api_stats(BackendServer* server,
                 auth_rate_remaining,
                 server->requests_last_hour,
                 (int)server->connection_count,
-                server->error_count,
+                (int)InterlockedExchangeAdd(&server->error_count, 0),
                 rate_limit_remaining,
                 server->api_key_enabled ? "true" : "false",
                 (long)(time(NULL) - server->start_time));
@@ -16843,7 +17324,10 @@ static int handle_api_post_training_start(BackendServer* server,
     /* R112: trainer_train may not record history. Compute loss directly via lnn_forward. */
     if ((!hist || hist->size == 0) && server->lnn_instance && samples > 0) {
         final_loss = 0.0f; size_t ok = 0;
-        float* pred = (float*)safe_calloc(net_config.output_size, sizeof(float));
+        /* 修复: server->lnn_instance是共享LNN(output_size=256)，不能用net_config.output_size(10)分配缓冲区 */
+        size_t lnn_out = lnn_get_output_size(server->lnn_instance);
+        if (lnn_out == 0) lnn_out = 256;
+        float* pred = (float*)safe_calloc(lnn_out, sizeof(float));
         if (pred) {
             for (size_t si = 0; si < samples; si++) {
                 if (lnn_forward(server->lnn_instance,
@@ -26274,6 +26758,15 @@ static int handle_api_post_system_command(BackendServer* s,
             command, exec_status, detail_msg);
         r->data = j; r->data_length = strlen(j);
         r->status_code = strcmp(exec_status, "ok") == 0 ? 200 : 400;
+        /* 4.3修复: 推送custom事件到WebSocket，前端可接收自定义事件通知 */
+        if (s->ws_push_server && command[0] != '\0') {
+            char custom_buf[512];
+            snprintf(custom_buf, sizeof(custom_buf),
+                "{\"type\":\"custom\",\"event\":\"system_command\","
+                "\"command\":\"%s\",\"status\":\"%s\",\"timestamp\":%lld}",
+                command, exec_status, (long long)time(NULL));
+            ws_push_broadcast_json(s->ws_push_server, custom_buf);
+        }
     }
     return 0;
 }
@@ -27429,9 +27922,9 @@ char* backend_server_get_stats(const BackendServer* server) {
     snprintf(stats, 1024,
             "{\"stats\":{\"total_requests\":%d,\"current_connections\":%d,"
             "\"error_count\":%d,\"is_running\":%s}}",
-            server->total_requests,
+            (int)InterlockedExchangeAdd(&server->total_requests, 0),
             (int)server->connection_count,
-            server->error_count,
+            (int)InterlockedExchangeAdd(&server->error_count, 0),
             server->is_running ? "true" : "false");
     
     return stats;
@@ -27613,8 +28106,8 @@ char* backend_server_get_health(const BackendServer* server) {
             uptime_hours, uptime_min, uptime_sec_remain,
             server->is_running ? "true" : "false",
             (int)server->connection_count,
-            server->total_requests,
-            server->error_count,
+            (int)InterlockedExchangeAdd(&server->total_requests, 0),
+            (int)InterlockedExchangeAdd(&server->error_count, 0),
             server->api_key_enabled ? "true" : "false",
             gpu_info_str,
             cpu_info_str,

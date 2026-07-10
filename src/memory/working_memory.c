@@ -719,8 +719,8 @@ int working_memory_serialize(const WorkingMemory* wm,
                     sizeof(wm->global_time) +
                     sizeof(wm->initialized);
 
+    /* P1-02修复：序列化所有槽位（包括非活跃的），避免反序列化时索引错位 */
     for (size_t i = 0; i < wm->slot_count; i++) {
-        if (!wm->slots[i].is_active) continue;
         needed += WM_KEY_MAX +
                   sizeof(size_t) +
                   (wm->slots[i].data_size * sizeof(float)) +
@@ -746,9 +746,8 @@ int working_memory_serialize(const WorkingMemory* wm,
     memcpy(buffer + pos, &wm->initialized, sizeof(wm->initialized));
     pos += sizeof(wm->initialized);
 
+    /* P1-02修复：序列化所有槽位（包括非活跃的），保持与反序列化顺序一致 */
     for (size_t i = 0; i < wm->slot_count; i++) {
-        if (!wm->slots[i].is_active) continue;
-
         memcpy(buffer + pos, wm->slots[i].key, WM_KEY_MAX);
         pos += WM_KEY_MAX;
 

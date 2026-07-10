@@ -78,6 +78,9 @@ typedef struct {
     size_t max_request_body_size; /**< 最大请求体大小（字节，默认16MB=16777216） */
     int connection_timeout_ms;    /**< 连接超时时间（毫秒，默认30000=30秒） */
     int max_connections_per_ip;   /**< 每个IP最大并发连接数（默认16，0=不限制） */
+    
+    /* P1-02修复: WebSocket端口配置，从配置文件读取，不再硬编码 */
+    int websocket_port;           /**< WebSocket端口号（默认SELFLNN_WEBSOCKET_PORT=8081，0=使用默认） */
 } BackendConfig;
 
 /**

@@ -187,6 +187,7 @@
         /* 监听导航切换，当产品设计面板可见时自动检查引擎状态 */
         var pdSection = document.getElementById('product-design');
         if (pdSection) {
+            /* D-007修复: 存储MutationObserver引用到全局，支持后续disconnect清理 */
             var observer = new MutationObserver(function(mutations) {
                 mutations.forEach(function(m) {
                     if (pdSection.classList.contains('active')) {
@@ -195,6 +196,8 @@
                 });
             });
             observer.observe(pdSection, { attributes: true, attributeFilter: ['class'] });
+            /* 存储observer引用供清理用 */
+            window._pdObserver = observer;
         }
     });
 

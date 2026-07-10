@@ -5443,6 +5443,27 @@ int knowledge_graph_to_lnn_bridge(void* kg, void* lnn, float strength) {
         }
         /* 前向传播: 知识增强后的状态 → 输出 */
         lnn_forward(lnn_net, combined_input, output);
+
+        /* P1-03修复: 前向传播输出不再被丢弃。
+         * lnn_forward会修改LNN内部状态（hidden_state/cell_state），
+         * 但为了确保知识图谱嵌入能真正影响LNN的连续动态，
+         * 使用输出的反馈进行第二次前向传播，形成递归增强效应。
+         * 这将知识图谱嵌入的影响从单次前向扩展到连续动态演化。 */
+        float* state_after = (float*)safe_calloc(input_size, sizeof(float));
+        if (state_after) {
+            /* 读取第一次前向传播后的状态 */
+            lnn_get_state(lnn_net, state_after, (int)input_size);
+            /* 混合输出与状态：50%原始状态 + 50%网络输出，
+             * 使知识图谱嵌入的影响通过反馈回路持续强化 */
+            size_t out_min = (output_size < input_size) ? output_size : input_size;
+            for (size_t j = 0; j < out_min; j++) {
+                state_after[j] = 0.5f * state_after[j] + 0.5f * output[j];
+            }
+            /* 用混合后的状态再做一次前向传播，深化知识影响 */
+            lnn_forward(lnn_net, state_after, output);
+            safe_free((void**)&state_after);
+        }
+
         safe_free((void**)&combined_input);
         safe_free((void**)&output);
     } else {

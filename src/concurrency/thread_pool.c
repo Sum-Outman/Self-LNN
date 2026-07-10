@@ -1166,11 +1166,14 @@ int thread_pool_submit(ThreadPool* pool, TaskFunction function,
         
         result = task_queue_push(pool, &pool->priority_queues[pq_idx], &task);
         if (result == 0) {
-            // 通知工作线程
+            /* P2修复: 使用broadcast替代signal，确保所有等待线程都能被唤醒。
+             * 避免丢失唤醒问题：多线程等待时，signal只唤醒一个线程，
+             * 如果该线程很快完成任务进入等待，其他线程可能永久错过唤醒。
+             * broadcast确保所有等待线程都有机会检查任务队列。 */
 #ifdef _WIN32
-            WakeConditionVariable(&pool->task_cond);
+            WakeAllConditionVariable(&pool->task_cond);
 #else
-            pthread_cond_signal(&pool->task_cond);
+            pthread_cond_broadcast(&pool->task_cond);
 #endif
         }
         

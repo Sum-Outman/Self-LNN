@@ -18,6 +18,9 @@
 #include "selflnn/utils/platform.h"
 #include "selflnn/utils/secure_random.h"
 #include "selflnn/utils/logging.h" /* log_warn宏 */
+/* P1-01修复: 机器人↔多模态集成 - 传感器数据推送到多模态管理器 */
+#include "selflnn/selflnn.h"
+#include "selflnn/multimodal/multimodal_manager.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -686,6 +689,56 @@ int robot_get_sensor_data(Robot* robot, int sensor_id, SensorData* sensor_data) 
     
     // 更新传感器更新计数
     robot->sensor_update_count++;
+    
+    /* ================================================================
+     * P1-01修复: 机器人↔多模态集成
+     * 将传感器数据推送到多模态管理器，使传感器数据流进入统一的多模态
+     * 连续动态系统，实现机器人传感器→多模态→LNN状态演化的完整链路。
+     * 管理器不可用时优雅降级，仅记录日志，不影响传感器数据正常返回。
+     * ================================================================ */
+    {
+        void* mm_raw = selflnn_get_multimodal_manager();
+        if (mm_raw) {
+            MultimodalManager* mm = (MultimodalManager*)mm_raw;
+            /* 推送传感器数据到多模态管理器进行统一处理
+             * 传感器数据作为sensor_data参数传入，其他模态（视觉/音频/文本等）
+             * 此时无数据则为NULL，多模态管理器内部会优雅处理NULL输入 */
+            float fused_features[256];
+            int result = multimodal_manager_process(
+                mm,
+                NULL,               /* vision_data: 无视觉数据 */
+                NULL,               /* audio_data: 无音频数据 */
+                NULL,               /* text_data: 无文本数据 */
+                sensor_data,        /* sensor_data: 当前机器人传感器数据 */
+                NULL,               /* haptic_data: 无触觉数据 */
+                NULL,               /* proprioception_data: 无本体感数据 */
+                NULL,               /* thermal_data: 无热感数据 */
+                NULL,               /* radar_data: 无雷达数据 */
+                NULL,               /* motor_data: 无电机数据 */
+                fused_features,     /* 融合特征输出 */
+                256                  /* 最大特征数 */
+            );
+            if (result > 0) {
+                /* 传感器数据成功注入多模态融合管线，融合特征已生成 */
+                log_info("[机器人↔多模态] 传感器数据已推送到多模态管理器: "
+                         "传感器类型=%d, ID=%d, 融合特征数=%d",
+                         sensor->config.type, sensor_id, result);
+            } else {
+                /* 多模态管理器存在但融合失败，记录警告但不影响传感器数据正常返回 */
+                log_warning("[机器人↔多模态] 传感器数据推送成功但融合处理返回%d: "
+                           "传感器类型=%d, ID=%d",
+                           result, sensor->config.type, sensor_id);
+            }
+        } else {
+            /* 多模态管理器不可用，优雅降级：传感器数据正常返回但跳过融合 */
+            static int mm_unavailable_logged = 0;
+            if (!mm_unavailable_logged) {
+                log_info("[机器人↔多模态] 多模态管理器不可用，传感器数据将直接返回"
+                         "（不经过多模态融合管线），此消息仅记录一次");
+                mm_unavailable_logged = 1;
+            }
+        }
+    }
     
     // 性能统计
     uint64_t elapsed_ns = perf_timer_stop(&timer);

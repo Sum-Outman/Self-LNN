@@ -194,6 +194,76 @@ int pipeline_run_full_training(TrainingPipeline* pipeline, float* final_loss);
 /* 训练监控器接口 */
 TrainingMonitor* training_pipeline_get_monitor(const TrainingPipeline* pipeline);
 
+/* ============================================================================
+ * P0-跨模块集成: 认知系统修正信号注入训练管线
+ * ============================================================================
+ * 认知系统（self_cognition、deep_correction、deep_reflection）在运行过程中
+ * 产生的修正信号（参数修正、反思结果、置信度等）通过此接口注入训练管线，
+ * 作为训练数据的补充，在下一次训练迭代中应用。
+ *
+ * 设计原则：
+ *   - 向后兼容：训练管线不可用时优雅降级（返回-1但不崩溃）
+ *   - 非阻塞：修正信号仅追加到队列，不阻塞认知系统运行
+ *   - 真实数据优先：修正信号作为辅助，不替代真实训练数据
+ * ============================================================================ */
+
+/** 认知修正信号来源 */
+typedef enum {
+    COG_CORRECTION_SOURCE_SELF_TRAINING = 0,   /**< 自我模型训练产生 */
+    COG_CORRECTION_SOURCE_DEEP_CORRECTION = 1, /**< 深度修正引擎产生 */
+    COG_CORRECTION_SOURCE_DEEP_REFLECTION = 2, /**< 深度反思引擎产生 */
+    COG_CORRECTION_SOURCE_METACOGNITION = 3    /**< 元认知系统产生 */
+} CognitionCorrectionSource;
+
+/** 认知修正信号 —— 从认知系统传递到训练管线的修正数据 */
+typedef struct {
+    CognitionCorrectionSource source;          /**< 修正信号来源 */
+    float* corrected_params;                   /**< 修正后的LNN参数（NULL表示无参数修正） */
+    size_t param_count;                        /**< 参数数量 */
+    float* param_gradients;                    /**< 修正梯度方向（可选，NULL表示无） */
+    size_t gradient_count;                     /**< 梯度数量 */
+    char correction_reason[512];               /**< 修正原因描述 */
+    float confidence;                          /**< 修正置信度 [0.0, 1.0] */
+    float effectiveness;                       /**< 修正效果评估 [0.0, 1.0] */
+    time_t timestamp;                          /**< 修正信号产生时间 */
+    int applied;                               /**< 是否已在训练管线中应用 */
+    int error_id;                              /**< 关联的错误ID（-1表示无关联错误） */
+    int hypothesis_id;                         /**< 关联的假设ID（-1表示无关联假设） */
+    float reflection_depth;                    /**< 反思深度评分（来自deep_reflection） */
+    float coherence_score;                     /**< 认知一致性评分（来自deep_reflection） */
+} CognitionCorrectionSignal;
+
+/** 认知修正信号队列最大容量 */
+#define COG_CORRECTION_QUEUE_MAX 64
+
+/**
+ * @brief 将认知系统的修正信号注入训练管线
+ *
+ * 认知系统在完成自我修正/反思后调用此函数，将修正结果推送到训练管线。
+ * 训练管线在下一个训练步骤中会检查并应用这些修正信号。
+ *
+ * @param pipeline 训练管线实例
+ * @param signal 修正信号（函数内部会复制数据，调用者保留所有权）
+ * @return 0成功，-1参数无效，-2队列已满，-3训练管线未初始化
+ */
+int training_pipeline_apply_cognition_correction(TrainingPipeline* pipeline,
+                                                  const CognitionCorrectionSignal* signal);
+
+/**
+ * @brief 获取训练管线中待处理的认知修正信号数量
+ *
+ * @param pipeline 训练管线实例
+ * @return 待处理信号数量，-1参数无效
+ */
+int training_pipeline_get_pending_corrections(const TrainingPipeline* pipeline);
+
+/**
+ * @brief 清除所有待处理的认知修正信号
+ *
+ * @param pipeline 训练管线实例
+ */
+void training_pipeline_clear_corrections(TrainingPipeline* pipeline);
+
 #ifdef __cplusplus
 }
 #endif

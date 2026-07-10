@@ -576,8 +576,12 @@ static ArchitectureEvaluation* population_nas_evaluator(
 
     CfCNetwork* cfc = lnn_get_cfc_network(lnn);
     size_t out_dim = cfc ? cfc->config.output_size : 64;
-    float out1[128], out2[128];
-    memset(out1, 0, sizeof(out1)); memset(out2, 0, sizeof(out2));
+    /* 修复: 使用动态分配替代固定128，防止out_dim>128时栈溢出 */
+    if (out_dim == 0) out_dim = 64;
+    if (out_dim > 4096) out_dim = 4096; /* 安全上限 */
+    float* out1 = (float*)safe_calloc(out_dim, sizeof(float));
+    float* out2 = (float*)safe_calloc(out_dim, sizeof(float));
+    if (!out1 || !out2) { safe_free((void**)&out1); safe_free((void**)&out2); safe_free((void**)&eval); return NULL; }
 
     /* 构造输入: 优先使用网络当前隐藏状态, 确保评估基于真实上下文 */
     float inp[64];
@@ -586,10 +590,10 @@ static ArchitectureEvaluation* population_nas_evaluator(
     inp[0] = logf(1.0f + (float)architecture->layer_count);
     inp[1] = logf(1.0f + (float)architecture->total_parameters) * 0.01f;
 
-    if (lnn_forward(lnn, inp, out1) != 0) { safe_free((void**)&eval); return NULL; }
+    if (lnn_forward(lnn, inp, out1) != 0) { safe_free((void**)&out1); safe_free((void**)&out2); safe_free((void**)&eval); return NULL; }
     /* 扰动输入评估灵敏度 */
     inp[0] += 0.01f;
-    if (lnn_forward(lnn, inp, out2) != 0) { safe_free((void**)&eval); return NULL; }
+    if (lnn_forward(lnn, inp, out2) != 0) { safe_free((void**)&out1); safe_free((void**)&out2); safe_free((void**)&eval); return NULL; }
     inp[0] -= 0.01f; /* 恢复 */
 
     /* 计算输出幅度和方差 */
@@ -609,6 +613,8 @@ static ArchitectureEvaluation* population_nas_evaluator(
     eval->overall_score = eval->accuracy - eval->complexity_score * 0.05f;
     eval->evaluation_status = 1; /* 标记为真实LNN评估 */
     eval->evaluation_log = NULL;
+    safe_free((void**)&out1);
+    safe_free((void**)&out2);
     return eval;
 }
 
@@ -1556,30 +1562,6 @@ static int nsga2_tournament_selection(Population* pop,
 }
 
 /**
- * @brief NSGA-II交叉操作（模拟二进制交叉SBX）
- */
-static void nsga2_sbx_crossover(const float* p1, const float* p2,
-                                 float* c1, float* c2, int genome_size,
-                                 float crossover_prob, float nc) {
-    for (int i = 0; i < genome_size; i++) {
-        if (uniform_random() < crossover_prob) {
-            float u = uniform_random();
-            float beta;
-            if (u <= 0.5f) {
-                beta = powf(2.0f * u, 1.0f / (nc + 1.0f));
-            } else {
-                beta = powf(1.0f / (2.0f * (1.0f - u)), 1.0f / (nc + 1.0f));
-            }
-            c1[i] = 0.5f * ((1.0f + beta) * p1[i] + (1.0f - beta) * p2[i]);
-            c2[i] = 0.5f * ((1.0f - beta) * p1[i] + (1.0f + beta) * p2[i]);
-        } else {
-            c1[i] = p1[i];
-            c2[i] = p2[i];
-        }
-    }
-}
-
-/**
  * @brief NSGA-II多项式变异
  */
 static void nsga2_polynomial_mutation(float* genome, int genome_size,
@@ -1736,8 +1718,22 @@ int population_nsga2_evolve(Population* pop, MultiObjectiveFunction obj_func,
             return -1;
         }
         
-        nsga2_sbx_crossover(p1->genome, p2->genome, c1->genome, c2->genome,
-                            (int)pop->genome_size, crossover_prob, 20.0f);
+        /* P1-04修复: 统一使用individual_sbx_crossover（284行完整版本），
+         * 删除重复的nsga2_sbx_crossover。使用宽边界[-10.0, 10.0]避免过度裁剪，
+         * 与原始nsga2_sbx_crossover的无边界行为一致。 */
+        if (individual_sbx_crossover(p1, p2, c1, c2, crossover_prob, 20.0f,
+                                      -10.0f, 10.0f) != 0) {
+            individual_destroy(c1);
+            individual_destroy(c2);
+            for (size_t j = 0; j < i; j++) individual_destroy(offspring[j]);
+            safe_free((void**)&offspring);
+            for (int r = 0; r < front_count; r++) safe_free((void**)&front_indices[r]);
+            safe_free((void**)&front_indices);
+            safe_free((void**)&front_sizes);
+            for (size_t j = 0; j < pop_size; j++) safe_free((void**)&obj_data[j].objectives);
+            safe_free((void**)&obj_data);
+            return -1;
+        }
         
         nsga2_polynomial_mutation(c1->genome, (int)pop->genome_size,
                                    mutation_prob, mutation_strength, 20.0f);

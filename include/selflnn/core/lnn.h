@@ -158,6 +158,14 @@ LNN* lnn_create(const LNNConfig* config);
 void lnn_free(LNN* network);
 
 /**
+ * @brief 记录全局LNN持久地址（用于lnn_free保护，与selflnn.c协作）
+ * 该地址永不自动清空，仅用于lnn_free的重复释放检查
+ * 
+ * @param global_lnn 全局LNN实例指针
+ */
+void lnn_set_global_address(LNN* global_lnn);
+
+/**
  * @brief 前向传播
  * 
  * @param network 网络句柄

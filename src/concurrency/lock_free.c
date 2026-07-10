@@ -1692,7 +1692,7 @@ typedef struct ThreadPoolTaskNode {
     ThreadPoolTaskFunc func;                 /**< 任务函数 */
     void* arg;                               /**< 任务参数 */
     int64_t task_id;                         /**< 任务ID */
-    TaskPriority priority;                   /**< 任务优先级 */
+    LfTaskPriority priority;                   /**< 任务优先级 */
     volatile int completed;                  /**< 完成标志 */
     volatile int* cancel_flag;               /**< 取消标志 */
     HANDLE completion_event;                 /**< 完成事件 */
@@ -1769,7 +1769,7 @@ static DWORD WINAPI worker_thread_main(LPVOID arg) {
         
         // 2. 从高优先级全局队列获取任务
         if (!task) {
-            for (int p = TASK_PRIORITY_CRITICAL; p >= TASK_PRIORITY_LOW && !task; p--) {
+            for (int p = LF_PRIORITY_CRITICAL; p >= LF_PRIORITY_LOW && !task; p--) {
                 if (pool->priority_queues[p]) {
                     ThreadPoolTaskNode* dequeued = NULL;
                     if (lock_free_queue_dequeue(pool->priority_queues[p], &dequeued,
@@ -2012,7 +2012,7 @@ void lock_free_thread_pool_free(LockFreeThreadPool* pool) {
 int64_t lock_free_thread_pool_submit(LockFreeThreadPool* pool,
                                        ThreadPoolTaskFunc func,
                                        void* arg,
-                                       TaskPriority priority) {
+                                       LfTaskPriority priority) {
     if (!pool || !func || !pool->active) return -1;
     
     ThreadPoolTaskNode* node = (ThreadPoolTaskNode*)safe_malloc(sizeof(ThreadPoolTaskNode));
@@ -2215,7 +2215,7 @@ typedef struct ThreadPoolTaskNode {
     ThreadPoolTaskFunc func;
     void* arg;
     int64_t task_id;
-    TaskPriority priority;
+    LfTaskPriority priority;
     volatile int completed;
     volatile int* cancel_flag;
     pthread_cond_t completion_cond;
@@ -2277,7 +2277,7 @@ static void* worker_thread_main(void* arg) {
         }
         
         if (!task) {
-            for (int p = TASK_PRIORITY_CRITICAL; p >= TASK_PRIORITY_LOW && !task; p--) {
+            for (int p = LF_PRIORITY_CRITICAL; p >= LF_PRIORITY_LOW && !task; p--) {
                 if (pool->priority_queues[p]) {
                     ThreadPoolTaskNode* dequeued = NULL;
                     if (lock_free_queue_dequeue(pool->priority_queues[p], &dequeued,

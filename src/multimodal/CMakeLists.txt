@@ -34,8 +34,7 @@ add_library(selflnn_multimodal
     slam_enhance.c
     haptic_enhance.c
     camera_capture.c
-    # DEEP-005: audio_capture.c 与 audio.c 重复实现 audio_capture_* 函数，已排除
-    # audio_capture.c
+    # P1-05修复: audio_capture.c已删除，其功能已由audio.c完整实现
     character_segmentation.c
     image_recognition_deep.c
     unified_signal_processor.c

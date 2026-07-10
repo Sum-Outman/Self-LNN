@@ -73,7 +73,7 @@ body {
     justify-content: center;
     font-size: 14px;
     font-weight: 500;
-    transition: all 0.3s ease;
+    transition: opacity 0.3s ease, background 0.3s ease;
     cursor: pointer;
 }
 /* JS未就绪时横幅也不显示，防止闪烁；连接状态由js/main.js动态管理 */
@@ -188,7 +188,7 @@ body {
     display: flex;
     align-items: center;
     gap: 0.35rem;
-    transition: all 0.25s ease;
+    transition: color 0.25s ease, background 0.25s ease;
     font-size: 0.85rem;
     white-space: nowrap;
     cursor: pointer;
@@ -203,7 +203,7 @@ body {
     color: #00cc6a;
     background: rgba(0, 255, 136, 0.12);
     font-weight: 600;
-    transition: all 0.25s ease;
+    transition: color 0.25s ease, background 0.25s ease;
 }
 
 /* 下拉菜单 */
@@ -416,7 +416,7 @@ body {
 }
 
 .loading-placeholder {
-    color: #666666;
+    color: #999999; /* P1-006修复: 提升对比度满足WCAG AA标准 */
     animation: loading-pulse 1.5s ease-in-out infinite;
 }
 
@@ -449,7 +449,7 @@ body {
 }
 
 .metric-value.metric-pending {
-    color: #666666;
+    color: #999999; /* P1-006修复: 提升对比度满足WCAG AA标准 */
     animation: loading-pulse 1.5s ease-in-out infinite;
 }
 
@@ -807,7 +807,7 @@ body {
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    transition: all 0.3s ease;
+    transition: background 0.3s ease, transform 0.3s ease, box-shadow 0.3s ease, opacity 0.3s ease;
 }
 
 .btn:hover {
@@ -1120,7 +1120,7 @@ body {
     cursor: pointer;
     font-size: 0.85rem;
     font-family: inherit;
-    transition: all 0.2s;
+    transition: background 0.2s, border-color 0.2s, color 0.2s;
 }
 
 .theme-btn:hover {
@@ -1509,7 +1509,7 @@ body {
     background: rgba(255, 255, 255, 0.03);
     border-radius: 8px;
     cursor: pointer;
-    transition: all 0.3s ease;
+    transition: background 0.3s ease, border-color 0.3s ease;
     border: 1px solid transparent;
 }
 
@@ -1563,7 +1563,7 @@ body {
 
 .model-item-status .status-badge.stopped {
     background: rgba(255, 255, 255, 0.1);
-    color: #777777;
+    color: #aaaaaa; /* P1-006修复: 提升对比度满足WCAG AA标准 */
 }
 
 .model-actions {
@@ -1989,7 +1989,7 @@ body {
 }
 
 .log-entry.error {
-    color: #777777;
+    color: #aaaaaa; /* P1-006修复: 提升对比度满足WCAG AA标准 */
     background: rgba(255, 255, 255, 0.05);
 }
 
@@ -2116,7 +2116,7 @@ body {
     background: rgba(255, 255, 255, 0.03);
     border-radius: 8px;
     border: 1px solid rgba(255, 255, 255, 0.05);
-    transition: all 0.3s ease;
+    transition: background 0.3s ease, border-color 0.3s ease;
 }
 
 .memory-entry:hover {
@@ -2275,7 +2275,7 @@ body {
     background: rgba(255, 255, 255, 0.03);
     border-radius: 8px;
     border: 1px solid transparent;
-    transition: all 0.3s ease;
+    transition: background 0.3s ease, border-color 0.3s ease;
 }
 
 .reasoning-task:hover {
@@ -2383,7 +2383,7 @@ body {
 }
 
 .metric-trend.down {
-    color: #777777;
+    color: #aaaaaa; /* P1-006修复: 提升对比度满足WCAG AA标准 */
 }
 
 .learning-progress {
@@ -2505,7 +2505,7 @@ body {
     background: rgba(255, 255, 255, 0.03);
     border-radius: 8px;
     border: 1px solid transparent;
-    transition: all 0.3s ease;
+    transition: background 0.3s ease, border-color 0.3s ease;
 }
 
 .evolution-stage.active {
@@ -2890,7 +2890,7 @@ body {
 }
 
 .status-item.offline {
-    color: #777777;
+    color: #aaaaaa; /* P1-006修复: 提升对比度满足WCAG AA标准 */
 }
 
 .info-grid {
@@ -3025,7 +3025,7 @@ body {
 }
 
 .status-value.error {
-    color: #777777;
+    color: #aaaaaa; /* P1-006修复: 提升对比度满足WCAG AA标准 */
 }
 
 .battery-indicator {
@@ -3123,7 +3123,7 @@ body {
     color: #888888;
     font-size: 1.5rem;
     cursor: pointer;
-    transition: all 0.3s ease;
+    transition: background 0.3s ease, border-color 0.3s ease, opacity 0.3s ease;
 }
 
 .direction-btn:hover {
@@ -3373,7 +3373,7 @@ body {
     background: rgba(255, 255, 255, 0.03);
     border-radius: 6px;
     border: 1px solid transparent;
-    transition: all 0.3s ease;
+    transition: background 0.3s ease, border-color 0.3s ease;
 }
 
 .queue-item:hover {
@@ -3389,7 +3389,7 @@ body {
 
 .task-priority.high {
     background: rgba(255, 255, 255, 0.1);
-    color: #777777;
+    color: #aaaaaa; /* P1-006修复: 提升对比度满足WCAG AA标准 */
 }
 
 .task-priority.medium {
@@ -3582,7 +3582,7 @@ body {
 .knowledge-entry.empty {
     text-align: center;
     padding: 2rem;
-    color: #666666;
+    color: #999999; /* P1-006修复: 提升对比度满足WCAG AA标准 */
     font-style: italic;
 }
 
@@ -4074,7 +4074,7 @@ body {
 }
 
 .ros-list-empty {
-    color: #777;
+    color: #aaa; /* P1-006修复: 提升对比度 */
     text-align: center;
     padding: 0.5rem;
     font-style: italic;
@@ -4152,7 +4152,7 @@ body {
     border: 1px solid rgba(255,255,255,0.1);
     color: #bbb;
     cursor: pointer;
-    transition: all 0.2s;
+    transition: background 0.2s, border-color 0.2s, color 0.2s;
 }
 
 .training-mode-btn:hover {
@@ -4286,7 +4286,7 @@ body {
 
 .sensor-table .table-empty {
     text-align: center;
-    color: #777;
+    color: #aaa; /* P1-006修复: 提升对比度 */
     padding: 1rem;
     font-style: italic;
 }
@@ -4605,7 +4605,7 @@ body {
 
 .dialogue-welcome .welcome-hint {
     margin-top: 1rem;
-    color: #666666;
+    color: #999999; /* P1-006修复: 提升对比度满足WCAG AA标准 */
     font-style: italic;
 }
 
@@ -4681,7 +4681,7 @@ body {
 
 .message-time {
     font-size: 0.7rem;
-    color: #666666;
+    color: #999999; /* P1-006修复: 提升对比度满足WCAG AA标准 */
     margin-top: 0.3rem;
     text-align: right;
 }
@@ -5033,7 +5033,7 @@ body {
 
 .toggle-desc {
     font-size: 0.75rem;
-    color: #666666;
+    color: #999999; /* P1-006修复: 提升对比度满足WCAG AA标准 */
 }
 
 /* FIX-CSS-001: .switch/.slider已移至8867行统一规范 */
@@ -5374,7 +5374,7 @@ body {
     color: rgba(255, 255, 255, 0.8);
     border-radius: 4px;
     cursor: pointer;
-    transition: all 0.2s;
+    transition: background 0.2s, border-color 0.2s, color 0.2s;
 }
 
 .device-btn:hover {
@@ -5512,7 +5512,7 @@ body {
     border: 1px solid rgba(255, 255, 255, 0.08);
     border-radius: 6px;
     cursor: pointer;
-    transition: all 0.2s;
+    transition: background 0.2s, border-color 0.2s, color 0.2s;
 }
 
 .device-select-item:hover {
@@ -5537,7 +5537,7 @@ body {
     border-radius: 6px;
     cursor: pointer;
     font-size: 0.85rem;
-    transition: all 0.2s;
+    transition: background 0.2s, border-color 0.2s, color 0.2s;
 }
 
 .device-selector-close:hover {
@@ -5742,7 +5742,7 @@ body {
     border-radius: 4px;
     background: rgba(0,0,0,0.3);
     margin-left: 0.5rem;
-    transition: all 0.3s ease;
+    transition: background 0.3s ease, color 0.3s ease;
 }
 
 /* 通知样式增强 */
@@ -6145,7 +6145,7 @@ body {
 }
 
 .endpoint-search-box input::placeholder {
-    color: #666666;
+    color: #999999; /* P1-006修复: 提升对比度满足WCAG AA标准 */
 }
 
 /* 响应式 */
@@ -6706,7 +6706,7 @@ body {
     height: 8px;
     border-radius: 50%;
     background: rgba(255, 255, 255, 0.2);
-    transition: all 0.1s ease;
+    transition: background 0.1s ease;
 }
 
 .vad-dot.speaking {
@@ -7091,7 +7091,7 @@ body {
 
 .cog-id-label {
     font-size: 0.65rem;
-    color: #666666;
+    color: #999999; /* P1-006修复: 提升对比度满足WCAG AA标准 */
     text-transform: uppercase;
     letter-spacing: 0.5px;
 }
@@ -7458,7 +7458,7 @@ body {
         width: 20px; height: 2px;
         background: #00c8ff;
         border-radius: 1px;
-        transition: all 0.3s;
+        transition: transform 0.3s, opacity 0.3s;
     }
     .nav.collapsed { display: none; }
     .nav.visible {
@@ -7619,7 +7619,7 @@ body {
     font-size: 14px;
     cursor: pointer;
     border: none;
-    transition: all 0.2s;
+    transition: background 0.2s, color 0.2s, opacity 0.2s;
 }
 .btn-ok {
     background: linear-gradient(135deg, #1565c0, #1976d2);
@@ -7636,8 +7636,8 @@ body {
 /* FIX-CSS-001: 统一.switch/.slider规范(合并原4处重复定义) */
 .switch { position:relative;display:inline-block;width:44px;height:24px;flex-shrink:0;vertical-align:middle; }
 .switch input { opacity:0;width:0;height:0; }
-.slider { position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:rgba(255,255,255,0.1);transition:all 0.3s;border-radius:24px; }
-.slider:before { position:absolute;content:"";height:18px;width:18px;left:3px;bottom:3px;background:#fff;transition:all 0.3s;border-radius:50%; }
+.slider { position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:rgba(255,255,255,0.1);transition:background 0.3s;border-radius:24px; }
+.slider:before { position:absolute;content:"";height:18px;width:18px;left:3px;bottom:3px;background:#fff;transition:transform 0.3s, left 0.3s;border-radius:50%; }
 .switch input:checked+.slider { background:#00ff88; }
 .switch input:checked+.slider:before { transform:translateX(20px); }
 .switch input:disabled+.slider { opacity:0.4;cursor:not-allowed; }
@@ -7689,7 +7689,7 @@ body {
 .pipeline-status-badge.online { background:rgba(46,204,113,0.15);color:#2ecc71; }
 .training-status-badge { padding:3px 10px;border-radius:10px;font-size:0.8rem;font-weight:500;background:rgba(100,100,100,0.15);color:#888; }
 .training-status-badge.active { background:rgba(46,204,113,0.15);color:#2ecc71; }
-.training-mode-btn { padding:4px 12px;border-radius:4px;font-size:0.8rem;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);color:#ccc;cursor:pointer;transition:all 0.2s; }
+.training-mode-btn { padding:4px 12px;border-radius:4px;font-size:0.8rem;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);color:#ccc;cursor:pointer;transition:background 0.2s,color 0.2s,border-color 0.2s; }
 .training-mode-btn:hover { background:rgba(255,255,255,0.1); }
 .training-mode-btn.active { background:rgba(33,150,243,0.2);border-color:rgba(33,150,243,0.5);color:#64b5f6; }
 .sentinel-card { border:1px solid rgba(255,68,68,0.2); }
@@ -7888,7 +7888,7 @@ body {
 .monitor-item .value{font-size:1.1rem;font-weight:600;color:#00c8ff}
 
 /* === FIX-FRONTEND-003: 补充前端缺失CSS类定义 === */
-.empty-state{text-align:center;padding:32px 16px;color:#666;font-size:.85rem}
+.empty-state{text-align:center;padding:32px 16px;color:#999;font-size:.85rem} /* P1-006修复: 提升对比度 */
 .checkpoint-table{width:100%;border-collapse:collapse;font-size:.8rem}
 .checkpoint-table th{background:rgba(0,200,255,.08);color:#00c8ff;padding:8px 10px;text-align:left;border-bottom:1px solid rgba(255,255,255,.08)}
 .checkpoint-table td{padding:7px 10px;border-bottom:1px solid rgba(255,255,255,.04);color:#ccc}

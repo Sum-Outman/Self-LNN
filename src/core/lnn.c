@@ -37,6 +37,17 @@
 #include <math.h>
 #include <stdio.h>
 #include <time.h>
+
+/* 全局LNN地址持久记录（用于lnn_free保护，即使g_global_singleton_lnn已被清空仍能识别） */
+static LNN* g_global_lnn_address = NULL;
+
+/**
+ * @brief 记录全局LNN地址（由selflnn.c在设置全局LNN时调用）
+ * 该地址永不自动清空，仅用于lnn_free的保护检查
+ */
+void lnn_set_global_address(LNN* global_lnn) {
+    g_global_lnn_address = global_lnn;
+}
 #include <stdint.h>
 
 /* 平台特定头文件 */
@@ -360,14 +371,32 @@ void lnn_free(LNN* network) {
         return;
     }
     
+    /* DEFECT-001/002/003/004修复: 单一LNN模式保护
+     * 当 selflnn_enforce_single_lnn() 已调用后，全局LNN由系统管理
+     * 所有模块（text_processor、manual_learning、imitation_deep等）
+     * 通过 lnn_create() 获取的都是同一个全局LNN引用
+     * 任何模块调用 lnn_free() 都会导致全局LNN被重复释放
+     * 此处检测并拦截对全局LNN的释放，防止内存污染
+     * 增强: 使用g_global_lnn_address持久记录，即使g_global_singleton_lnn已清空仍能识别 */
+    if (selflnn_is_single_lnn_enforced()) {
+        void* global_lnn = selflnn_get_lnn();
+        if (!global_lnn) global_lnn = g_global_lnn_address;  /* 回退到持久记录 */
+        if (global_lnn && network == (LNN*)global_lnn) {
+            log_debug("[单一LNN] lnn_free()——拦截对全局LNN的释放，由系统管理生命周期");
+            return;
+        }
+    }
+    
     // 释放CfC网络
     if (network->cfc_network) {
         cfc_free(network->cfc_network);
+        network->cfc_network = NULL;  /* DEFECT修复: 防止重复释放 */
     }
     
     // 释放网络状态
     if (network->state) {
         network_state_free(network->state);
+        network->state = NULL;  /* DEFECT修复: 防止重复释放 */
     }
     
     // 释放拉普拉斯分析器
@@ -1134,79 +1163,30 @@ static uint32_t lnn_calc_checksum(const void* data, size_t size) {
  * M-2修复: 锁内仅复制数据到堆临时缓冲区，释放锁后在锁外执行fwrite，
  * 避免在持有互斥锁期间进行耗时的磁盘I/O操作。
  */
+/* 漏洞追踪: 全局易失变量用于在SEH崩溃时定位精确位置 */
 int lnn_save(LNN* network, const char* filepath) {
     /* 参数检查 */
     SELFLNN_CHECK_NULL(network, "LNN网络句柄为空");
     SELFLNN_CHECK_NULL(filepath, "文件路径为空");
 
-    /* 预计算维度（锁外安全：config不可变） */
     size_t hidden_size = network->config.hidden_size;
     CfCNetwork* cfc = network->cfc_network;
-    int num_layers = cfc->config.num_layers;
-    size_t cfc_input_size = cfc->config.input_size;
-    size_t cfc_output_size = cfc->config.output_size;
-    size_t weight_size = cfc_input_size * hidden_size;
-    size_t hidden_weight_size = hidden_size * hidden_size;
+    if (!cfc) {
+        log_error("LNN的CfC网络未初始化，无法保存模型");
+        return -1;
+    }
 
-    /* ================================================================
-     * 所有需要在锁外释放的临时缓冲区指针（初始化为NULL，便于统一清理）
-     * ================================================================ */
-    float* buf_hidden = NULL;           /* 隐藏状态副本 */
-    float* buf_cell = NULL;             /* 细胞状态副本 */
-    float* buf_cfc_w = NULL;            /* CFC权重矩阵副本 */
-    float* buf_cfc_b = NULL;            /* CFC偏置向量副本 */
-    float* buf_W_out = NULL;            /* 输出投影矩阵副本 */
-    float* buf_b_out = NULL;            /* 输出投影偏置副本 */
-
-    /* 每层CfC单元数据 —— 指针数组 [num_layers] */
-    CfCCellConfig* cell_cfgs = NULL;   /* 每层单元配置 */
-    int* cell_use_gating = NULL;       /* 每层use_gating */
-    int* cell_use_adapt = NULL;       /* 每层use_adaptive_tau */
-    float* cell_avg_act = NULL;        /* 每层avg_activation */
-    float* cell_max_act = NULL;        /* 每层max_activation */
-    float* cell_min_tau = NULL;        /* 每层min_time_constant */
-    float* cell_max_tau = NULL;        /* 每层max_time_constant */
-    float* cell_tau_lr = NULL;         /* 每层tau_learning_rate */
-    float* cell_stime = NULL;          /* 每层state->time */
-    float* cell_sadapt = NULL;         /* 每层state->adaptation_rate */
-    float** cell_svec = NULL;          /* 每层state->state */
-    float** cell_aparam = NULL;        /* 每层state->adapted_params */
-    float** cell_weights = NULL;       /* 每层weight_matrix */
-    float** cell_biases = NULL;        /* 每层bias_vector */
-    float** cell_tau_arr = NULL;       /* 每层time_constants */
-    float** cell_igw = NULL;           /* 每层input_gate_weights */
-    float** cell_fgw = NULL;           /* 每层forget_gate_weights */
-    float** cell_ogw = NULL;           /* 每层output_gate_weights */
-    float** cell_gb = NULL;            /* 每层gate_biases */
-    float** cell_h2ig = NULL;          /* 每层hidden_to_input_gate */
-    float** cell_h2fg = NULL;          /* 每层hidden_to_forget_gate */
-    float** cell_h2og = NULL;          /* 每层hidden_to_output_gate */
-    float** cell_h2a = NULL;           /* 每层hidden_to_activation */
-    int* cell_use_mts = NULL;          /* 每层use_multi_timescale */
-    int* cell_fast_ratio_i = NULL;     /* 每层fast_tau_ratio*1000 */
-    int* cell_slow_ratio_i = NULL;     /* 每层slow_tau_ratio*1000 */
-    float** cell_ftau = NULL;          /* 每层fast_time_constants */
-    float** cell_stau = NULL;          /* 每层slow_time_constants */
-    float** cell_fstate = NULL;        /* 每层fast_state */
-    float** cell_sstate = NULL;        /* 每层slow_state */
-
-    /* 层归一化数据 */
-    int has_ln = 0;
-    float** ln_gamma = NULL;           /* 每层gamma */
-    float** ln_beta = NULL;            /* 每层beta */
-
-    /* 错误处理标签跳转目标 */
+    /* 临时缓冲区：仅保存LNN特有数据（hidden_state, cell_state, stats） */
+    float* buf_hidden = NULL;
+    float* buf_cell = NULL;
     int ret = 0;
 
     /* ================================================================
-     * 第一阶段：在LNN_LOCK内复制所有需要保存的数据到临时缓冲区
+     * 第一阶段：在锁内快速复制LNN特有数据到堆缓冲区
      * ================================================================ */
     LNN_LOCK(network);
 
-    /* --- 1. 复制LNN配置（栈拷贝） --- */
     LNNConfig saved_config = network->config;
-
-    /* --- 2. 复制标量字段 --- */
     int saved_ps = network->enable_param_sharding;
     size_t saved_ns = network->num_local_shards;
     int saved_gc = network->enable_gradient_checkpointing;
@@ -1217,174 +1197,23 @@ int lnn_save(LNN* network, const char* filepath) {
     uint64_t saved_bwd = (uint64_t)network->backward_count;
     double saved_time_val = network->total_training_time;
 
-    /* --- 3. 复制隐藏状态和细胞状态到堆缓冲区 --- */
     buf_hidden = (float*)safe_malloc(hidden_size * sizeof(float));
     buf_cell   = (float*)safe_malloc(hidden_size * sizeof(float));
-    if (!buf_hidden || !buf_cell) goto alloc_fail;
-
+    if (!buf_hidden || !buf_cell) {
+        LNN_UNLOCK(network);
+        selflnn_set_last_error(SELFLNN_ERROR_MEMORY_ALLOCATION, __func__, __FILE__, __LINE__,
+                              "保存模型时内存分配失败");
+        safe_free((void**)&buf_hidden);
+        safe_free((void**)&buf_cell);
+        return SELFLNN_ERROR_MEMORY_ALLOCATION;
+    }
     memcpy(buf_hidden, network->hidden_state, hidden_size * sizeof(float));
     memcpy(buf_cell,   network->cell_state,   hidden_size * sizeof(float));
 
-    /* --- 4. 复制CFC网络顶层数据 --- */
-    CfCNetworkConfig saved_cfc_cfg = cfc->config;
-
-    size_t total_w = cfc->total_weight_params;
-    size_t total_b = cfc->total_bias_params;
-    if (total_w == 0) {
-        total_w = (num_layers == 1) ? weight_size : hidden_weight_size;
-    }
-    if (total_b == 0) total_b = hidden_size;
-
-    buf_cfc_w = (float*)safe_malloc(total_w * sizeof(float));
-    buf_cfc_b = (float*)safe_malloc(total_b * sizeof(float));
-    if (!buf_cfc_w || !buf_cfc_b) goto alloc_fail;
-
-    memcpy(buf_cfc_w, cfc->weight_matrix, total_w * sizeof(float));
-    memcpy(buf_cfc_b, cfc->bias_vector,   total_b * sizeof(float));
-
-    /* --- 5. 复制输出投影参数（如果存在） --- */
-    if (cfc_output_size != hidden_size && cfc->W_out_params && cfc->b_out_params) {
-        size_t out_proj_count = cfc_output_size * hidden_size;
-        buf_W_out = (float*)safe_malloc(out_proj_count * sizeof(float));
-        buf_b_out = (float*)safe_malloc(cfc_output_size * sizeof(float));
-        if (!buf_W_out || !buf_b_out) goto alloc_fail;
-        memcpy(buf_W_out, cfc->W_out_params, out_proj_count * sizeof(float));
-        memcpy(buf_b_out, cfc->b_out_params, cfc_output_size * sizeof(float));
-    }
-
-    /* --- 6. 复制每层CfC单元数据 --- */
-    if (num_layers > 0) {
-        /* 分配标量数组 */
-        cell_cfgs  = (CfCCellConfig*)safe_malloc((size_t)num_layers * sizeof(CfCCellConfig));
-        cell_use_gating = (int*)safe_malloc((size_t)num_layers * sizeof(int));
-        cell_use_adapt  = (int*)safe_malloc((size_t)num_layers * sizeof(int));
-        cell_avg_act    = (float*)safe_malloc((size_t)num_layers * sizeof(float));
-        cell_max_act    = (float*)safe_malloc((size_t)num_layers * sizeof(float));
-        cell_min_tau    = (float*)safe_malloc((size_t)num_layers * sizeof(float));
-        cell_max_tau    = (float*)safe_malloc((size_t)num_layers * sizeof(float));
-        cell_tau_lr     = (float*)safe_malloc((size_t)num_layers * sizeof(float));
-        cell_stime      = (float*)safe_malloc((size_t)num_layers * sizeof(float));
-        cell_sadapt     = (float*)safe_malloc((size_t)num_layers * sizeof(float));
-        cell_use_mts    = (int*)safe_malloc((size_t)num_layers * sizeof(int));
-        cell_fast_ratio_i = (int*)safe_malloc((size_t)num_layers * sizeof(int));
-        cell_slow_ratio_i = (int*)safe_malloc((size_t)num_layers * sizeof(int));
-
-        /* 分配指针数组 */
-        cell_svec    = (float**)safe_calloc((size_t)num_layers, sizeof(float*));
-        cell_aparam  = (float**)safe_calloc((size_t)num_layers, sizeof(float*));
-        cell_weights = (float**)safe_calloc((size_t)num_layers, sizeof(float*));
-        cell_biases  = (float**)safe_calloc((size_t)num_layers, sizeof(float*));
-        cell_tau_arr = (float**)safe_calloc((size_t)num_layers, sizeof(float*));
-        cell_igw     = (float**)safe_calloc((size_t)num_layers, sizeof(float*));
-        cell_fgw     = (float**)safe_calloc((size_t)num_layers, sizeof(float*));
-        cell_ogw     = (float**)safe_calloc((size_t)num_layers, sizeof(float*));
-        cell_gb      = (float**)safe_calloc((size_t)num_layers, sizeof(float*));
-        cell_h2ig    = (float**)safe_calloc((size_t)num_layers, sizeof(float*));
-        cell_h2fg    = (float**)safe_calloc((size_t)num_layers, sizeof(float*));
-        cell_h2og    = (float**)safe_calloc((size_t)num_layers, sizeof(float*));
-        cell_h2a     = (float**)safe_calloc((size_t)num_layers, sizeof(float*));
-        cell_ftau    = (float**)safe_calloc((size_t)num_layers, sizeof(float*));
-        cell_stau    = (float**)safe_calloc((size_t)num_layers, sizeof(float*));
-        cell_fstate  = (float**)safe_calloc((size_t)num_layers, sizeof(float*));
-        cell_sstate  = (float**)safe_calloc((size_t)num_layers, sizeof(float*));
-
-        if (!cell_cfgs || !cell_use_gating || !cell_use_adapt ||
-            !cell_avg_act || !cell_max_act || !cell_min_tau || !cell_max_tau ||
-            !cell_tau_lr || !cell_stime || !cell_sadapt || !cell_use_mts ||
-            !cell_fast_ratio_i || !cell_slow_ratio_i ||
-            !cell_svec || !cell_aparam || !cell_weights || !cell_biases ||
-            !cell_tau_arr || !cell_igw || !cell_fgw || !cell_ogw || !cell_gb ||
-            !cell_h2ig || !cell_h2fg || !cell_h2og || !cell_h2a ||
-            !cell_ftau || !cell_stau || !cell_fstate || !cell_sstate) {
-            goto alloc_fail;
-        }
-
-        /* 逐层复制数据 */
-        size_t cell_w_size = (num_layers == 1) ? weight_size : hidden_weight_size;
-        size_t gate_bias_size = hidden_size * 3;
-
-        for (int i = 0; i < num_layers; i++) {
-            CfCCell* cell = cfc->layers[i];
-            if (!cell) goto alloc_fail;
-            if (!cell->state) goto alloc_fail;
-
-            /* 标量字段 */
-            cell_cfgs[i] = cell->config;
-            cell_use_gating[i] = cell->use_gating;
-            cell_use_adapt[i]  = cell->use_adaptive_tau;
-            cell_avg_act[i] = cell->avg_activation;
-            cell_max_act[i] = cell->max_activation;
-            cell_min_tau[i] = cell->min_time_constant;
-            cell_max_tau[i] = cell->max_time_constant;
-            cell_tau_lr[i]  = cell->tau_learning_rate;
-            cell_stime[i]  = cell->state->time;
-            cell_sadapt[i] = cell->state->adaptation_rate;
-            cell_use_mts[i] = cell->use_multi_timescale;
-            cell_fast_ratio_i[i] = (int)(cell->fast_tau_ratio * 1000.0f);
-            cell_slow_ratio_i[i] = (int)(cell->slow_tau_ratio * 1000.0f);
-
-            /* 加权数组 —— 逐个分配并复制 */
-            #define ALLOC_COPY_ARRAY(dst, src, count) do { \
-                (dst) = (float*)safe_malloc((count) * sizeof(float)); \
-                if (!(dst)) goto alloc_fail; \
-                memcpy((dst), (src), (count) * sizeof(float)); \
-            } while(0)
-
-            ALLOC_COPY_ARRAY(cell_svec[i],   cell->state->state,          hidden_size);
-            ALLOC_COPY_ARRAY(cell_aparam[i], cell->state->adapted_params, hidden_size);
-            ALLOC_COPY_ARRAY(cell_weights[i], cell->weight_matrix,        cell_w_size);
-            ALLOC_COPY_ARRAY(cell_biases[i],  cell->bias_vector,          hidden_size);
-            ALLOC_COPY_ARRAY(cell_tau_arr[i], cell->time_constants,       hidden_size);
-            ALLOC_COPY_ARRAY(cell_igw[i],     cell->input_gate_weights,   cell_w_size);
-            ALLOC_COPY_ARRAY(cell_fgw[i],     cell->forget_gate_weights,  cell_w_size);
-            ALLOC_COPY_ARRAY(cell_ogw[i],     cell->output_gate_weights,  cell_w_size);
-            ALLOC_COPY_ARRAY(cell_gb[i],      cell->gate_biases,          gate_bias_size);
-            ALLOC_COPY_ARRAY(cell_h2ig[i],    cell->hidden_to_input_gate_weights,    hidden_weight_size);
-            ALLOC_COPY_ARRAY(cell_h2fg[i],    cell->hidden_to_forget_gate_weights,   hidden_weight_size);
-            ALLOC_COPY_ARRAY(cell_h2og[i],    cell->hidden_to_output_gate_weights,   hidden_weight_size);
-            ALLOC_COPY_ARRAY(cell_h2a[i],     cell->hidden_to_activation_weights,    hidden_weight_size);
-
-            /* 多时间尺度数据（仅在启用时复制） */
-            if (cell->use_multi_timescale) {
-                ALLOC_COPY_ARRAY(cell_ftau[i],   cell->fast_time_constants, hidden_size);
-                ALLOC_COPY_ARRAY(cell_stau[i],   cell->slow_time_constants, hidden_size);
-                ALLOC_COPY_ARRAY(cell_fstate[i], cell->fast_state,          hidden_size);
-                ALLOC_COPY_ARRAY(cell_sstate[i], cell->slow_state,          hidden_size);
-            }
-
-            #undef ALLOC_COPY_ARRAY
-        }
-    }
-
-    /* --- 7. 复制层归一化参数 --- */
-    if (cfc->layer_norms && cfc->config.use_layer_norm) {
-        has_ln = 1;
-        ln_gamma = (float**)safe_calloc((size_t)num_layers, sizeof(float*));
-        ln_beta  = (float**)safe_calloc((size_t)num_layers, sizeof(float*));
-        if (!ln_gamma || !ln_beta) goto alloc_fail;
-
-        for (int i = 0; i < num_layers; i++) {
-            LayerNorm* ln = (LayerNorm*)cfc->layer_norms[i];
-            if (!ln) {
-                ln_gamma[i] = NULL;
-                ln_beta[i]  = NULL;
-                continue;
-            }
-            const float* gamma = layer_norm_get_gamma(ln);
-            const float* beta  = layer_norm_get_beta(ln);
-            ln_gamma[i] = (float*)safe_malloc(hidden_size * sizeof(float));
-            ln_beta[i]  = (float*)safe_malloc(hidden_size * sizeof(float));
-            if (!ln_gamma[i] || !ln_beta[i]) goto alloc_fail;
-            memcpy(ln_gamma[i], gamma, hidden_size * sizeof(float));
-            memcpy(ln_beta[i],  beta,  hidden_size * sizeof(float));
-        }
-    }
-
-    /* 数据复制完成，释放锁 */
     LNN_UNLOCK(network);
 
     /* ================================================================
-     * 第二阶段：在锁外执行所有文件I/O（fwrite）
+     * 第二阶段：在锁外执行文件I/O —— 委托cfc_save处理CFC网络
      * ================================================================ */
     {
         FILE* file = fopen(filepath, "wb");
@@ -1395,348 +1224,66 @@ int lnn_save(LNN* network, const char* filepath) {
             goto cleanup;
         }
 
-        /* 构建并写入文件头 */
+        /* 1. 写入文件头 */
         LNNFileHeader header;
         memset(&header, 0, sizeof(header));
         memcpy(header.magic, SELFLNN_FILE_MAGIC, SELFLNN_FILE_MAGIC_SIZE);
         header.version = SELFLNN_FILE_VERSION;
         header.header_size = sizeof(LNNFileHeader);
-
 #ifdef SELFLNN_NO_PRETRAINED
         header.marker |= SELFLNN_MARKER_FROM_SCRATCH;
 #else
         header.marker |= SELFLNN_MARKER_PRETRAINED;
 #endif
-
-        uint32_t config_checksum = lnn_calc_checksum(&saved_config, sizeof(LNNConfig));
-        header.checksum = config_checksum;
-
+        header.checksum = lnn_calc_checksum(&saved_config, sizeof(LNNConfig));
         if (fwrite(&header, sizeof(header), 1, file) != 1) {
-            selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                                  "写入模型文件头失败");
+            selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__, "写入文件头失败");
             fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup;
         }
 
-        /* 写入LNN配置 */
+        /* 2. 写入LNN配置 */
         if (fwrite(&saved_config, sizeof(LNNConfig), 1, file) != 1) {
-            selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                                  "保存LNN网络配置失败");
+            selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__, "保存LNN配置失败");
             fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup;
         }
 
-        /* 写入CFC网络配置 */
-        if (fwrite(&saved_cfc_cfg, sizeof(CfCNetworkConfig), 1, file) != 1) {
-            selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                                  "保存CfC网络配置失败");
-            fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup;
-        }
-
-        /* 写入每层CfC单元配置 */
-        for (int i = 0; i < num_layers; i++) {
-            if (fwrite(&cell_cfgs[i], sizeof(CfCCellConfig), 1, file) != 1) {
-                selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                                      "保存第%d层CfC单元配置失败", i);
-                fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup;
-            }
-        }
-
-        /* 写入CFC权重矩阵和偏置向量 */
-        if (fwrite(buf_cfc_w, sizeof(float), total_w, file) != total_w) {
-            selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                                  "保存权重矩阵失败（大小：%zu）", total_w);
-            fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup;
-        }
-        if (fwrite(buf_cfc_b, sizeof(float), total_b, file) != total_b) {
-            selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                                  "保存偏置向量失败（大小：%zu）", total_b);
-            fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup;
-        }
-
-        /* 写入输出投影参数 */
-        if (buf_W_out && buf_b_out) {
-            size_t out_proj_count = cfc_output_size * hidden_size;
-            if (fwrite(buf_W_out, sizeof(float), out_proj_count, file) != out_proj_count) {
-                selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                                      "保存输出投影矩阵失败（大小：%zu）", out_proj_count);
-                fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup;
-            }
-            if (fwrite(buf_b_out, sizeof(float), cfc_output_size, file) != cfc_output_size) {
-                selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                                      "保存输出投影偏置失败（大小：%zu）", (size_t)cfc_output_size);
-                fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup;
-            }
-        }
-
-        /* 写入CfC细胞标记和逐层数据 */
-        if (num_layers > 0) {
-            uint32_t cell_marker = 0xCFCC3E11;
-            if (fwrite(&cell_marker, sizeof(uint32_t), 1, file) != 1) {
-                selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                                      "保存CfC细胞标记失败");
-                fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup;
-            }
-
-            for (int i = 0; i < num_layers; i++) {
-                /* 写入细胞配置 */
-                if (fwrite(&cell_cfgs[i], sizeof(CfCCellConfig), 1, file) != 1) {
-                    selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                                          "保存第%d层细胞配置失败", i);
-                    fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup;
-                }
-
-                /* 写入内部状态标志 */
-                int flags[2] = { cell_use_gating[i], cell_use_adapt[i] };
-                if (fwrite(flags, sizeof(int), 2, file) != 2) {
-                    selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                                          "保存第%d层状态标志失败", i);
-                    fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup;
-                }
-
-                /* 写入训练参数 */
-                float params[4] = { cell_avg_act[i], cell_max_act[i],
-                                    cell_min_tau[i], cell_max_tau[i] };
-                if (fwrite(params, sizeof(float), 4, file) != 4) {
-                    selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                                          "保存第%d层训练参数失败", i);
-                    fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup;
-                }
-                if (fwrite(&cell_tau_lr[i], sizeof(float), 1, file) != 1) {
-                    selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                                          "保存第%d层tau学习率失败", i);
-                    fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup;
-                }
-
-                /* 写入状态向量 */
-                if (fwrite(cell_svec[i],   sizeof(float), hidden_size, file) != hidden_size ||
-                    fwrite(cell_aparam[i], sizeof(float), hidden_size, file) != hidden_size ||
-                    fwrite(&cell_stime[i],  sizeof(float), 1, file) != 1 ||
-                    fwrite(&cell_sadapt[i], sizeof(float), 1, file) != 1) {
-                    selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                                          "保存第%d层状态失败", i);
-                    fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup;
-                }
-
-                /* 写入权重和偏置 */
-                size_t cell_w_size = (num_layers == 1) ? weight_size : hidden_weight_size;
-                if (fwrite(cell_weights[i], sizeof(float), cell_w_size, file) != cell_w_size ||
-                    fwrite(cell_biases[i],  sizeof(float), hidden_size, file) != hidden_size) {
-                    selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                                          "保存第%d层权重失败", i);
-                    fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup;
-                }
-
-                /* 写入时间常数 */
-                if (fwrite(cell_tau_arr[i], sizeof(float), hidden_size, file) != hidden_size) {
-                    selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                                          "保存第%d层时间常数失败", i);
-                    fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup;
-                }
-
-                /* 写入门控权重 */
-                if (fwrite(cell_igw[i], sizeof(float), cell_w_size, file) != cell_w_size ||
-                    fwrite(cell_fgw[i], sizeof(float), cell_w_size, file) != cell_w_size ||
-                    fwrite(cell_ogw[i], sizeof(float), cell_w_size, file) != cell_w_size) {
-                    selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                                          "保存第%d层门控权重失败", i);
-                    fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup;
-                }
-                if (fwrite(cell_gb[i], sizeof(float), hidden_size * 3, file) != hidden_size * 3) {
-                    selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                                          "保存第%d层门控偏置失败", i);
-                    fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup;
-                }
-
-                /* 写入隐藏到隐藏连接权重 */
-                if (fwrite(cell_h2ig[i], sizeof(float), hidden_weight_size, file) != hidden_weight_size ||
-                    fwrite(cell_h2fg[i], sizeof(float), hidden_weight_size, file) != hidden_weight_size ||
-                    fwrite(cell_h2og[i], sizeof(float), hidden_weight_size, file) != hidden_weight_size ||
-                    fwrite(cell_h2a[i],  sizeof(float), hidden_weight_size, file) != hidden_weight_size) {
-                    selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                                          "保存第%d层hidden-to-hidden权重失败", i);
-                    fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup;
-                }
-
-                /* 写入多时间尺度标记和数据 */
-                int mts_flags[3] = { cell_use_mts[i], cell_fast_ratio_i[i], cell_slow_ratio_i[i] };
-                if (fwrite(mts_flags, sizeof(int), 3, file) != 3) {
-                    selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                                          "保存第%d层多时间尺度标记失败", i);
-                    fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup;
-                }
-                if (cell_use_mts[i]) {
-                    if (fwrite(cell_ftau[i],   sizeof(float), hidden_size, file) != hidden_size ||
-                        fwrite(cell_stau[i],   sizeof(float), hidden_size, file) != hidden_size ||
-                        fwrite(cell_fstate[i], sizeof(float), hidden_size, file) != hidden_size ||
-                        fwrite(cell_sstate[i], sizeof(float), hidden_size, file) != hidden_size) {
-                        selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                                              "保存第%d层多时间尺度数据失败", i);
-                        fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup;
-                    }
-                }
-            }
-        }
-
-        /* 写入层归一化参数 */
-        if (has_ln && ln_gamma && ln_beta) {
-            uint32_t ln_marker = 0x4C4E4F52;  /* "LNOR" */
-            if (fwrite(&ln_marker, sizeof(uint32_t), 1, file) != 1) {
-                selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                                      "保存层归一化标记失败");
-                fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup;
-            }
-            for (int i = 0; i < num_layers; i++) {
-                if (!ln_gamma[i] || !ln_beta[i]) {
-                    uint16_t zero_dim = 0;
-                    fwrite(&zero_dim, sizeof(uint16_t), 1, file);
-                    continue;
-                }
-                uint16_t dim = (uint16_t)hidden_size;
-                if (fwrite(&dim, sizeof(uint16_t), 1, file) != 1 ||
-                    fwrite(ln_gamma[i], sizeof(float), (size_t)dim, file) != (size_t)dim ||
-                    fwrite(ln_beta[i],  sizeof(float), (size_t)dim, file) != (size_t)dim) {
-                    selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                                          "保存第%d层层归一化参数失败", i);
-                    fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup;
-                }
-            }
-        }
-
-        /* 写入隐藏状态 */
+        /* 3. 写入隐藏状态和细胞状态（在CFC数据之前，便于加载时先恢复LNN状态） */
         if (fwrite(buf_hidden, sizeof(float), hidden_size, file) != hidden_size) {
-            selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                                  "保存隐藏状态失败");
+            selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__, "保存隐藏状态失败");
             fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup;
         }
-
-        /* 写入细胞状态 */
         if (fwrite(buf_cell, sizeof(float), hidden_size, file) != hidden_size) {
-            selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                                  "保存细胞状态失败");
+            selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__, "保存细胞状态失败");
             fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup;
         }
 
-        /* 写入扩展字段版本标记 */
+        /* 4. 委托cfc_save处理整个CfC网络（配置+权重+偏置+层归一化+逐层细胞参数） */
+        if (cfc_save(cfc, file) != 0) {
+            selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__, "保存CfC网络失败");
+            fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup;
+        }
+
+        /* 5. 写入LNN扩展字段（统计信息） */
         uint32_t ext_version = 2;
-        if (fwrite(&ext_version, sizeof(uint32_t), 1, file) != 1) {
-            selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                                  "保存扩展版本标记失败");
-            fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup;
-        }
-
-        /* 写入分片配置 */
-        if (fwrite(&saved_ps, sizeof(int), 1, file) != 1 ||
-            fwrite(&saved_ns, sizeof(size_t), 1, file) != 1) {
-            selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                                  "保存分片配置失败");
-            fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup;
-        }
-
-        /* 写入梯度检查点配置 */
-        if (fwrite(&saved_gc, sizeof(int), 1, file) != 1) {
-            selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                                  "保存梯度检查点配置失败");
-            fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup;
-        }
-
-        /* 写入模型并行配置 */
-        if (fwrite(&saved_mp, sizeof(int), 1, file) != 1) {
-            selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                                  "保存模型并行配置失败");
-            fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup;
-        }
-
-        /* 写入异步同步配置 */
-        if (fwrite(&saved_ag, sizeof(int), 1, file) != 1) {
-            selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                                  "保存异步同步配置失败");
-            fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup;
-        }
-
-        /* 写入统计信息 */
-        if (fwrite(&saved_loss, sizeof(float), 1, file) != 1) {
-            selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                                  "保存当前损失失败");
-            fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup;
-        }
-
+        if (fwrite(&ext_version, sizeof(uint32_t), 1, file) != 1) { fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup; }
+        if (fwrite(&saved_ps, sizeof(int), 1, file) != 1) { fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup; }
+        if (fwrite(&saved_ns, sizeof(size_t), 1, file) != 1) { fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup; }
+        if (fwrite(&saved_gc, sizeof(int), 1, file) != 1) { fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup; }
+        if (fwrite(&saved_mp, sizeof(int), 1, file) != 1) { fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup; }
+        if (fwrite(&saved_ag, sizeof(int), 1, file) != 1) { fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup; }
+        if (fwrite(&saved_loss, sizeof(float), 1, file) != 1) { fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup; }
         uint64_t fwd_bwd[2] = { saved_fwd, saved_bwd };
-        if (fwrite(fwd_bwd, sizeof(uint64_t), 2, file) != 2) {
-            selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                                  "保存前向/反向计数失败");
-            fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup;
-        }
-        if (fwrite(&saved_time_val, sizeof(double), 1, file) != 1) {
-            selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                                  "保存训练时间失败");
-            fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup;
-        }
+        if (fwrite(fwd_bwd, sizeof(uint64_t), 2, file) != 2) { fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup; }
+        if (fwrite(&saved_time_val, sizeof(double), 1, file) != 1) { fclose(file); ret = SELFLNN_ERROR_IO_ERROR; goto cleanup; }
 
         fclose(file);
     }
 
     ret = 0;
-    goto cleanup;
 
-    /* ================================================================
-     * 内存分配失败处理：解锁 + 设置错误码 + 跳转到清理
-     * ================================================================ */
-alloc_fail:
-    LNN_UNLOCK(network);
-    selflnn_set_last_error(SELFLNN_ERROR_MEMORY_ALLOCATION, __func__, __FILE__, __LINE__,
-                          "保存模型时内存分配失败（hidden_size=%zu，num_layers=%d）",
-                          hidden_size, num_layers);
-    ret = SELFLNN_ERROR_MEMORY_ALLOCATION;
-
-    /* ================================================================
-     * 统一清理：释放所有临时堆缓冲区
-     * ================================================================ */
 cleanup:
-    /* 顶层LNN数据 */
     safe_free((void**)&buf_hidden);
     safe_free((void**)&buf_cell);
-    safe_free((void**)&buf_cfc_w);
-    safe_free((void**)&buf_cfc_b);
-    safe_free((void**)&buf_W_out);
-    safe_free((void**)&buf_b_out);
-
-    /* 每层标量数组 */
-    safe_free((void**)&cell_cfgs);
-    safe_free((void**)&cell_use_gating);
-    safe_free((void**)&cell_use_adapt);
-    safe_free((void**)&cell_avg_act);
-    safe_free((void**)&cell_max_act);
-    safe_free((void**)&cell_min_tau);
-    safe_free((void**)&cell_max_tau);
-    safe_free((void**)&cell_tau_lr);
-    safe_free((void**)&cell_stime);
-    safe_free((void**)&cell_sadapt);
-    safe_free((void**)&cell_use_mts);
-    safe_free((void**)&cell_fast_ratio_i);
-    safe_free((void**)&cell_slow_ratio_i);
-
-    /* 每层数组指针和数据 */
-    if (cell_svec)    { for (int i = 0; i < num_layers; i++) safe_free((void**)&cell_svec[i]);    safe_free((void**)&cell_svec); }
-    if (cell_aparam)  { for (int i = 0; i < num_layers; i++) safe_free((void**)&cell_aparam[i]);  safe_free((void**)&cell_aparam); }
-    if (cell_weights) { for (int i = 0; i < num_layers; i++) safe_free((void**)&cell_weights[i]); safe_free((void**)&cell_weights); }
-    if (cell_biases)  { for (int i = 0; i < num_layers; i++) safe_free((void**)&cell_biases[i]);  safe_free((void**)&cell_biases); }
-    if (cell_tau_arr) { for (int i = 0; i < num_layers; i++) safe_free((void**)&cell_tau_arr[i]); safe_free((void**)&cell_tau_arr); }
-    if (cell_igw)     { for (int i = 0; i < num_layers; i++) safe_free((void**)&cell_igw[i]);     safe_free((void**)&cell_igw); }
-    if (cell_fgw)     { for (int i = 0; i < num_layers; i++) safe_free((void**)&cell_fgw[i]);     safe_free((void**)&cell_fgw); }
-    if (cell_ogw)     { for (int i = 0; i < num_layers; i++) safe_free((void**)&cell_ogw[i]);     safe_free((void**)&cell_ogw); }
-    if (cell_gb)      { for (int i = 0; i < num_layers; i++) safe_free((void**)&cell_gb[i]);      safe_free((void**)&cell_gb); }
-    if (cell_h2ig)    { for (int i = 0; i < num_layers; i++) safe_free((void**)&cell_h2ig[i]);    safe_free((void**)&cell_h2ig); }
-    if (cell_h2fg)    { for (int i = 0; i < num_layers; i++) safe_free((void**)&cell_h2fg[i]);    safe_free((void**)&cell_h2fg); }
-    if (cell_h2og)    { for (int i = 0; i < num_layers; i++) safe_free((void**)&cell_h2og[i]);    safe_free((void**)&cell_h2og); }
-    if (cell_h2a)     { for (int i = 0; i < num_layers; i++) safe_free((void**)&cell_h2a[i]);     safe_free((void**)&cell_h2a); }
-    if (cell_ftau)    { for (int i = 0; i < num_layers; i++) safe_free((void**)&cell_ftau[i]);    safe_free((void**)&cell_ftau); }
-    if (cell_stau)    { for (int i = 0; i < num_layers; i++) safe_free((void**)&cell_stau[i]);    safe_free((void**)&cell_stau); }
-    if (cell_fstate)  { for (int i = 0; i < num_layers; i++) safe_free((void**)&cell_fstate[i]);  safe_free((void**)&cell_fstate); }
-    if (cell_sstate)  { for (int i = 0; i < num_layers; i++) safe_free((void**)&cell_sstate[i]);  safe_free((void**)&cell_sstate); }
-
-    /* 层归一化 */
-    if (ln_gamma) { for (int i = 0; i < num_layers; i++) safe_free((void**)&ln_gamma[i]); safe_free((void**)&ln_gamma); }
-    if (ln_beta)  { for (int i = 0; i < num_layers; i++) safe_free((void**)&ln_beta[i]);  safe_free((void**)&ln_beta); }
-
     return ret;
 }
 
@@ -1817,16 +1364,102 @@ LNN* lnn_load(const char* filepath) {
         return NULL;
     }
 
-    // 创建网络
-    LNN* network = lnn_create(&config);
-    if (!network) {
-        selflnn_set_last_error(SELFLNN_ERROR_MEMORY_ALLOCATION, __func__, __FILE__, __LINE__,
-                              "创建LNN网络失败");
+    /* DEFECT-015修复: 绕过单一LNN限制创建独立实例。
+     * lnn_load()从文件加载模型，必须创建独立LNN实例而非返回全局LNN。
+     * 原代码调用lnn_create(&config)在单一LNN模式下返回全局LNN，
+     * 导致cfc_load()尝试将文件数据加载到全局LNN的CfC网络中，
+     * 若维度不匹配则cfc_load()验证失败返回错误。
+     * 修复: 直接创建独立LNN和CfC网络，不经过单一LNN检查。 */
+    LNN* network = NULL;
+    {
+        /* 手动创建LNN结构体 */
+        network = (LNN*)safe_malloc(sizeof(LNN));
+        if (!network) {
+            selflnn_set_last_error(SELFLNN_ERROR_MEMORY_ALLOCATION, __func__, __FILE__, __LINE__,
+                                  "创建LNN网络失败");
+            fclose(file);
+            return NULL;
+        }
+        memset(network, 0, sizeof(LNN));
+        memcpy(&network->config, &config, sizeof(LNNConfig));
+
+        /* 分配隐藏状态和细胞状态数组 */
+        network->hidden_state = (float*)safe_malloc(config.hidden_size * sizeof(float));
+        network->cell_state   = (float*)safe_malloc(config.hidden_size * sizeof(float));
+        if (!network->hidden_state || !network->cell_state) {
+            safe_free((void**)&network->hidden_state);
+            safe_free((void**)&network->cell_state);
+            safe_free((void**)&network);
+            selflnn_set_last_error(SELFLNN_ERROR_MEMORY_ALLOCATION, __func__, __FILE__, __LINE__,
+                                  "分配隐藏状态/细胞状态数组失败");
+            fclose(file);
+            return NULL;
+        }
+        memset(network->hidden_state, 0, config.hidden_size * sizeof(float));
+        memset(network->cell_state, 0, config.hidden_size * sizeof(float));
+
+        /* 初始化互斥锁 */
+        network->lock = mutex_create();
+        if (!network->lock) {
+            safe_free((void**)&network->hidden_state);
+            safe_free((void**)&network->cell_state);
+            safe_free((void**)&network);
+            selflnn_set_last_error(SELFLNN_ERROR_OPERATION_FAILED, __func__, __FILE__, __LINE__,
+                                  "初始化LNN互斥锁失败");
+            fclose(file);
+            return NULL;
+        }
+        network->is_initialized = 1;
+
+        /* 创建CfC网络 —— 必须传递所有字段以确保与保存的网络结构一致 */
+        CfCNetworkConfig cfc_config = {0};
+        cfc_config.input_size = config.input_size;
+        cfc_config.hidden_size = config.hidden_size;
+        cfc_config.output_size = config.output_size;
+        cfc_config.learning_rate = config.learning_rate;
+        cfc_config.time_constant = config.time_constant;
+        cfc_config.noise_std = config.noise_std;
+        cfc_config.enable_training = config.enable_training;
+        cfc_config.enable_adaptation = config.enable_adaptation;
+        cfc_config.num_layers = config.num_layers;
+        cfc_config.ode_solver_type = config.ode_solver_type;
+        /* DEFECT-017修复: 必须传递use_layer_norm=1以确保cfc_create分配layer_norms数组。
+         * 原代码cfc_config={0}导致use_layer_norm=0，cfc_create虽将network->config.use_layer_norm
+         * 设为1但跳过layer_norms分配（检查的是参数config而非network->config），导致cfc_load因
+         * network->layer_norms==NULL而跳过层归一化数据读取，文件位置错位使后续fread读取垃圾数据。 */
+        cfc_config.use_layer_norm = 1;
+        cfc_config.use_enhanced = 1;
+        cfc_config.dropout_rate = config.dropout_rate;
+        cfc_config.delta_t = 1.0f;
+
+        network->cfc_network = (CfCNetwork*)cfc_create(&cfc_config);
+        if (!network->cfc_network) {
+            selflnn_set_last_error(SELFLNN_ERROR_MEMORY_ALLOCATION, __func__, __FILE__, __LINE__,
+                                  "创建CfC网络失败");
+            safe_free((void**)&network);
+            fclose(file);
+            return NULL;
+        }
+    }
+
+    /* 加载隐藏状态和细胞状态（在CfC网络之前，与lnn_save写入顺序一致） */
+    size_t hidden_size = config.hidden_size;
+    if (fread(network->hidden_state, sizeof(float), hidden_size, file) != hidden_size) {
+        selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                              "加载隐藏状态失败（大小：%zu）", hidden_size);
+        lnn_free(network);
+        fclose(file);
+        return NULL;
+    }
+    if (fread(network->cell_state, sizeof(float), hidden_size, file) != hidden_size) {
+        selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                              "加载细胞状态失败（大小：%zu）", hidden_size);
+        lnn_free(network);
         fclose(file);
         return NULL;
     }
 
-    // 加载CfC网络
+    /* 加载CfC网络（读取顺序与cfc_save一致：配置→权重→偏置→输出投影→细胞标记→逐层细胞→层归一化） */
     if (cfc_load(network->cfc_network, file) != 0) {
         selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
                               "加载CfC网络数据失败");
@@ -1851,25 +1484,6 @@ LNN* lnn_load(const char* filepath) {
             fclose(file);
             return NULL;
         }
-    }
-
-    // 加载隐藏状态
-    size_t hidden_size = config.hidden_size;
-    if (fread(network->hidden_state, sizeof(float), hidden_size, file) != hidden_size) {
-        selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                              "加载隐藏状态失败（大小：%zu）", hidden_size);
-        lnn_free(network);
-        fclose(file);
-        return NULL;
-    }
-
-    // 加载细胞状态
-    if (fread(network->cell_state, sizeof(float), hidden_size, file) != hidden_size) {
-        selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                              "加载细胞状态失败（大小：%zu）", hidden_size);
-        lnn_free(network);
-        fclose(file);
-        return NULL;
     }
 
     /* P2-FIX-18: 尝试加载扩展字段（v2格式）—— 所有fread调用均进行返回值检查 */
@@ -2038,16 +1652,7 @@ int lnn_load_from_file(LNN* network, const char* filepath) {
 
     LNN_LOCK(network);
 
-    /* 加载CfC网络权重到已有网络 */
-    if (cfc_load(network->cfc_network, file) != 0) {
-        selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                              "加载CfC网络数据失败");
-        LNN_UNLOCK(network);
-        fclose(file);
-        return -1;
-    }
-
-    /* 加载隐藏状态 */
+    /* 加载隐藏状态和细胞状态（在CfC网络之前，与lnn_save写入顺序一致） */
     size_t hidden_size = network->config.hidden_size;
     if (fread(network->hidden_state, sizeof(float), hidden_size, file) != hidden_size) {
         selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
@@ -2056,11 +1661,18 @@ int lnn_load_from_file(LNN* network, const char* filepath) {
         fclose(file);
         return -1;
     }
-
-    /* 加载细胞状态 */
     if (fread(network->cell_state, sizeof(float), hidden_size, file) != hidden_size) {
         selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
                               "加载细胞状态失败");
+        LNN_UNLOCK(network);
+        fclose(file);
+        return -1;
+    }
+
+    /* 加载CfC网络权重到已有网络 */
+    if (cfc_load(network->cfc_network, file) != 0) {
+        selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                              "加载CfC网络数据失败");
         LNN_UNLOCK(network);
         fclose(file);
         return -1;
@@ -3063,6 +2675,10 @@ SELFLNN_API int lnn_set_laplace_analyzer(LNN* network, void* laplace_analyzer,
     SELFLNN_CHECK_NULL(network, "LNN网络句柄为空");
     SELFLNN_CHECK_INITIALIZED(network, "LNN网络未初始化");
     LNN_LOCK(network);
+    // 修复: 设置新分析器前先释放旧分析器，防止内存泄漏
+    if (network->laplace_analyzer) {
+        laplace_analyzer_free(network->laplace_analyzer);
+    }
     network->laplace_analyzer = (LaplaceAnalyzer*)laplace_analyzer;
     network->laplace_gradient_strength = gradient_strength > 0.0f ? gradient_strength : 0.1f;
     if (network->laplace_gradient_strength > 1.0f) network->laplace_gradient_strength = 1.0f;

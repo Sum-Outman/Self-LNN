@@ -65,6 +65,7 @@
 #include "selflnn/cognition/deep_thought_chain.h"
 #include "selflnn/cognition/bdi_model.h"  /* M-7修复: BDI模型提取到独立模块 */
 #include "selflnn/programming/programming_bridge.h"  /* 自我编程闭环桥接 */
+#include "selflnn/training/training_pipeline.h"  /* P0-跨模块集成: 认知修正信号注入训练管线 */
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -5096,6 +5097,71 @@ static int train_self_model_internal(SelfCognitionSystem* system, int epochs) {
         
         log_info("自我模型训练完成，总损失：%.6f，准确性：%.4f",
                 system->model_training_loss, system->model_accuracy);
+    }
+    
+    /* ================================================================
+     * P0-跨模块集成: 将自我模型训练结果注入训练管线
+     * ================================================================
+     * 在内部训练完成后，将训练修正信号推送到全局训练管线。
+     * 训练管线不可用时优雅降级，不破坏认知系统独立运行能力。
+     *
+     * 流程：
+     *   1. 通过 selflnn_get_training_pipeline() 获取训练管线实例
+     *   2. 如果管线可用，收集自我模型当前参数作为修正信号
+     *   3. 调用 training_pipeline_apply_cognition_correction() 注入信号
+     *   4. 如果管线不可用，记录日志后继续（向后兼容）
+     * ================================================================ */
+    {
+        TrainingPipeline* tp = selflnn_get_training_pipeline();
+        if (tp) {
+            /* 获取自我模型LNN的当前参数 */
+            float* model_params = lnn_get_parameters(system->self_model_lnn);
+            size_t param_count = lnn_get_parameter_count(system->self_model_lnn);
+
+            if (model_params && param_count > 0) {
+                /* 构建认知修正信号 */
+                CognitionCorrectionSignal signal;
+                memset(&signal, 0, sizeof(signal));
+
+                signal.source = COG_CORRECTION_SOURCE_SELF_TRAINING;
+                signal.corrected_params = model_params;
+                signal.param_count = param_count;
+                signal.param_gradients = NULL;  /* 无梯度信息 */
+                signal.gradient_count = 0;
+                signal.confidence = system->model_accuracy;  /* 使用模型准确性作为置信度 */
+                signal.effectiveness = system->model_accuracy;
+                signal.timestamp = time(NULL);
+                signal.applied = 0;
+                signal.error_id = -1;        /* 无关联错误 */
+                signal.hypothesis_id = -1;    /* 无关联假设 */
+                signal.reflection_depth = 0.0f;
+                signal.coherence_score = 0.0f;
+
+                /* 构建修正原因描述 */
+                snprintf(signal.correction_reason, sizeof(signal.correction_reason),
+                    "自我模型内部训练完成 [轮次=%d, 损失=%.6f, 准确性=%.4f, "
+                    "数据量=%zu, 参数数=%zu]",
+                    system->model_training_epochs,
+                    system->model_training_loss,
+                    system->model_accuracy,
+                    system->state_history_size,
+                    param_count);
+
+                /* 注入训练管线（此函数内部会深拷贝数据，不持有model_params指针） */
+                int result = training_pipeline_apply_cognition_correction(tp, &signal);
+                if (result == 0) {
+                    log_info("自我模型训练结果已成功注入训练管线 [参数数=%zu, 准确性=%.4f]",
+                             param_count, system->model_accuracy);
+                } else {
+                    log_warning("自我模型训练结果注入训练管线失败，错误码=%d", result);
+                }
+            } else {
+                log_warning("自我模型参数获取失败，跳过训练管线注入");
+            }
+        } else {
+            /* 训练管线不可用，优雅降级 */
+            log_info("训练管线不可用，自我模型训练结果仅保留在认知系统内部");
+        }
     }
     
     // 释放训练缓冲区

@@ -83,11 +83,17 @@ struct CfCEmbedState {
     float* relation_momentum;
     float* relation_velocity;
 
-    /* 四元数嵌入（用于旋转） */
+    /* 四元数嵌入（用于旋转） —— 实体 */
     float* entity_quaternion_r;
     float* entity_quaternion_i;
     float* entity_quaternion_j;
     float* entity_quaternion_k;
+
+    /* 四元数嵌入（用于旋转） —— 关系（P1-01修复：关系四元数分量独立分配） */
+    float* relation_quaternion_r;
+    float* relation_quaternion_i;
+    float* relation_quaternion_j;
+    float* relation_quaternion_k;
 
     /* CfC ODE传播状态 */
     float* cfc_state_buffer;
@@ -186,6 +192,16 @@ CfCEmbedState* cfc_embed_create(const CfCEmbedConfig* config) {
             safe_calloc(CFC_EMBED_MAX_ENTITIES * dim, sizeof(float));
         state->entity_quaternion_k = (float*)
             safe_calloc(CFC_EMBED_MAX_ENTITIES * dim, sizeof(float));
+
+        /* P1-01修复：为关系也分配四元数分量 */
+        state->relation_quaternion_r = (float*)
+            safe_calloc(CFC_EMBED_MAX_RELATIONS * dim, sizeof(float));
+        state->relation_quaternion_i = (float*)
+            safe_calloc(CFC_EMBED_MAX_RELATIONS * dim, sizeof(float));
+        state->relation_quaternion_j = (float*)
+            safe_calloc(CFC_EMBED_MAX_RELATIONS * dim, sizeof(float));
+        state->relation_quaternion_k = (float*)
+            safe_calloc(CFC_EMBED_MAX_RELATIONS * dim, sizeof(float));
     }
 
     state->relation_embeddings = (float*)
@@ -222,6 +238,17 @@ CfCEmbedState* cfc_embed_create(const CfCEmbedConfig* config) {
         }
     }
 
+    /* P1-01修复：初始化关系四元数分量 */
+    if (state->relation_quaternion_r) {
+        int total = CFC_EMBED_MAX_RELATIONS * dim;
+        for (int i = 0; i < total; i++) {
+            state->relation_quaternion_r[i] = embed_rand_normal() * 0.1f;
+            state->relation_quaternion_i[i] = embed_rand_normal() * 0.1f;
+            state->relation_quaternion_j[i] = embed_rand_normal() * 0.1f;
+            state->relation_quaternion_k[i] = embed_rand_normal() * 0.1f;
+        }
+    }
+
     state->is_initialized = 1;
     return state;
 }
@@ -247,6 +274,11 @@ void cfc_embed_destroy(CfCEmbedState* state) {
     safe_free((void**)&state->entity_quaternion_i);
     safe_free((void**)&state->entity_quaternion_j);
     safe_free((void**)&state->entity_quaternion_k);
+    /* P1-01修复：释放关系四元数分量 */
+    safe_free((void**)&state->relation_quaternion_r);
+    safe_free((void**)&state->relation_quaternion_i);
+    safe_free((void**)&state->relation_quaternion_j);
+    safe_free((void**)&state->relation_quaternion_k);
     safe_free((void**)&state->cfc_state_buffer);
     safe_free((void**)&state->cfc_graph_state);
     safe_free((void**)&state->entity_momentum);
@@ -399,10 +431,11 @@ float cfc_embed_score_triple(CfCEmbedState* state, int head_id, int rel_id, int 
             &state->entity_quaternion_i[head_id * dim],
             &state->entity_quaternion_j[head_id * dim],
             &state->entity_quaternion_k[head_id * dim],
-            &state->entity_quaternion_r[rel_id * dim],
-            &state->entity_quaternion_i[rel_id * dim],
-            &state->entity_quaternion_j[rel_id * dim],
-            &state->entity_quaternion_k[rel_id * dim],
+            /* P1-01修复：使用关系四元数分量替代实体四元数分量 */
+            &state->relation_quaternion_r[rel_id * dim],
+            &state->relation_quaternion_i[rel_id * dim],
+            &state->relation_quaternion_j[rel_id * dim],
+            &state->relation_quaternion_k[rel_id * dim],
             out_r, out_i, out_j, out_k, dim);
 
         float qscore = 0.0f;

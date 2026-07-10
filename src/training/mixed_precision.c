@@ -1722,6 +1722,17 @@ static int scale_fp32_gradients(float* gradients, size_t count, float scale) {
         return 0;
     }
     
+    /* P2修复: 在缩放前检查scale是否为NaN或Inf，
+     * 避免NaN/Inf污染所有梯度值导致训练崩溃 */
+    if (isnan(scale)) {
+        log_error("梯度缩放失败: scale值为NaN，无法进行FP32梯度缩放");
+        return -1;
+    }
+    if (isinf(scale)) {
+        log_error("梯度缩放失败: scale值为Inf (值=%f)，无法进行FP32梯度缩放", (double)scale);
+        return -1;
+    }
+    
     for (size_t i = 0; i < count; i++) {
         gradients[i] *= scale;
     }
@@ -1735,6 +1746,17 @@ static int scale_fp32_gradients(float* gradients, size_t count, float scale) {
 static int scale_fp16_gradients(fp16_t* gradients, size_t count, float scale) {
     if (!gradients || count == 0 || scale == 1.0f) {
         return 0;
+    }
+    
+    /* P2修复: 在缩放前检查scale是否为NaN或Inf，
+     * 避免NaN/Inf污染所有FP16梯度值导致训练崩溃 */
+    if (isnan(scale)) {
+        log_error("梯度缩放失败: scale值为NaN，无法进行FP16梯度缩放");
+        return -1;
+    }
+    if (isinf(scale)) {
+        log_error("梯度缩放失败: scale值为Inf (值=%f)，无法进行FP16梯度缩放", (double)scale);
+        return -1;
     }
     
     // 转换为FP32，缩放，再转换回FP16
@@ -2072,10 +2094,13 @@ int mixed_precision_forward(MixedPrecisionContext* context,
 
 /**
  * @brief 应用混合精度到反向传播
+ * 
+ * P1-01修复: grad_input参数不再被丢弃，实现完整的梯度回传。
+ * 如果当前输入梯度是FP16格式，转换为FP32写入grad_input；
+ * 如果本身就是FP32，直接复制。确保混合精度反向传播能够将梯度传递回输入层。
  */
 int mixed_precision_backward(MixedPrecisionContext* context,
                             const void* grad_output, void* grad_input) {
-    (void)grad_input;
     if (!context || !grad_output) {
         return -1;
     }
@@ -2229,15 +2254,14 @@ int mixed_precision_backward(MixedPrecisionContext* context,
     
     float* gradient_buffer = NULL;
     int need_free_gradient = 0;
-    if (!grad_input) {
-        gradient_buffer = (float*)safe_malloc(grad_size * sizeof(float));
-        if (!gradient_buffer) {
-            return -1;
-        }
-        need_free_gradient = 1;
-    } else {
-        gradient_buffer = (float*)grad_input;
+    /* P1-01修复: 始终使用独立缓冲区计算梯度，确保FP16/FP32格式转换正确。
+     * 不再将grad_input直接作为梯度缓冲区，而是在计算完成后，
+     * 根据格式要求写入grad_input。 */
+    gradient_buffer = (float*)safe_malloc(grad_size * sizeof(float));
+    if (!gradient_buffer) {
+        return -1;
     }
+    need_free_gradient = 1;
     
     int result = -1;
     
@@ -2296,6 +2320,17 @@ int mixed_precision_backward(MixedPrecisionContext* context,
     }
     
     if (need_free_gradient && gradient_buffer) {
+        /* P1-01修复: 将梯度回传到grad_input，根据格式进行转换 */
+        if (grad_input && result == 0) {
+            if (context->config.use_fp16_for_backward) {
+                /* FP16格式: 将FP32梯度转换为FP16后写入grad_input */
+                convert_fp32_to_fp16(gradient_buffer, (fp16_t*)grad_input, grad_size);
+                context->stats.fp32_to_fp16_conversions++;
+            } else {
+                /* FP32格式: 直接复制梯度到grad_input */
+                memcpy(grad_input, gradient_buffer, grad_size * sizeof(float));
+            }
+        }
         safe_free((void**)&gradient_buffer);
     }
     

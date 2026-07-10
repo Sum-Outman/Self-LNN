@@ -109,7 +109,14 @@ typedef enum {
     CI_TOK_ARROW = 22,
     CI_TOK_LBRACE = 23,   /* { 左花括号 */
     CI_TOK_RBRACE = 24,    /* } 右花括号 */
-    CI_TOK_COMMA = 25      /* , 逗号(多参数函数参数分隔) */
+    CI_TOK_COMMA = 25,     /* , 逗号(多参数函数参数分隔) */
+    /* P2-05修复: 添加缺失的比较运算符和逻辑运算符 */
+    CI_TOK_LE = 26,        /* <= 小于等于 */
+    CI_TOK_GE = 27,        /* >= 大于等于 */
+    CI_TOK_AND = 28,       /* && 逻辑与 */
+    CI_TOK_OR = 29,        /* || 逻辑或 */
+    CI_TOK_NOT = 30,       /* ! 逻辑非 */
+    CI_TOK_NOT_EQ = 31     /* != 不等于 */
 } CiTokenType;
 
 typedef struct {
@@ -491,7 +498,37 @@ static int _ci_tokenize(CiInterpreter* ci) {
             case ')': ci->tokens[ci->token_count++].type = CI_TOK_RPAREN; ci->pos++; break;
             case '[': ci->tokens[ci->token_count++].type = CI_TOK_LBRACKET; ci->pos++; break;
             case ']': ci->tokens[ci->token_count++].type = CI_TOK_RBRACKET; ci->pos++; break;
-            case '&': ci->tokens[ci->token_count++].type = CI_TOK_AMPERSAND; ci->pos++; break;
+            case '&':
+                /* P2-05修复: 支持 && 逻辑与运算符 */
+                if (ci->source[ci->pos + 1] == '&') {
+                    ci->tokens[ci->token_count++].type = CI_TOK_AND;
+                    ci->pos += 2;
+                } else {
+                    ci->tokens[ci->token_count++].type = CI_TOK_AMPERSAND; ci->pos++;
+                }
+                break;
+            case '|':
+                /* P2-05修复: 支持 || 逻辑或运算符 */
+                if (ci->source[ci->pos + 1] == '|') {
+                    ci->tokens[ci->token_count++].type = CI_TOK_OR;
+                    ci->pos += 2;
+                } else {
+                    /* 单|管道符未支持，作为错误字符处理 */
+                    ci->has_error = 1;
+                    snprintf(ci->error_msg, sizeof(ci->error_msg),
+                             "行%d: 不支持的字符 '|' (仅支持'||'逻辑或)", ci->lineno);
+                    return -1;
+                }
+                break;
+            case '!':
+                /* P2-05修复: 支持 ! 逻辑非和 != 不等于运算符 */
+                if (ci->source[ci->pos + 1] == '=') {
+                    ci->tokens[ci->token_count++].type = CI_TOK_NOT_EQ;
+                    ci->pos += 2;
+                } else {
+                    ci->tokens[ci->token_count++].type = CI_TOK_NOT; ci->pos++;
+                }
+                break;
             case '.': ci->tokens[ci->token_count++].type = CI_TOK_DOT; ci->pos++; break;
             case '=':
                 if (ci->source[ci->pos + 1] == '=') {
@@ -502,8 +539,24 @@ static int _ci_tokenize(CiInterpreter* ci) {
                     ci->pos++;
                 }
                 break;
-            case '<': ci->tokens[ci->token_count++].type = CI_TOK_LT; ci->pos++; break;
-            case '>': ci->tokens[ci->token_count++].type = CI_TOK_GT; ci->pos++; break;
+            case '<':
+                /* P2-05修复: 支持 <= 运算符 */
+                if (ci->source[ci->pos + 1] == '=') {
+                    ci->tokens[ci->token_count++].type = CI_TOK_LE;
+                    ci->pos += 2;
+                } else {
+                    ci->tokens[ci->token_count++].type = CI_TOK_LT; ci->pos++;
+                }
+                break;
+            case '>':
+                /* P2-05修复: 支持 >= 运算符 */
+                if (ci->source[ci->pos + 1] == '=') {
+                    ci->tokens[ci->token_count++].type = CI_TOK_GE;
+                    ci->pos += 2;
+                } else {
+                    ci->tokens[ci->token_count++].type = CI_TOK_GT; ci->pos++;
+                }
+                break;
             case ';': ci->tokens[ci->token_count++].type = CI_TOK_SEMI; ci->pos++; break;
             case '{': ci->tokens[ci->token_count++].type = CI_TOK_LBRACE; ci->pos++; break;
             case '}': ci->tokens[ci->token_count++].type = CI_TOK_RBRACE; ci->pos++; break;
@@ -837,14 +890,68 @@ static float _ci_compare(CiInterpreter* ci) {
         _ci_next(ci);
         return (left > _ci_add_sub(ci)) ? 1.0f : 0.0f;
     }
+    /* P2-05修复: 支持 <= 运算符 */
+    if (tok->type == CI_TOK_LE) {
+        _ci_next(ci);
+        return (left <= _ci_add_sub(ci)) ? 1.0f : 0.0f;
+    }
+    /* P2-05修复: 支持 >= 运算符 */
+    if (tok->type == CI_TOK_GE) {
+        _ci_next(ci);
+        return (left >= _ci_add_sub(ci)) ? 1.0f : 0.0f;
+    }
     if (tok->type == CI_TOK_EQ) {
         _ci_next(ci);
         return (fabsf(left - _ci_add_sub(ci)) < 1e-6f) ? 1.0f : 0.0f;
     }
+    /* P2-05修复: 支持 != 不等于运算符 */
+    if (tok->type == CI_TOK_NOT_EQ) {
+        _ci_next(ci);
+        return (fabsf(left - _ci_add_sub(ci)) >= 1e-6f) ? 1.0f : 0.0f;
+    }
     return left;
 }
 
-static float _ci_expr(CiInterpreter* ci) { return _ci_compare(ci); }
+/* P2-05修复: 逻辑非运算符 ! */
+static float _ci_not(CiInterpreter* ci) {
+    CiToken* tok = _ci_current(ci);
+    if (tok->type == CI_TOK_NOT) {
+        _ci_next(ci);
+        float val = _ci_not(ci);  /* 递归支持多重!! */
+        return (fabsf(val) < 1e-6f) ? 1.0f : 0.0f;
+    }
+    return _ci_compare(ci);
+}
+
+/* P2-05修复: 逻辑与运算符 && */
+static float _ci_and(CiInterpreter* ci) {
+    float left = _ci_not(ci);
+    CiToken* tok = _ci_current(ci);
+    while (tok->type == CI_TOK_AND) {
+        _ci_next(ci);
+        float right = _ci_not(ci);
+        /* 逻辑与：两边都非零才为真 */
+        left = (fabsf(left) > 1e-6f && fabsf(right) > 1e-6f) ? 1.0f : 0.0f;
+        tok = _ci_current(ci);
+    }
+    return left;
+}
+
+/* P2-05修复: 逻辑或运算符 || */
+static float _ci_or(CiInterpreter* ci) {
+    float left = _ci_and(ci);
+    CiToken* tok = _ci_current(ci);
+    while (tok->type == CI_TOK_OR) {
+        _ci_next(ci);
+        float right = _ci_and(ci);
+        /* 逻辑或：任一边非零即为真 */
+        left = (fabsf(left) > 1e-6f || fabsf(right) > 1e-6f) ? 1.0f : 0.0f;
+        tok = _ci_current(ci);
+    }
+    return left;
+}
+
+static float _ci_expr(CiInterpreter* ci) { return _ci_or(ci); }
 
 /* ---- 语句执行 ---- */
 

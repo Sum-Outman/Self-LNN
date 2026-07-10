@@ -396,6 +396,8 @@ struct CfCNetwork {
      * 仅在 config.use_enhanced=1 时分配，为NULL时走原始前向路径 */
     void* enhanced_state;         /**< CfcEnhancedState* 增强层状态句柄 */
     void* enhanced_cfg;           /**< CfcEnhancedConfig* 增强层配置副本 */
+    /* 修复: 缓存创建时的max_layer_size，防止cfc_backward_ex运行时重新计算导致不一致 */
+    size_t max_layer_size;        /**< 创建时计算的max(input_size, hidden_size, output_size) */
 };
 #endif
 

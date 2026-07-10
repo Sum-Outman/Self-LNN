@@ -122,6 +122,7 @@ CfCNetwork* cfc_create(const CfCNetworkConfig* config) {
     network->layer_outputs = (float*)safe_calloc(total_layers * max_layer_size, sizeof(float));
     network->layer_gradients = (float*)safe_calloc(total_layers * max_layer_size, sizeof(float));
     network->activation_buffer = (float*)safe_calloc(max_layer_size, sizeof(float));
+    network->max_layer_size = max_layer_size; /* 缓存创建时计算的max_layer_size，防止backward重新计算不一致 */
 /* 逐层分配dropout掩码，避免多层共享单一掩码导致反向传播使用错误掩码 */
     network->dropout_mask = (float*)safe_calloc(total_layers * max_layer_size, sizeof(float));
     
@@ -802,9 +803,14 @@ int cfc_backward_ex(CfCNetwork* network, const float* error,
     size_t output_size = config->output_size;
     int num_layers = config->num_layers;
 
-    size_t max_layer_size = hidden_size;
-    if (input_size > max_layer_size) max_layer_size = input_size;
-    if (output_size > max_layer_size) max_layer_size = output_size;
+    /* 修复: 使用创建时缓存的max_layer_size，防止运行时重新计算与分配时不一致 */
+    size_t max_layer_size = network->max_layer_size;
+    if (max_layer_size == 0) {
+        /* 兼容旧版未设置max_layer_size的网络 */
+        max_layer_size = hidden_size;
+        if (input_size > max_layer_size) max_layer_size = input_size;
+        if (output_size > max_layer_size) max_layer_size = output_size;
+    }
 
     /* 保存输入信号（第一层反向传播需要） */
     float* saved_input = NULL;
@@ -1335,7 +1341,9 @@ int cfc_save(const CfCNetwork* network, FILE* file) {
     {
         /* 哨兵标记表示扩展格式 */
         uint32_t cell_marker = 0xCFCC3E11;
-        fwrite(&cell_marker, sizeof(uint32_t), 1, file);
+        SELFLNN_CHECK(fwrite(&cell_marker, sizeof(uint32_t), 1, file) == 1,
+                     SELFLNN_ERROR_IO_ERROR,
+                     "保存CfC细胞扩展格式哨兵标记失败");
         for (int i = 0; i < network->config.num_layers; i++) {
             SELFLNN_CHECK(cfc_cell_save(network->layers[i], file) == 0,
                          SELFLNN_ERROR_IO_ERROR,
@@ -1343,25 +1351,35 @@ int cfc_save(const CfCNetwork* network, FILE* file) {
         }
     }
 
-/* 保存层归一化可学习参数(gamma/beta)
+    /* 保存层归一化可学习参数(gamma/beta)
      * 此前cfc_save完全遗漏了layer_norm参数，导致加载后归一化回退到初始值 */
     if (network->layer_norms && network->config.use_layer_norm) {
         uint32_t ln_marker = 0x4C4E4F52;  /* "LNOR" */
-        fwrite(&ln_marker, sizeof(uint32_t), 1, file);
+        SELFLNN_CHECK(fwrite(&ln_marker, sizeof(uint32_t), 1, file) == 1,
+                     SELFLNN_ERROR_IO_ERROR,
+                     "保存层归一化哨兵标记失败");
         for (int i = 0; i < network->config.num_layers; i++) {
             LayerNorm* ln = (LayerNorm*)network->layer_norms[i];
             if (!ln) {
                 /* 写入零长度标记表示该层无LN实例 */
                 uint16_t zero_dim = 0;
-                fwrite(&zero_dim, sizeof(uint16_t), 1, file);
+                SELFLNN_CHECK(fwrite(&zero_dim, sizeof(uint16_t), 1, file) == 1,
+                             SELFLNN_ERROR_IO_ERROR,
+                             "保存第%d层层归一化零长度标记失败", i);
                 continue;
             }
             const float* gamma = layer_norm_get_gamma(ln);
             const float* beta  = layer_norm_get_beta(ln);
             uint16_t dim = (uint16_t)network->config.hidden_size;
-            fwrite(&dim, sizeof(uint16_t), 1, file);
-            fwrite(gamma, sizeof(float), (size_t)dim, file);
-            fwrite(beta,  sizeof(float), (size_t)dim, file);
+            SELFLNN_CHECK(fwrite(&dim, sizeof(uint16_t), 1, file) == 1,
+                         SELFLNN_ERROR_IO_ERROR,
+                         "保存第%d层层归一化维度失败（dim=%u）", i, (unsigned int)dim);
+            SELFLNN_CHECK(fwrite(gamma, sizeof(float), (size_t)dim, file) == (size_t)dim,
+                         SELFLNN_ERROR_IO_ERROR,
+                         "保存第%d层层归一化gamma参数失败（dim=%u）", i, (unsigned int)dim);
+            SELFLNN_CHECK(fwrite(beta, sizeof(float), (size_t)dim, file) == (size_t)dim,
+                         SELFLNN_ERROR_IO_ERROR,
+                         "保存第%d层层归一化beta参数失败（dim=%u）", i, (unsigned int)dim);
         }
     }
     

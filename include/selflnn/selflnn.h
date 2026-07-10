@@ -305,6 +305,55 @@ typedef struct {
     int distributed_port;
     int mixed_precision_mode;  /* M-035: 混合精度模式 (0=关闭, 1=auto, 2=FP16, 3=BF16) */
     float custom_power_factor; /* DEEP-005: 自定义功耗因子，POWER_MODE_CUSTOM时使用，默认1.0 */
+
+    /* P1-04修复: 嵌套段解析字段 —— 从 system_config.json 的嵌套对象中解析 */
+    /* safety 嵌套段 */
+    int safety_content_filter_enabled;    /* content_filter_enabled: 内容过滤开关 */
+    int safety_audit_logging_enabled;     /* audit_logging_enabled: 审计日志开关 */
+    int safety_emergency_stop_enabled;    /* emergency_stop_enabled: 紧急停止开关 */
+    float safety_behavior_constraints_strictness; /* 行为约束严格度 */
+    int safety_max_violations_per_hour;   /* 每小时最大违规次数 */
+    int safety_circuit_breaker_threshold; /* 熔断器阈值 */
+    int safety_circuit_breaker_cooldown_sec; /* 熔断器冷却时间(秒) */
+
+    /* evolution 嵌套段 */
+    int evolution_population_size;        /* 种群大小 */
+    float evolution_mutation_rate;        /* 变异率 */
+    float evolution_crossover_rate;       /* 交叉率 */
+    int evolution_elite_count;            /* 精英保留数 */
+    int evolution_generations;            /* 演化代数 */
+    int evolution_island_count;           /* 岛屿数量 */
+    int evolution_migration_interval;     /* 迁移间隔(代) */
+
+    /* laplace 嵌套段 */
+    int laplace_freq_bands;               /* 频率带数 */
+    float laplace_stability_threshold;    /* 稳定性阈值 */
+    float laplace_spectral_efficiency_target; /* 频谱效率目标 */
+    int laplace_update_interval_sec;      /* 更新间隔(秒) */
+
+    /* agi 嵌套段 */
+    int agi_self_evolution_enabled;       /* 自我演化开关 */
+    int agi_self_learning_enabled;        /* 自我学习开关 */
+    int agi_self_decision_enabled;        /* 自我决策开关 */
+    int agi_self_execution_enabled;       /* 自主执行开关 */
+    int agi_imitation_learning_enabled;   /* 模仿学习开关 */
+    int agi_self_correction_enabled;      /* 自我修正开关 */
+    int agi_reflection_enabled;           /* 反思开关 */
+    int agi_planning_enabled;             /* 规划开关 */
+    int agi_background_loop_interval_sec; /* 后台循环间隔(秒) */
+
+    /* self_cognition 嵌套段 */
+    int self_cognition_enabled;           /* 自我认知开关 */
+    int self_cognition_metacognition_enabled; /* 元认知开关 */
+    int self_cognition_reflection_interval_min; /* 自我反思间隔(分钟) */
+    int self_cognition_thought_chain_depth;    /* 思维链深度 */
+    int self_cognition_correction_max_iterations; /* 修正最大迭代次数 */
+
+    /* system 嵌套段 */
+    int system_auto_restart_on_failure;   /* 失败自动重启 */
+    int system_auto_save_interval_minutes; /* 自动保存间隔(分钟) */
+    char system_log_level[32];            /* 日志级别字符串 */
+    int system_web_ui_enabled;            /* Web UI开关 */
 } SystemConfig;
 
 typedef struct {
@@ -493,6 +542,12 @@ SELFLNN_API UnifiedSignalProcessor*          selflnn_get_unified_signal_processo
 SELFLNN_API UnifiedSignalProcessorAdvanced*  selflnn_get_unified_signal_processor_advanced(void);
 SELFLNN_API UnifiedSignalProcessorTraining*  selflnn_get_unified_signal_processor_training(void);
 
+/* P0跨模块集成: 多模态管理器全局访问接口
+ * 训练管线通过此接口获取多模态管理器实例，实现训练与多模态融合的深度集成。
+ * 返回NULL时调用方需优雅降级回退到原有数据加载器路径。 */
+SELFLNN_API void* selflnn_get_multimodal_manager(void);
+SELFLNN_API void  selflnn_set_multimodal_manager(void* manager);
+
 /* P2-007修复: selflnn_get_teaching_system的显式声明 */
 SELFLNN_API TeachingSystem* selflnn_get_teaching_system(void);
 
@@ -544,6 +599,14 @@ SELFLNN_API int selflnn_consume_knowledge_inference(void* lnn_instance, void* ki
  * selflnn_check_and_reset_knowledge_refresh: AGI后台循环查询并重置标志 */
 SELFLNN_API void selflnn_trigger_knowledge_refresh(void);
 SELFLNN_API int selflnn_check_and_reset_knowledge_refresh(void);
+
+/* P0修复: AGI认知循环→训练管线触发机制
+ * selflnn_trigger_training: AGI认知循环调用，设置训练触发标志
+ * selflnn_check_and_reset_training_trigger: 后台训练循环查询并重置标志
+ * 当AGI认知循环检测到性能下降或新模式时，通过此机制通知后台训练循环
+ * 优先执行训练步，而非等待定时训练间隔。 */
+SELFLNN_API void selflnn_trigger_training(void);
+SELFLNN_API int selflnn_check_and_reset_training_trigger(void);
 
 /* ================================================================
  * 8. AGI后台任务所需的状态访问器

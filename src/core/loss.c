@@ -28,42 +28,60 @@ static volatile float g_default_quantile_tau = 0.5f;
 /* 可配置超参数setter函数 —— P3-02修复: Windows下使用InterlockedExchange原子写 */
 void loss_set_default_focal_gamma(float gamma) {
 #ifdef _MSC_VER
-    InterlockedExchange((volatile LONG*)&g_default_focal_gamma, *(LONG*)&gamma);
+    /* P0修复: 使用memcpy进行安全类型双关，避免float→LONG指针转换违反严格别名规则 */
+    LONG bits;
+    memcpy(&bits, &gamma, sizeof(float));
+    InterlockedExchange((volatile LONG*)&g_default_focal_gamma, bits);
 #else
     g_default_focal_gamma = gamma;
 #endif
 }
 void loss_set_default_focal_alpha(float alpha) {
 #ifdef _MSC_VER
-    InterlockedExchange((volatile LONG*)&g_default_focal_alpha, *(LONG*)&alpha);
+    /* P0修复: 使用memcpy进行安全类型双关，避免float→LONG指针转换违反严格别名规则 */
+    LONG bits;
+    memcpy(&bits, &alpha, sizeof(float));
+    InterlockedExchange((volatile LONG*)&g_default_focal_alpha, bits);
 #else
     g_default_focal_alpha = alpha;
 #endif
 }
 void loss_set_default_dice_smooth(float smooth) {
 #ifdef _MSC_VER
-    InterlockedExchange((volatile LONG*)&g_default_dice_smooth, *(LONG*)&smooth);
+    /* P0修复: 使用memcpy进行安全类型双关，避免float→LONG指针转换违反严格别名规则 */
+    LONG bits;
+    memcpy(&bits, &smooth, sizeof(float));
+    InterlockedExchange((volatile LONG*)&g_default_dice_smooth, bits);
 #else
     g_default_dice_smooth = smooth;
 #endif
 }
 void loss_set_default_triplet_margin(float margin) {
 #ifdef _MSC_VER
-    InterlockedExchange((volatile LONG*)&g_default_triplet_margin, *(LONG*)&margin);
+    /* P0修复: 使用memcpy进行安全类型双关，避免float→LONG指针转换违反严格别名规则 */
+    LONG bits;
+    memcpy(&bits, &margin, sizeof(float));
+    InterlockedExchange((volatile LONG*)&g_default_triplet_margin, bits);
 #else
     g_default_triplet_margin = margin;
 #endif
 }
 void loss_set_default_huber_delta(float delta) {
 #ifdef _MSC_VER
-    InterlockedExchange((volatile LONG*)&g_default_huber_delta, *(LONG*)&delta);
+    /* P0修复: 使用memcpy进行安全类型双关，避免float→LONG指针转换违反严格别名规则 */
+    LONG bits;
+    memcpy(&bits, &delta, sizeof(float));
+    InterlockedExchange((volatile LONG*)&g_default_huber_delta, bits);
 #else
     g_default_huber_delta = delta;
 #endif
 }
 void loss_set_default_quantile_tau(float tau) {
 #ifdef _MSC_VER
-    InterlockedExchange((volatile LONG*)&g_default_quantile_tau, *(LONG*)&tau);
+    /* P0修复: 使用memcpy进行安全类型双关，避免float→LONG指针转换违反严格别名规则 */
+    LONG bits;
+    memcpy(&bits, &tau, sizeof(float));
+    InterlockedExchange((volatile LONG*)&g_default_quantile_tau, bits);
 #else
     g_default_quantile_tau = tau;
 #endif

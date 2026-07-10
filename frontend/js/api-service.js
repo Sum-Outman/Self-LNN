@@ -78,8 +78,12 @@ class ApiService {
         this._coldStartUntil = Date.now()+ 30000; /* 冷启动期30秒，避免启动时误报熔断 */
         this.connectionCheckInterval = null;
         
-        /* F-014修复: API密钥认证支持 */
-        this._apiKey = localStorage.getItem('selflnn_api_key') || null;
+        /* P1-FIX-04: 安全警告 - API密钥不应存储在localStorage中
+         * localStorage数据在浏览器关闭后仍持久化，且XSS攻击可轻易窃取。
+         * 改用sessionStorage（浏览器会话结束后自动清除），降低持久化泄露风险。
+         * 最佳实践：仅在内存中存储，使用后立即清除，敏感操作通过后端token交换机制。
+         */
+        this._apiKey = sessionStorage.getItem('selflnn_api_key') || null;
 
         this.requestConfig = {
             retryCount: 1,
@@ -3020,7 +3024,7 @@ class ApiService {
             }
         }
         if (type === 'audio' || type === 'audiovideo') {
-            var audioTrack = stream.getAudioTracks[0];
+            var audioTrack = stream.getAudioTracks()[0];
             if (audioTrack) {
                 try {
                     var audioStream = new MediaStream([audioTrack]);
@@ -3557,13 +3561,16 @@ class ApiService {
 
     // ==================== API密钥管理 API ====================
 
-    /* F-014: 设置API密钥用于后续请求认证 */
+    /* F-014: 设置API密钥用于后续请求认证
+     * P1-FIX-04: 安全修复 - 迁移至sessionStorage，会话结束自动清除
+     * 若用户明确要求"记住我"功能，应由用户主动选择是否持久化存储
+     */
     setApiKey(key) {
         this._apiKey = key;
         if (key) {
-            localStorage.setItem('selflnn_api_key', key);
+            sessionStorage.setItem('selflnn_api_key', key);
         } else {
-            localStorage.removeItem('selflnn_api_key');
+            sessionStorage.removeItem('selflnn_api_key');
         }
     }
 

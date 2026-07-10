@@ -11,6 +11,7 @@
 #include <time.h>
 #include "selflnn/utils/secure_random.h"
 #include "selflnn/utils/memory_utils.h"
+#include "selflnn/utils/logging.h"
 
 struct TeachSystem {
     TeachDemoSet demos;
@@ -580,22 +581,84 @@ int teach_export_demos(TeachSystem* system, const char* file_path) {
     FILE* fp = fopen(file_path, "wb");
     if (!fp) return -2;
 
-    fwrite(&system->demos.num_demos, sizeof(size_t), 1, fp);
-    fwrite(&system->obs_dim, sizeof(size_t), 1, fp);
-    fwrite(&system->act_dim, sizeof(size_t), 1, fp);
+    /* 写入演示数量 */
+    if (fwrite(&system->demos.num_demos, sizeof(size_t), 1, fp) != 1) {
+        log_error("[示教导出] 写入演示数量失败");
+        fclose(fp);
+        return -4;
+    }
+    /* 写入观测维度 */
+    if (fwrite(&system->obs_dim, sizeof(size_t), 1, fp) != 1) {
+        log_error("[示教导出] 写入观测维度失败");
+        fclose(fp);
+        return -4;
+    }
+    /* 写入动作维度 */
+    if (fwrite(&system->act_dim, sizeof(size_t), 1, fp) != 1) {
+        log_error("[示教导出] 写入动作维度失败");
+        fclose(fp);
+        return -4;
+    }
 
     for (size_t i = 0; i < system->demos.num_demos; i++) {
-        fwrite(&system->demos.trajectory_lengths[i], sizeof(size_t), 1, fp);
-        fwrite(&system->demos.task_types[i], sizeof(TeachTaskType), 1, fp);
-        fwrite(system->demos.labels[i], TEACH_LABEL_LEN, 1, fp);
+        /* 写入轨迹长度 */
+        if (fwrite(&system->demos.trajectory_lengths[i], sizeof(size_t), 1, fp) != 1) {
+            log_error("[示教导出] 写入第%zu条演示轨迹长度失败", i);
+            fclose(fp);
+            return -4;
+        }
+        /* 写入任务类型 */
+        if (fwrite(&system->demos.task_types[i], sizeof(TeachTaskType), 1, fp) != 1) {
+            log_error("[示教导出] 写入第%zu条演示任务类型失败", i);
+            fclose(fp);
+            return -4;
+        }
+        /* 写入标签 */
+        if (fwrite(system->demos.labels[i], TEACH_LABEL_LEN, 1, fp) != 1) {
+            log_error("[示教导出] 写入第%zu条演示标签失败", i);
+            fclose(fp);
+            return -4;
+        }
 
         size_t len = system->demos.trajectory_lengths[i];
         size_t obs_off = i * TEACH_MAX_STEPS_PER_DEMO * system->obs_dim;
         size_t act_off = i * TEACH_MAX_STEPS_PER_DEMO * system->act_dim;
 
-        fwrite(system->demos.observations + obs_off, sizeof(float), len * system->obs_dim, fp);
-        fwrite(system->demos.actions + act_off, sizeof(float), len * system->act_dim, fp);
-        fwrite(system->demos.task_embeddings + i * TEACH_MODALITY_DIM, sizeof(float), 128, fp);
+        /* P1修复: 乘法溢出检查。
+         * len * obs_dim 和 len * act_dim 作为fwrite的count参数，
+         * 若乘积溢出size_t范围会导致实际写入数据量远小于预期，
+         * 造成数据截断和静默损坏。使用 SIZE_MAX 作为上限进行除法检查。 */
+        if (system->obs_dim > 0 && len > (size_t)-1 / system->obs_dim) {
+            log_error("[示教导出] 第%zu条演示数据溢出（步数=%zu, 观测维度=%zu，乘积超过SIZE_MAX）",
+                      i, len, system->obs_dim);
+            fclose(fp);
+            return -4;
+        }
+        if (system->act_dim > 0 && len > (size_t)-1 / system->act_dim) {
+            log_error("[示教导出] 第%zu条演示动作数据溢出（步数=%zu, 动作维度=%zu，乘积超过SIZE_MAX）",
+                      i, len, system->act_dim);
+            fclose(fp);
+            return -4;
+        }
+
+        /* 写入观测数据 */
+        if (fwrite(system->demos.observations + obs_off, sizeof(float), len * system->obs_dim, fp) != len * system->obs_dim) {
+            log_error("[示教导出] 写入第%zu条演示观测数据失败（步数=%zu, 观测维度=%zu）", i, len, system->obs_dim);
+            fclose(fp);
+            return -4;
+        }
+        /* 写入动作数据 */
+        if (fwrite(system->demos.actions + act_off, sizeof(float), len * system->act_dim, fp) != len * system->act_dim) {
+            log_error("[示教导出] 写入第%zu条演示动作数据失败（步数=%zu, 动作维度=%zu）", i, len, system->act_dim);
+            fclose(fp);
+            return -4;
+        }
+        /* 写入任务嵌入向量（固定128维） */
+        if (fwrite(system->demos.task_embeddings + i * TEACH_MODALITY_DIM, sizeof(float), 128, fp) != 128) {
+            log_error("[示教导出] 写入第%zu条演示任务嵌入向量失败", i);
+            fclose(fp);
+            return -4;
+        }
     }
 
     fclose(fp);
@@ -609,28 +672,75 @@ int teach_import_demos(TeachSystem* system, const char* file_path) {
     if (!fp) return -2;
 
     size_t num_import, import_obs_dim, import_act_dim;
-    fread(&num_import, sizeof(size_t), 1, fp);
-    fread(&import_obs_dim, sizeof(size_t), 1, fp);
-    fread(&import_act_dim, sizeof(size_t), 1, fp);
+    /* 读取演示数量 */
+    if (fread(&num_import, sizeof(size_t), 1, fp) != 1) {
+        log_error("[示教导入] 读取演示数量失败");
+        fclose(fp);
+        return -4;
+    }
+    /* 读取观测维度 */
+    if (fread(&import_obs_dim, sizeof(size_t), 1, fp) != 1) {
+        log_error("[示教导入] 读取观测维度失败");
+        fclose(fp);
+        return -4;
+    }
+    /* 读取动作维度 */
+    if (fread(&import_act_dim, sizeof(size_t), 1, fp) != 1) {
+        log_error("[示教导入] 读取动作维度失败");
+        fclose(fp);
+        return -4;
+    }
 
     if (num_import + system->demos.num_demos > TEACH_MAX_DEMOS) {
+        log_error("[示教导入] 演示数量超限：导入%zu+现有%zu > 最大%d",
+                  num_import, system->demos.num_demos, TEACH_MAX_DEMOS);
         fclose(fp);
         return -3;
     }
 
     for (size_t i = 0; i < num_import; i++) {
         size_t idx = system->demos.num_demos + i;
-        fread(&system->demos.trajectory_lengths[idx], sizeof(size_t), 1, fp);
-        fread(&system->demos.task_types[idx], sizeof(TeachTaskType), 1, fp);
-        fread(system->demos.labels[idx], TEACH_LABEL_LEN, 1, fp);
+        /* 读取轨迹长度 */
+        if (fread(&system->demos.trajectory_lengths[idx], sizeof(size_t), 1, fp) != 1) {
+            log_error("[示教导入] 读取第%zu条演示轨迹长度失败", i);
+            fclose(fp);
+            return -4;
+        }
+        /* 读取任务类型 */
+        if (fread(&system->demos.task_types[idx], sizeof(TeachTaskType), 1, fp) != 1) {
+            log_error("[示教导入] 读取第%zu条演示任务类型失败", i);
+            fclose(fp);
+            return -4;
+        }
+        /* 读取标签 */
+        if (fread(system->demos.labels[idx], TEACH_LABEL_LEN, 1, fp) != 1) {
+            log_error("[示教导入] 读取第%zu条演示标签失败", i);
+            fclose(fp);
+            return -4;
+        }
 
         size_t len = system->demos.trajectory_lengths[idx];
         size_t obs_off = idx * TEACH_MAX_STEPS_PER_DEMO * system->obs_dim;
         size_t act_off = idx * TEACH_MAX_STEPS_PER_DEMO * system->act_dim;
 
-        fread(system->demos.observations + obs_off, sizeof(float), len * system->obs_dim, fp);
-        fread(system->demos.actions + act_off, sizeof(float), len * system->act_dim, fp);
-        fread(system->demos.task_embeddings + idx * TEACH_MODALITY_DIM, sizeof(float), 128, fp);
+        /* 读取观测数据 */
+        if (fread(system->demos.observations + obs_off, sizeof(float), len * system->obs_dim, fp) != len * system->obs_dim) {
+            log_error("[示教导入] 读取第%zu条演示观测数据失败（步数=%zu, 观测维度=%zu）", i, len, system->obs_dim);
+            fclose(fp);
+            return -4;
+        }
+        /* 读取动作数据 */
+        if (fread(system->demos.actions + act_off, sizeof(float), len * system->act_dim, fp) != len * system->act_dim) {
+            log_error("[示教导入] 读取第%zu条演示动作数据失败（步数=%zu, 动作维度=%zu）", i, len, system->act_dim);
+            fclose(fp);
+            return -4;
+        }
+        /* 读取任务嵌入向量（固定128维） */
+        if (fread(system->demos.task_embeddings + idx * TEACH_MODALITY_DIM, sizeof(float), 128, fp) != 128) {
+            log_error("[示教导入] 读取第%zu条演示任务嵌入向量失败", i);
+            fclose(fp);
+            return -4;
+        }
 
         system->demos.timestamps[idx] = (float)time(NULL);
         system->demos.confidence_scores[idx] = 0.8f;
