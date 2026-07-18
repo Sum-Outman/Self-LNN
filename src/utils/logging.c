@@ -20,8 +20,17 @@
 #ifdef _WIN32
 #include <windows.h>
 static CRITICAL_SECTION g_log_lock;
-static volatile LONG g_log_lock_initialized = 0;
-#define LOG_LOCK_INIT() do { if (InterlockedCompareExchange(&g_log_lock_initialized, 1, 0) == 0) { InitializeCriticalSection(&g_log_lock); } } while(0)
+/* P1修复: 使用InitOnceExecuteOnce替代InterlockedCompareExchange实现惰性初始化，
+ * 消除CAS设置标志后、InitializeCriticalSection完成前的竞态窗口。
+ * 原代码CAS成功后立即将标志置1，但InitializeCriticalSection尚未完成，
+ * 其他线程看到标志为1后直接EnterCriticalSection会导致未定义行为。 */
+static INIT_ONCE g_log_init_once = INIT_ONCE_STATIC_INIT;
+static BOOL CALLBACK log_lock_init_callback(PINIT_ONCE InitOnce, PVOID Parameter, PVOID* Context) {
+    (void)InitOnce; (void)Parameter; (void)Context;
+    InitializeCriticalSection(&g_log_lock);
+    return TRUE;
+}
+#define LOG_LOCK_INIT() do { InitOnceExecuteOnce(&g_log_init_once, log_lock_init_callback, NULL, NULL); } while(0)
 #define LOG_LOCK() do { LOG_LOCK_INIT(); EnterCriticalSection(&g_log_lock); } while(0)
 #define LOG_UNLOCK() LeaveCriticalSection(&g_log_lock)
 #else
@@ -591,7 +600,10 @@ static void write_log_message(LogLevel level, const char* file, int line,
     const char* color = "";
     const char* reset = "";
     
-    if (enable_color && output == stdout || output == stderr)
+    /* P2修复: 运算符优先级错误，&& 优先级高于 ||，
+     * 原表达式等价于 (enable_color && output==stdout) || output==stderr，
+     * 导致未启用颜色时仍对stderr输出添加颜色码。加括号修正逻辑。 */
+    if (enable_color && (output == stdout || output == stderr))
     {
         color = logging_get_level_color(level);
         reset = color_reset;
@@ -619,6 +631,10 @@ static void write_log_message(LogLevel level, const char* file, int line,
     
     // 输出日志消息
     if (target == LOG_TARGET_FILE && log_file) {
+        /* P1修复: check_auto_rotation()和log_file_bytes_written更新访问/修改共享状态，
+         * 必须在LOG_LOCK保护范围内执行，避免多线程并发写入时竞态导致
+         * 轮转状态不一致和字节数丢失 */
+        LOG_LOCK();
         /* 检查是否需要自动轮转 */
         int msg_len = (int)strlen(prefix) + (int)strlen(message) + 2;
         if (g_log_state.log_file_bytes_written + (size_t)msg_len > g_log_state.log_rotate_max_bytes) {
@@ -626,6 +642,7 @@ static void write_log_message(LogLevel level, const char* file, int line,
             output = g_log_state.log_file ? g_log_state.log_file : stderr;
         }
         g_log_state.log_file_bytes_written += msg_len;
+        LOG_UNLOCK();
     }
     fprintf(output, "%s%s\n", prefix, message);
     fflush(output);

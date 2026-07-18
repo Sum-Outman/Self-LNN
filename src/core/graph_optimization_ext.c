@@ -1474,6 +1474,10 @@ float mrf_infer_marginal(const MarkovRandomField* mrf, int node_id, int n_burnin
     int ds = mrf->nodes[vi].domain_size;
     int nsamples = n_samples > 0 ? n_samples : 100;
 
+    /* v9.15修复: 三元乘法溢出检查，防止nsamples*n*sizeof(int)回绕 */
+    if (nsamples > 0 && n > 0 && (size_t)nsamples > SIZE_MAX / ((size_t)n * sizeof(int))) {
+        return -1.0f;
+    }
     int* all_samples = (int*)safe_malloc((size_t)nsamples * (size_t)n * sizeof(int));
     if (!all_samples) return -1.0f;
 

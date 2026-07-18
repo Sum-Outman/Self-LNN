@@ -1671,6 +1671,10 @@ void topology_optimization_destroy(TopologyOptimizationState* state) {
 static int solve_cg(double* K, int* K_rows, int n_dof, double* f, double* u, int max_iter, double tol) {
     if (!K || !K_rows || !f || !u || n_dof <= 0) return -1;
     
+    /* D12修复: 密集矩阵格式，K_rows[i]=n_dof为行步长 */
+    int stride = K_rows[0];
+    if (stride <= 0) stride = n_dof;
+    
     double* r = (double*)safe_calloc(n_dof, sizeof(double));
     double* d = (double*)safe_calloc(n_dof, sizeof(double));
     double* q = (double*)safe_calloc(n_dof, sizeof(double));
@@ -1683,16 +1687,13 @@ static int solve_cg(double* K, int* K_rows, int n_dof, double* f, double* u, int
         return -1;
     }
     
+    /* Jacobi预处理器: 对角元倒数 */
     for (int i = 0; i < n_dof; i++) {
-        if (K_rows[i] >= 0)
-            M[i] = 1.0 / (K[i * 4 + 0] + 1e-12);
-        else
-            M[i] = 1.0;
+        M[i] = 1.0 / (K[i * stride + i] + 1e-12);
     }
     
     for (int i = 0; i < n_dof; i++) u[i] = 0.0;
     for (int i = 0; i < n_dof; i++) r[i] = f[i];
-    
     for (int i = 0; i < n_dof; i++) d[i] = M[i] * r[i];
     
     double rho = 0.0;
@@ -1700,14 +1701,13 @@ static int solve_cg(double* K, int* K_rows, int n_dof, double* f, double* u, int
     
     int iter;
     for (iter = 0; iter < max_iter; iter++) {
-        for (int i = 0; i < n_dof; i++) q[i] = 0.0;
+        /* 密集矩阵-向量乘法: q = K * d */
         for (int i = 0; i < n_dof; i++) {
-            if (K_rows[i] < 0) { q[i] = d[i]; continue; }
-            double* row = &K[i * 4];
-            q[i] += row[0] * d[i];
-            if (i + K_rows[i] < n_dof && K_rows[i] > 0)
-                q[i] += (i > 0 && K_rows[i - 1] > 0 && i - K_rows[i - 1] >= 0) ?
-                         row[1] * d[i + K_rows[i]] + row[2] * d[i - K_rows[i - 1]] : 0;
+            q[i] = 0.0;
+            double* row = &K[i * stride];
+            for (int j = 0; j < n_dof; j++) {
+                q[i] += row[j] * d[j];
+            }
         }
         
         double dq = 0.0;
@@ -1759,8 +1759,11 @@ double topology_optimization_simp_iteration(TopologyOptimizationState* state) {
     int n = nelx * nely;
     int ndof = 2 * (nelx + 1) * (nely + 1);
     
+    /* D12修复: K矩阵分配为密集格式(ndof*ndof)而非稀疏格式(ndof*4)。
+     * 装配代码使用密集索引K[edof[i]*ndof+edof[j]]，edof[i]可达ndof+3，
+     * 稀疏格式下越界写入远超分配范围，导致ACCESS_VIOLATION(0xC0000005)。 */
     double* u = (double*)safe_calloc(ndof, sizeof(double));
-    double* K = (double*)safe_calloc(ndof * 4, sizeof(double));
+    double* K = (double*)safe_calloc((size_t)ndof * ndof, sizeof(double));
     int* K_rows = (int*)safe_calloc(ndof, sizeof(int));
     if (!u || !K || !K_rows) {
         if (u) safe_free((void**)&u);
@@ -1770,7 +1773,7 @@ double topology_optimization_simp_iteration(TopologyOptimizationState* state) {
     }
     
     for (int i = 0; i < ndof; i++) {
-        K_rows[i] = 2 * (nelx + 1);
+        K_rows[i] = ndof;  /* 密集矩阵带宽=ndof */
     }
     
     for (int elx = 0; elx < nelx; elx++) {
@@ -1800,8 +1803,8 @@ double topology_optimization_simp_iteration(TopologyOptimizationState* state) {
     for (int fi = 0; fi < state->fixed_count; fi++) {
         int dof = state->fixed_dofs[fi];
         if (dof < ndof) {
-            for (int j = 0; j < 4; j++) K[dof * 4 + j] = 0.0;
-            K[dof * 4 + 0] = 1.0;
+            for (int j = 0; j < ndof; j++) K[dof * ndof + j] = 0.0;
+            K[dof * ndof + dof] = 1.0;
             u[dof] = 0.0;
         }
     }

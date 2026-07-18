@@ -34,18 +34,27 @@ extern void* selflnn_get_multimodal_teaching(void);
 extern void* selflnn_get_shared_lnn(void);
 
 /* ─── 内存工具兼容 ─── */
-#undef safe_calloc
-void* safe_calloc(size_t num, size_t size) {
-    void* p = calloc(num, size);
-    if (!p) log_error("[compat] safe_calloc(%zu,%zu) failed", num, size);
-    return p;
+/* v9.1修复: 移除#undef safe_calloc重定义，避免绕过内存跟踪器导致堆损坏。
+ * 原实现使用calloc()分配，但safe_free()会检测到未跟踪指针并尝试读取
+ * 前导头部(magic检测)，若magic巧合匹配则free(垃圾指针)导致堆损坏。
+ * 所有模块应通过memory_utils.h中的宏定义使用_safe_calloc/_safe_malloc。 */
+/* 兼容层: 如果链接器解析到safe_calloc（非宏展开场景），转发到真实实现 */
+void* safe_calloc_stub(size_t num, size_t size) {
+    /* 外部声明，由memory_utils.c提供真实实现 */
+    extern void* _safe_calloc(size_t count, size_t size, const char* file, int line);
+    return _safe_calloc(num, size, "compat", 0);
 }
 
 /* ─── safe_strdup 兼容 ─── */
+/* v9.1修复: 使用safe_malloc+memcpy替代_strdup，确保内存跟踪一致 */
 #undef safe_strdup
 char* safe_strdup(const char* s) {
     if (!s) return NULL;
-    return _strdup(s);
+    extern void* _safe_malloc(size_t size, const char* file, int line);
+    size_t len = strlen(s) + 1;
+    char* buf = (char*)_safe_malloc(len, "compat", 0);
+    if (buf) memcpy(buf, s, len);
+    return buf;
 }
 
 /* ─── 时间工具兼容（修复: 返回真实系统时间戳） ─── */
@@ -85,7 +94,9 @@ double CLAMP(double x, double min, double max) {
 
 /* ─── JSON 工具兼容 ─── */
 void json_value_free(void* value) {
-    if (value) free(value);
+    /* P1修复: 原生free()释放safe_malloc分配的内存会导致统计不一致，
+     * 改用safe_free统一管理 */
+    safe_free((void**)&value);
 }
 
 /* ─── GPU 后端兼容（修复: 桥接到真实GPU初始化，使用GpuBackend类型） ─── */
@@ -163,11 +174,12 @@ void bf16_matmul(const void* A, const void* B, void* C, int M, int N, int K) {
     unsigned short* bf16_C = (unsigned short*)C;
 
     /* 全部使用堆分配避免VLA栈溢出风险 */
-    float* f_A = (float*)malloc((size_t)M * (size_t)K * sizeof(float));
-    float* f_B = (float*)malloc((size_t)K * (size_t)N * sizeof(float));
-    float* f_C = (float*)calloc((size_t)M * (size_t)N, sizeof(float));
+    /* P2修复: 使用safe_malloc/safe_calloc替代原生malloc/calloc，统一内存管理 */
+    float* f_A = (float*)safe_malloc((size_t)M * (size_t)K * sizeof(float));
+    float* f_B = (float*)safe_malloc((size_t)K * (size_t)N * sizeof(float));
+    float* f_C = (float*)safe_calloc((size_t)M * (size_t)N, sizeof(float));
     if (!f_A || !f_B || !f_C) {
-        free(f_A); free(f_B); free(f_C);
+        safe_free((void**)&f_A); safe_free((void**)&f_B); safe_free((void**)&f_C);
         memset(C, 0, (size_t)M * (size_t)N * sizeof(unsigned short));
         return;
     }
@@ -186,7 +198,8 @@ void bf16_matmul(const void* A, const void* B, void* C, int M, int N, int K) {
     }
 
     for (size_t i = 0; i < (size_t)M * (size_t)N; i++) bf16_C[i] = float_to_bf16(f_C[i]);
-    free(f_A); free(f_B); free(f_C);
+    /* P2修复: 使用safe_free替代原生free */
+    safe_free((void**)&f_A); safe_free((void**)&f_B); safe_free((void**)&f_C);
 }
 
 /* H-001修复: 知识图谱一致性检查真实实现
@@ -400,5 +413,6 @@ int dg_get_current_state(void* dg, float* state, size_t len) {
 
 /* ─── AGI 协调计划兼容 ─── */
 void free_coordination_plan(void* plan) {
-    if (plan) free(plan);
+    /* P1修复: 使用safe_free替代原生free，保持内存统计一致性 */
+    safe_free((void**)&plan);
 }

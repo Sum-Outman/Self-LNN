@@ -16,6 +16,7 @@
 #include "selflnn/training/mixed_precision.h"
 #include "selflnn/training/regularization.h"
 #include "selflnn/training/distributed_training.h"
+#include "selflnn/learning/meta_learning.h"     /* v9.19: CfC元优化器接入 */
 #include "distributed_internal.h"
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/laplace.h"
@@ -927,6 +928,9 @@ typedef struct Trainer {
      * 原为static float导致多Trainer实例并行运行时状态串扰(数据竞争)，
      * 分布式训练/多实验场景下早停误判、验证评估偏差 */
     float last_mini_val_loss;                /**< 微验证上次损失（每Trainer实例独立） */
+    /* v9.19: CfC元优化器 — 替代标准SGD/Adam的元学习优化 */
+    void* meta_optimizer;                    /**< CfcMetaOptimizer句柄（NULL=使用标准优化器） */
+    int use_meta_optimizer;                  /**< 是否启用CfC元优化器 */
 } Trainer;
 
 /**
@@ -4019,7 +4023,7 @@ static int distributed_elastic_add_node(Trainer* trainer, int new_node_id, int n
     int old_N = trainer->distributed_num_nodes;
 
     if (trainer->heartbeat_last_seen) {
-        double* new_last_seen = (double*)realloc(trainer->heartbeat_last_seen,
+        double* new_last_seen = (double*)safe_realloc(trainer->heartbeat_last_seen,
                                                   (size_t)num_total_nodes * sizeof(double));
         if (!new_last_seen) return -1;
         trainer->heartbeat_last_seen = new_last_seen;
@@ -4027,7 +4031,7 @@ static int distributed_elastic_add_node(Trainer* trainer, int new_node_id, int n
     }
 
     if (trainer->heartbeat_node_alive) {
-        _Atomic int* new_alive = (_Atomic int*)realloc(
+        _Atomic int* new_alive = (_Atomic int*)safe_realloc(
             (void*)trainer->heartbeat_node_alive,
             (size_t)num_total_nodes * sizeof(int));
         if (!new_alive) return -1;
@@ -4036,7 +4040,7 @@ static int distributed_elastic_add_node(Trainer* trainer, int new_node_id, int n
     }
 
     if (trainer->stale_gradient_enabled && trainer->stale_gradient_coefficients) {
-        float* new_coeffs = (float*)realloc(trainer->stale_gradient_coefficients,
+        float* new_coeffs = (float*)safe_realloc(trainer->stale_gradient_coefficients,
                                              (size_t)num_total_nodes * sizeof(float));
         if (!new_coeffs) return -1;
         trainer->stale_gradient_coefficients = new_coeffs;
@@ -4044,7 +4048,7 @@ static int distributed_elastic_add_node(Trainer* trainer, int new_node_id, int n
     }
 
     if (trainer->stale_gradient_enabled && trainer->stale_gradient_counters) {
-        int* new_counters = (int*)realloc(trainer->stale_gradient_counters,
+        int* new_counters = (int*)safe_realloc(trainer->stale_gradient_counters,
                                            (size_t)num_total_nodes * sizeof(int));
         if (!new_counters) return -1;
         trainer->stale_gradient_counters = new_counters;
@@ -6582,8 +6586,14 @@ skip_optimizer_and_continue: /* NaN/Inf检测时跳转到此处跳过优化器 *
                         }
                     } else {
                         // 标准精度优化器更新
-                        optimizer_update(&trainer->optimizer, parameters,
-                                        gradients_to_use, trainer->gradients_size);
+                        /* v9.19: CfC元优化器 — 逐参数元学习优化 */
+                        if (trainer->use_meta_optimizer && trainer->meta_optimizer) {
+                            cfc_meta_optimizer_step((CfcMetaOptimizer*)trainer->meta_optimizer,
+                                gradients_to_use, parameters, trainer->gradients_size, parameters);
+                        } else {
+                            optimizer_update(&trainer->optimizer, parameters,
+                                            gradients_to_use, trainer->gradients_size);
+                        }
                     }
                     
                     // 在参数更新后应用DropConnect正则化
@@ -15465,8 +15475,12 @@ int trainer_pretrain_contrastive(Trainer* trainer,
 
     /* 为每个样本的视觉和文本分配完整嵌入向量缓冲区 */
     size_t embed_bytes = embed_dim * sizeof(float);
-    float* vision_embeddings = (float*)safe_malloc(num_samples * embed_bytes);
-    float* text_embeddings   = (float*)safe_malloc(num_samples * embed_bytes);
+    /* v9.12修复: 乘法溢出检查，防止分配不足导致缓冲区溢出 */
+    if (num_samples > 0 && embed_bytes > SIZE_MAX / (size_t)num_samples) {
+        return -1;
+    }
+    float* vision_embeddings = (float*)safe_malloc((size_t)num_samples * embed_bytes);
+    float* text_embeddings   = (float*)safe_malloc((size_t)num_samples * embed_bytes);
     float* proj_buffer       = (float*)safe_calloc(embed_dim, sizeof(float));
     if (!vision_embeddings || !text_embeddings || !proj_buffer) {
         safe_free((void**)&vision_embeddings);
@@ -15476,13 +15490,17 @@ int trainer_pretrain_contrastive(Trainer* trainer,
     }
 
     /* P0-02修复：分配L2范数保存缓冲区，用于反向传播时还原原始嵌入梯度 */
-    float* vis_norms = (float*)safe_malloc(num_samples * sizeof(float));
-    float* txt_norms = (float*)safe_malloc(num_samples * sizeof(float));
+    float* vis_norms = (float*)safe_malloc((size_t)num_samples * sizeof(float));
+    float* txt_norms = (float*)safe_malloc((size_t)num_samples * sizeof(float));
     /* 分配嵌入梯度缓冲区（用于InfoNCE损失对嵌入向量的梯度） */
-    float* vis_emb_grad = (float*)safe_malloc(num_samples * embed_bytes);
-    float* txt_emb_grad = (float*)safe_malloc(num_samples * embed_bytes);
+    float* vis_emb_grad = (float*)safe_malloc((size_t)num_samples * embed_bytes);
+    float* txt_emb_grad = (float*)safe_malloc((size_t)num_samples * embed_bytes);
     /* 分配softmax概率矩阵缓冲区 */
-    float* sim_matrix = (float*)safe_malloc(num_samples * num_samples * sizeof(float));
+    /* v9.12修复: 乘法溢出检查 */
+    if (num_samples > 0 && (size_t)num_samples > SIZE_MAX / ((size_t)num_samples * sizeof(float))) {
+        return -1;
+    }
+    float* sim_matrix = (float*)safe_malloc((size_t)num_samples * (size_t)num_samples * sizeof(float));
     if (!vis_norms || !txt_norms || !vis_emb_grad || !txt_emb_grad || !sim_matrix) {
         safe_free((void**)&vis_norms);
         safe_free((void**)&txt_norms);
@@ -17180,6 +17198,43 @@ static char* _training_http_get(const char* url, size_t* out_size) {
         if (result) { memcpy(result, body, body_len); result[body_len] = '\0'; *out_size = body_len; safe_free((void**)&response); return result; }
     }
     *out_size = total; return response;
+}
+
+/* ============================================================================
+ * v9.19: CfC元优化器接入 — 训练器getter/setter
+ * 提供安全的opaque struct访问，避免backend.c直接访问Trainer内部字段
+ * ============================================================================ */
+
+int trainer_set_meta_optimizer(Trainer* trainer, void* meta_optimizer) {
+    if (!trainer) return -1;
+    TRAINER_LOCK(trainer);
+    trainer->meta_optimizer = meta_optimizer;
+    TRAINER_UNLOCK(trainer);
+    return 0;
+}
+
+void* trainer_get_meta_optimizer(Trainer* trainer) {
+    if (!trainer) return NULL;
+    TRAINER_LOCK(trainer);
+    void* optim = trainer->meta_optimizer;
+    TRAINER_UNLOCK(trainer);
+    return optim;
+}
+
+int trainer_set_use_meta_optimizer(Trainer* trainer, int enable) {
+    if (!trainer) return -1;
+    TRAINER_LOCK(trainer);
+    trainer->use_meta_optimizer = enable;
+    TRAINER_UNLOCK(trainer);
+    return 0;
+}
+
+int trainer_get_use_meta_optimizer(Trainer* trainer) {
+    if (!trainer) return 0;
+    TRAINER_LOCK(trainer);
+    int use = trainer->use_meta_optimizer;
+    TRAINER_UNLOCK(trainer);
+    return use;
 }
 
 /* 纯C HTTP POST (无TLS) */

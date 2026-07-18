@@ -22,7 +22,16 @@
         .fa-check-circle:before { content: "✅"; }
     </style>
 
-    <script src="js/api-service.js?v=16"></script>
+    <!-- v9.11修复: 必须在api-service.js加载前设置SELFLNN_CONFIG，否则host默认localhost与127.0.0.1跨域不匹配 -->
+    <script>
+        window.SELFLNN_CONFIG = window.SELFLNN_CONFIG || {
+            host: window.location.hostname || 'localhost',
+            port: 8080,
+            wsPort: 8081
+        };
+    </script>
+
+    <script src="js/api-service.js?v=19"></script>
     <script src="js/selflnn-chart.js?v=1"></script>
     <script>
         window.__PAGE_READY = false;
@@ -4486,13 +4495,22 @@ response = requests.get(
 
         /* 移除pollTimer/resTimer重复声明，统一使用L4193处的声明 var pollTimer = null, resTimer = null; */
         window.addEventListener('DOMContentLoaded', function() {
-            checkSafetyConnection;
-            pollSafety;
-            pollResources;
-            fetchSafetyBounds;
-            pollTimer = _addSafetyTimer(pollSafety, 3000);
-            resTimer = _addSafetyTimer(pollResources, 5000);
-            _addSafetyTimer(checkSafetyConnection, 30000);
+            /* v9.11修复: 错峰启动轮询，防止页面加载时所有轮询同时触发导致服务器连接风暴 */
+            setTimeout(function() {
+                pollSafety();
+                pollTimer = _addSafetyTimer(pollSafety, 5000);
+            }, 500);
+            setTimeout(function() {
+                pollResources();
+                resTimer = _addSafetyTimer(pollResources, 8000);
+            }, 1500);
+            setTimeout(function() {
+                checkSafetyConnection();
+                _addSafetyTimer(checkSafetyConnection, 60000);
+            }, 3000);
+            setTimeout(function() {
+                fetchSafetyBounds();
+            }, 4000);
         });
     </script>
 
@@ -5338,9 +5356,12 @@ response = requests.get(
         checkSkillsConnection(); /* F-1修复: 添加函数调用括号 */
 
         window.addEventListener('DOMContentLoaded', function() {
-            checkSkillsConnection(); /* F-1修复: 添加函数调用括号 */
-            loadSkills();            /* F-1修复: 添加函数调用括号 */
-            setInterval(checkSkillsConnection, 30000);
+            /* v9.11修复: 错峰启动技能连接检查，减少服务器并发连接风暴 */
+            setTimeout(function() {
+                checkSkillsConnection();
+                loadSkills();
+                setInterval(checkSkillsConnection, 30000);
+            }, 6000);
         });
     </script>
 
@@ -5681,7 +5702,7 @@ response = requests.get(
                 document.getElementById('unified-dim').textContent = data.unified_dim != null ? data.unified_dim : 512;
                 if (data.processing) {
                     if (multimodalPollTimer) clearInterval(multimodalPollTimer);
-                    multimodalPollTimer = setInterval(pollMultimodal, 2000);
+                    multimodalPollTimer = setInterval(pollMultimodal, 5000);
                 }
             } catch(e) { console.warn('多模态状态加载失败:', e.message); }
         }
@@ -5791,7 +5812,7 @@ response = requests.get(
                 showNotification(data.success ? '教学已开始：正在教AGI认识 "' + name + '"' : '教学启动失败', data.success ? 'success' : 'danger');
                 if (data.success) {
                     if (multimodalPollTimer) clearInterval(multimodalPollTimer);
-                    multimodalPollTimer = setInterval(pollMultimodal, 2000);
+                    multimodalPollTimer = setInterval(pollMultimodal, 5000);
                 }
             } catch(e) { showNotification('连接失败', 'danger'); }
         }
@@ -6244,8 +6265,11 @@ response = requests.get(
         }
         document.addEventListener('DOMContentLoaded', function() {
             /* ZSFIII-P0-002修复: loadLogs缺少()调用 */
-            loadLogs();
-            setInterval(loadLogs, 30000);
+            /* v9.11修复: 错峰启动轮询，减少服务器并发连接风暴 */
+            setTimeout(function() {
+                loadLogs();
+                setInterval(loadLogs, 30000);
+            }, 5000);
         });
     </script>
 
@@ -6378,7 +6402,14 @@ response = requests.get(
                 document.getElementById('gpu-devices').textContent = d.devices;
                 document.getElementById('hw-gpu-memory').textContent = d.totalMemoryMb + ' MB';
             }
-            el.textContent = d.lines.join('\n');
+            /* 空值检查：API调用失败时d.lines可能为undefined，防止TypeError */
+            if (d && d.lines && Array.isArray(d.lines)) {
+                el.textContent = d.lines.join('\n');
+            } else if (d && d.success) {
+                el.textContent = 'GPU诊断完成：后端=' + d.backend + '，设备=' + d.devices + '，显存=' + d.totalMemoryMb + ' MB';
+            } else {
+                el.textContent = 'GPU诊断失败：' + (d && d.error ? d.error : '未知错误');
+            }
         }
 
         /* H005-修复: 手动注册浏览器自动枚举不到的设备 */
@@ -6885,7 +6916,7 @@ response = requests.get(
 
     <!-- JavaScript -->
     <script src="js/compatibility.js"></script>
-    <script src="js/data-engine.js?v=15"></script>
+    <script src="js/data-engine.js?v=18"></script>
     <script src="js/device-manager.js?v=1"></script>
     <script src="js/voice-capture-util.js?v=17"></script>
     <script src="js/voice-command.js"></script>
@@ -6893,12 +6924,12 @@ response = requests.get(
     <script src="js/visualization.js"></script>
     <script src="js/agi-controller.js"></script>
     <script src="js/dialogue-enhanced.js"></script>
-    <script src="js/knowledge-graph.js"></script>
+    <script src="js/knowledge-graph.js?v=2"></script>
     <script src="js/training-push.js"></script>
     <script src="js/training-center.js"></script>
     <!-- H-001修复: simulation-control.js移到main.js之前加载，避免初始化时序问题 -->
     <script src="js/simulation-control.js"></script>
-    <script src="js/main.js?v=211"></script>
+    <script src="js/main.js?v=214"></script>
     <script>
         // 更新当前时间 - M-006修复: 注册定时器使状态栏时间实时更新
         function updateTime() {
@@ -7796,7 +7827,8 @@ response = requests.get(
                 document.body.appendChild(o);
                 return o;
             });
-            overlay.style.display = 'block';
+            /* v9.13修复: 添加style属性存在性检查，防止多次调用时undefined错误 */
+            if (overlay && overlay.style) overlay.style.display = 'block';
         }
         
         function hideReconnectToast() {

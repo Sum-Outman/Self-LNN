@@ -2205,7 +2205,13 @@ static void robot_sim_update_state(Robot* robot, float dt) {
 #ifdef SELFLNN_STRICT_REAL_DATA
 /* 严格真实数据模式下，仿真物理状态更新仅允许PyBullet/Gazebo桥接，
      * 禁止使用内建简单仿真。 */
-    SELFLNN_WARN("严格真实数据模式：禁止内建简单物理仿真，请使用PyBullet/Gazebo桥接");
+    {
+        static int s_warned = 0;  /* 仅警告一次，避免高频调用导致日志淹没 */
+        if (!s_warned) {
+            s_warned = 1;
+            SELFLNN_WARN("严格真实数据模式：禁止内建简单物理仿真，请使用PyBullet/Gazebo桥接");
+        }
+    }
     return;
 #else
     /* 非严格模式下的内建物理仿真 */
@@ -2432,7 +2438,13 @@ static int robot_sim_generate_sensor_data(Robot* robot, RobotSensorType sensor_t
 #ifdef SELFLNN_STRICT_REAL_DATA
 /* 严格真实数据模式下，仿真传感器数据生成仅允许sensor_simulation.c
      * 和PyBullet/Gazebo桥接生成，禁止使用内建简单仿真。 */
-    SELFLNN_WARN("严格真实数据模式：禁止内建简单传感器仿真，请使用sensor_simulation或桥接");
+    {
+        static int s_sensor_warned = 0;  /* 仅警告一次，避免高频调用导致日志淹没 */
+        if (!s_sensor_warned) {
+            s_sensor_warned = 1;
+            SELFLNN_WARN("严格真实数据模式：禁止内建简单传感器仿真，请使用sensor_simulation或桥接");
+        }
+    }
     return -3;
 #endif
     
@@ -2833,7 +2845,8 @@ RobotController* robot_controller_create(const MultiRobotConfig* config) {
         size_t len = strlen(config->environment_file) + 1;
         controller->environment_file = (char*)safe_malloc(len);
         if (controller->environment_file) {
-            strcpy(controller->environment_file, config->environment_file);
+            strncpy(controller->environment_file, config->environment_file, len);
+            controller->environment_file[len - 1] = '\0';
         }
     }
     

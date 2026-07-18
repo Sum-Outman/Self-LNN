@@ -303,6 +303,7 @@ var g_dataEngineFirstConnect = true;
 async function refreshAllSections() {
 /* 添加多模态状态刷新到定时更新周期中 */
 /* 所有刷新函数统一从DataEngine读取真实数据，互不覆盖 */
+/* v9.14修复: 从Promise.all并行改为串行+节流，防止瞬间15+并发请求压垮单线程服务器 */
     var sections = [
         { name: 'dashboard', fn: refreshDashboard },
         { name: 'knowledge', fn: refreshKnowledgeStats },
@@ -321,27 +322,29 @@ async function refreshAllSections() {
         { name: 'chart', fn: initApiUsageChart }
     ];
     var completed = 0;
-    var promises = sections.map(function(s) {
+    /* v9.14修复: 串行执行各模块刷新，每2个模块间暂停80ms，防止请求风暴 */
+    for (var i = 0; i < sections.length; i++) {
+        var s = sections[i];
         try {
             var r = s.fn();
             if (r && r.then) {
-                return r.then(function() {
-                    completed++;
-                }).catch(function(e) {
+                try {
+                    await r;
+                } catch(e) {
                     console.warn(s.name + ' 刷新失败:', e && e.message ? e.message : e);
-                    completed++;
-                });
+                }
             }
             completed++;
-            return Promise.resolve();
         } catch(e) {
             console.warn(s.name + ' 执行异常:', e && e.message ? e.message : e);
             completed++;
-            return Promise.resolve();
         }
-    });
-    await Promise.all(promises);
-    console.log('[SELF-LNN] 并行刷新完成 ' + completed + '/' + sections.length + ' 个模块');
+        /* 每2个模块间暂停80ms，给服务器喘息时间 */
+        if ((i + 1) % 2 === 0 && i < sections.length - 1) {
+            await new Promise(function(resolve) { setTimeout(resolve, 80); });
+        }
+    }
+    console.log('[SELF-LNN] 串行刷新完成 ' + completed + '/' + sections.length + ' 个模块');
 /* 删除硬编码假数据，改为读取真实系统状态 */
     var systemData = g_dataEngine ? g_dataEngine.getData() : null;
     if (systemData && systemData.system && systemData.system._connected) {
@@ -654,9 +657,14 @@ async function refreshRosGazeboStatus() {
 // =============================================================================
 
 /* 从localStorage读取上次保存的训练模式，默认模仿学习(1) */
+/* v9.12修复: 用try/catch包裹localStorage操作，防止浏览器禁用存储时阻断初始化 */
 var selectedTrainingMode = (function() {
-    var saved = localStorage.getItem('selflnn_training_mode');
-    return saved ? parseInt(saved, 10) || 1 : 1;
+    try {
+        var saved = localStorage.getItem('selflnn_training_mode');
+        return saved ? parseInt(saved, 10) || 1 : 1;
+    } catch (e) {
+        return 1;
+    }
 })();
 
 /**
@@ -665,7 +673,8 @@ var selectedTrainingMode = (function() {
 function selectTrainingMode(mode) {
     selectedTrainingMode = mode;
 /* 用户更改时保存到localStorage */
-    localStorage.setItem('selflnn_training_mode', String(mode));
+/* v9.12修复: 用try/catch包裹localStorage操作，防止写入失败抛异常 */
+    try { localStorage.setItem('selflnn_training_mode', String(mode)); } catch (e) { /* 静默失败 */ }
     var btns = document.querySelectorAll('.training-mode-btn');
     for (var i = 0; i < btns.length; i++) {
         btns[i].className = 'btn btn-sm training-mode-btn' + (parseInt(btns[i].getAttribute('data-mode')) === mode ? ' active' : '');
@@ -4955,6 +4964,8 @@ function knowledgeRefreshStatus() {
         statusEl.style.display = 'block';
         statusEl.style.background = 'rgba(0,200,255,0.1)';
         statusEl.style.color = '#00c8ff';
+        /* v9.12修复: 检查SelfLnnApi是否存在，防止API未加载时崩溃 */
+        if (!window.SelfLnnApi) { statusEl.textContent = 'API服务未就绪，请稍候刷新'; return; }
         window.SelfLnnApi.getKnowledgeStats().then(function(data) {
             /* FIX-F2-CRIT-4: getKnowledgeStats包装为{success,data},后端返回{stats:{...}} */
             var stats = (data && data.data && data.data.stats) ? data.data.stats : (data && data.stats) ? data.stats : null;
@@ -5346,10 +5357,12 @@ function pollHyperparameterStatus() {
     if (typeof g_dataEngine !== 'undefined' && g_dataEngine && typeof g_dataEngine.registerModule === 'function') {
         g_dataEngine.registerModule('hyperparameter_poll', 5000, _hpPollTick);
     } else {
-        var hpInterval = setInterval(function() {
+        /* P2修复: 存储到window以便beforeunload清理 */
+        window._hpInterval = setInterval(function() {
             _hpPollTick();
             if (_hpPollCount > _hpMaxPolls || !hyperparameterOptimizer) {
-                clearInterval(hpInterval);
+                clearInterval(window._hpInterval);
+                window._hpInterval = null;
             }
         }, 5000);
     }
@@ -6099,6 +6112,15 @@ async function sendDialogueMessage() {
 
     var dialogueResult;
 
+    /* 守卫检查: API未就绪时提前返回，避免TypeError崩溃 */
+    if (!window.SelfLnnApi || typeof window.SelfLnnApi.sendDialogueMessage !== 'function') {
+        if (typingEl) typingEl.remove();
+        addDialogueMessage('assistant', '系统未连接，请稍后重试...');
+        input.disabled = false;
+        input.focus();
+        return;
+    }
+
     /* FIX-JS-004: try/catch保护避免网络异常导致输入框永久锁定 */
     try {
         if (multimodalImage || multimodalAudio) {
@@ -6372,9 +6394,14 @@ async function clearDialogueHistory() {
 
     document.getElementById('dialogue-session-count').textContent = '0';
 
-    const result = await window.SelfLnnApi.clearDialogueHistory();
-    if (result.success) {
-        showNotification('对话历史已清空', 'success');
+    /* 守卫检查: API未就绪时仅清除本地显示 */
+    if (window.SelfLnnApi && typeof window.SelfLnnApi.clearDialogueHistory === 'function') {
+        const result = await window.SelfLnnApi.clearDialogueHistory();
+        if (result.success) {
+            showNotification('对话历史已清空', 'success');
+        }
+    } else {
+        showNotification('后端未连接，仅清除本地显示', 'warning');
     }
 }
 
@@ -6401,6 +6428,11 @@ function initDialogueTemperature() {
  * 切换AGI功能
  */
 async function toggleAgiFeature(feature, enabled) {
+    /* 守卫检查: API未就绪时提前返回 */
+    if (!window.SelfLnnApi || typeof window.SelfLnnApi.toggleAgiFeature !== 'function') {
+        showNotification('⚠️ 后端未连接，无法切换AGI功能', 'warning');
+        return;
+    }
     const result = await window.SelfLnnApi.toggleAgiFeature(feature, enabled);
     if (result.success) {
         /* S-006修复: 补全所有AGI功能的中文标签映射 */
@@ -6428,6 +6460,11 @@ async function toggleAgiFeature(feature, enabled) {
  * 初始化AGI功能状态
  */
 async function initAgiFeatureStatus() {
+    /* 守卫检查: API未就绪时跳过初始化 */
+    if (!window.SelfLnnApi || typeof window.SelfLnnApi.getAgiFeatureStatus !== 'function') {
+        console.warn('[AGI功能状态] API未就绪，跳过初始化');
+        return;
+    }
     /* P1-004修复: 添加result为null时的检查，防止后端返回异常数据时崩溃 */
     const result = await window.SelfLnnApi.getAgiFeatureStatus();
     if (!result) {
@@ -7553,6 +7590,11 @@ async function saveModelConfig() {
 /* ===== 记忆统计 - 刷新 ===== */
 async function refreshMemoryStats() {
     showNotification('正在刷新记忆统计...', 'info');
+    /* 守卫检查: API未就绪时提前返回 */
+    if (!window.SelfLnnApi || typeof window.SelfLnnApi.getMemoryStatus !== 'function') {
+        showNotification('⚠️ 后端未连接，无法刷新记忆统计', 'warning');
+        return;
+    }
     try {
         var result = await window.SelfLnnApi.getMemoryStatus();
         if (result && result.success && result.data) {
@@ -8153,6 +8195,11 @@ async function saveReasoningConfig() {
 /* ===== 学习指标 - 刷新 ===== */
 async function refreshLearningMetrics() {
     showNotification('正在刷新学习指标...', 'info');
+    /* 守卫检查: API未就绪时提前返回 */
+    if (!window.SelfLnnApi || typeof window.SelfLnnApi.getLearningStatus !== 'function') {
+        showNotification('⚠️ 后端未连接，无法刷新学习指标', 'warning');
+        return;
+    }
     try {
         var result = await window.SelfLnnApi.getLearningStatus();
         if (result && result.success && result.data) {
@@ -9088,6 +9135,8 @@ window.addEventListener('beforeunload', function() {
     window._cleanupAllEventListeners();
     /* 清理已知的全局定时器 */
     if (window._trainingPollInterval) { clearInterval(window._trainingPollInterval); delete window._trainingPollInterval; }
+    /* P2修复: 清理超参数轮询定时器 */
+    if (window._hpInterval) { clearInterval(window._hpInterval); delete window._hpInterval; }
     /* P1-F07: _statusPollInterval从未赋值，死代码已移除 */
     /* P1-F08: sensorStreamInterval是模块级let变量而非window属性 */
     if (typeof sensorStreamInterval !== 'undefined' && sensorStreamInterval) { clearInterval(sensorStreamInterval); sensorStreamInterval = null; }
@@ -9097,6 +9146,11 @@ window.addEventListener('beforeunload', function() {
     if (window.multimodalPollTimer) { clearInterval(window.multimodalPollTimer); delete window.multimodalPollTimer; }
     if (window._allPanelsRefreshTimer) { clearInterval(window._allPanelsRefreshTimer); delete window._allPanelsRefreshTimer; }
     if (typeof fleetPollInterval !== 'undefined' && fleetPollInterval) { clearInterval(fleetPollInterval); fleetPollInterval = null; }
+    /* v9.12修复: 清理知识图谱定时器数组 */
+    if (window._kgIntervalIds && window._kgIntervalIds.length) {
+        window._kgIntervalIds.forEach(function(id) { clearInterval(id); });
+        window._kgIntervalIds = [];
+    }
     /* P1-F11: 清理设备管理器内部定时器和Worker */
     if (g_deviceManager && typeof g_deviceManager.destroy === 'function') {
         try { g_deviceManager.destroy(); } catch(e) { /* FE-011修复: 空catch块添加错误日志 */ console.error('[设备管理器] 销毁时出错:', e && e.message ? e.message : e); }

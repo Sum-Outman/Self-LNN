@@ -144,13 +144,14 @@ class VoiceCommandSystem {
     get isRecording() { return this._capturer ? this._capturer.isRecording : false; }
 
     async startRecording(micStream) {
+        if (!this._capturer) return {success:false, error:'语音采集模块未加载'};
         if (this.isRecording) return { success: false, error: '录音已在进行中' };
         this.isProcessing = false;
         return this._capturer.start(micStream);
     }
 
     stopRecording() {
-        this._capturer.stop();
+        if (this._capturer) this._capturer.stop();
     }
 
     async _processAudioBlob(audioBlob) {
@@ -263,7 +264,10 @@ class VoiceCommandSystem {
 
     destroy() {
         this.stopContinuousMode();
-        this._capturer.destroy();
+        if (this._capturer) {
+            this._capturer.destroy();
+            this._capturer = null;
+        }
         this.commandEngine = null;
     }
 }

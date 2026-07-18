@@ -304,8 +304,12 @@ Tensor* tensor_clone(const Tensor* src) {
     }
     
     // 复制数据
-    size_t copy_size = src->size < dst->size ? src->size : dst->size;
-    memcpy(dst->data, src->data, copy_size);
+    /* 修复缺陷12: 检查src和dst大小是否一致，不一致时返回错误 */
+    if (src->size != dst->size) {
+        tensor_free(dst);
+        return NULL;
+    }
+    memcpy(dst->data, src->data, src->size);
     
     // 复制其他字段
     dst->format = src->format;

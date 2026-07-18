@@ -304,8 +304,8 @@ float sigmoid_stable(float x);
 #define MATH_E 2.71828182845904523536f
 #define MATH_SQRT2 1.41421356237309504880f
 #define MATH_SQRT1_2 0.70710678118654752440f
-#define MATH_INF_FLOAT (1.0f / 0.0f)
-#define MATH_NAN_FLOAT (0.0f / 0.0f)
+#define MATH_INF_FLOAT INFINITY
+#define MATH_NAN_FLOAT NAN
 
 /**
  * @brief 实数FFT（完整工业级Cooley-Tukey算法实现）

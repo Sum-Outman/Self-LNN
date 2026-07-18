@@ -748,6 +748,7 @@ void self_cognition_free(SelfCognitionSystem* system) {
     
     /* 释放深度自我认知系统资源 */
     // 释放自我模型LNN
+    /* v7.1修复: 单LNN模式下owns=0，不释放共享LNN */
     if (system->self_model_lnn && system->self_model_owns) {
         lnn_free(system->self_model_lnn);
     }
@@ -876,7 +877,8 @@ static int self_cognition_update_nolock(SelfCognitionSystem* system, SelfCogniti
         memset(state_buf, 0, sizeof(state_buf));
         collect_system_state(system, state_buf, 64);
 
-        size_t state_dim = 32;
+        /* 修复缺陷11: 使用sizeof(state_buf)/sizeof(float)替代硬编码的32 */
+        size_t state_dim = sizeof(state_buf) / sizeof(float);
         if (!system->state_history) {
             system->state_history_capacity = 128;
             system->state_history = (float*)safe_calloc(
@@ -4746,11 +4748,14 @@ static int initialize_self_model(SelfCognitionSystem* system, const SelfModelCon
     
     // 创建LNN实例
     system->self_model_lnn = lnn_create(&lnn_config);
-    system->self_model_owns = 1;
     if (!system->self_model_lnn) {
         log_error("创建自我模型LNN失败\n");
         return -1;
     }
+    /* v7.1修复: 单LNN模式下，lnn_create返回共享全局LNN。
+     * 如果self_model_owns=1，self_cognition_free会销毁全局LNN，
+     * 导致后续模块(如dialogue)使用已被销毁的LNN而崩溃。 */
+    system->self_model_owns = selflnn_is_single_lnn_enforced() ? 0 : 1;
     
     // 初始化状态历史缓冲区
     size_t state_dim = 32;  // 系统状态维度

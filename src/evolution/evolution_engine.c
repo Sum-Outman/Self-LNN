@@ -96,9 +96,10 @@ static float rand_gaussian(unsigned int* state, float mean, float stddev) {
 }
 
 /* 初始化个体 */
-static void init_individual(EvolutionIndividual* ind, size_t chrom_size, float min_val, float max_val, unsigned int* rng) {
+/* v9.2修复: 返回int以便调用者检测分配失败 */
+static int init_individual(EvolutionIndividual* ind, size_t chrom_size, float min_val, float max_val, unsigned int* rng) {
     ind->chromosome = (float*)safe_malloc(chrom_size * sizeof(float));
-    if (!ind->chromosome) return;
+    if (!ind->chromosome) return -1;
     ind->chromosome_size = chrom_size;
     ind->fitness = (min_val > max_val) ? -FLT_MAX : 0.0f;
     ind->pareto_rank = 0;
@@ -112,6 +113,7 @@ static void init_individual(EvolutionIndividual* ind, size_t chrom_size, float m
     for (size_t i = 0; i < chrom_size; i++) {
         ind->chromosome[i] = min_val + rand_float(rng) * range;
     }
+    return 0;
 }
 
 /* 释放个体 */
@@ -607,6 +609,8 @@ static float compute_diversity(EvolutionPopulation* pop) {
     if (!center) return 0.0f;
 
     for (size_t i = 0; i < pop->size; i++) {
+        /* v9.2修复: 逐个检查个体chromosome非NULL */
+        if (!pop->individuals[i].chromosome) continue;
         for (size_t j = 0; j < pop->individuals[i].chromosome_size; j++) {
             center[j] += pop->individuals[i].chromosome[j];
         }
@@ -617,6 +621,8 @@ static float compute_diversity(EvolutionPopulation* pop) {
 
     float dist_sum = 0.0f;
     for (size_t i = 0; i < pop->size; i++) {
+        /* v9.2修复: 逐个检查个体chromosome非NULL */
+        if (!pop->individuals[i].chromosome) continue;
         float d = 0.0f;
         for (size_t j = 0; j < pop->individuals[i].chromosome_size; j++) {
             float diff = pop->individuals[i].chromosome[j] - center[j];
@@ -865,6 +871,11 @@ int evolution_engine_disable_cmaes(EvolutionEngine* engine) {
 
 int evolution_initialize_population(EvolutionEngine* engine, float min_val, float max_val) {
     if (!engine || !engine->fitness_func) return -1;
+    /* v9.2修复: 参数验证 — chromosome_size和max_generations必须>0 */
+    if (engine->config.chromosome_size == 0) {
+        log_error("[演化引擎] evolution_initialize_population: chromosome_size=0，必须大于0");
+        return -1;
+    }
 
     size_t pop_size = engine->config.population_size;
     engine->population.individuals = (EvolutionIndividual*)safe_calloc(
@@ -877,20 +888,40 @@ int evolution_initialize_population(EvolutionEngine* engine, float min_val, floa
     engine->population.stagnated_generations = 0;
 
     unsigned int* rng = &engine->rng_state;
+    int valid_count = 0;
     for (size_t i = 0; i < pop_size; i++) {
-        init_individual(&engine->population.individuals[i], 
+        int ret = init_individual(&engine->population.individuals[i], 
                        engine->config.chromosome_size, min_val, max_val, rng);
         engine->population.individuals[i].id = (int)i;
-        evaluate_individual(engine, &engine->population.individuals[i]);
+        /* v9.2修复: 只评估分配成功的个体，跳过chromosome为NULL的个体 */
+        if (ret == 0 && engine->population.individuals[i].chromosome) {
+            evaluate_individual(engine, &engine->population.individuals[i]);
+            valid_count++;
+        }
+    }
+
+    /* 如果所有个体都分配失败，则失败 */
+    if (valid_count == 0) {
+        log_error("[演化引擎] evolution_initialize_population: 所有个体染色体分配失败");
+        for (size_t i = 0; i < pop_size; i++) {
+            free_individual(&engine->population.individuals[i]);
+        }
+        safe_free((void**)&engine->population.individuals);
+        return -1;
     }
 
     update_population_stats(&engine->population);
 
-    /* 初始化适应度历史 */
-    engine->stats.fitness_history = (float*)safe_malloc(
-        engine->config.max_generations * sizeof(float));
-    engine->stats.diversity_history = (float*)safe_malloc(
-        engine->config.max_generations * sizeof(float));
+    /* v9.2修复: max_generations必须>=1才能分配历史数组，否则设为NULL避免分配失败 */
+    if (engine->config.max_generations > 0) {
+        engine->stats.fitness_history = (float*)safe_malloc(
+            engine->config.max_generations * sizeof(float));
+        engine->stats.diversity_history = (float*)safe_malloc(
+            engine->config.max_generations * sizeof(float));
+    } else {
+        engine->stats.fitness_history = NULL;
+        engine->stats.diversity_history = NULL;
+    }
     engine->stats.history_size = 0;
     engine->stats.diversity_size = 0;
 
@@ -912,16 +943,35 @@ int evolution_initialize_from_existing(EvolutionEngine* engine,
     engine->population.best_fitness = -FLT_MAX;
     engine->population.stagnated_generations = 0;
 
+    /* v9.2修复: 参数验证 */
+    if (engine->config.chromosome_size == 0) {
+        log_error("[演化引擎] evolution_initialize_from_existing: chromosome_size=0");
+        return -1;
+    }
+
     unsigned int* rng = &engine->rng_state;
+    int valid_count = 0;
     for (size_t i = 0; i < pop_size; i++) {
-        init_individual(&engine->population.individuals[i],
+        int ret = init_individual(&engine->population.individuals[i],
                        engine->config.chromosome_size, -1.0f, 1.0f, rng);
         engine->population.individuals[i].id = (int)i;
-        if (i < count) {
+        /* v9.2修复: 只操作分配成功的个体 */
+        if (ret != 0 || !engine->population.individuals[i].chromosome) continue;
+        if (i < count && chromosomes[i]) {
             memcpy(engine->population.individuals[i].chromosome, 
                    chromosomes[i], engine->config.chromosome_size * sizeof(float));
         }
         evaluate_individual(engine, &engine->population.individuals[i]);
+        valid_count++;
+    }
+
+    if (valid_count == 0) {
+        log_error("[演化引擎] evolution_initialize_from_existing: 所有个体分配失败");
+        for (size_t i = 0; i < pop_size; i++) {
+            free_individual(&engine->population.individuals[i]);
+        }
+        safe_free((void**)&engine->population.individuals);
+        return -1;
     }
 
     update_population_stats(&engine->population);
@@ -930,10 +980,16 @@ int evolution_initialize_from_existing(EvolutionEngine* engine,
     if (engine->stats.fitness_history) safe_free((void**)&engine->stats.fitness_history);
     if (engine->stats.diversity_history) safe_free((void**)&engine->stats.diversity_history);
 
-    engine->stats.fitness_history = (float*)safe_malloc(
-        engine->config.max_generations * sizeof(float));
-    engine->stats.diversity_history = (float*)safe_malloc(
-        engine->config.max_generations * sizeof(float));
+    /* v9.2修复: max_generations必须>=1才能分配历史数组 */
+    if (engine->config.max_generations > 0) {
+        engine->stats.fitness_history = (float*)safe_malloc(
+            engine->config.max_generations * sizeof(float));
+        engine->stats.diversity_history = (float*)safe_malloc(
+            engine->config.max_generations * sizeof(float));
+    } else {
+        engine->stats.fitness_history = NULL;
+        engine->stats.diversity_history = NULL;
+    }
     /* P1修复: 重置历史计数器，避免越界写入旧数据 */
     engine->stats.history_size = 0;
     engine->stats.diversity_size = 0;
@@ -1051,7 +1107,7 @@ int evolution_step(EvolutionEngine* engine) {
 
     /* 交叉和变异生成新个体 */
     float mutation_rate = engine->config.mutation_rate;
-    if (engine->config.use_adaptive_mutation) {
+    if (engine->config.use_adaptive_mutation && engine->config.max_generations > 0) {
         float progress = (float)pop->generation / (float)engine->config.max_generations;
         mutation_rate = engine->config.mutation_rate_max - 
             (engine->config.mutation_rate_max - engine->config.mutation_rate_min) * progress;
@@ -1120,7 +1176,10 @@ int evolution_step(EvolutionEngine* engine) {
             new_pop[i].id = (int)engine->eval_counter;
         }
 
-        evaluate_individual(engine, &new_pop[i]);
+        /* v9.2修复: 检查chromosome非NULL再评估，跳过无效个体 */
+        if (new_pop[i].chromosome) {
+            evaluate_individual(engine, &new_pop[i]);
+        }
     }
 
     /* 替换种群 */
@@ -1135,7 +1194,9 @@ int evolution_step(EvolutionEngine* engine) {
     update_population_stats(pop);
 
     /* 记录历史 */
-    if (engine->stats.history_size < engine->config.max_generations) {
+    /* v9.2修复: 检查fitness_history和diversity_history非NULL再写入 */
+    if (engine->stats.fitness_history && engine->stats.diversity_history &&
+        engine->stats.history_size < (size_t)engine->config.max_generations) {
         engine->stats.fitness_history[engine->stats.history_size] = pop->best_fitness;
         engine->stats.diversity_history[engine->stats.diversity_size] = pop->diversity;
         engine->stats.history_size++;
@@ -1180,6 +1241,8 @@ int evolution_step(EvolutionEngine* engine) {
         float min_v = engine->config.chromosome_min;
         float max_v = engine->config.chromosome_max;
         for (size_t i = elite_count; i < pop_size; i++) {
+            /* v9.2修复: 检查chromosome非NULL再访问 */
+            if (!pop->individuals[i].chromosome) continue;
             for (size_t j = 0; j < chrom_size; j++) {
                 pop->individuals[i].chromosome[j] = min_v + rand_float(rng) * (max_v - min_v);
             }
@@ -1525,6 +1588,16 @@ int evolution_get_pareto_front(const EvolutionEngine* engine,
     return 0;
 }
 
+/* v9.1: 释放帕累托前沿，包括每个个体的染色体内存 */
+void evolution_free_pareto_front(EvolutionIndividual* front, size_t front_size) {
+    if (!front) return;
+    for (size_t i = 0; i < front_size; i++) {
+        safe_free((void**)&front[i].chromosome);
+        safe_free((void**)&front[i].objectives);
+    }
+    safe_free((void**)&front);
+}
+
 const EvolutionPopulation* evolution_get_population(const EvolutionEngine* engine) {
     return engine ? &engine->population : NULL;
 }
@@ -1567,14 +1640,31 @@ int evolution_save_population(const EvolutionEngine* engine, const char* filepat
     if (!fp) return -1;
 
     uint32_t magic = 0x45564F4C;
-    fwrite(&magic, sizeof(uint32_t), 1, fp);
-    fwrite(&engine->population.size, sizeof(size_t), 1, fp);
-    fwrite(&engine->config.chromosome_size, sizeof(size_t), 1, fp);
+    /* 缺陷修复: 检查fwrite返回值，写入失败时关闭文件并返回-1 */
+    if (fwrite(&magic, sizeof(uint32_t), 1, fp) != 1) {
+        fclose(fp);
+        return -1;
+    }
+    if (fwrite(&engine->population.size, sizeof(size_t), 1, fp) != 1) {
+        fclose(fp);
+        return -1;
+    }
+    if (fwrite(&engine->config.chromosome_size, sizeof(size_t), 1, fp) != 1) {
+        fclose(fp);
+        return -1;
+    }
 
     for (size_t i = 0; i < engine->population.size; i++) {
         EvolutionIndividual* ind = &engine->population.individuals[i];
-        fwrite(ind->chromosome, sizeof(float), ind->chromosome_size, fp);
-        fwrite(&ind->fitness, sizeof(float), 1, fp);
+        if (fwrite(ind->chromosome, sizeof(float), ind->chromosome_size, fp) !=
+            ind->chromosome_size) {
+            fclose(fp);
+            return -1;
+        }
+        if (fwrite(&ind->fitness, sizeof(float), 1, fp) != 1) {
+            fclose(fp);
+            return -1;
+        }
     }
     fclose(fp);
     return 0;

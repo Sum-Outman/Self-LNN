@@ -95,6 +95,7 @@ class BrowserCompat {
     }
 
     getSupportedVideoMimeType() {
+        if (typeof MediaRecorder === 'undefined' || !MediaRecorder.isTypeSupported) return 'video/webm';
         var types = [
             'video/webm;codecs=vp9,opus',
             'video/webm;codecs=vp8,opus',

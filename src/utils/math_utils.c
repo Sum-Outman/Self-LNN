@@ -40,8 +40,16 @@ static RNGState g_rng_state = {{0}, 0};
 
 #ifdef _WIN32
 static CRITICAL_SECTION g_rng_lock;
-static int g_rng_lock_init = 0;
-#define RNG_LOCK() do { if (!g_rng_lock_init) { InitializeCriticalSection(&g_rng_lock); g_rng_lock_init = 1; } EnterCriticalSection(&g_rng_lock); } while(0)
+/* P1修复: 使用InitOnceExecuteOnce替代惰性初始化，消除竞态。
+ * 原代码在多线程下可能同时通过 !g_rng_lock_init 检查并重复初始化锁，
+ * 或在InitializeCriticalSection完成前其他线程进入未就绪的临界区。 */
+static INIT_ONCE g_rng_init_once = INIT_ONCE_STATIC_INIT;
+static BOOL CALLBACK rng_lock_init_callback(PINIT_ONCE InitOnce, PVOID Parameter, PVOID* Context) {
+    (void)InitOnce; (void)Parameter; (void)Context;
+    InitializeCriticalSection(&g_rng_lock);
+    return TRUE;
+}
+#define RNG_LOCK() do { InitOnceExecuteOnce(&g_rng_init_once, rng_lock_init_callback, NULL, NULL); EnterCriticalSection(&g_rng_lock); } while(0)
 #define RNG_UNLOCK() LeaveCriticalSection(&g_rng_lock)
 #else
 #include <pthread.h>
@@ -1057,6 +1065,11 @@ void rng_seed(uint64_t seed) {
     RNG_LOCK();
     g_rng_state.state[0] = seed;
     g_rng_state.state[1] = seed * 6364136223846793005ULL;
+    /* P2修复: seed=0时state[0]和state[1]均为0，RNG将永久卡在零输出，
+     * 强制设置state[0]为非零常数（黄金分割常数）避免退化 */
+    if (g_rng_state.state[0] == 0 && g_rng_state.state[1] == 0) {
+        g_rng_state.state[0] = 0x9E3779B97F4A7C15ULL;
+    }
     g_rng_state.initialized = 1;
     RNG_UNLOCK();
 }

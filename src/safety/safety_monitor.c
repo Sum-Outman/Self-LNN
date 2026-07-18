@@ -784,7 +784,9 @@ int safety_validate_decision(SafetyMonitor* monitor, const char* decision_type,
 #ifdef _WIN32
 #include <windows.h>
 #include <psapi.h>
+#include <iphlpapi.h>
 #pragma comment(lib, "psapi.lib")
+#pragma comment(lib, "iphlpapi.lib")
 static float get_cpu_usage_local(void) {
     static ULARGE_INTEGER last_idle = {0}, last_kernel = {0}, last_user = {0};
     FILETIME idle, kernel, user;
@@ -1200,18 +1202,44 @@ int safety_check_network(SafetyMonitor* monitor) {
     SAFETY_UNLOCK(monitor);
 
     /* 跨平台获取当前连接数和带宽使用
-     * 由于不同平台API差异较大，这里实现平台无关的检查框架
-     * 在实际部署时可针对具体平台实现更精确的统计
-     */
+     * 实现真实的网络连接统计，而非死代码框架 */
     int current_connections = 0;
     float current_bandwidth_mbps = 0.0f;
 
 #ifdef _WIN32
-    /* Windows平台: 此处可通过GetTcpTable2获取TCP连接统计 */
-    /* 框架保留，实际实现由平台特定代码补充 */
+    /* Windows平台: 使用GetTcpTable2获取真实的TCP连接统计 */
+    {
+        ULONG table_size = 0;
+        /* 首先获取所需缓冲区大小 */
+        GetTcpTable2(NULL, &table_size, FALSE);
+        if (table_size > 0 && table_size < 1048576) { /* 限制最大1MB防止异常 */
+            MIB_TCPTABLE2* tcp_table = (MIB_TCPTABLE2*)malloc(table_size);
+            if (tcp_table) {
+                if (GetTcpTable2(tcp_table, &table_size, FALSE) == NO_ERROR) {
+                    current_connections = (int)tcp_table->dwNumEntries;
+                    /* 估算带宽：每个连接按平均负载估算 */
+                    current_bandwidth_mbps = (float)current_connections * 0.01f;
+                }
+                free(tcp_table);
+            }
+        }
+    }
 #else
-    /* Linux平台: 此处可通过/proc/net/tcp读取连接统计 */
-    /* 框架保留，实际实现由平台特定代码补充 */
+    /* Linux平台: 通过/proc/net/tcp读取连接统计 */
+    {
+        FILE* fp = fopen("/proc/net/tcp", "r");
+        if (fp) {
+            char line[256];
+            /* 跳过标题行 */
+            if (fgets(line, sizeof(line), fp)) {
+                while (fgets(line, sizeof(line), fp)) {
+                    current_connections++;
+                }
+            }
+            fclose(fp);
+            current_bandwidth_mbps = (float)current_connections * 0.01f;
+        }
+    }
 #endif
 
     /* 检查连接数超限 */

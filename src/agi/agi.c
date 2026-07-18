@@ -2022,6 +2022,7 @@ int agi_system_cognitive_cycle(AGISystem* system, const float* sensory_input, in
 {
     if (!system || !sensory_input || !output) return -1;
     if (!system->initialized) return -1;
+    if (input_dim <= 0) return -1;
 
     system->total_cycles++;
     int state_dim = system->state_vector_dim;
@@ -2865,15 +2866,17 @@ int agi_system_cognitive_cycle_multimodal(AGISystem* system,
 
     transition_state(system, AGI_STATE_LEARN);
     float reward = 0.0f;
+    int last_modality_idx = -1;
     int last_input_dim = 0;
     for (i = UNIFIED_LNN_MAX_MODALITIES - 1; i >= 0; i--) {
         if (modality_present[i] && raw_inputs[i] && raw_dims[i] > 0) {
+            last_modality_idx = i;
             last_input_dim = raw_dims[i];
             break;
         }
     }
-    if (last_input_dim > 0) {
-        const float* last_input = raw_inputs[last_input_dim > 0 ? last_input_dim - 1 : 0];
+    if (last_input_dim > 0 && last_modality_idx >= 0) {
+        const float* last_input = raw_inputs[last_modality_idx];
         for (i = 0; i < output_dim && i < state_dim; i++) {
             float delta = output[i] - (last_input ? last_input[i % last_input_dim] : 0.0f);
             reward -= delta * delta * 0.01f;
@@ -3223,16 +3226,19 @@ int agi_system_save_state(AGISystem* system, const char* filepath)
     fwrite(&magic, sizeof(uint32_t), 1, f);
     fwrite(&version, sizeof(uint32_t), 1, f);
 
-    fwrite(&system->config, sizeof(AGIConfig), 1, f);
-    fwrite(&system->current_state, sizeof(AGIState), 1, f);
-    fwrite(&system->goal_count, sizeof(int), 1, f);
-    fwrite(system->goals, sizeof(AIGoal), (size_t)system->goal_count, f);
-    fwrite(&system->task_count, sizeof(int), 1, f);
-    fwrite(system->tasks, sizeof(AGITask), (size_t)system->task_count, f);
-    fwrite(system->state_vector, sizeof(float), (size_t)system->state_vector_dim, f);
-    fwrite(&system->avg_reward, sizeof(float), 1, f);
-    fwrite(&system->total_cycles, sizeof(int), 1, f);
-    fwrite(&system->autonomous_mode, sizeof(int), 1, f);
+    if (fwrite(&system->config, sizeof(AGIConfig), 1, f) != 1 ||
+        fwrite(&system->current_state, sizeof(AGIState), 1, f) != 1 ||
+        fwrite(&system->goal_count, sizeof(int), 1, f) != 1 ||
+        fwrite(system->goals, sizeof(AIGoal), (size_t)system->goal_count, f) != (size_t)system->goal_count ||
+        fwrite(&system->task_count, sizeof(int), 1, f) != 1 ||
+        fwrite(system->tasks, sizeof(AGITask), (size_t)system->task_count, f) != (size_t)system->task_count ||
+        fwrite(system->state_vector, sizeof(float), (size_t)system->state_vector_dim, f) != (size_t)system->state_vector_dim ||
+        fwrite(&system->avg_reward, sizeof(float), 1, f) != 1 ||
+        fwrite(&system->total_cycles, sizeof(int), 1, f) != 1 ||
+        fwrite(&system->autonomous_mode, sizeof(int), 1, f) != 1) {
+        fclose(f);
+        return -1;
+    }
 
     fclose(f);
     return 0;
@@ -3256,14 +3262,26 @@ int agi_system_load_state(AGISystem* system, const char* filepath)
         return -1;
     }
 
-    fread(&system->config, sizeof(AGIConfig), 1, f);
-    fread(&system->current_state, sizeof(AGIState), 1, f);
-    fread(&system->goal_count, sizeof(int), 1, f);
+    if (fread(&system->config, sizeof(AGIConfig), 1, f) != 1 ||
+        fread(&system->current_state, sizeof(AGIState), 1, f) != 1 ||
+        fread(&system->goal_count, sizeof(int), 1, f) != 1) {
+        fclose(f);
+        return -1;
+    }
     if (system->goal_count > AGI_MAX_GOALS) system->goal_count = AGI_MAX_GOALS;
-    fread(system->goals, sizeof(AIGoal), (size_t)system->goal_count, f);
-    fread(&system->task_count, sizeof(int), 1, f);
+    if (fread(system->goals, sizeof(AIGoal), (size_t)system->goal_count, f) != (size_t)system->goal_count) {
+        fclose(f);
+        return -1;
+    }
+    if (fread(&system->task_count, sizeof(int), 1, f) != 1) {
+        fclose(f);
+        return -1;
+    }
     if (system->task_count > AGI_MAX_TASKS) system->task_count = AGI_MAX_TASKS;
-    fread(system->tasks, sizeof(AGITask), (size_t)system->task_count, f);
+    if (fread(system->tasks, sizeof(AGITask), (size_t)system->task_count, f) != (size_t)system->task_count) {
+        fclose(f);
+        return -1;
+    }
     /* P0修复: 加载状态后将QUEUED任务重置为PENDING，
      * 因为新会话的TaskScheduler尚未接收这些任务的提交 */
     for (int i = 0; i < system->task_count; i++) {
@@ -3275,10 +3293,13 @@ int agi_system_load_state(AGISystem* system, const char* filepath)
         fclose(f);
         return -1;
     }
-    fread(system->state_vector, sizeof(float), (size_t)system->state_vector_dim, f);
-    fread(&system->avg_reward, sizeof(float), 1, f);
-    fread(&system->total_cycles, sizeof(int), 1, f);
-    fread(&system->autonomous_mode, sizeof(int), 1, f);
+    if (fread(system->state_vector, sizeof(float), (size_t)system->state_vector_dim, f) != (size_t)system->state_vector_dim ||
+        fread(&system->avg_reward, sizeof(float), 1, f) != 1 ||
+        fread(&system->total_cycles, sizeof(int), 1, f) != 1 ||
+        fread(&system->autonomous_mode, sizeof(int), 1, f) != 1) {
+        fclose(f);
+        return -1;
+    }
 
     fclose(f);
     return 0;

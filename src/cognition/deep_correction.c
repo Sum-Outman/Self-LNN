@@ -551,9 +551,10 @@ int dc_analyze_root_cause(DCCorrectionSystem* dcs, int error_id) {
     for (int i = 0; i < dcs->error_count; i++) {
         if (dcs->errors[i].error_id != error_id) continue;
 
-        /* 阶段1: 运行贝叶斯诊断 */
-        DCDiagnosisResult bayes_result;
-        int bayes_nodes = dc_bayesian_diagnose(dcs, error_id, &bayes_result);
+        /* 阶段1: 运行贝叶斯诊断（堆分配，DCDiagnosisResult约37KB，避免栈溢出） */
+        DCDiagnosisResult* bayes_result = (DCDiagnosisResult*)safe_calloc(1, sizeof(DCDiagnosisResult));
+        if (!bayes_result) return -1;
+        int bayes_nodes = dc_bayesian_diagnose(dcs, error_id, bayes_result);
 
         /* 阶段2: 规则匹配（原有逻辑增强） */
         int best_rule = -1;
@@ -563,9 +564,9 @@ int dc_analyze_root_cause(DCCorrectionSystem* dcs, int error_id) {
                 float rule_score = dcs->rules[r].success_rate;
                 /* 如果贝叶斯结果中也包含该模式，加权提升 */
                 if (bayes_nodes > 0) {
-                    for (int n = 0; n < bayes_result.node_count; n++) {
-                        if (strstr(bayes_result.nodes[n].name, dcs->rules[r].pattern)) {
-                            rule_score += bayes_result.nodes[n].posterior_prob * 0.2f;
+                    for (int n = 0; n < bayes_result->node_count; n++) {
+                        if (strstr(bayes_result->nodes[n].name, dcs->rules[r].pattern)) {
+                            rule_score += bayes_result->nodes[n].posterior_prob * 0.2f;
                             break;
                         }
                     }
@@ -580,12 +581,13 @@ int dc_analyze_root_cause(DCCorrectionSystem* dcs, int error_id) {
         /* 阶段3: 融合决策 */
         if (best_rule >= 0) {
             dcs->errors[i].root_cause_id = dcs->rules[best_rule].rule_id;
-        } else if (bayes_nodes > 0 && bayes_result.top_cause_count > 0) {
+        } else if (bayes_nodes > 0 && bayes_result->top_cause_count > 0) {
             /* 如果没有规则匹配，使用贝叶斯top-1作为根因（编码为负数表示贝叶斯节点ID） */
-            dcs->errors[i].root_cause_id = -(bayes_result.top_cause_ids[0] + 1);
+            dcs->errors[i].root_cause_id = -(bayes_result->top_cause_ids[0] + 1);
         } else {
             dcs->errors[i].root_cause_id = -1;
         }
+        safe_free((void**)&bayes_result);
         return 0;
     }
     return -1;
@@ -608,17 +610,23 @@ int dc_get_root_cause(const DCCorrectionSystem* dcs, int error_id, char* cause, 
         } else if (dcs->errors[i].root_cause_id < 0) {
             /* 负数：贝叶斯节点ID */
             int bayes_node_id = -dcs->errors[i].root_cause_id - 1;
-            DCDiagnosisResult bayes_result;
-            if (dc_bayesian_diagnose((DCCorrectionSystem*)dcs, error_id, &bayes_result) > 0) {
-                for (int n = 0; n < bayes_result.node_count; n++) {
-                    if (bayes_result.nodes[n].node_id == bayes_node_id) {
+            DCDiagnosisResult* bayes_result = (DCDiagnosisResult*)safe_calloc(1, sizeof(DCDiagnosisResult));
+            if (!bayes_result) {
+                snprintf(cause, max_len, "根因：%s（内存不足）", dcs->errors[i].description);
+                return -1;
+            }
+            if (dc_bayesian_diagnose((DCCorrectionSystem*)dcs, error_id, bayes_result) > 0) {
+                for (int n = 0; n < bayes_result->node_count; n++) {
+                    if (bayes_result->nodes[n].node_id == bayes_node_id) {
                         snprintf(cause, max_len, "贝叶斯诊断[%s]（概率%.0f%%）",
-                            bayes_result.nodes[n].name,
-                            bayes_result.nodes[n].posterior_prob * 100.0f);
+                            bayes_result->nodes[n].name,
+                            bayes_result->nodes[n].posterior_prob * 100.0f);
+                        safe_free((void**)&bayes_result);
                         return 0;
                     }
                 }
             }
+            safe_free((void**)&bayes_result);
         }
         snprintf(cause, max_len, "根因：%s（未匹配规则）", dcs->errors[i].description);
         return 0;
@@ -1630,9 +1638,12 @@ int dc_run_full_correction_pipeline(DCCorrectionSystem* dcs,
         *out_error = *e;
     }
 
-    /* Step 2: 分析根因 */
-    DCDiagnosisResult diag_result;
-    dc_bayesian_diagnose(dcs, error_id, &diag_result);
+    /* Step 2: 分析根因（堆分配，DCDiagnosisResult约37KB，避免栈溢出） */
+    DCDiagnosisResult* diag_result = (DCDiagnosisResult*)safe_calloc(1, sizeof(DCDiagnosisResult));
+    if (diag_result) {
+        dc_bayesian_diagnose(dcs, error_id, diag_result);
+        safe_free((void**)&diag_result);
+    }
 
     /* Step 3: 生成修正假设 */
     DCCorrectionHypothesis hyps[8];

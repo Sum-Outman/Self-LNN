@@ -970,14 +970,16 @@ void multisystem_control_engine_destroy(MultiSystemControlEngine* engine) {
 #else
         pthread_mutex_destroy(&engine->discovery_lock);
 #endif
-        if (engine->discovered_devices) {
-            for (size_t i = 0; i < engine->discovered_count; i++) {
-                if (engine->discovered_devices[i]) {
-                    destroy_device_info(engine->discovered_devices[i]);
-                }
+    }
+    /* discovered_devices在discovery_enabled=0时也可能已分配（socket初始化失败时），
+     * 必须无条件清理，防止内存泄漏。 */
+    if (engine->discovered_devices) {
+        for (size_t i = 0; i < engine->discovered_count; i++) {
+            if (engine->discovered_devices[i]) {
+                destroy_device_info(engine->discovered_devices[i]);
             }
-            safe_free((void**)&engine->discovered_devices);
         }
+        safe_free((void**)&engine->discovered_devices);
     }
     
     /* 释放群体智能优化器 */

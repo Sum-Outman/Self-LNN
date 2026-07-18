@@ -260,6 +260,7 @@ static double get_system_power_usage(void) {
                                 unsigned long long energy2 = energy_uj;
                                 clock_gettime(CLOCK_MONOTONIC, &ts2);
                                 fclose(fp);
+                                fp = NULL;  /* P1修复: 置空防止行275 if(fp) fclose(fp)双重关闭 */
 
                                 double time_diff_s = (ts2.tv_sec - ts1.tv_sec) + (ts2.tv_nsec - ts1.tv_nsec) / 1e9;
                                 double energy_diff_j = (double)(energy2 - energy1) / 1e6;

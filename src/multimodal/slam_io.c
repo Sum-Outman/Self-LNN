@@ -110,9 +110,11 @@ int slam_load_map_binary(SlamSystem* system, const char* filename) {
     (void)version;
 
     int num_keyframes, num_landmarks;
-    fread(&num_keyframes, sizeof(int), 1, fp);
-    fread(&num_landmarks, sizeof(int), 1, fp);
+    if (fread(&num_keyframes, sizeof(int), 1, fp) != 1) { fclose(fp); return -1; }
+    if (fread(&num_landmarks, sizeof(int), 1, fp) != 1) { fclose(fp); return -1; }
 
+    if (num_keyframes < 0) num_keyframes = 0;
+    if (num_landmarks < 0) num_landmarks = 0;
     if (num_keyframes > SLAM_MAX_KEYFRAMES) num_keyframes = SLAM_MAX_KEYFRAMES;
     if (num_landmarks > SLAM_MAX_LANDMARKS) num_landmarks = SLAM_MAX_LANDMARKS;
 
@@ -167,7 +169,9 @@ int slam_load_map_binary(SlamSystem* system, const char* filename) {
     system->local_map.num_landmarks = num_landmarks;
 
     int num_edges;
-    fread(&num_edges, sizeof(int), 1, fp);
+    if (fread(&num_edges, sizeof(int), 1, fp) != 1) { fclose(fp); return -1; }
+    if (num_edges < 0) num_edges = 0;
+    if (num_edges > 10000) num_edges = 10000;
     system->covisibility.num_essential_edges = 0;
     if (num_edges > 0) {
         int* edges_from = (int*)slam_malloc((size_t)num_edges * sizeof(int));
@@ -185,6 +189,7 @@ int slam_load_map_binary(SlamSystem* system, const char* filename) {
         }
     }
 
+    if (ferror(fp)) { fclose(fp); return -1; }
     fclose(fp);
     return 0;
 }
@@ -241,7 +246,7 @@ static int slam_load_image_ppm(const char* filename, float* image_data, int* wid
     if (is_color) {
         unsigned char* rgb = (unsigned char*)slam_malloc((size_t)w * h * 3);
         if (!rgb) { fclose(fp); return -1; }
-        fread(rgb, 1, (size_t)w * h * 3, fp);
+        if (fread(rgb, 1, (size_t)w * h * 3, fp) != (size_t)w * h * 3) { slam_free(rgb); fclose(fp); return -1; }
 
         float inv = 1.0f / max_val;
         for (int i = 0; i < w * h; i++) {
@@ -251,7 +256,7 @@ static int slam_load_image_ppm(const char* filename, float* image_data, int* wid
     } else {
         unsigned char* gray = (unsigned char*)slam_malloc((size_t)w * h);
         if (!gray) { fclose(fp); return -1; }
-        fread(gray, 1, (size_t)w * h, fp);
+        if (fread(gray, 1, (size_t)w * h, fp) != (size_t)w * h) { slam_free(gray); fclose(fp); return -1; }
 
         float inv = 1.0f / max_val;
         for (int i = 0; i < w * h; i++) {

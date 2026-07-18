@@ -1263,6 +1263,11 @@ int laplace_lle(const float* data, int num_points, int data_dim, int embedding_d
                 M[i * num_points + j] /= row_sum;
     }
 
+    /* v9.15修复: 乘法溢出检查，防止num_points*num_points回绕 */
+    if (num_points > 0 && (size_t)num_points > SIZE_MAX / ((size_t)num_points * sizeof(float))) {
+        safe_free((void**)&neighbors); safe_free((void**)&distances); safe_free((void**)&W); safe_free((void**)&Z); safe_free((void**)&G); safe_free((void**)&M);
+        return -1;
+    }
     float* MT = (float*)safe_malloc((size_t)num_points * (size_t)num_points * sizeof(float));
     float* V = (float*)safe_malloc((size_t)num_points * (size_t)num_points * sizeof(float));
     float* eig = (float*)safe_malloc((size_t)num_points * sizeof(float));

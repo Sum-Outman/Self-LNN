@@ -452,6 +452,12 @@ float knowledge_graph_density(KnowledgeGraph* graph);
  */
 float knowledge_graph_clustering_coefficient(KnowledgeGraph* graph);
 
+/* v9.18: 连通分量 — BFS遍历识别所有连通分量，返回分量数量和每个节点的分量ID */
+int knowledge_graph_connected_components(KnowledgeGraph* graph, int* component_ids, size_t* component_count);
+
+/* v9.18: 度分布 — 计算度频率直方图 */
+int knowledge_graph_degree_distribution(KnowledgeGraph* graph, int* degree_counts, size_t max_degree);
+
 /**
  * @brief 从知识库导入知识到图谱
  * 

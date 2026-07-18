@@ -134,11 +134,9 @@ SELFLNN_API void logging_log(LogLevel level, const char* file, int line, const c
     } while (0)
 
 // 性能日志（用于性能关键代码）
-#define log_perf_begin(name) \
-    do { \
-        double __perf_start = logging_get_timestamp(); \
-        (void)__perf_start; \
-    } while (0)
+// 修复: 将 start 变量提升到调用方作用域，使 log_perf_end 能获取到时间戳。
+// 用法: log_perf_begin(myperf); ... log_perf_end("myperf", myperf_start);
+#define log_perf_begin(name) double name##_start = logging_get_timestamp()
 
 #define log_perf_end(name, start) \
     do { \

@@ -1559,6 +1559,7 @@ typedef struct OpenCLContext {
 
 static LIBRARY_HANDLE g_opencl_library = NULL;
 static int g_opencl_initialized = 0;
+static int g_opencl_load_attempted = 0;  /* 防止重复加载：首次尝试后不再重复加载OpenCL库 */
 static char g_opencl_error_string[1024] = "未初始化";  /**< 增强错误缓冲区，支持详细错误信息 */
 
 /**
@@ -1631,6 +1632,10 @@ static int opencl_load_library(void) {
     if (g_opencl_initialized) {
         return 0;
     }
+    /* 防止重复加载：如果之前尝试过且失败了，不再重复尝试 */
+    if (g_opencl_load_attempted) {
+        return -1;
+    }
     
     // 尝试加载OpenCL库（支持多个版本和供应商）
 #ifdef _WIN32
@@ -1666,6 +1671,7 @@ static int opencl_load_library(void) {
     }
     
     if (!g_opencl_library) {
+        g_opencl_load_attempted = 1;  /* 标记加载失败，避免重复尝试 */
         snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), 
                 "无法加载任何OpenCL运行时库，已尝试所有已知的供应商库名");
         fprintf(stderr, "[OpenCL警告] 无法加载任何OpenCL运行时库（已尝试所有已知供应商库名），将尝试其他GPU后端\n");
@@ -1677,6 +1683,7 @@ static int opencl_load_library(void) {
     do { \
         name = (void*)GET_PROC_ADDRESS(g_opencl_library, #name); \
         if (!name) { \
+            g_opencl_load_attempted = 1;  /* 标记加载失败，避免重复尝试 */ \
             snprintf(g_opencl_error_string, sizeof(g_opencl_error_string), \
                     "无法加载OpenCL函数: %s", #name); \
             fprintf(stderr, "[OpenCL警告] 无法加载核心函数 %s，OpenCL运行时可能不完整，将尝试其他GPU后端\n", #name); \

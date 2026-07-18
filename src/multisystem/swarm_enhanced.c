@@ -227,6 +227,8 @@ void swarm_aco_enhanced_destroy(SwarmEnhancedEngine* engine) {
     if (engine->consensus_log) {
         safe_free((void**)&engine->consensus_log);
     }
+    /* 缺陷修复: consensus_peer_states 分配后从未释放，添加释放 */
+    safe_free((void**)&engine->consensus_peer_states);
 
     /* 释放通信资源 */
     if (engine->comm_states) {
@@ -242,8 +244,17 @@ void swarm_aco_enhanced_destroy(SwarmEnhancedEngine* engine) {
     safe_free((void**)&engine->comm_message_buffer);
     /* M-038修复: 清理多通道队列 */
     if (engine->comm_channel_buffers) {
-        for (int c = 0; c < engine->comm_channel_count; c++)
+        for (int c = 0; c < engine->comm_channel_count; c++) {
+            /* 缺陷修复: 释放每个通道缓冲区中每条消息的state_vector */
+            if (engine->comm_channel_buffers[c]) {
+                int sz = engine->comm_channel_buffer_sizes ?
+                    engine->comm_channel_buffer_sizes[c] : 0;
+                for (int m = 0; m < sz; m++) {
+                    safe_free((void**)&engine->comm_channel_buffers[c][m].state_vector);
+                }
+            }
             safe_free((void**)&engine->comm_channel_buffers[c]);
+        }
         safe_free((void**)&engine->comm_channel_buffers);
     }
     safe_free((void**)&engine->comm_channel_buffer_sizes);
@@ -353,11 +364,16 @@ static int aco_select_next_node(SwarmEnhancedEngine* engine,
         }
     }
 
-    safe_free((void**)&probs);
+    /* 缺陷修复: 释放前保存最后一个有效索引，避免释放后访问probs[j] */
+    int last_valid = -1;
     for (int j = n - 1; j >= 0; j--) {
-        if (probs[j] > 0) return j;
+        if (probs[j] > 0) {
+            last_valid = j;
+            break;
+        }
     }
-    return -1;
+    safe_free((void**)&probs);
+    return last_valid;
 }
 
 int swarm_aco_iterate(SwarmEnhancedEngine* engine, int iteration) {
@@ -1309,20 +1325,29 @@ int swarm_liquid_comm_create(SwarmEnhancedEngine* engine,
         safe_calloc(engine->comm_buffer_capacity, sizeof(LiquidMessage));
 
     /* M-038修复: 初始化多通道消息队列 */
+    /* 缺陷修复: 使用临时变量保存safe_realloc返回值，检查后再赋值 */
     int ch = engine->comm_channel_count;
     size_t new_cap = ch * sizeof(LiquidMessage*);
-    engine->comm_channel_buffers = (LiquidMessage**)safe_realloc(
+    LiquidMessage** tmp_buffers = (LiquidMessage**)safe_realloc(
         engine->comm_channel_buffers, new_cap);
-    engine->comm_channel_buffer_sizes = (int*)safe_realloc(
+    int* tmp_sizes = (int*)safe_realloc(
         engine->comm_channel_buffer_sizes, ch * sizeof(int));
-    engine->comm_channel_buffer_caps = (int*)safe_realloc(
+    int* tmp_caps = (int*)safe_realloc(
         engine->comm_channel_buffer_caps, ch * sizeof(int));
-    if (engine->comm_channel_buffers) {
-        engine->comm_channel_buffers[ch - 1] = (LiquidMessage*)
-            safe_calloc(256, sizeof(LiquidMessage));
+    if (!tmp_buffers || !tmp_sizes || !tmp_caps) {
+        safe_free((void**)&tmp_buffers);
+        safe_free((void**)&tmp_sizes);
+        safe_free((void**)&tmp_caps);
+        return -1;
     }
-    if (engine->comm_channel_buffer_sizes) engine->comm_channel_buffer_sizes[ch - 1] = 0;
-    if (engine->comm_channel_buffer_caps) engine->comm_channel_buffer_caps[ch - 1] = 256;
+    engine->comm_channel_buffers = tmp_buffers;
+    engine->comm_channel_buffer_sizes = tmp_sizes;
+    engine->comm_channel_buffer_caps = tmp_caps;
+    engine->comm_channel_buffers[ch - 1] = (LiquidMessage*)
+        safe_calloc(256, sizeof(LiquidMessage));
+    if (!engine->comm_channel_buffers[ch - 1]) return -1;
+    engine->comm_channel_buffer_sizes[ch - 1] = 0;
+    engine->comm_channel_buffer_caps[ch - 1] = 256;
 
     return channel;
 }
@@ -1550,15 +1575,34 @@ int swarm_enhanced_save(const SwarmEnhancedEngine* engine,
     if (!f) return -1;
 
     int alg = (int)algorithm;
-    fwrite(&alg, sizeof(int), 1, f);
+    /* 缺陷修复: 检查fwrite返回值，写入失败时关闭文件并返回-1 */
+    if (fwrite(&alg, sizeof(int), 1, f) != 1) {
+        fclose(f);
+        return -1;
+    }
 
     if (algorithm == SWARM_ENH_ACO_ADAPTIVE) {
-        fwrite(&engine->aco_config, sizeof(ACOEnhancedConfig), 1, f);
-        fwrite(&engine->aco_num_nodes, sizeof(int), 1, f);
-        fwrite(&engine->aco_best_cost, sizeof(float), 1, f);
+        if (fwrite(&engine->aco_config, sizeof(ACOEnhancedConfig), 1, f) != 1) {
+            fclose(f);
+            return -1;
+        }
+        if (fwrite(&engine->aco_num_nodes, sizeof(int), 1, f) != 1) {
+            fclose(f);
+            return -1;
+        }
+        if (fwrite(&engine->aco_best_cost, sizeof(float), 1, f) != 1) {
+            fclose(f);
+            return -1;
+        }
     } else if (algorithm == SWARM_ENH_ABC_ADAPTIVE) {
-        fwrite(&engine->abc_config, sizeof(ABCEnhancedConfig), 1, f);
-        fwrite(&engine->abc_best_fitness, sizeof(float), 1, f);
+        if (fwrite(&engine->abc_config, sizeof(ABCEnhancedConfig), 1, f) != 1) {
+            fclose(f);
+            return -1;
+        }
+        if (fwrite(&engine->abc_best_fitness, sizeof(float), 1, f) != 1) {
+            fclose(f);
+            return -1;
+        }
     }
 
     fclose(f);

@@ -464,6 +464,418 @@ if(BUILD_TESTS)
     endif()
     add_test(NAME comprehensive_test COMMAND comprehensive_test WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+    # boundary_test: 边界条件与压力测试（NaN/Inf/极端值/空指针/并发/内存压力）
+    add_executable(boundary_test tests/boundary_test.c)
+    target_include_directories(boundary_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(MINGW)
+        target_link_options(boundary_test PRIVATE "-Wl,--start-group" "-Wl,--end-group")
+    endif()
+    target_link_libraries(boundary_test PRIVATE
+        selflnn_backend
+        selflnn_multisystem
+        selflnn_multimodal
+        selflnn_core
+        selflnn_math
+        selflnn_memory
+        selflnn_reasoning
+        selflnn_learning
+        selflnn_training
+        selflnn_knowledge
+        selflnn_robot
+        selflnn_concurrency
+        selflnn_cognition
+        selflnn_agi
+        selflnn_evolution
+        selflnn_programming
+        selflnn_product_design
+        selflnn_safety
+        selflnn_distributed
+        selflnn_gpu
+        utils
+    )
+    set_target_properties(boundary_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+    )
+    if(MSVC)
+        target_link_libraries(boundary_test PRIVATE uuid ole32 winmm mmdevapi propsys)
+        set_target_properties(boundary_test PROPERTIES LINK_FLAGS "/STACK:67108864")
+        target_compile_definitions(boundary_test PRIVATE
+            _CRT_SECURE_NO_WARNINGS _USE_MATH_DEFINES
+            WIN32_LEAN_AND_MEAN _WINSOCK_DEPRECATED_NO_WARNINGS)
+    elseif(WIN32)
+        target_link_libraries(boundary_test PRIVATE uuid ole32 winmm mmdevapi propsys setupapi pdh bcrypt)
+        target_link_options(boundary_test PRIVATE "-Wl,--end-group")
+    else()
+        find_package(Threads REQUIRED)
+        target_link_libraries(boundary_test PRIVATE Threads::Threads m dl)
+    endif()
+    add_test(NAME boundary_test COMMAND boundary_test WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+    # functional_verify: 功能完整性深度验证（模型保存/训练/知识图谱/推理/过滤器/配置/记忆/紧急停止）
+    add_executable(functional_verify tests/functional_verify.c)
+    target_include_directories(functional_verify PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(MINGW)
+        target_link_options(functional_verify PRIVATE "-Wl,--start-group" "-Wl,--end-group")
+    endif()
+    target_link_libraries(functional_verify PRIVATE
+        selflnn_backend
+        selflnn_multisystem
+        selflnn_multimodal
+        selflnn_core
+        selflnn_math
+        selflnn_memory
+        selflnn_reasoning
+        selflnn_learning
+        selflnn_training
+        selflnn_knowledge
+        selflnn_robot
+        selflnn_concurrency
+        selflnn_cognition
+        selflnn_agi
+        selflnn_evolution
+        selflnn_programming
+        selflnn_product_design
+        selflnn_safety
+        selflnn_distributed
+        selflnn_gpu
+        utils
+    )
+    set_target_properties(functional_verify PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+    )
+    if(MSVC)
+        target_link_libraries(functional_verify PRIVATE uuid ole32 winmm mmdevapi propsys)
+        set_target_properties(functional_verify PROPERTIES LINK_FLAGS "/STACK:67108864")
+        target_compile_definitions(functional_verify PRIVATE
+            _CRT_SECURE_NO_WARNINGS _USE_MATH_DEFINES
+            WIN32_LEAN_AND_MEAN _WINSOCK_DEPRECATED_NO_WARNINGS)
+    elseif(WIN32)
+        target_link_libraries(functional_verify PRIVATE uuid ole32 winmm mmdevapi propsys setupapi pdh bcrypt)
+        target_link_options(functional_verify PRIVATE "-Wl,--end-group")
+    else()
+        find_package(Threads REQUIRED)
+        target_link_libraries(functional_verify PRIVATE Threads::Threads m dl)
+    endif()
+    add_test(NAME functional_verify COMMAND functional_verify WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+    # module_deep_test: 模块深度功能测试 — 覆盖零覆盖模块的API（对话/自我认知/进化/在线学习/自主学习/多系统控制）
+    add_executable(module_deep_test tests/module_deep_test.c)
+    target_include_directories(module_deep_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(MINGW)
+        target_link_options(module_deep_test PRIVATE "-Wl,--start-group" "-Wl,--end-group")
+    endif()
+    target_link_libraries(module_deep_test PRIVATE
+        selflnn_backend
+        selflnn_multisystem
+        selflnn_multimodal
+        selflnn_core
+        selflnn_math
+        selflnn_memory
+        selflnn_reasoning
+        selflnn_learning
+        selflnn_training
+        selflnn_knowledge
+        selflnn_robot
+        selflnn_concurrency
+        selflnn_cognition
+        selflnn_agi
+        selflnn_evolution
+        selflnn_programming
+        selflnn_product_design
+        selflnn_safety
+        selflnn_distributed
+        selflnn_gpu
+        utils
+    )
+    set_target_properties(module_deep_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+    )
+    if(MSVC)
+        target_link_libraries(module_deep_test PRIVATE uuid ole32 winmm mmdevapi propsys)
+        set_target_properties(module_deep_test PROPERTIES LINK_FLAGS "/STACK:67108864")
+        target_compile_definitions(module_deep_test PRIVATE
+            _CRT_SECURE_NO_WARNINGS _USE_MATH_DEFINES
+            WIN32_LEAN_AND_MEAN _WINSOCK_DEPRECATED_NO_WARNINGS)
+    elseif(WIN32)
+        target_link_libraries(module_deep_test PRIVATE uuid ole32 winmm mmdevapi propsys setupapi pdh bcrypt)
+        target_link_options(module_deep_test PRIVATE "-Wl,--end-group")
+    else()
+        find_package(Threads REQUIRED)
+        target_link_libraries(module_deep_test PRIVATE Threads::Threads m dl)
+    endif()
+    add_test(NAME module_deep_test COMMAND module_deep_test WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+    # module_extend_test: 扩展模块深度功能测试 — 覆盖 programming/computer_operation/product_design 模块
+    add_executable(module_extend_test tests/module_extend_test.c)
+    target_include_directories(module_extend_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(MINGW)
+        target_link_options(module_extend_test PRIVATE "-Wl,--start-group" "-Wl,--end-group")
+    endif()
+    target_link_libraries(module_extend_test PRIVATE
+        selflnn_backend
+        selflnn_multisystem
+        selflnn_multimodal
+        selflnn_core
+        selflnn_math
+        selflnn_memory
+        selflnn_reasoning
+        selflnn_learning
+        selflnn_training
+        selflnn_knowledge
+        selflnn_robot
+        selflnn_concurrency
+        selflnn_cognition
+        selflnn_agi
+        selflnn_evolution
+        selflnn_programming
+        selflnn_product_design
+        selflnn_safety
+        selflnn_distributed
+        selflnn_gpu
+        utils
+    )
+    set_target_properties(module_extend_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+    )
+    if(MSVC)
+        target_link_libraries(module_extend_test PRIVATE uuid ole32 winmm mmdevapi propsys)
+        set_target_properties(module_extend_test PROPERTIES LINK_FLAGS "/STACK:67108864")
+        target_compile_definitions(module_extend_test PRIVATE
+            _CRT_SECURE_NO_WARNINGS _USE_MATH_DEFINES
+            WIN32_LEAN_AND_MEAN _WINSOCK_DEPRECATED_NO_WARNINGS)
+    elseif(WIN32)
+        target_link_libraries(module_extend_test PRIVATE uuid ole32 winmm mmdevapi propsys setupapi pdh bcrypt)
+        target_link_options(module_extend_test PRIVATE "-Wl,--end-group")
+    else()
+        find_package(Threads REQUIRED)
+        target_link_libraries(module_extend_test PRIVATE Threads::Threads m dl)
+    endif()
+    add_test(NAME module_extend_test COMMAND module_extend_test WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+    # parse_diag_test: parse_source_code 诊断测试（D11调试用）
+    add_executable(parse_diag_test tests/parse_diag_test.c)
+    target_include_directories(parse_diag_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_link_options(parse_diag_test PRIVATE "-Wl,--start-group" "-Wl,--end-group")
+    endif()
+    target_link_libraries(parse_diag_test PRIVATE
+        selflnn_programming selflnn_backend selflnn_core
+        selflnn_memory selflnn_utils selflnn_knowledge selflnn_evolution
+        selflnn_safety selflnn_multimodal selflnn_product_design
+        selflnn_robot selflnn_distributed selflnn_training
+    )
+    if (WIN32)
+        set_target_properties(parse_diag_test PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/bin/Release"
+            RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/bin/Debug"
+        )
+        target_link_libraries(parse_diag_test PRIVATE uuid ole32 winmm mmdevapi propsys)
+        set_target_properties(parse_diag_test PROPERTIES LINK_FLAGS "/STACK:67108864")
+        target_compile_definitions(parse_diag_test PRIVATE
+            _CRT_SECURE_NO_WARNINGS
+        )
+    else()
+        target_link_libraries(parse_diag_test PRIVATE Threads::Threads m dl)
+    endif()
+
+    # ast_diag_test: AST销毁/重构交互诊断测试（D13调试用）
+    add_executable(ast_diag_test tests/ast_diag_test.c)
+    target_include_directories(ast_diag_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_link_options(ast_diag_test PRIVATE "-Wl,--start-group" "-Wl,--end-group")
+    endif()
+    target_link_libraries(ast_diag_test PRIVATE
+        selflnn_programming selflnn_backend selflnn_core
+        selflnn_memory selflnn_utils selflnn_knowledge selflnn_evolution
+        selflnn_safety selflnn_multimodal selflnn_product_design
+        selflnn_robot selflnn_distributed selflnn_training
+        selflnn_math selflnn_reasoning selflnn_learning
+        selflnn_concurrency selflnn_cognition selflnn_agi
+        selflnn_multisystem selflnn_gpu
+    )
+    if (WIN32)
+        set_target_properties(ast_diag_test PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/bin/Release"
+            RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/bin/Debug"
+        )
+        target_link_libraries(ast_diag_test PRIVATE uuid ole32 winmm mmdevapi propsys)
+        set_target_properties(ast_diag_test PROPERTIES LINK_FLAGS "/STACK:67108864")
+        target_compile_definitions(ast_diag_test PRIVATE
+            _CRT_SECURE_NO_WARNINGS
+        )
+    else()
+        target_link_libraries(ast_diag_test PRIVATE Threads::Threads m dl)
+    endif()
+
+    # sys_ctx_test: 系统上下文诊断测试（D11/D13残留调试用）
+    add_executable(sys_ctx_test tests/sys_ctx_test.c)
+    target_include_directories(sys_ctx_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(sys_ctx_test PRIVATE
+        selflnn_backend selflnn_multisystem selflnn_multimodal
+        selflnn_core selflnn_math selflnn_memory selflnn_reasoning
+        selflnn_learning selflnn_training selflnn_knowledge selflnn_robot
+        selflnn_gpu selflnn_concurrency selflnn_cognition selflnn_agi
+        selflnn_evolution selflnn_programming selflnn_product_design
+        selflnn_safety selflnn_distributed utils
+    )
+    if (WIN32)
+        set_target_properties(sys_ctx_test PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/bin/Release"
+            RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/bin/Debug"
+        )
+        target_link_libraries(sys_ctx_test PRIVATE uuid ole32 winmm mmdevapi propsys)
+        set_target_properties(sys_ctx_test PROPERTIES LINK_FLAGS "/STACK:67108864")
+        target_compile_definitions(sys_ctx_test PRIVATE
+            _CRT_SECURE_NO_WARNINGS _USE_MATH_DEFINES
+            WIN32_LEAN_AND_MEAN _WINSOCK_DEPRECATED_NO_WARNINGS)
+    elseif(WIN32)
+        target_link_libraries(sys_ctx_test PRIVATE uuid ole32 winmm mmdevapi propsys setupapi pdh bcrypt)
+        target_link_options(sys_ctx_test PRIVATE "-Wl,--end-group")
+    else()
+        target_link_libraries(sys_ctx_test PRIVATE Threads::Threads m dl)
+    endif()
+
+    # module_core_test: 核心模块深度测试 — 覆盖CfC/ODE/张量/工具/记忆/并发/BDI模块
+    add_executable(module_core_test tests/module_core_test.c)
+    target_include_directories(module_core_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(module_core_test PRIVATE
+        selflnn_backend selflnn_multisystem selflnn_multimodal
+        selflnn_core selflnn_math selflnn_memory selflnn_reasoning
+        selflnn_learning selflnn_training selflnn_knowledge selflnn_robot
+        selflnn_gpu selflnn_concurrency selflnn_cognition selflnn_agi
+        selflnn_evolution selflnn_programming selflnn_product_design
+        selflnn_safety selflnn_distributed utils
+    )
+    if (WIN32)
+        set_target_properties(module_core_test PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/bin/Release"
+            RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/bin/Debug"
+        )
+        target_link_libraries(module_core_test PRIVATE uuid ole32)
+        set_target_properties(module_core_test PROPERTIES LINK_FLAGS "/STACK:67108864")
+        target_compile_definitions(module_core_test PRIVATE
+            _CRT_SECURE_NO_WARNINGS _USE_MATH_DEFINES
+        )
+    else()
+        target_link_libraries(module_core_test PRIVATE Threads::Threads m dl)
+    endif()
+
+    # module_missing_test: 缺失模块综合测试 — 覆盖reasoning/agi/distributed/math模块
+    add_executable(module_missing_test tests/module_missing_test.c)
+    target_include_directories(module_missing_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(module_missing_test PRIVATE
+        selflnn_backend selflnn_multisystem selflnn_multimodal
+        selflnn_core selflnn_math selflnn_memory selflnn_reasoning
+        selflnn_learning selflnn_training selflnn_knowledge selflnn_robot
+        selflnn_gpu selflnn_concurrency selflnn_cognition selflnn_agi
+        selflnn_evolution selflnn_programming selflnn_product_design
+        selflnn_safety selflnn_distributed utils
+    )
+    if (WIN32)
+        set_target_properties(module_missing_test PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/bin/Release"
+            RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/bin/Debug"
+        )
+        target_link_libraries(module_missing_test PRIVATE uuid ole32)
+        set_target_properties(module_missing_test PROPERTIES LINK_FLAGS "/STACK:67108864")
+        target_compile_definitions(module_missing_test PRIVATE
+            _CRT_SECURE_NO_WARNINGS _USE_MATH_DEFINES
+        )
+    else()
+        target_link_libraries(module_missing_test PRIVATE Threads::Threads m dl)
+    endif()
+
+    # module_remaining_test: 剩余未覆盖模块综合测试 — 覆盖核心/认知/学习/进化/知识/训练/机器人层
+    add_executable(module_remaining_test tests/module_remaining_test.c)
+    target_include_directories(module_remaining_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(module_remaining_test PRIVATE
+        selflnn_backend selflnn_multisystem selflnn_multimodal
+        selflnn_core selflnn_math selflnn_memory selflnn_reasoning
+        selflnn_learning selflnn_training selflnn_knowledge selflnn_robot
+        selflnn_cognition selflnn_agi selflnn_evolution selflnn_product_design
+        selflnn_programming selflnn_concurrency
+        selflnn_safety selflnn_distributed utils
+    )
+    if (WIN32)
+        set_target_properties(module_remaining_test PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/bin/Release"
+            RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/bin/Debug"
+        )
+        target_link_libraries(module_remaining_test PRIVATE uuid ole32)
+        set_target_properties(module_remaining_test PROPERTIES LINK_FLAGS "/STACK:67108864")
+        target_compile_definitions(module_remaining_test PRIVATE
+            _CRT_SECURE_NO_WARNINGS _USE_MATH_DEFINES
+        )
+    else()
+        target_link_libraries(module_remaining_test PRIVATE Threads::Threads m dl)
+    endif()
+
+    # module_core_v2_test: 核心模块V2测试 — 覆盖CfC/错误处理/层归一化/四元数CfC/网络状态
+    add_executable(module_core_v2_test tests/module_core_v2_test.c)
+    target_include_directories(module_core_v2_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(module_core_v2_test PRIVATE
+        selflnn_backend selflnn_multisystem selflnn_multimodal
+        selflnn_core selflnn_math selflnn_memory selflnn_reasoning
+        selflnn_learning selflnn_training selflnn_knowledge
+        selflnn_robot selflnn_cognition selflnn_agi selflnn_evolution
+        selflnn_programming selflnn_product_design selflnn_concurrency
+        selflnn_safety selflnn_distributed selflnn_gpu utils
+    )
+    set_target_properties(module_core_v2_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+    )
+    if(MSVC)
+        target_link_libraries(module_core_v2_test PRIVATE uuid ole32 winmm mmdevapi propsys)
+        set_target_properties(module_core_v2_test PROPERTIES LINK_FLAGS "/STACK:67108864")
+        target_compile_definitions(module_core_v2_test PRIVATE
+            _CRT_SECURE_NO_WARNINGS _USE_MATH_DEFINES
+            WIN32_LEAN_AND_MEAN _WINSOCK_DEPRECATED_NO_WARNINGS
+        )
+    elseif(WIN32)
+        target_link_libraries(module_core_v2_test PRIVATE uuid ole32 winmm mmdevapi propsys setupapi pdh bcrypt)
+    else()
+        target_link_libraries(module_core_v2_test PRIVATE Threads::Threads m dl)
+    endif()
+
+    # cfc_debug_test: CFC挂起隔离测试(G1排查)
+    add_executable(cfc_debug_test tests/cfc_debug_test.c)
+    target_include_directories(cfc_debug_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(cfc_debug_test PRIVATE
+        selflnn_core
+        selflnn_utils
+    )
+    set_target_properties(cfc_debug_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/bin/Release"
+    )
+    if(WIN32)
+        target_link_libraries(cfc_debug_test PRIVATE uuid ole32 winmm)
+        set_target_properties(cfc_debug_test PROPERTIES LINK_FLAGS "/STACK:67108864")
+    else()
+        target_link_libraries(cfc_debug_test PRIVATE Threads::Threads m dl)
+    endif()
+
+    # module_extend_v2_test: 模块扩展V2测试 — 覆盖8个优先未测试模块
+    # common/platform_types/port_config/quaternion_enhanced/data_loaders/
+    # dataset_mnist/dataset_cifar10/knowledge_bridge
+    add_executable(module_extend_v2_test tests/module_extend_v2_test.c)
+    target_include_directories(module_extend_v2_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(module_extend_v2_test PRIVATE
+        selflnn_core
+        selflnn_utils
+        selflnn_training
+        selflnn_knowledge
+        selflnn_cognition
+    )
+    set_target_properties(module_extend_v2_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/bin/Release"
+    )
+    if(WIN32)
+        target_link_libraries(module_extend_v2_test PRIVATE uuid ole32 winmm)
+        set_target_properties(module_extend_v2_test PROPERTIES LINK_FLAGS "/STACK:67108864")
+    else()
+        target_link_libraries(module_extend_v2_test PRIVATE Threads::Threads m dl)
+    endif()
+
     
 endif()
 

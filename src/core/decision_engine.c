@@ -1635,7 +1635,8 @@ int decision_audit_log_export_json(const DecisionAuditLog* log,
     if (written < 0 || (size_t)written >= buffer_size - pos) return -1;
     pos += (size_t)written;
 
-    return (int)pos;
+    /* B1修复: 返回0表示成功，而非返回pos(字节数)导致调用方误判为错误码 */
+    return 0;
 }
 
 int decision_audit_log_recent(const DecisionAuditLog* log,

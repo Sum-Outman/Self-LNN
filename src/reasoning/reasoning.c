@@ -8,6 +8,8 @@
 #include "selflnn/reasoning/reasoning.h"
 #include "selflnn/reasoning/causal_reasoning.h"
 #include "selflnn/knowledge/knowledge.h"
+#include "selflnn/knowledge/logic_reasoning.h" /* v9.17: 接入FOL一阶逻辑归结引擎 */
+#include "selflnn/knowledge/semantic_network.h" /* v9.19: 语义网络扩散激活增强推理 */
 #include "selflnn/programming/programming_bridge.h" /* 推理→编程闭环: 推理结论委托代码生成 */
 #include "selflnn/utils/platform.h" /* P1修复: 互斥锁支持 */
 #pragma warning(disable: 4702)  /* ZSFOOO-E002 */
@@ -115,6 +117,11 @@ struct ReasoningEngine {
     size_t history_input_dim;   /* S-031修复: 存储历史输入维度 */
     size_t history_output_dim;  /* S-031修复: 存储历史输出维度 */
     char* history_file_path;
+    
+    /* v9.17: 符号逻辑推理引擎 — FOL一阶逻辑归结 */
+    LogicReasoningEngine* logic_engine;
+    /* v9.19: 语义网络 — 扩散激活增强推理 */
+    SemanticNetwork* semantic_network;
 };
 
 /* 静态函数前向声明 */
@@ -222,6 +229,22 @@ ReasoningEngine* reasoning_engine_create(const ReasoningConfig* config) {
     /* 初始化贝叶斯网络集成 — 实例化而非NULL */
     engine->bayesian_network = bayesian_network_create(64);
     
+    /* v9.17: 初始化符号逻辑推理引擎（FOL一阶逻辑归结） */
+    {
+        LogicReasoningEngineConfig logic_config;
+        memset(&logic_config, 0, sizeof(LogicReasoningEngineConfig));
+        logic_config.mode = LOGIC_REASONING_MIXED_CHAINING;  /* 混合推理: 前向+后向 */
+        logic_config.max_inference_steps = 200;
+        logic_config.min_confidence = 0.1f;
+        logic_config.enable_conflict_resolution = 1;
+        logic_config.enable_uncertainty_reasoning = 0;
+        logic_config.working_memory_size = 2000;
+        engine->logic_engine = logic_reasoning_engine_create(&logic_config);
+        if (engine->logic_engine) {
+            /* v9.17: 默认逻辑规则已包含在引擎内部，无需额外添加 */
+        }
+    }
+    
     return engine;
 }
 
@@ -252,6 +275,12 @@ void reasoning_engine_free(ReasoningEngine* engine) {
     if (engine->bayesian_network) {
         bayesian_network_free(engine->bayesian_network);
         engine->bayesian_network = NULL;
+    }
+    
+    /* v9.17: 释放符号逻辑推理引擎 */
+    if (engine->logic_engine) {
+        logic_reasoning_engine_free(engine->logic_engine);
+        engine->logic_engine = NULL;
     }
     
     safe_free((void**)&engine->history_inputs);
@@ -299,9 +328,21 @@ int reasoning_record_history(ReasoningEngine* engine, const float* input, size_t
     if (engine->history_size >= engine->history_capacity) {
         size_t new_cap = engine->history_capacity * 2;
         if (new_cap > 65536) { mutex_unlock(engine->lock); return -1; }
-        float* new_in = (float*)safe_realloc(engine->history_inputs, new_cap * total * sizeof(float));
-        float* new_out = (float*)safe_realloc(engine->history_outputs, new_cap * output_size * sizeof(float));
-        if (!new_in || !new_out) { mutex_unlock(engine->lock); return -1; }
+        /* 先分配两个新缓冲区，全部成功后再更新指针，避免部分失败导致悬空指针 */
+        float* new_in = (float*)safe_malloc(new_cap * total * sizeof(float));
+        float* new_out = (float*)safe_malloc(new_cap * output_size * sizeof(float));
+        if (!new_in || !new_out) {
+            if (new_in) safe_free((void**)&new_in);
+            if (new_out) safe_free((void**)&new_out);
+            mutex_unlock(engine->lock);
+            return -1;
+        }
+        /* 复制旧数据到新缓冲区 */
+        memcpy(new_in, engine->history_inputs, engine->history_size * total * sizeof(float));
+        memcpy(new_out, engine->history_outputs, engine->history_size * output_size * sizeof(float));
+        /* 释放旧缓冲区 */
+        safe_free((void**)&engine->history_inputs);
+        safe_free((void**)&engine->history_outputs);
         engine->history_inputs = new_in;
         engine->history_outputs = new_out;
         engine->history_capacity = new_cap;
@@ -326,13 +367,19 @@ int reasoning_save_history(const ReasoningEngine* engine, const char* filepath) 
     /* S-031修复: 保存实际维度信息 */
     size_t in_dim = engine->history_input_dim > 0 ? engine->history_input_dim : 256;
     size_t out_dim = engine->history_output_dim > 0 ? engine->history_output_dim : 256;
-    fwrite(&count, sizeof(int), 1, fp);
-    fwrite(&hist_size, sizeof(size_t), 1, fp);
-    fwrite(&in_dim, sizeof(size_t), 1, fp);
-    fwrite(&out_dim, sizeof(size_t), 1, fp);
+    if (fwrite(&count, sizeof(int), 1, fp) != 1 ||
+        fwrite(&hist_size, sizeof(size_t), 1, fp) != 1 ||
+        fwrite(&in_dim, sizeof(size_t), 1, fp) != 1 ||
+        fwrite(&out_dim, sizeof(size_t), 1, fp) != 1) {
+        fclose(fp);
+        return -1;
+    }
     if (hist_size > 0 && engine->history_inputs && engine->history_outputs) {
-        fwrite(engine->history_inputs, sizeof(float), hist_size * in_dim, fp);
-        fwrite(engine->history_outputs, sizeof(float), hist_size * out_dim, fp);
+        if (fwrite(engine->history_inputs, sizeof(float), hist_size * in_dim, fp) != hist_size * in_dim ||
+            fwrite(engine->history_outputs, sizeof(float), hist_size * out_dim, fp) != hist_size * out_dim) {
+            fclose(fp);
+            return -1;
+        }
     }
     fclose(fp);
     return 0;
@@ -348,8 +395,11 @@ int reasoning_load_history(ReasoningEngine* engine, const char* filepath) {
     int count = 0;
     size_t hist_size = 0;
     size_t in_dim = 256, out_dim = 256;
-    fread(&count, sizeof(int), 1, fp);
-    fread(&hist_size, sizeof(size_t), 1, fp);
+    if (fread(&count, sizeof(int), 1, fp) != 1 ||
+        fread(&hist_size, sizeof(size_t), 1, fp) != 1) {
+        fclose(fp);
+        return -1;
+    }
     /* S-031修复: 尝试读取维度信息（兼容旧格式） */
     long saved_pos = ftell(fp);
     fseek(fp, 0, SEEK_END);
@@ -370,13 +420,24 @@ int reasoning_load_history(ReasoningEngine* engine, const char* filepath) {
         fread(&out_dim, sizeof(size_t), 1, fp);
     }
     if (hist_size > 0 && hist_size < 65536) {
+        /* 防止整数溢出：检查乘法是否溢出 */
+        if (hist_size > SIZE_MAX / (in_dim * sizeof(float)) ||
+            hist_size > SIZE_MAX / (out_dim * sizeof(float))) {
+            fclose(fp);
+            return -1;
+        }
         safe_free((void**)&engine->history_inputs);
         safe_free((void**)&engine->history_outputs);
         engine->history_inputs = (float*)safe_malloc(hist_size * in_dim * sizeof(float));
         engine->history_outputs = (float*)safe_malloc(hist_size * out_dim * sizeof(float));
         if (engine->history_inputs && engine->history_outputs) {
-            fread(engine->history_inputs, sizeof(float), hist_size * in_dim, fp);
-            fread(engine->history_outputs, sizeof(float), hist_size * out_dim, fp);
+            if (fread(engine->history_inputs, sizeof(float), hist_size * in_dim, fp) != hist_size * in_dim ||
+                fread(engine->history_outputs, sizeof(float), hist_size * out_dim, fp) != hist_size * out_dim) {
+                safe_free((void**)&engine->history_inputs);
+                safe_free((void**)&engine->history_outputs);
+                fclose(fp);
+                return -1;
+            }
             engine->history_size = hist_size;
             engine->history_capacity = hist_size;
             engine->history_input_dim = in_dim;
@@ -4728,6 +4789,18 @@ int reasoning_engine_set_lnn(ReasoningEngine* engine, LNN* lnn) {
     return 0;
 }
 
+/* v9.19: 语义网络集成 — 扩散激活增强推理 */
+int reasoning_engine_set_semantic_network(ReasoningEngine* engine, void* network) {
+    if (!engine) return -1;
+    engine->semantic_network = (SemanticNetwork*)network;
+    return 0;
+}
+
+void* reasoning_engine_get_semantic_network(const ReasoningEngine* engine) {
+    if (!engine) return NULL;
+    return (void*)engine->semantic_network;
+}
+
 /**
  * @brief 同步知识库到推理引擎内部表示
  *
@@ -4974,6 +5047,73 @@ int reasoning_infer_with_knowledge(ReasoningEngine* engine,
         }
     }
 
+    return 0;
+}
+
+/* ============================================================================
+ * v9.17: 符号演绎推理 — 基于FOL一阶逻辑归结
+ * 这是真正的符号推理入口，与reasoning_infer()的浮点模糊匹配完全不同。
+ * 内部调用logic_fol_resolution()执行归结反驳证明。
+ * ============================================================================ */
+SELFLNN_API int reasoning_symbolic_deduce(ReasoningEngine* engine,
+                              const char** premises, int premise_count,
+                              const char* goal,
+                              char** result_json) {
+    if (!engine || !premises || premise_count < 1 || !goal || !result_json) {
+        return -1;
+    }
+    
+    if (!engine->logic_engine) {
+        log_warn("[符号推理] 逻辑推理引擎未初始化，无法执行符号推理");
+        return -1;
+    }
+    
+    /* 调用FOL一阶逻辑归结 */
+    int max_steps = 500;
+    int result_proved = 0;
+    char* proof_trace = NULL;
+    
+    int ret = logic_fol_resolution(premises, premise_count, goal, max_steps,
+                                   &proof_trace, &result_proved);
+    
+    if (ret != 0) {
+        *result_json = string_duplicate(
+            "{\"symbolic_reasoning\":{"
+            "\"status\":\"error\","
+            "\"message\":\"FOL归结执行失败\","
+            "\"goal\":\"%s\"}}");
+        return -1;
+    }
+    
+    /* 构造JSON结果 */
+    char* json_buf = (char*)safe_malloc(4096);
+    if (!json_buf) return -1;
+    
+    const char* proof_str = proof_trace ? proof_trace : "";
+    
+    snprintf(json_buf, 4096,
+        "{\"symbolic_reasoning\":{"
+        "\"status\":\"%s\","
+        "\"goal\":\"%s\","
+        "\"proved\":%s,"
+        "\"method\":\"fol_resolution_refutation\","
+        "\"premise_count\":%d,"
+        "\"max_steps\":%d,"
+        "\"proof_trace\":\"%s\"}}",
+        result_proved ? "success" : "unproven",
+        goal,
+        result_proved ? "true" : "false",
+        premise_count,
+        max_steps,
+        proof_str);
+    
+    *result_json = json_buf;
+    
+    /* 释放proof_trace（如果logic_fol_resolution分配了内存） */
+    if (proof_trace) {
+        safe_free((void**)&proof_trace);
+    }
+    
     return 0;
 }
 

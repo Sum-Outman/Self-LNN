@@ -666,39 +666,65 @@ int memory_store(MemorySystem* system, const char* key, const float* data,
     if (!array_ptr || count >= capacity) {
         if (array_ptr && count > 0) {
             // LRU淘汰策略：找到最久未访问的记忆项并淘汰
+            /* P0修复: 添加NULL守卫，防止数组中的NULL槽位导致ACCESS_VIOLATION。
+             * memory_apply_decay()(第445行)已有array[i]空指针检查，
+             * 但此处的LRU遍历缺少此保护，已导致间歇性0xC0000005崩溃。 */
             MemoryItem** array = *array_ptr;
             size_t lru_index = 0;
-            float oldest_time = array[0]->last_access_time;
+            float oldest_time = 0.0f;
+            int lru_found = 0;
             
-            for (size_t i = 1; i < count; i++) {
-                if (array[i]->last_access_time < oldest_time) {
-                    oldest_time = array[i]->last_access_time;
+            /* 跳过NULL槽位，找到第一个有效项 */
+            for (size_t i = 0; i < count; i++) {
+                if (array[i]) {
                     lru_index = i;
+                    oldest_time = array[i]->last_access_time;
+                    lru_found = 1;
+                    break;
                 }
             }
             
-            // 从缓存中移除被淘汰项（如果存在）
-            for (size_t cache_idx = 0; cache_idx < 10; cache_idx++) {
-                if (system->recent_cache[cache_idx] == array[lru_index]) {
-                    system->recent_cache[cache_idx] = NULL;
+            if (lru_found) {
+                for (size_t i = lru_index + 1; i < count; i++) {
+                    if (array[i] && array[i]->last_access_time < oldest_time) {
+                        oldest_time = array[i]->last_access_time;
+                        lru_index = i;
+                    }
                 }
             }
             
-            // 释放被淘汰的记忆项
-            memory_item_free(array[lru_index]);
-            
-            // 移动后续项填补空缺
-            for (size_t j = lru_index; j < count - 1; j++) {
-                array[j] = array[j + 1];
-            }
-            array[count - 1] = NULL;
-            
-            // 更新计数
-            switch (type) {
-                case MEMORY_TYPE_SHORT_TERM: system->st_count--; break;
-                case MEMORY_TYPE_LONG_TERM:  system->lt_count--; break;
-                case MEMORY_TYPE_EPISODIC:   system->ep_count--; break;
-                case MEMORY_TYPE_SEMANTIC:   system->se_count--; break;
+            /* P0修复: 如果所有槽位均为NULL(极端情况)，直接跳过淘汰，按容量不足处理 */
+            if (lru_found) {
+                // 从缓存中移除被淘汰项（如果存在）
+                for (size_t cache_idx = 0; cache_idx < 10; cache_idx++) {
+                    if (system->recent_cache[cache_idx] == array[lru_index]) {
+                        system->recent_cache[cache_idx] = NULL;
+                    }
+                }
+                
+                // 释放被淘汰的记忆项
+                memory_item_free(array[lru_index]);
+                
+                // 移动后续项填补空缺
+                for (size_t j = lru_index; j < count - 1; j++) {
+                    array[j] = array[j + 1];
+                }
+                array[count - 1] = NULL;
+                
+                // 更新计数
+                switch (type) {
+                    case MEMORY_TYPE_SHORT_TERM: system->st_count--; break;
+                    case MEMORY_TYPE_LONG_TERM:  system->lt_count--; break;
+                    case MEMORY_TYPE_EPISODIC:   system->ep_count--; break;
+                    case MEMORY_TYPE_SEMANTIC:   system->se_count--; break;
+                }
+            } else {
+                /* 所有槽位为NULL，无法淘汰，释放新项并返回错误 */
+                memory_item_free(item);
+                MEMORY_UNLOCK(system);
+                selflnn_set_last_error(SELFLNN_ERROR_MEMORY_FULL, __func__, __FILE__, __LINE__,
+                                      "记忆存储所有槽位均为NULL，无法淘汰（类型：%d）", type);
+                return SELFLNN_ERROR_MEMORY_FULL;
             }
             
             // 重新获取计数（已更新）

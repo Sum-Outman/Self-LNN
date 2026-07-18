@@ -834,6 +834,10 @@ int reasoning_engine_set_bayesian_network(ReasoningEngine* engine,
  */
 BayesianNetwork* reasoning_engine_get_bayesian_network(const ReasoningEngine* engine);
 
+/* v9.19: 语义网络集成 — 扩散激活增强推理 */
+SELFLNN_API int reasoning_engine_set_semantic_network(ReasoningEngine* engine, void* network);
+SELFLNN_API void* reasoning_engine_get_semantic_network(const ReasoningEngine* engine);
+
 /* ============================================================================
  *修复: 推理历史管理（4个缺失声明）
  * ============================================================================ */
@@ -845,6 +849,29 @@ int reasoning_autosave_history(ReasoningEngine* engine);
 
 /* M-022修复: 因果推理→规划系统桥接 → 获取因果推理引擎 */
 SELFLNN_API void* reasoning_engine_get_causal_engine(ReasoningEngine* engine);
+
+/* ============================================================================
+ * v9.17修复: 符号推理API — 接入FOL一阶逻辑归结引擎
+ * 解决符号推理仅40%的结构性缺陷：logic_reasoning.c的FOL归结原本零调用
+ * ============================================================================ */
+
+/**
+ * @brief 符号演绎推理（基于FOL一阶逻辑归结）
+ * 
+ * 这是真正的符号推理入口，与reasoning_infer()的浮点模糊匹配完全不同。
+ * 内部调用logic_fol_resolution()执行归结反驳证明。
+ * 
+ * @param engine 推理引擎句柄（内部包含LogicReasoningEngine）
+ * @param premises 前提字符串数组（FOL公式）
+ * @param premise_count 前提数量
+ * @param goal 待证明的目标公式
+ * @param result_json 输出：JSON格式推理结果（调用者需safe_free）
+ * @return int 成功返回0，失败返回-1
+ */
+SELFLNN_API int reasoning_symbolic_deduce(ReasoningEngine* engine,
+                              const char** premises, int premise_count,
+                              const char* goal,
+                              char** result_json);
 
 #ifdef __cplusplus
 }

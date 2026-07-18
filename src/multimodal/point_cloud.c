@@ -3687,9 +3687,9 @@ int point_cloud_downsample(PointCloudProcessor* processor,
     }
     /* 体素网格下采样：对每个体素取质心作为代表点 */
     float inv_vs = 1.0f / voxel_size;
-    int max_grid = 4096;
+    int max_grid = 256;
     typedef struct { float sum[3]; int count; } VoxelCell;
-    VoxelCell* grid = (VoxelCell*)safe_calloc(max_grid * max_grid * max_grid, sizeof(VoxelCell));
+    VoxelCell* grid = (VoxelCell*)safe_calloc((size_t)max_grid * max_grid * max_grid, sizeof(VoxelCell));
     if (!grid) {
         log_error("[点云] point_cloud_downsample: 网格内存分配失败");
         return -1;

@@ -34,6 +34,8 @@ static char g_bridge_summary[1024] = "";
  * ================================================================ */
 
 static void closure_init(ProgrammingClosure* c) {
+    /* 修复缺陷3: 添加NULL检查，防止空指针解引用 */
+    if (!c) return;
     memset(c, 0, sizeof(ProgrammingClosure));
 }
 
@@ -382,7 +384,7 @@ int programming_bridge_full_closure(SelfProgrammingEngine* engine,
 
     char* code = NULL;
     if (source) {
-        code = strdup(source);
+        code = safe_strdup(source);
         closure->generated_code = code;
     } else if (spec) {
         code = synthesize_code(engine, spec);

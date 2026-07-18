@@ -1841,7 +1841,8 @@ int planning_generate(PlanningSystem* system,
             int node_count = 0;
             if (!nodes) { steps = 0; break; }
             
-            /* 根节点 */
+            /* 根节点 — v9.22修复: parent必须设为-1，否则反向传播while(bp>=0)在根节点bp=0→0→0..无限循环 */
+            nodes[0].parent = -1;
             nodes[0].visits = 1;
             nodes[0].depth = 0;
             memcpy(nodes[0].state, current_state, state_size * sizeof(float));
@@ -2529,11 +2530,12 @@ int planning_execute(PlanningSystem* system,
      */
     if (!system || !plan || !execution_feedback || max_feedback_size == 0) return -1;
 
-    size_t state_dim = system->config.max_plan_length > 0 ? 
-        (size_t)system->config.max_plan_length : 2;
-    size_t steps = plan_size / state_dim;
-    if (steps == 0) steps = 1;
-    if (steps > max_feedback_size) steps = max_feedback_size;
+    /* v9.22修复: 原代码错误使用max_plan_length(规划步数上限)作为状态维度
+     * 当plan_size=16时 state_dim=20 → steps=0 → 读取plan[0..19]越界 → ACCESS_VIOLATION
+     * 修复: 使用plan_size作为实际状态维度，每次处理1步 */
+    size_t state_dim = plan_size;
+    if (state_dim > MAX_STATE_DIMENSION) state_dim = MAX_STATE_DIMENSION;
+    size_t steps = 1;
     
     /* 获取当前系统状态作为起点 */
     float current_state[MAX_STATE_DIMENSION];
@@ -2543,8 +2545,6 @@ int planning_execute(PlanningSystem* system,
     
     /* 获取共享LNN用于状态转移模拟 */
     void* lnn = selflnn_get_lnn();
-    int lnn_dim = state_dim < 128 ? (int)state_dim : 128;
-    
     /* 逐步执行规划，每步通过LNN模拟状态演化 */
     for (size_t i = 0; i < steps && i < max_feedback_size; i++) {
         const float* target_state = plan + i * state_dim;
@@ -2561,17 +2561,21 @@ int planning_execute(PlanningSystem* system,
         }
         
         if (lnn) {
-            /* F-017核心: 通过LNN前向传播进行状态转移 */
-            float lnn_input[128] = {0};
-            float lnn_output[128] = {0};
+            /* v9.22修复: lnn_input[128]和lnn_output[128]栈缓冲区对于256维LNN太小，
+             * 导致lnn_forward_with_memory_context写入越界→栈溢出→ACCESS_VIOLATION崩溃。
+             * 修复: 使用512元素栈缓冲区，覆盖256维LNN的输入/输出需求。
+             * 注意: 不使用safe_malloc避免其内部跟踪表被LNN操作损坏。 */
+            float lnn_input[512] = {0};
+            float lnn_output[512] = {0};
             /* 输入 = 当前状态 + 动作信号 */
-            for (int d = 0; d < lnn_dim && d < (int)state_dim; d++) {
+            for (size_t d = 0; d < state_dim && d < 512; d++) {
                 lnn_input[d] = current_state[d] * 0.7f + action[d] * 0.3f;
             }
-            if (lnn_forward_with_memory_context((LNN*)lnn, lnn_input, lnn_output) == 0) {
+            int fwd_ret = lnn_forward_with_memory_context((LNN*)lnn, lnn_input, lnn_output);
+            if (fwd_ret == 0) {
                 /* 新状态 = 0.8*旧状态 + 0.2*LNN输出 */
                 for (size_t d = 0; d < state_dim && d < MAX_STATE_DIMENSION; d++) {
-                    if (d < (size_t)lnn_dim) {
+                    if (d < 512) {
                         current_state[d] = current_state[d] * 0.8f + lnn_output[d] * 0.2f;
                     }
                     current_state[d] = CLAMP(current_state[d], -3.0f, 3.0f);

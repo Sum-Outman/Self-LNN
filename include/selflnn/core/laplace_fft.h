@@ -5,6 +5,7 @@
 #include <math.h>
 #include <string.h>
 #include <stdlib.h>
+#include "selflnn/utils/memory_utils.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -62,12 +63,12 @@ static inline void lfft_complex_inplace(LFFT_Complex* data, size_t n, int invers
 
 /* 实部+虚部分开数组的FFT接口 */
 static inline void lfft_split_radix2(float* real, float* imag, size_t n, int inverse) {
-    LFFT_Complex* tmp = (LFFT_Complex*)malloc(n * sizeof(LFFT_Complex));
+    LFFT_Complex* tmp = (LFFT_Complex*)safe_malloc(n * sizeof(LFFT_Complex));
     if (!tmp) return;
     for (size_t i = 0; i < n; i++) { tmp[i].re = real[i]; tmp[i].im = imag ? imag[i] : 0.0f; }
     lfft_complex_inplace(tmp, n, inverse);
     for (size_t i = 0; i < n; i++) { real[i] = tmp[i].re; if (imag) imag[i] = tmp[i].im; }
-    free(tmp);
+    safe_free((void**)&tmp);
 }
 
 /* 实数FFT（输入纯实数，输出复谱） */
@@ -78,14 +79,14 @@ static inline void lfft_real_forward(const float* input, float* real_out, float*
 
 /* 实数IFFT（输入复谱，输出实数） */
 static inline void lfft_real_inverse(const float* real_in, const float* imag_in, float* output, size_t n) {
-    float* re = (float*)malloc(n * sizeof(float));
-    float* im = (float*)malloc(n * sizeof(float));
-    if (!re || !im) { free(re); free(im); return; }
+    float* re = (float*)safe_malloc(n * sizeof(float));
+    float* im = (float*)safe_malloc(n * sizeof(float));
+    if (!re || !im) { safe_free((void**)&re); safe_free((void**)&im); return; }
     memcpy(re, real_in, n * sizeof(float));
     memcpy(im, imag_in, n * sizeof(float));
     lfft_split_radix2(re, im, n, 1);
     for (size_t i = 0; i < n; i++) output[i] = re[i];
-    free(re); free(im);
+    safe_free((void**)&re); safe_free((void**)&im);
 }
 
 #endif

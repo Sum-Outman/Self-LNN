@@ -401,7 +401,7 @@ static int convert_to_grayscale(const float* image, int width, int height, int c
     }
     
     if (channels == 1) {
-        memcpy(gray, image, width * height * sizeof(float));
+        memcpy(gray, image, (size_t)width * height * sizeof(float));
     } else if (channels == 3) {
         for (int i = 0; i < width * height; i++) {
             float r = image[i * 3];
@@ -649,7 +649,7 @@ static int detect_edges_sobel(const float* gray, int width, int height,
     const int sobel_y[3][3] = {{-1, -2, -1}, {0, 0, 0}, {1, 2, 1}};
     
     // 初始化边缘图像
-    memset(magnitude, 0, width * height * sizeof(float));
+    memset(magnitude, 0, (size_t)width * height * sizeof(float));
     
     for (int y = 1; y < height - 1; y++) {
         for (int x = 1; x < width - 1; x++) {
@@ -770,7 +770,7 @@ static int find_connected_components(const float* binary, int width, int height,
     }
     
     // 初始化标签数组
-    memset(labels, 0, width * height * sizeof(int));
+    memset(labels, 0, (size_t)width * height * sizeof(int));
     
     int current_label = 0;
     

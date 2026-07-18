@@ -111,7 +111,7 @@ class ApiService {
 
         /* 请求队列：管理高并发请求，避免同时发出过多请求 */
         this.requestQueue = [];
-        this.maxConcurrentRequests = 3;
+        this.maxConcurrentRequests = 2; /* v9.14修复: 从3降至2，减轻单线程服务器并发压力 */
         this.activeRequestCount = 0;
         this.requestQueueProcessing = false;
         this._drainInterval = 0;
@@ -259,12 +259,21 @@ class ApiService {
         if (this.requestQueueProcessing) return;
         this.requestQueueProcessing = true;
 
+        /* v9.14修复: 批次间添加50ms延迟，防止瞬间并发压垮单线程服务器 */
+        let batchCount = 0;
         while (this.requestQueue.length > 0 && this.activeRequestCount < this.maxConcurrentRequests) {
             const queueItem = this.requestQueue.shift();
             if (!queueItem) continue;
 
             this.activeRequestCount++;
             this.executeRequestWithRetry(queueItem.endpoint, queueItem.options, queueItem.resolve, queueItem.reject, queueItem.subsystem);
+            batchCount++;
+            
+            /* 每处理maxConcurrentRequests个请求后暂停50ms，给服务器喘息时间 */
+            if (batchCount >= this.maxConcurrentRequests && this.requestQueue.length > 0) {
+                await new Promise(function(r) { setTimeout(r, 50); });
+                batchCount = 0;
+            }
         }
 
         this.requestQueueProcessing = false;
@@ -7078,7 +7087,7 @@ window.SelfLnnApi = new ApiService;
 /* WebSocket通过HTTP Upgrade共用HTTP端口 — 构造函数动态读取window.SELFLNN_CONFIG */
 window.SelfLnnWebSocket = new WebSocketManager;
 
-}); /* IIFE结束 */
+})(); /* IIFE结束 */
 
 /* WebSocket自动连接已启用（延迟连接, 确保服务器就绪） */
 
@@ -7114,7 +7123,7 @@ window.SelfLnnWebSocket = new WebSocketManager;
             b.innerHTML = '<span class="connection-dot disconnected"></span> 点击重连WebSocket';
         }
     });
-});
+})();
 
 /* 注册对话流式消息全局分发（使用WebSocketManager.on接口） */
 (function() {
@@ -7165,4 +7174,4 @@ window.SelfLnnWebSocket = new WebSocketManager;
     setTimeout(function() {
         ws.connect();
     }, 3000);
-});
+})();

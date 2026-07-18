@@ -3905,7 +3905,11 @@ int rl_save(RLAgent* agent, const char* filepath)
             }
         }
     }
-    fclose(fp);
+    /* 修复缺陷13: 检查fclose返回值 */
+    if (fclose(fp) != 0) {
+        log_error("[RL保存] 关闭文件失败: %s", filepath);
+        return -3;
+    }
     return 0;
 }
 

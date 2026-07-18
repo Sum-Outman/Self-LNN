@@ -5688,7 +5688,7 @@ static int vulkan_compute_dispatch(
     safe_free((void**)&spirv_code);
     if (result != 0) return -1;
 
-    VkDescriptorSetLayoutBinding* bindings = (VkDescriptorSetLayoutBinding*)calloc((size_t)num_buffers, sizeof(VkDescriptorSetLayoutBinding));
+    VkDescriptorSetLayoutBinding* bindings = (VkDescriptorSetLayoutBinding*)safe_calloc((size_t)num_buffers, sizeof(VkDescriptorSetLayoutBinding));
     if (!bindings) { vkDestroyShaderModule(ctx->device, shader_module, NULL); return -1; }
 
     for (int i = 0; i < num_buffers; i++) {
@@ -5794,8 +5794,8 @@ static int vulkan_compute_dispatch(
         return -1;
     }
 
-    VkWriteDescriptorSet* write_sets = (VkWriteDescriptorSet*)calloc((size_t)num_buffers, sizeof(VkWriteDescriptorSet));
-    VkDescriptorBufferInfo* buf_infos = (VkDescriptorBufferInfo*)calloc((size_t)num_buffers, sizeof(VkDescriptorBufferInfo));
+    VkWriteDescriptorSet* write_sets = (VkWriteDescriptorSet*)safe_calloc((size_t)num_buffers, sizeof(VkWriteDescriptorSet));
+    VkDescriptorBufferInfo* buf_infos = (VkDescriptorBufferInfo*)safe_calloc((size_t)num_buffers, sizeof(VkDescriptorBufferInfo));
     if (!write_sets || !buf_infos) {
         safe_free((void**)&write_sets);
         safe_free((void**)&buf_infos);
@@ -5907,7 +5907,7 @@ int vulkan_forward_dense(GpuContext* context,
     memcpy(weight_buf.mapped_ptr, weights, weight_count * sizeof(float));
     memcpy(input_buf.mapped_ptr, input, input_count * sizeof(float));
 
-    VulkanDeviceBuffer* matmul_bufs = (VulkanDeviceBuffer*)calloc(3, sizeof(VulkanDeviceBuffer));
+    VulkanDeviceBuffer* matmul_bufs = (VulkanDeviceBuffer*)safe_calloc(3, sizeof(VulkanDeviceBuffer));
     if (!matmul_bufs) goto cleanup;
     matmul_bufs[0] = input_buf;
     matmul_bufs[1] = weight_buf;
@@ -5937,7 +5937,7 @@ int vulkan_forward_dense(GpuContext* context,
         if (vulkan_create_device_buffer(ctx, bias_size, 0x00000002, &bias_buf) != 0) goto cleanup;
         memcpy(bias_buf.mapped_ptr, bias, bias_size);
 
-        VulkanDeviceBuffer* bias_bufs = (VulkanDeviceBuffer*)calloc(2, sizeof(VulkanDeviceBuffer));
+        VulkanDeviceBuffer* bias_bufs = (VulkanDeviceBuffer*)safe_calloc(2, sizeof(VulkanDeviceBuffer));
         if (!bias_bufs) goto cleanup;
         bias_bufs[0] = temp_buf;
         bias_bufs[1] = bias_buf;
@@ -5956,7 +5956,7 @@ int vulkan_forward_dense(GpuContext* context,
     }
 
     {
-        VulkanDeviceBuffer* act_bufs = (VulkanDeviceBuffer*)calloc(2, sizeof(VulkanDeviceBuffer));
+        VulkanDeviceBuffer* act_bufs = (VulkanDeviceBuffer*)safe_calloc(2, sizeof(VulkanDeviceBuffer));
         if (!act_bufs) goto cleanup;
         act_bufs[0] = temp_buf;
         act_bufs[1] = output_buf;
@@ -6192,8 +6192,8 @@ int vulkan_batch_norm_forward(GpuContext* context,
     memcpy(beta_buf.mapped_ptr, beta, channels * sizeof(float));
 
     if (is_training) {
-        float* mean_arr = (float*)calloc(channels, sizeof(float));
-        float* var_arr = (float*)calloc(channels, sizeof(float));
+        float* mean_arr = (float*)safe_calloc(channels, sizeof(float));
+        float* var_arr = (float*)safe_calloc(channels, sizeof(float));
         if (!mean_arr || !var_arr) {
             safe_free((void**)&mean_arr);
             safe_free((void**)&var_arr);
@@ -6333,9 +6333,9 @@ int vulkan_batch_norm_backward(GpuContext* context,
 
     // CPU: 从x_hat buffer计算d_gamma和d_beta
     {
-        float* x_hat_host = (float*)calloc(total, sizeof(float));
-        float* grad_out_host = (float*)calloc(total, sizeof(float));
-        float* gamma_host = (float*)calloc(channels, sizeof(float));
+        float* x_hat_host = (float*)safe_calloc(total, sizeof(float));
+        float* grad_out_host = (float*)safe_calloc(total, sizeof(float));
+        float* gamma_host = (float*)safe_calloc(channels, sizeof(float));
         if (!x_hat_host || !grad_out_host || !gamma_host) {
             safe_free((void**)&x_hat_host);
             safe_free((void**)&grad_out_host);
@@ -6638,7 +6638,7 @@ int vulkan_cross_entropy_loss_gradient(GpuContext* context,
                                 &pc, sizeof(pc), (unsigned int)((batch_size + 63) / 64), 1, 1) != 0) goto cleanup_ce;
 
     if (loss && loss_buf.mapped_ptr) {
-        float* loss_host = (float*)calloc(batch_size, sizeof(float));
+        float* loss_host = (float*)safe_calloc(batch_size, sizeof(float));
         if (loss_host) {
             memcpy(loss_host, loss_buf.mapped_ptr, batch_size * sizeof(float));
             double total_loss = 0.0;

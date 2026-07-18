@@ -202,6 +202,7 @@ typedef enum {
     API_POST_TRAINING_PAUSE = 110,         /**< 暂停训练 */
     API_POST_TRAINING_STOP = 111,          /**< 停止训练 */
     API_GET_TRAINING_HISTORY = 112,        /**< 获取训练历史 */
+    API_POST_TRAINING_META = 332,          /**< 元学习训练 POST /api/training/meta */
 
     /* ===== 硬件检测新端点 ===== */
     API_POST_HARDWARE_SCAN = 113,          /**< 扫描硬件 */
@@ -233,6 +234,14 @@ typedef enum {
     API_POST_KG_SEARCH = 318,              /**< 图谱语义搜索 POST /api/kg/search */
     API_POST_KG_SPARQL = 319,              /**< SPARQL查询 POST /api/kg/sparql */
     API_GET_KG_VISUALIZE = 320,            /**< 图谱可视化JSON导出 GET /api/kg/visualize */
+    
+    /* v9.18: 知识图谱高级图算法REST API — 暴露底层完整实现 */
+    API_GET_KG_BETWEENNESS = 323,          /**< Betweenness中心性 GET /api/kg/betweenness */
+    API_GET_KG_CLOSENESS = 324,            /**< Closeness中心性 GET /api/kg/closeness */
+    API_GET_KG_DIAMETER = 328,             /**< 图直径 GET /api/kg/diameter */
+    API_GET_KG_CLUSTERING = 329,           /**< 聚类系数 GET /api/kg/clustering */
+    API_GET_KG_CONNECTIVITY = 330,         /**< 连通分量 GET /api/kg/connectivity */
+    API_GET_KG_DEGREE_DIST = 331,          /**< 度分布 GET /api/kg/degree-dist */
     
     API_POST_CAMERA_SWITCH = 325,          /**< 切换摄像头 */
     API_POST_VIDEO_QUALITY = 326,          /**< 设置视频质量 */
@@ -524,7 +533,53 @@ typedef enum {
     API_POST_ROBOT_REGISTER = 357,            /**< 注册机器人 POST /api/robot/register */
     API_POST_LNN_CONFIG = 358,                /**< 更新LNN配置 POST /api/lnn/config */
 
-    /* ===== L-016修复: 哨兵值紧随最高枚举值（API_REQUEST_COUNT = 359，handler_table大小自动适配） ===== */
+    /* ===== v9.13修复: 15个缺失API端点（前端轮询调用但后端未注册） ===== */
+    API_GET_METRICS = 359,                     /**< 获取系统性能指标 GET /api/metrics */
+    API_GET_CONFIG = 360,                      /**< 获取系统配置 GET /api/config */
+    API_GET_SELF_STATUS = 361,                 /**< 获取自我状态 GET /api/self/status */
+    API_GET_SELF_COGNITION = 362,              /**< 获取自我认知 GET /api/self/cognition */
+    API_GET_SELF_IDENTITY = 363,               /**< 获取自我身份 GET /api/self/identity */
+    API_GET_MULTIMODAL_MODALITIES = 364,       /**< 获取多模态能力列表 GET /api/multimodal/modalities */
+    API_GET_LEARNING_PROGRESS = 365,           /**< 获取学习进度 GET /api/learning/progress */
+    API_GET_KNOWLEDGE_CATEGORIES = 366,        /**< 获取知识分类 GET /api/knowledge/categories */
+    API_GET_SLAM_STATUS = 367,                 /**< 获取SLAM状态 GET /api/slam/status */
+    API_GET_STEREO_STATUS = 368,               /**< 获取双目感知状态 GET /api/stereo/status */
+    API_GET_AGI_STATUS = 369,                  /**< 获取AGI综合状态 GET /api/agi/status */
+    API_POST_AGI_ANALYZE = 370,                /**< AGI分析请求 POST /api/agi/analyze */
+    API_POST_SELF_REFLECT = 371,               /**< 自我反思 POST /api/self/reflect */
+    API_POST_EVOLUTION_STEP = 372,             /**< 单步演化 POST /api/evolution/step */
+    API_POST_SAFETY_CHECK = 373,               /**< 安全检查 POST /api/safety/check */
+
+    /* v9.17: 符号推理API — 接入FOL一阶逻辑归结引擎 */
+    API_POST_REASONING_SYMBOLIC = 374,         /**< 符号推理 POST /api/reasoning/symbolic */
+
+    /* v9.20: P2语义网络API — 5个剪枝/聚类/推理/合并/重要性端点 */
+    API_POST_SEMANTIC_PRUNE = 375,             /**< 语义网络剪枝 POST /api/semantic/prune */
+    API_POST_SEMANTIC_CLUSTER = 376,           /**< 概念聚类 POST /api/semantic/cluster */
+    API_POST_SEMANTIC_INFER = 377,             /**< 关系推理 POST /api/semantic/infer */
+    API_POST_SEMANTIC_MERGE = 378,             /**< 语义网络合并 POST /api/semantic/merge */
+    API_GET_SEMANTIC_IMPORTANCE = 379,         /**< 概念重要性 GET /api/semantic/importance */
+    API_GET_LEARNING_EXPERIENCES = 380,        /**< 学习经验列表 GET /api/learning/experiences */
+
+    /* v9.21: 因果推理引擎端点 */
+    API_POST_CAUSAL_BUILD = 381,               /**< 构建因果图 POST /api/causal/build */
+    API_POST_CAUSAL_INFER = 382,               /**< 因果推理 POST /api/causal/infer */
+    API_POST_CAUSAL_COUNTERFACTUAL = 383,      /**< 反事实推理 POST /api/causal/counterfactual */
+    API_POST_CAUSAL_DISCOVER = 384,            /**< 因果发现 POST /api/causal/discover */
+    API_POST_CAUSAL_ESTIMATE = 385,            /**< 因果效应估计 POST /api/causal/estimate */
+
+    /* v9.21: 规划系统端点 */
+    API_POST_PLAN_GENERATE = 386,              /**< 生成规划 POST /api/plan/generate */
+    API_POST_PLAN_EXECUTE = 387,               /**< 执行规划 POST /api/plan/execute */
+    API_POST_PLAN_MULTI_OBJECTIVE = 388,       /**< 多目标规划 POST /api/plan/multi-objective */
+    API_POST_PLAN_MCTS = 389,                  /**< MCTS搜索 POST /api/plan/mcts */
+
+    /* v9.22: 演化触发/自我认知/语义扩散激活端点 */
+    API_POST_EVOLUTION_TRIGGER = 390,          /**< 演化触发 POST /api/evolution/trigger */
+    API_POST_COGNITION_SELF = 391,             /**< 自我认知 POST /api/cognition/self */
+    API_POST_SEMANTIC_DIFFUSE = 392,           /**< 语义扩散激活 POST /api/semantic/diffuse */
+
+    /* v9.18: 新增6个知识图谱高级图算法端点(323-331)，API_REQUEST_COUNT自动更新为393 */
     API_REQUEST_COUNT                        /**< 自动计算枚举最大值+1，反映API处理程序分发表大小 */
 } ApiRequestType;
 
@@ -548,7 +603,7 @@ typedef struct {
     time_t created_at;               /**< 创建时间 */
     time_t expires_at;               /**< 过期时间（0=永不过期） */
     time_t last_used_at;             /**< 最后使用时间 */
-    int usage_count;                 /**< 使用次数 */
+    volatile long usage_count;       /**< 使用次数（volatile long适配InterlockedIncrement，兼容LONG） */
 } ApiKeyEntry;
 
 /**

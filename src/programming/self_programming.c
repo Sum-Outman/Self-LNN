@@ -226,7 +226,9 @@ static void parser_init(ParserState* state, const char* source) {
  * @brief 前进到下一个字符
  */
 static void parser_advance(ParserState* state) {
-    if (!state || state->position >= state->length) {
+    /* 修复缺陷1: 将NULL检查与position检查拆分，防止NULL解引用 */
+    if (!state) return;
+    if (state->position >= state->length) {
         state->current_char = '\0';
         return;
     }
@@ -916,7 +918,10 @@ static ASTNode* parse_primary(ParserState* state) {
                 node->value.int_value = atoi(token.value);
             }
         }
-        if (token.value) safe_free((void**)&token.value);
+        /* D11修复: 不释放token.value。parser_consume_token后
+         * state->current_token.value仍指向同一内存，下一次
+         * parser_peek_token会调用safe_free释放它。此处释放会导致双重释放
+         * →堆损坏(0xC0000374)。 */
         return node;
     }
     
@@ -924,9 +929,12 @@ static ASTNode* parse_primary(ParserState* state) {
         parser_consume_token(state);
         ASTNode* node = create_ast_node(AST_LITERAL);
         if (node) {
+            /* D11修复: string_duplicate_nullable创建副本，
+             * 原始token.value由下一次parser_peek_token释放。 */
             node->value.string_value = string_duplicate_nullable(token.value);
         }
-        if (token.value) safe_free((void**)&token.value);
+        /* D11修复: 不释放token.value。与NUMBER分支同理，
+         * 下一次parser_peek_token会释放state->current_token.value。 */
         return node;
     }
     
@@ -1721,8 +1729,7 @@ ASTNode* parse_source_code(SelfProgrammingEngine* engine, const char* source_cod
                 int saved_line = state.line;
                 int saved_col = state.column;
                 char saved_char = state.current_char;
-                int saved_token_avail = state.token_available;
-                Token saved_token = state.current_token;
+                /* D11修复: 不再保存saved_token/saved_token_avail — 悬空指针风险 */
                 
                 // 解析返回类型
                 ASTNode* type_node = parse_type(&state);
@@ -1768,8 +1775,10 @@ ASTNode* parse_source_code(SelfProgrammingEngine* engine, const char* source_cod
                                     state.line = saved_line;
                                     state.column = saved_col;
                                     state.current_char = saved_char;
-                                    state.token_available = saved_token_avail;
-                                    state.current_token = saved_token;
+                                    /* D11修复: 不恢复saved_token。saved_token.value在解析
+                                     * 尝试过程中已被parser_peek_token释放(悬空指针)。
+                                     * token_available=0让下次peek重新解析并正确释放当前值。 */
+                                    state.token_available = 0;
                                 }
                                 
                                 if (func_node) {
@@ -1789,8 +1798,8 @@ ASTNode* parse_source_code(SelfProgrammingEngine* engine, const char* source_cod
                             state.line = saved_line;
                             state.column = saved_col;
                             state.current_char = saved_char;
-                            state.token_available = saved_token_avail;
-                            state.current_token = saved_token;
+                            /* D11修复: 悬空指针恢复 → token_available=0 */
+                            state.token_available = 0;
                         }
                     } else {
                         // 不是标识符，恢复状态
@@ -1798,8 +1807,8 @@ ASTNode* parse_source_code(SelfProgrammingEngine* engine, const char* source_cod
                         state.line = saved_line;
                         state.column = saved_col;
                         state.current_char = saved_char;
-                        state.token_available = saved_token_avail;
-                        state.current_token = saved_token;
+                        /* D11修复: 悬空指针恢复 → token_available=0 */
+                        state.token_available = 0;
                     }
                 } else {
                     // 不是类型，恢复状态
@@ -1807,8 +1816,8 @@ ASTNode* parse_source_code(SelfProgrammingEngine* engine, const char* source_cod
                     state.line = saved_line;
                     state.column = saved_col;
                     state.current_char = saved_char;
-                    state.token_available = saved_token_avail;
-                    state.current_token = saved_token;
+                    /* D11修复: 悬空指针恢复 → token_available=0 */
+                    state.token_available = 0;
                 }
             }
         }
@@ -1849,7 +1858,14 @@ void ast_destroy(ASTNode* ast) {
         safe_free((void**)&ast->name);
     }
     
-    if (ast->type == AST_LITERAL && ast->value.string_value) {
+    /* D13修复: NUMBER字面量与STRING字面量共享AST_LITERAL类型。
+     * value是union，NUMBER字面量的int_value/float_value与string_value共用内存。
+     * 当int_value为小整数(如1)时，string_value被误判为非空指针(0x1)，
+     * safe_free尝试释放它→堆损坏→ACCESS_VIOLATION。
+     * 修复: 检查值是否在有效堆地址范围(>64KB)。所有现代OS的NULL保留区
+     * 至少64KB，任何小于此值的指针都不是有效堆分配。 */
+    if (ast->type == AST_LITERAL && ast->value.string_value
+        && (uintptr_t)ast->value.string_value > 0xFFFF) {
         safe_free((void**)&ast->value.string_value);
     }
     
@@ -2581,7 +2597,8 @@ int execute_code_sandboxed(SelfProgrammingEngine* engine,
     char temp_dir[MAX_PATH];
     char temp_path[MAX_PATH];
     if (GetTempPathA(sizeof(temp_path), temp_path) == 0) {
-        strcpy(temp_path, ".");
+        /* v9.15修复: 使用snprintf替代strcpy，统一安全函数规范 */
+        snprintf(temp_path, sizeof(temp_path), ".");
     }
     snprintf(temp_dir, sizeof(temp_dir), "%s", temp_path);
     
@@ -3069,6 +3086,15 @@ CodeQualityResult self_check_code_gen_quality(SelfProgrammingEngine* engine,
     result.quality_score = 100.0f;
     size_t detail_pos = 0;
     
+    /* 修复缺陷4: 防止snprintf的detail_pos无符号下溢的安全追加宏 */
+    #define SAFE_DETAIL_APPEND(fmt, ...) do { \
+        if (detail_pos < sizeof(result.details)) { \
+            int _w = snprintf(result.details + detail_pos, \
+                             sizeof(result.details) - detail_pos, fmt, ##__VA_ARGS__); \
+            if (_w > 0) detail_pos += (size_t)_w; \
+        } \
+    } while(0)
+    
     if (!engine || !source_code) {
         result.has_syntax_errors = 1;
         result.quality_score = 0.0f;
@@ -3086,12 +3112,8 @@ CodeQualityResult self_check_code_gen_quality(SelfProgrammingEngine* engine,
         return result;
     }
     
-    detail_pos += snprintf(result.details + detail_pos,
-                           sizeof(result.details) - detail_pos,
-                           "=== 代码质量自检报告 ===\n");
-    detail_pos += snprintf(result.details + detail_pos,
-                           sizeof(result.details) - detail_pos,
-                           "代码长度：%zu 字符\n", source_len);
+    SAFE_DETAIL_APPEND("=== 代码质量自检报告 ===\n");
+    SAFE_DETAIL_APPEND("代码长度：%zu 字符\n", source_len);
     
     // 1. 语法验证：通过解析器验证
     ASTNode* ast = parse_source_code(engine, source_code);
@@ -3101,23 +3123,13 @@ CodeQualityResult self_check_code_gen_quality(SelfProgrammingEngine* engine,
         analyze_code_complexity(engine, ast, &analysis);
         
         result.has_syntax_errors = 0;
-        detail_pos += snprintf(result.details + detail_pos,
-                               sizeof(result.details) - detail_pos,
-                               "语法验证：通过\n");
-        detail_pos += snprintf(result.details + detail_pos,
-                               sizeof(result.details) - detail_pos,
-                               "函数数量：%d\n", analysis.function_count);
-        detail_pos += snprintf(result.details + detail_pos,
-                               sizeof(result.details) - detail_pos,
-                               "变量数量：%d\n", analysis.variable_count);
-        detail_pos += snprintf(result.details + detail_pos,
-                               sizeof(result.details) - detail_pos,
-                               "圈复杂度：%d\n", analysis.cyclomatic_complexity);
-        detail_pos += snprintf(result.details + detail_pos,
-                               sizeof(result.details) - detail_pos,
-                               "可维护性指数：%.1f\n", analysis.maintainability_index);
+        SAFE_DETAIL_APPEND("语法验证：通过\n");
+        SAFE_DETAIL_APPEND("函数数量：%d\n", analysis.function_count);
+        SAFE_DETAIL_APPEND("变量数量：%d\n", analysis.variable_count);
+        SAFE_DETAIL_APPEND("圈复杂度：%d\n", analysis.cyclomatic_complexity);
+        SAFE_DETAIL_APPEND("可维护性指数：%.1f\n", analysis.maintainability_index);
         
-        ast_destroy(ast);
+        /* v7.1修复: ast_destroy移到函数末尾(H-017代码之后), 防止use-after-free */
     } else {
         result.has_syntax_errors = 1;
         result.issue_count++;
@@ -3125,9 +3137,7 @@ CodeQualityResult self_check_code_gen_quality(SelfProgrammingEngine* engine,
         if (result.quality_score > syntax_penalty) {
             result.quality_score -= syntax_penalty;
         }
-        detail_pos += snprintf(result.details + detail_pos,
-                               sizeof(result.details) - detail_pos,
-                               "语法验证：失败 - 存在语法错误\n");
+        SAFE_DETAIL_APPEND("语法验证：失败 - 存在语法错误\n");
     }
     
     // 2. 符号引用完整性检查
@@ -3173,9 +3183,7 @@ CodeQualityResult self_check_code_gen_quality(SelfProgrammingEngine* engine,
         result.issue_count++;
         float penalty = 15.0f;
         if (result.quality_score > penalty) result.quality_score -= penalty;
-        detail_pos += snprintf(result.details + detail_pos,
-                               sizeof(result.details) - detail_pos,
-                               "括号不匹配：大括号 %s %d 个\n",
+        SAFE_DETAIL_APPEND("括号不匹配：大括号 %s %d 个\n",
                                open_braces > 0 ? "缺少" : "多余",
                                abs(open_braces));
     }
@@ -3183,9 +3191,7 @@ CodeQualityResult self_check_code_gen_quality(SelfProgrammingEngine* engine,
         result.issue_count++;
         float penalty = 10.0f;
         if (result.quality_score > penalty) result.quality_score -= penalty;
-        detail_pos += snprintf(result.details + detail_pos,
-                               sizeof(result.details) - detail_pos,
-                               "括号不匹配：圆括号 %s %d 个\n",
+        SAFE_DETAIL_APPEND("括号不匹配：圆括号 %s %d 个\n",
                                open_parens > 0 ? "缺少" : "多余",
                                abs(open_parens));
     }
@@ -3193,9 +3199,7 @@ CodeQualityResult self_check_code_gen_quality(SelfProgrammingEngine* engine,
         result.issue_count++;
         float penalty = 10.0f;
         if (result.quality_score > penalty) result.quality_score -= penalty;
-        detail_pos += snprintf(result.details + detail_pos,
-                               sizeof(result.details) - detail_pos,
-                               "括号不匹配：方括号 %s %d 个\n",
+        SAFE_DETAIL_APPEND("括号不匹配：方括号 %s %d 个\n",
                                open_brackets > 0 ? "缺少" : "多余",
                                abs(open_brackets));
     }
@@ -3220,14 +3224,10 @@ CodeQualityResult self_check_code_gen_quality(SelfProgrammingEngine* engine,
         result.issue_count += unsafe_count;
         float penalty = (float)(unsafe_count * 5);
         if (result.quality_score > penalty) result.quality_score -= penalty;
-        detail_pos += snprintf(result.details + detail_pos,
-                               sizeof(result.details) - detail_pos,
-                               "内存安全：发现 %d 个不安全函数调用\n", unsafe_count);
+        SAFE_DETAIL_APPEND("内存安全：发现 %d 个不安全函数调用\n", unsafe_count);
     } else {
         result.memory_safe = 1;
-        detail_pos += snprintf(result.details + detail_pos,
-                               sizeof(result.details) - detail_pos,
-                               "内存安全：未发现明显问题\n");
+        SAFE_DETAIL_APPEND("内存安全：未发现明显问题\n");
     }
     
     // 4. 类型一致性检查（基于关键字）
@@ -3245,13 +3245,9 @@ CodeQualityResult self_check_code_gen_quality(SelfProgrammingEngine* engine,
     }
     
     if (strstr(source_code, "void main") || strstr(source_code, "int main")) {
-        detail_pos += snprintf(result.details + detail_pos,
-                               sizeof(result.details) - detail_pos,
-                               "主函数定义：存在\n");
+        SAFE_DETAIL_APPEND("主函数定义：存在\n");
     } else if (type_count > 0) {
-        detail_pos += snprintf(result.details + detail_pos,
-                               sizeof(result.details) - detail_pos,
-                               "类型声明检查：通过\n");
+        SAFE_DETAIL_APPEND("类型声明检查：通过\n");
     }
     
     // 5. 递归深度分析
@@ -3265,9 +3261,7 @@ CodeQualityResult self_check_code_gen_quality(SelfProgrammingEngine* engine,
     if (recursion_depth > 10) {
         result.recursion_depth_safe = 0;
         result.issue_count++;
-        detail_pos += snprintf(result.details + detail_pos,
-                               sizeof(result.details) - detail_pos,
-                               "递归深度：超过安全阈值\n");
+        SAFE_DETAIL_APPEND("递归深度：超过安全阈值\n");
     } else {
         result.recursion_depth_safe = 1;
     }
@@ -3275,13 +3269,9 @@ CodeQualityResult self_check_code_gen_quality(SelfProgrammingEngine* engine,
     // 6. 编译验证
     CompilationResult comp_result = verify_code_compilation(engine, source_code);
     if (comp_result.success) {
-        detail_pos += snprintf(result.details + detail_pos,
-                               sizeof(result.details) - detail_pos,
-                               "编译验证：通过\n");
+        SAFE_DETAIL_APPEND("编译验证：通过\n");
     } else {
-        detail_pos += snprintf(result.details + detail_pos,
-                               sizeof(result.details) - detail_pos,
-                               "编译验证：失败（%d错误，%d警告）\n",
+        SAFE_DETAIL_APPEND("编译验证：失败（%d错误，%d警告）\n",
                                comp_result.error_count, comp_result.warning_count);
         result.issue_count += comp_result.error_count;
         float compile_penalty = (float)(comp_result.error_count * 10 + comp_result.warning_count * 3);
@@ -3293,12 +3283,8 @@ CodeQualityResult self_check_code_gen_quality(SelfProgrammingEngine* engine,
     }
     if (result.quality_score < 0.0f) result.quality_score = 0.0f;
     
-    detail_pos += snprintf(result.details + detail_pos,
-                           sizeof(result.details) - detail_pos,
-                           "\n综合质量评分：%.1f / 100.0\n", result.quality_score);
-    detail_pos += snprintf(result.details + detail_pos,
-                           sizeof(result.details) - detail_pos,
-                           "发现问题总数：%d\n", result.issue_count);
+    SAFE_DETAIL_APPEND("\n综合质量评分：%.1f / 100.0\n", result.quality_score);
+    SAFE_DETAIL_APPEND("发现问题总数：%d\n", result.issue_count);
     
     /* H-017集成: 调用编程增强进行重构分析、性能分析、安全扫描 */
     if (engine->penh_engine && ast) {
@@ -3307,9 +3293,7 @@ CodeQualityResult self_check_code_gen_quality(SelfProgrammingEngine* engine,
         memset(&refactor_plan, 0, sizeof(PenhRefactorPlan));
         penh_analyze_refactoring(engine->penh_engine, ast, &refactor_plan);
         if (refactor_plan.action_count > 0) {
-            detail_pos += snprintf(result.details + detail_pos,
-                                   sizeof(result.details) - detail_pos,
-                                   "重构建议：%d个优化操作\n", refactor_plan.action_count);
+            SAFE_DETAIL_APPEND("重构建议：%d个优化操作\n", refactor_plan.action_count);
         }
         
         /* 性能分析 */
@@ -3317,9 +3301,7 @@ CodeQualityResult self_check_code_gen_quality(SelfProgrammingEngine* engine,
         memset(&perf_result, 0, sizeof(PenhPerfResult));
         penh_analyze_performance(source_code, ast, &perf_result);
         if (perf_result.issue_count > 0) {
-            detail_pos += snprintf(result.details + detail_pos,
-                                   sizeof(result.details) - detail_pos,
-                                   "性能问题：%d个瓶颈(%.1f分)\n", perf_result.issue_count, perf_result.overall_score);
+            SAFE_DETAIL_APPEND("性能问题：%d个瓶颈(%.1f分)\n", perf_result.issue_count, perf_result.overall_score);
         }
         
         /* 安全漏洞扫描 */
@@ -3327,12 +3309,15 @@ CodeQualityResult self_check_code_gen_quality(SelfProgrammingEngine* engine,
         memset(&sec_result, 0, sizeof(PenhSecurityResult));
         penh_scan_security(source_code, ast, &sec_result);
         if (sec_result.vuln_count > 0) {
-            detail_pos += snprintf(result.details + detail_pos,
-                                   sizeof(result.details) - detail_pos,
-                                   "安全漏洞：%d个风险(%.1f分)\n", sec_result.vuln_count, sec_result.overall_risk_score);
+            SAFE_DETAIL_APPEND("安全漏洞：%d个风险(%.1f分)\n", sec_result.vuln_count, sec_result.overall_risk_score);
         }
     }
     
+    /* v7.1修复: ast_destroy延迟到H-017集成代码之后执行，防止use-after-free */
+    if (ast) {
+        ast_destroy(ast);
+    }
+    #undef SAFE_DETAIL_APPEND
     return result;
 }
 
@@ -3367,15 +3352,27 @@ CodeSpecification* create_code_specification(const char* function_name,
  */
 int code_spec_add_parameter(CodeSpecification* spec, const char* name, DataType type) {
     if (!spec || !name) return SELFLNN_ERROR_INVALID_ARGUMENT;
-    DataType* new_types = (DataType*)safe_realloc(spec->param_types,
-                              (spec->param_count + 1) * sizeof(DataType));
-    char** new_names = (char**)safe_realloc(spec->param_names,
-                            (spec->param_count + 1) * sizeof(char*));
+    /* 修复缺陷2: 先用临时变量分配新数组，全部成功后再更新spec字段 */
+    /* 使用safe_malloc+memcpy替代safe_realloc，避免连锁失败导致spec字段不一致 */
+    DataType* new_types = (DataType*)safe_malloc((spec->param_count + 1) * sizeof(DataType));
+    char** new_names = (char**)safe_malloc((spec->param_count + 1) * sizeof(char*));
     if (!new_types || !new_names) {
+        /* 失败时释放临时变量，原spec字段保持不变 */
         safe_free((void**)&new_types);
         safe_free((void**)&new_names);
         return SELFLNN_ERROR_OUT_OF_MEMORY;
     }
+    /* 复制旧数据到新数组 */
+    if (spec->param_types && spec->param_count > 0) {
+        memcpy(new_types, spec->param_types, spec->param_count * sizeof(DataType));
+    }
+    if (spec->param_names && spec->param_count > 0) {
+        memcpy(new_names, spec->param_names, spec->param_count * sizeof(char*));
+    }
+    /* 释放旧数组 */
+    safe_free((void**)&spec->param_types);
+    safe_free((void**)&spec->param_names);
+    /* 全部成功后再更新spec字段 */
     spec->param_types = new_types;
     spec->param_names = new_names;
     spec->param_types[spec->param_count] = type;
@@ -3948,23 +3945,33 @@ SemanticAnalysisResult* semantic_analyze(SelfProgrammingEngine* engine,
                           &result->type_errors, &result->type_error_count, &err_cap);
     
     size_t detail_pos = 0;
-    detail_pos += snprintf(result->details + detail_pos, sizeof(result->details) - detail_pos,
-                           "=== 语义分析报告 ===\n");
-    detail_pos += snprintf(result->details + detail_pos, sizeof(result->details) - detail_pos,
-                           "符号数量: %zu\n", result->symbol_count);
-    detail_pos += snprintf(result->details + detail_pos, sizeof(result->details) - detail_pos,
-                           "作用域错误: %zu\n", result->scope_error_count);
-    detail_pos += snprintf(result->details + detail_pos, sizeof(result->details) - detail_pos,
-                           "类型错误: %zu\n", result->type_error_count);
+    /* v9.11修复: 每次snprintf前检查剩余空间，防止size_t下溢 */
+    size_t detail_buf_size = sizeof(result->details);
+    if (detail_pos < detail_buf_size) {
+        detail_pos += snprintf(result->details + detail_pos, detail_buf_size - detail_pos,
+                               "=== 语义分析报告 ===\n");
+    }
+    if (detail_pos < detail_buf_size) {
+        detail_pos += snprintf(result->details + detail_pos, detail_buf_size - detail_pos,
+                               "符号数量: %zu\n", result->symbol_count);
+    }
+    if (detail_pos < detail_buf_size) {
+        detail_pos += snprintf(result->details + detail_pos, detail_buf_size - detail_pos,
+                               "作用域错误: %zu\n", result->scope_error_count);
+    }
+    if (detail_pos < detail_buf_size) {
+        detail_pos += snprintf(result->details + detail_pos, detail_buf_size - detail_pos,
+                               "类型错误: %zu\n", result->type_error_count);
+    }
     
-    for (size_t i = 0; i < result->scope_error_count; i++) {
-        detail_pos += snprintf(result->details + detail_pos, sizeof(result->details) - detail_pos,
+    for (size_t i = 0; i < result->scope_error_count && detail_pos < detail_buf_size; i++) {
+        detail_pos += snprintf(result->details + detail_pos, detail_buf_size - detail_pos,
                                "  [作用域错误] %s\n",
                                result->scope_errors[i] ? result->scope_errors[i] : "未知错误");
     }
     
-    for (size_t i = 0; i < result->type_error_count; i++) {
-        detail_pos += snprintf(result->details + detail_pos, sizeof(result->details) - detail_pos,
+    for (size_t i = 0; i < result->type_error_count && detail_pos < detail_buf_size; i++) {
+        detail_pos += snprintf(result->details + detail_pos, detail_buf_size - detail_pos,
                                "  [类型错误] %s\n",
                                result->type_errors[i] ? result->type_errors[i] : "未知错误");
     }

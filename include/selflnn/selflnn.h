@@ -564,6 +564,9 @@ SELFLNN_API UnifiedLNNState* selflnn_get_unified_lnn_state(void);
 SELFLNN_API UnifiedState*    selflnn_get_unified_state(void);
 SELFLNN_API void selflnn_enforce_single_lnn(void);
 SELFLNN_API int selflnn_is_single_lnn_enforced(void);
+
+/* 临时禁用单LNN强制策略，用于系统关闭时正确释放全局LNN */
+SELFLNN_API void selflnn_disable_single_lnn_enforcement(void);
 /* P0修复: LNN线程安全访问锁，供后端API使用 */
 SELFLNN_API void selflnn_lock_lnn(void);
 SELFLNN_API void selflnn_unlock_lnn(void);

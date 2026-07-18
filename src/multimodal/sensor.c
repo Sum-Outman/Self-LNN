@@ -573,10 +573,10 @@ typedef struct {
 } CalibrationBuffer;
 
 static CalibrationBuffer* calib_buf_create(int capacity) {
-    CalibrationBuffer* cb = (CalibrationBuffer*)calloc(1, sizeof(CalibrationBuffer));
+    CalibrationBuffer* cb = (CalibrationBuffer*)safe_calloc(1, sizeof(CalibrationBuffer));
     if (!cb) return NULL;
-    cb->buffer = (float*)calloc((size_t)capacity, sizeof(float));
-    if (!cb->buffer) { free(cb); return NULL; }
+    cb->buffer = (float*)safe_calloc((size_t)capacity, sizeof(float));
+    if (!cb->buffer) { safe_free((void**)&cb); return NULL; }
     cb->capacity = capacity;
     cb->count = 0;
     return cb;
@@ -590,8 +590,8 @@ static void calib_buf_push(CalibrationBuffer* cb, float val) {
 
 static void calib_buf_free(CalibrationBuffer* cb) {
     if (!cb) return;
-    free(cb->buffer);
-    free(cb);
+    safe_free((void**)&cb->buffer);
+    safe_free((void**)&cb);
 }
 
 int sensor_calibrate_noise(SensorProcessor* processor,

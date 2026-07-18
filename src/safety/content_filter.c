@@ -492,14 +492,31 @@ int content_filter_check(ContentFilter* filter, const char* content,
             }
         }
         float lnn_output[CONTENT_FILTER_EMBED_DIM];
+        float* heap_output = NULL;
         int lnn_forward_success = 0;
-        if (lnn_forward((LNN*)lnn_for_semantic, input_embed, lnn_output) == 0) {
+        /* P0修复: 单LNN强制策略可能将内部CfC(128维)替换为全局LNN(256维)，
+         * 导致栈缓冲区溢出。检查输出维度，必要时使用堆分配缓冲区。 */
+        size_t actual_output_size = lnn_get_output_size((LNN*)lnn_for_semantic);
+        float* lnn_output_ptr = lnn_output;
+        if (actual_output_size > CONTENT_FILTER_EMBED_DIM) {
+            heap_output = (float*)safe_malloc(actual_output_size * sizeof(float));
+            if (heap_output) {
+                lnn_output_ptr = heap_output;
+                log_info("[内容过滤] 检测到LNN输出维度(%zu)超过嵌入维度(%d)，使用堆缓冲区防止栈溢出",
+                         actual_output_size, CONTENT_FILTER_EMBED_DIM);
+            } else {
+                /* 堆分配失败，回退到关键词匹配 */
+                log_warning("[内容过滤] 堆缓冲区分配失败，语义评分跳过");
+                cached_enable_semantic = 0;
+            }
+        }
+        if (cached_enable_semantic && lnn_forward((LNN*)lnn_for_semantic, input_embed, lnn_output_ptr) == 0) {
             lnn_forward_success = 1;
             float output_energy = 0.0f;
             int active_dims = 0;
             float max_activation = 0.0f;
             for (int d = 0; d < CONTENT_FILTER_EMBED_DIM; d++) {
-                float val = lnn_output[d];
+                float val = lnn_output_ptr[d];
                 output_energy += val * val;
                 if (fabsf(val) > 0.1f) active_dims++;
                 if (fabsf(val) > max_activation) max_activation = fabsf(val);
@@ -528,6 +545,10 @@ int content_filter_check(ContentFilter* filter, const char* content,
                 highest_score = semantic_score;
                 strncpy(detected_pattern, "[语义检测]", sizeof(detected_pattern) - 1);
             }
+        }
+        /* 释放堆缓冲区（如果有） */
+        if (heap_output) {
+            safe_free((void**)&heap_output);
         }
 
         /* P2-03修复: 内部CfC/LNN推理失败时的统计特征fallback

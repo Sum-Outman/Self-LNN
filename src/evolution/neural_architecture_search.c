@@ -794,6 +794,11 @@ int nas_save_state(NASSystem* system, const char* filepath) {
         save_architecture_to_stream(system->best_architecture, file);
     }
     
+    /* 缺陷修复: 使用ferror检查所有fprintf写入是否出错 */
+    if (ferror(file)) {
+        fclose(file);
+        return -1;
+    }
     fclose(file);
     return 0;
 }

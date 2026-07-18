@@ -77,6 +77,9 @@ static float min_float(float a, float b)
 
 static void cfc_step_p(float* h, const float* input, int dim, float tau, float dt)
 {
+    /* P-4: 输入边界检查，防止非法参数导致未定义行为 */
+    if (!h || dim <= 0 || dim > 16384) return;
+    if (tau <= 0.0f || dt <= 0.0f || dt > 1.0f || tau > 1000.0f) return;
     for (int i = 0; i < dim; i++) {
         float x = input ? input[i % dim] : 0.0f;
         float gate = sigmoid_p(h[i] + x);
@@ -90,9 +93,19 @@ static void cfc_step_p(float* h, const float* input, int dim, float tau, float d
 static int ensure_capacity(void** ptr, int* capacity, int new_count, size_t elem_size, int init_cap)
 {
     if (new_count <= *capacity) return 0;
-    int new_cap = *capacity == 0 ? init_cap : *capacity * 2;
-    while (new_cap < new_count) new_cap *= 2;
-    void* tmp = realloc(*ptr, (size_t)new_cap * elem_size);
+    /* P-2: 检查int溢出——在乘法前验证不会超过INT_MAX */
+    int new_cap;
+    if (*capacity == 0) {
+        new_cap = init_cap;
+    } else {
+        if (*capacity > INT_MAX / 2) return -1; /* 容量溢出 */
+        new_cap = *capacity * 2;
+    }
+    while (new_cap < new_count) {
+        if (new_cap > INT_MAX / 2) return -1; /* 容量溢出 */
+        new_cap *= 2;
+    }
+    void* tmp = safe_realloc(*ptr, (size_t)new_cap * elem_size);
     if (!tmp) return -1;
     *ptr = tmp;
     *capacity = new_cap;
@@ -132,13 +145,22 @@ PlanEnhancedEngine* plan_enhanced_create(const PlanEnhancedConfig* config)
     engine->agents = NULL;
     /* 初始化CfC状态 */
     engine->cfc_dim = 64;
+    /* P-6: 逐个检查safe_calloc返回值，避免对NULL指针的后续操作 */
     engine->cfc_state = (float*)safe_calloc((size_t)engine->cfc_dim, sizeof(float));
+    if (!engine->cfc_state) {
+        safe_free((void**)&engine);
+        return NULL;
+    }
     engine->cfc_gate = (float*)safe_calloc((size_t)engine->cfc_dim, sizeof(float));
+    if (!engine->cfc_gate) {
+        safe_free((void**)&engine->cfc_state);
+        safe_free((void**)&engine);
+        return NULL;
+    }
     engine->cfc_act = (float*)safe_calloc((size_t)engine->cfc_dim, sizeof(float));
-    if (!engine->cfc_state || !engine->cfc_gate || !engine->cfc_act) {
+    if (!engine->cfc_act) {
         safe_free((void**)&engine->cfc_state);
         safe_free((void**)&engine->cfc_gate);
-        safe_free((void**)&engine->cfc_act);
         safe_free((void**)&engine);
         return NULL;
     }
@@ -456,6 +478,7 @@ int plan_enhanced_generate_temporal(PlanEnhancedEngine* engine,
     } BeamCandidate;
 
     BeamCandidate beams[PLAN_MAX_BEAM];
+    memset(beams, 0, sizeof(beams)); /* P-1: 清零BeamCandidate数组，确保所有指针字段为NULL */
     int beam_count = 1;
     /* 初始化第0条beam */
     beams[0].state = (float*)safe_malloc(state_size * sizeof(float));
@@ -714,7 +737,7 @@ PlanLandmarkGraph* plan_enhanced_extract_landmarks(PlanEnhancedEngine* engine,
         if (goal_state[i] > 0.5f && initial_state[i] <= 0.5f) {
             if (graph->landmark_count >= graph->landmark_capacity) {
                 int new_cap = graph->landmark_capacity * 2;
-                PlanLandmark* tmp = (PlanLandmark*)realloc(graph->landmarks,
+                PlanLandmark* tmp = (PlanLandmark*)safe_realloc(graph->landmarks,
                     (size_t)new_cap * sizeof(PlanLandmark));
                 if (!tmp) break;
                 graph->landmarks = tmp;
@@ -757,7 +780,7 @@ PlanLandmarkGraph* plan_enhanced_extract_landmarks(PlanEnhancedEngine* engine,
                         if (already_landmark) continue;
                         if (graph->landmark_count >= graph->landmark_capacity) {
                             int new_cap = graph->landmark_capacity * 2;
-                            PlanLandmark* tmp = (PlanLandmark*)realloc(graph->landmarks,
+                            PlanLandmark* tmp = (PlanLandmark*)safe_realloc(graph->landmarks,
                                 (size_t)new_cap * sizeof(PlanLandmark));
                             if (!tmp) break;
                             graph->landmarks = tmp;
@@ -1047,6 +1070,8 @@ int plan_enhanced_generate_landmark_based(PlanEnhancedEngine* engine,
             if (open_count >= LM_MAX_OPEN) break;
 
             int child = open_count++;
+            /* P-7: 偏移量边界检查，防止open_state_data越界访问 */
+            if (child >= LM_MAX_OPEN) break;
             open_states[child] = open_state_data + (size_t)child * state_size;
             memcpy(open_states[child], cur_state, state_size * sizeof(float));
             /* 应用效果 */
@@ -1103,6 +1128,10 @@ int plan_enhanced_generate_landmark_based(PlanEnhancedEngine* engine,
     }
 
     /* 反转路径 */
+    /* P-3: 释放旧指针避免覆盖泄漏 */
+    safe_free((void**)&result->action_ids);
+    safe_free((void**)&result->start_times);
+    safe_free((void**)&result->end_times);
     result->action_ids = (int*)safe_malloc((size_t)path_len * sizeof(int));
     result->start_times = (float*)safe_calloc((size_t)path_len, sizeof(float));
     result->end_times = (float*)safe_calloc((size_t)path_len, sizeof(float));
@@ -1536,6 +1565,10 @@ int plan_enhanced_generate_symbolic(PlanSymbolicPlanner* planner,
     }
 
     /* 反转路径到结果 */
+    /* P-3: 释放旧指针避免覆盖泄漏 */
+    safe_free((void**)&result->action_ids);
+    safe_free((void**)&result->start_times);
+    safe_free((void**)&result->end_times);
     result->action_ids = (int*)safe_malloc((size_t)path_len * sizeof(int));
     result->start_times = (float*)safe_calloc((size_t)path_len, sizeof(float));
     result->end_times = (float*)safe_calloc((size_t)path_len, sizeof(float));
@@ -1655,6 +1688,11 @@ int plan_enhanced_generate_htn(PlanEnhancedEngine* engine,
     if (root_task_id < 0 || root_task_id >= engine->htn_task_count) return -1;
     int max_steps = engine->config.max_plan_length > 0 ?
                     engine->config.max_plan_length : 200;
+    /* P-3: 释放旧指针避免覆盖泄漏 */
+    safe_free((void**)&result->action_ids);
+    safe_free((void**)&result->start_times);
+    safe_free((void**)&result->end_times);
+    safe_free((void**)&result->assigned_agents);
     result->action_ids = (int*)safe_calloc((size_t)max_steps, sizeof(int));
     result->start_times = (float*)safe_calloc((size_t)max_steps, sizeof(float));
     result->end_times = (float*)safe_calloc((size_t)max_steps, sizeof(float));
@@ -1854,7 +1892,7 @@ int plan_enhanced_generate_conditional(PlanEnhancedEngine* engine,
         memcpy(branch_state, initial_state, state_size * sizeof(float));
         for (int v = 0; v < num_sensing_vars; v++) {
             int var_idx = sensing_vars[v];
-            if (var_idx >= 0 && var_idx < (int)state_size) {
+            if (var_idx >= 0 && (size_t)var_idx < state_size) { /* P-5: 使用size_t比较避免截断 */
                 /* 分支b的第v位决定该感知变量的值 */
                 branch_state[var_idx] = (b >> v) & 1 ? 1.0f : 0.0f;
             }
@@ -2507,6 +2545,11 @@ int plan_enhanced_generate_ff(PlanEnhancedEngine* engine,
     if (engine->action_count <= 0) return -1;
     int max_steps = engine->config.max_plan_length > 0 ?
                     engine->config.max_plan_length : 100;
+    /* P-3: 释放旧指针避免覆盖泄漏 */
+    safe_free((void**)&result->action_ids);
+    safe_free((void**)&result->start_times);
+    safe_free((void**)&result->end_times);
+    safe_free((void**)&result->assigned_agents);
     result->action_ids = (int*)safe_calloc((size_t)max_steps, sizeof(int));
     result->start_times = (float*)safe_calloc((size_t)max_steps, sizeof(float));
     result->end_times = (float*)safe_calloc((size_t)max_steps, sizeof(float));
@@ -2601,6 +2644,11 @@ int plan_enhanced_generate_ffd(PlanEnhancedEngine* engine,
     if (engine->action_count <= 0) return -1;
     int max_steps = engine->config.max_plan_length > 0 ?
                     engine->config.max_plan_length : 100;
+    /* P-3: 释放旧指针避免覆盖泄漏 */
+    safe_free((void**)&result->action_ids);
+    safe_free((void**)&result->start_times);
+    safe_free((void**)&result->end_times);
+    safe_free((void**)&result->assigned_agents);
     result->action_ids = (int*)safe_calloc((size_t)max_steps, sizeof(int));
     result->start_times = (float*)safe_calloc((size_t)max_steps, sizeof(float));
     result->end_times = (float*)safe_calloc((size_t)max_steps, sizeof(float));

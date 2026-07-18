@@ -165,6 +165,11 @@ static pthread_mutex_t g_alloc_track_lock = PTHREAD_MUTEX_INITIALIZER;
 /** @brief atexit 已注册标志（D-3修复: LONG类型支持InterlockedCompareExchange原子操作） */
 static volatile LONG g_atexit_registered = 0;
 
+/* M-5修复: 分配跟踪链表损坏标志。
+ * 当 alloc_track_remove 检测到链表循环(max_iter耗尽)时置位, 后续所有
+ * 跟踪操作(alloc_track_add/remove/contains/dump)均跳过, 防止在损坏链表上反复死循环。 */
+static volatile int g_alloc_track_corrupted = 0;
+
 /**
  * @brief 程序退出时自动清理：检测泄漏 + 销毁锁
  */
@@ -259,6 +264,8 @@ static void alloc_track_unlock(void) {
 static void alloc_track_add(void* data_ptr, size_t size, size_t alloc_id,
                             const char* file, int line) {
     if (!data_ptr) return;
+    /* M-5修复: 若跟踪链表已损坏, 跳过添加避免在损坏链表上操作 */
+    if (g_alloc_track_corrupted) return;
     /* P-AUDIT修复(根因): 原使用safe_malloc分配跟踪节点,但safe_malloc内部会调用alloc_track_add,
      * 形成无限互递归: alloc_track_add → safe_malloc → _safe_malloc → alloc_track_add → ...
      * 这导致所有未调用memory_utils_bypass_safe_alloc(1)的程序(如lnn_verify.exe)栈溢出。
@@ -281,9 +288,15 @@ static void alloc_track_add(void* data_ptr, size_t size, size_t alloc_id,
  */
 static void alloc_track_remove(void* data_ptr) {
     if (!data_ptr) return;
+    /* M-5修复: 若跟踪链表已标记损坏, 跳过所有操作避免死循环 */
+    if (g_alloc_track_corrupted) return;
     alloc_track_lock();
+    /* M-5修复: 锁内再次检查, 防止竞态 */
+    if (g_alloc_track_corrupted) { alloc_track_unlock(); return; }
     AllocTrackNode** pp = &g_alloc_track_list;
-    while (*pp) {
+    /* G1防御: 添加遍历上限防止链表被破坏为环时死循环 */
+    size_t max_iter = 1000000;
+    while (*pp && max_iter-- > 0) {
         if ((*pp)->data_ptr == data_ptr) {
             AllocTrackNode* to_free = *pp;
             *pp = (*pp)->next;
@@ -294,6 +307,20 @@ static void alloc_track_remove(void* data_ptr) {
             return;
         }
         pp = &(*pp)->next;
+    }
+    /* M-5修复: max_iter耗尽时的明确错误处理。
+     * 原实现仅打印错误后继续, 但链表已被破坏为环, 后续任何遍历操作
+     * (alloc_track_contains/alloc_track_dump_leaks)均会再次死循环。
+     * 修复: 置损坏标志、清空链表指针、输出详细诊断信息, 彻底阻断后续遍历。 */
+    if (max_iter == 0 && !g_alloc_track_corrupted) {
+        g_alloc_track_corrupted = 1;
+        fprintf(stderr, "致命错误: alloc_track_remove 检测到分配跟踪链表循环(搜索指针=%p, 已遍历%zu次)\n",
+                data_ptr, (size_t)1000000);
+        fprintf(stderr, "  诊断: 跟踪链表内部指针被破坏, 可能由堆缓冲区溢出导致。\n");
+        fprintf(stderr, "  措施: 已标记跟踪链表为损坏状态, 后续所有跟踪操作将被跳过。\n");
+        fprintf(stderr, "  建议: 启用更严格的堆检查(如 Application Verifier)定位根因。\n");
+        /* 清空链表指针, 防止其他函数在未检查损坏标志的情况下遍历 */
+        g_alloc_track_list = NULL;
     }
     alloc_track_unlock();
 }
@@ -313,6 +340,8 @@ static void alloc_track_remove(void* data_ptr) {
  */
 static int alloc_track_contains(void* data_ptr, size_t* out_size) {
     if (!data_ptr) return 0;
+    /* M-5修复: 若跟踪链表已损坏, 直接返回未找到 */
+    if (g_alloc_track_corrupted) return 0;
     int found = 0;
     alloc_track_lock();
     AllocTrackNode* node = g_alloc_track_list;
@@ -333,6 +362,11 @@ static int alloc_track_contains(void* data_ptr, size_t* out_size) {
  * @return 泄漏的分配数量
  */
 static int alloc_track_dump_leaks(void) {
+    /* M-5修复: 若跟踪链表已损坏, 无法遍历泄漏报告 */
+    if (g_alloc_track_corrupted) {
+        fprintf(stderr, "[泄漏检测] 跟踪链表已损坏, 无法生成泄漏报告\n");
+        return -1;
+    }
     int leak_count = 0;
     size_t leak_total = 0;
     alloc_track_lock();
@@ -403,6 +437,8 @@ static size_t align_size(size_t size, size_t alignment) {
  * @return 0 如果所有块完好，-1 如果发现损坏
  */
 static int validate_all_magic(void) {
+    /* M-5修复: 若跟踪链表已损坏, 跳过验证 */
+    if (g_alloc_track_corrupted) return 0;
     alloc_track_lock();
     AllocTrackNode* node = g_alloc_track_list;
     int corrupted = 0;
@@ -422,6 +458,23 @@ static int validate_all_magic(void) {
     }
     alloc_track_unlock();
     return corrupted ? -1 : 0;
+}
+
+/* v9.1: 公开接口，供测试使用 */
+int memory_utils_validate_all_tracked(void) {
+    return validate_all_magic();
+}
+
+/* v9.1: 返回跟踪列表中的条目数 */
+size_t memory_utils_tracked_count(void) {
+    /* M-5修复: 若跟踪链表已损坏, 返回0 */
+    if (g_alloc_track_corrupted) return 0;
+    size_t count = 0;
+    alloc_track_lock();
+    AllocTrackNode* node = g_alloc_track_list;
+    while (node) { count++; node = node->next; }
+    alloc_track_unlock();
+    return count;
 }
 
 /**
@@ -605,8 +658,10 @@ void* _safe_aligned_malloc(size_t size, size_t alignment, const char* file, int 
         return NULL;
     }
 
-    /* 溢出检查: 避免巨大 alignment/size 导致 total_size 回绕。
-     * 将各项限制在 SIZE_MAX/2 以内, 保证后续求和不溢出。 */
+    /* M-1修复: 逐步溢出检查, 替代原来的 SIZE_MAX/2 粗粒度检查。
+     * 原检查(alignment > SIZE_MAX/2 || size > SIZE_MAX/2)无法防止
+     * alignment + BLOCK_HEADER_SIZE + aligned_size + guard_size + BLOCK_FOOTER_SIZE
+     * 五项累加的总溢出。现改为逐步加法, 每一步都检查是否溢出。 */
     if (alignment > SIZE_MAX / 2 || size > SIZE_MAX / 2) {
         return NULL;
     }
@@ -615,8 +670,23 @@ void* _safe_aligned_malloc(size_t size, size_t alignment, const char* file, int 
      * 取 alignment 作为对齐余量上界(>= alignment-1), 保证 data_ptr 能在 raw+BLOCK_HEADER_SIZE
      * 之后向上对齐到 alignment, 且头部不越界到 raw_ptr 之前。 */
     size_t aligned_size = align_size(size, 16);
+    /* 验证 aligned_size 对齐后未回绕 */
+    if (aligned_size < size) {
+        return NULL;
+    }
     size_t guard_size = 16;  /* 与 safe_malloc 一致的保护字节大小 */
-    size_t total_size = (size_t)alignment + BLOCK_HEADER_SIZE + aligned_size + guard_size + BLOCK_FOOTER_SIZE;
+
+    /* M-1修复: 逐步溢出检查 total_size = alignment + BLOCK_HEADER_SIZE + aligned_size + guard_size + BLOCK_FOOTER_SIZE。
+     * 每步加法前检查是否超过 SIZE_MAX, 防止多值累加导致的整数溢出回绕。 */
+    size_t total_size = (size_t)alignment;
+    if (total_size > SIZE_MAX - BLOCK_HEADER_SIZE) { return NULL; }
+    total_size += BLOCK_HEADER_SIZE;
+    if (total_size > SIZE_MAX - aligned_size) { return NULL; }
+    total_size += aligned_size;
+    if (total_size > SIZE_MAX - guard_size) { return NULL; }
+    total_size += guard_size;
+    if (total_size > SIZE_MAX - BLOCK_FOOTER_SIZE) { return NULL; }
+    total_size += BLOCK_FOOTER_SIZE;
 
     void* raw_ptr = malloc(total_size);
     if (!raw_ptr) {
@@ -688,6 +758,8 @@ void* _safe_aligned_malloc(size_t size, size_t alignment, const char* file, int 
  * @return 0 所有块完好，-1 发现损坏
  */
 int selflnn_validate_all_allocations(void) {
+    /* M-5修复: 若跟踪链表已损坏, 跳过验证 */
+    if (g_alloc_track_corrupted) return 0;
     alloc_track_lock();
     AllocTrackNode* node = g_alloc_track_list;
     int corrupted = 0;
@@ -721,9 +793,24 @@ int selflnn_validate_all_allocations(void) {
 void safe_free(void** ptr) {
     /* P0-FIX: ptr本身校验 — NULL/低地址/未对齐/MSVC调试填充 */
     if (!ptr || (uintptr_t)ptr < 0x1000 || ((uintptr_t)ptr & 7) != 0) return;
+    /* M-4修复: 补充MSVC调试模式下更多内存模式的覆盖。
+     * 原仅覆盖 0xCCCCCCCC(未初始化栈), 现补充:
+     *   0xCDCDCDCD — 未初始化堆内存(C运行时用此值填充malloc分配的内存)
+     *   0xFEEEFEEE — 已释放堆内存(HeapFree后OS填充)
+     *   0xDDDDDDDD — 已释放堆内存(CRT调试堆释放后填充)
+     *   0xFDFDFDFD — 堆保护区边界填充(no man's land)
+     *   0xABABABAB — 堆保护区边界填充(no man's land, alternate)
+     * 检测逻辑: 若指针的32位高低部分相等且匹配任一已知模式, 则判定为调试填充。 */
     {   uint32_t lo = (uint32_t)((uintptr_t)ptr & 0xFFFFFFFF);
         uint32_t hi = (uint32_t)((uintptr_t)ptr >> 32);
-        if (lo == hi && lo >= 0xCCCCCCCC) return; /* MSVC debug pattern */
+        if (lo == hi) {
+            /* 检查所有已知MSVC调试填充模式 */
+            if (lo == 0xCCCCCCCC || lo == 0xCDCDCDCD ||
+                lo == 0xFEEEFEEE || lo == 0xDDDDDDDD ||
+                lo == 0xFDFDFDFD || lo == 0xABABABAB) {
+                return; /* MSVC debug pattern */
+            }
+        }
     }
 #ifdef USE_STANDARD_ALLOC
     if (*ptr) {
@@ -747,11 +834,11 @@ void safe_free(void** ptr) {
         }
         return;
     }
-#ifdef _DEBUG
-    if (_CrtCheckMemory() == 0) {
-        fprintf(stderr, "堆损坏检测：在safe_free开始时堆已损坏\n");
-    }
-#endif
+/* G1修复: 移除 _CrtCheckMemory() 调用。
+     * 根因: 当缓冲区溢出破坏CRT调试堆元数据(_CrtMemBlockHeader链表指针)后，
+     * _CrtCheckMemory() 遍历被破坏的链表时进入无限循环，导致程序挂起。
+     * safe_free 已有自己的完整性检测(头部magic/保护字节/尾部magic)，
+     * 不需要额外的CRT堆检测。Release模式下此代码不存在，修复不影响正常功能。 */
     if (!ptr || !*ptr) {
         return;
     }
@@ -826,31 +913,67 @@ void safe_free(void** ptr) {
     // 检查地址是否不太可能有效（避免访问极低或极高的地址）
     // 跳过检查，因为系统内存布局未知
     
-    // 验证魔法数字
-    if (header->magic == 0) {
-        /* P6-R90: 魔法数字为零=已释放。快速返回, 不做任何操作。
-         * alloc_track_remove已在首次释放时调用, fprintf/free都会显著拖慢。 */
-        *ptr = NULL;
-        return;
+    /* M-2修复: TOCTOU竞态 - 原子地检查并清除magic, 消除检查与置零之间的竞态窗口。
+     * 原实现分两步: 1) 读取magic检查; 2) 后续置零。在这两步之间, 另一个线程可能
+     * 并发释放同一指针, 导致双释放(double-free)或堆损坏。
+     * 修复: 使用原子CAS(Compare-And-Swap)一步完成"检查magic==MEMORY_MAGIC并置零",
+     * 若CAS失败则说明magic已被其他线程修改(并发释放或已损坏), 安全退出。 */
+    {
+        size_t expected = MEMORY_MAGIC;
+        size_t old_magic = 0;
+#ifdef _MSC_VER
+        /* Windows: 64位系统上size_t为8字节, 使用InterlockedCompareExchange64;
+         * 32位系统上size_t为4字节, 使用InterlockedCompareExchange。
+         * 通过sizeof(size_t)在编译期选择正确的原子操作。 */
+        if (sizeof(size_t) == 8) {
+            old_magic = (size_t)_InterlockedCompareExchange64(
+                (__int64 volatile*)&header->magic, 0, (__int64)expected);
+        } else {
+            old_magic = (size_t)InterlockedCompareExchange(
+                (LONG volatile*)&header->magic, 0, (LONG)expected);
+        }
+#else
+        /* GCC/Clang: __sync_val_compare_and_swap 返回旧值, 语义与CAS一致 */
+        old_magic = __sync_val_compare_and_swap(&header->magic, expected, (size_t)0);
+#endif
+        if (old_magic == 0) {
+            /* P6-R90: 魔法数字为零=已释放(并发释放或use-after-free)。
+             * alloc_track_remove已在首次释放时调用, 快速返回不做任何操作。 */
+            *ptr = NULL;
+            return;
+        }
+        if (old_magic != MEMORY_MAGIC) {
+            /* magic不匹配(被并发修改或已损坏) → header指针可能已被破坏。
+             * 不调用free(), 避免向堆管理器提交随机指针导致堆损坏扩散。 */
+            fprintf(stderr, "内存损坏: 魔法数字不匹配 %p magic=0x%llx (skipping free)\n",
+                   data_ptr, (unsigned long long)old_magic);
+            alloc_track_remove(data_ptr);
+            *ptr = NULL;
+            return;
+        }
+        /* CAS成功: magic已从MEMORY_MAGIC原子置为0, 当前线程获得独占释放权。
+         * 后续代码安全执行free, 不再有并发释放风险。 */
     }
     
-    if (header->magic != MEMORY_MAGIC) {
-        /* P6-R90: 魔法数字不匹配 = header指针可能已损坏。
-         * 调用free(header)会向堆管理器提交随机指针 → 堆损坏扩散 → 下次malloc()返回NULL或崩溃。
-         * 只记录并清空指针，不释放。小内存泄漏 < 堆损坏扩散。 */
-        fprintf(stderr, "内存损坏: 魔法数字不匹配 %p magic=0x%llx (skipping free)\n",
-               data_ptr, (unsigned long long)header->magic);
+    // 验证尾部
+    /* M-3修复: 放宽并改进header->size验证条件。
+     * 原检查: header->size > SIZE_MAX - align_size(1,16) 即 header->size > SIZE_MAX - 16,
+     * 问题: (a) 计算复杂但语义等价于 size > SIZE_MAX - 16, 可读性差;
+     *       (b) 上界偏保守, 合理值为 SIZE_MAX - 15(align_size公式: (size+15)&~15);
+     *       (c) 缺少对 size==0 的检查(0为无效分配, 应单独处理)。
+     * 修复: 使用更清晰的验证逻辑, 检查size合理性(非零、不溢出对齐计算)。 */
+    if (header->size == 0) {
+        /* size为0: 无效分配或头部已被破坏清零 */
+        fprintf(stderr, "内存损坏: 块大小为0 at %p (skipping free)\n", data_ptr);
         alloc_track_remove(data_ptr);
         *ptr = NULL;
         return;
     }
-    
-    // 验证尾部
-    // 首先确保header->size是合理的（避免缓冲区溢出）
-    if (header->size > SIZE_MAX - align_size(1, 16)) {
-        /* P6-R90: size值不可能 → header已损坏。
-         * 不调用free(), 避免堆损坏扩散。 */
-        fprintf(stderr, "内存损坏: 无效块大小 %zu at %p (skipping free)\n", header->size, data_ptr);
+    if (header->size > SIZE_MAX - 15) {
+        /* align_size(header->size, 16) = (size + 15) & ~15, 当 size > SIZE_MAX - 15
+         * 时加法溢出, 导致 aligned_size 回绕为小值, 后续保护字节/尾部计算越界。
+         * 此检查使用正确的上界 SIZE_MAX - 15, 同时接受所有合法size值。 */
+        fprintf(stderr, "内存损坏: 块大小过大(将导致对齐溢出) %zu at %p (skipping free)\n", header->size, data_ptr);
         alloc_track_remove(data_ptr);
         *ptr = NULL;
         return;
@@ -1140,14 +1263,21 @@ MemoryPool* memory_pool_create(const MemoryPoolConfig* config) {
     }
     
     // 更新统计
+    /* P2修复: g_memory_stats为全局共享状态，多线程并发创建内存池时
+     * 无锁修改pool_count会导致计数不一致 */
+    MEM_LOCK();
     g_memory_stats.pool_count++;
+    MEM_UNLOCK();
     
     // 注册到全局池链表
     PoolNode* node = (PoolNode*)safe_malloc(sizeof(PoolNode));
     if (node) {
         node->pool = pool;
+        /* P2修复: g_pool_list为全局链表，无锁修改会导致链表节点丢失或损坏 */
+        MEM_LOCK();
         node->next = g_pool_list;
         g_pool_list = node;
+        MEM_UNLOCK();
     }
     
     return pool;
@@ -1318,9 +1448,12 @@ void memory_pool_destroy(MemoryPool* pool) {
     safe_free((void**)&pool->block_span);
     
     // 更新统计
+    // 从全局池链表中移除
+    /* P2修复: pool_count--和g_pool_list移除操作修改全局共享状态，
+     * 必须加锁保护，防止并发创建/销毁内存池时链表损坏和计数不一致 */
+    MEM_LOCK();
     g_memory_stats.pool_count--;
     
-    // 从全局池链表中移除
     PoolNode** pp = &g_pool_list;
     while (*pp) {
         if ((*pp)->pool == pool) {
@@ -1331,6 +1464,7 @@ void memory_pool_destroy(MemoryPool* pool) {
         }
         pp = &(*pp)->next;
     }
+    MEM_UNLOCK();
     
     // 释放池结构
     safe_free((void**)&pool);

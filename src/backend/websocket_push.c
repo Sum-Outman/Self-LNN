@@ -135,9 +135,11 @@ static int ws_base64_encode(const unsigned char* in, int in_len, char* out, int 
     unsigned char a[3];
     while (in_len > 0) {
         int n = in_len > 3 ? 3 : in_len;
+        /* v9.11修复: 清零a数组防止残留值污染最后不完整组的编码 */
+        memset(a, 0, sizeof(a));
         for (int k = 0; k < n; k++) a[k] = in[i++];
         in_len -= n;
-        if (j + 5 > out_max) return -1;  /* H-008修复: 边界检查，需要j+4(数据)+1(空终止符)<=out_max */
+        if (j + 5 > out_max) return -1;  /* H-008修复: 边界检查 */
         out[j++] = b64[a[0] >> 2];
         out[j++] = b64[((a[0] & 0x03) << 4) | (a[1] >> 4)];
         out[j++] = (n > 1) ? b64[((a[1] & 0x0F) << 2) | (a[2] >> 6)] : '=';
@@ -324,38 +326,46 @@ static int ws_do_handshake(ws_socket_t sock)
     /* P2-16修复: 循环读取直到完整HTTP头，处理TCP分片 */
     while (total < (int)sizeof(buf) - 1) {
         n = (int)recv(sock, buf + total, (int)sizeof(buf) - 1 - total, 0);
-        if (n <= 0) return -1;
+        if (n <= 0) {
+            log_warn("[WebSocket握手] recv失败: n=%d, errno=%d, total=%d", n, (int)WS_ERRNO, total);
+            return -1;
+        }
         total += n;
         buf[total] = '\0';
         if (strstr(buf, "\r\n\r\n")) break; /* HTTP头结束 */
     }
+    log_info("[WebSocket握手] 收到HTTP请求(%d bytes): %.60s", total, buf);
 
     /* C-003修复: 提取URI路径并校验，仅允许合法WebSocket端点 */
     {
         const char* req_end = strstr(buf, "\r\n");
-        if (!req_end) return -1;
+        if (!req_end) { log_warn("[WebSocket握手] 未找到请求行结束符"); return -1; }
         const char* space1 = strchr(buf, ' ');
-        if (!space1) return -1;
+        if (!space1) { log_warn("[WebSocket握手] 未找到HTTP方法后的空格"); return -1; }
         const char* uri_start = space1 + 1;
         const char* space2 = strchr(uri_start, ' ');
-        if (!space2) return -1;
+        if (!space2) { log_warn("[WebSocket握手] 未找到URI后的空格"); return -1; }
         size_t uri_len = (size_t)(space2 - uri_start);
         /* 允许的WebSocket端点: "/ws" */
         if (uri_len != 3 || memcmp(uri_start, "/ws", 3) != 0) {
+            log_warn("[WebSocket握手] URI不匹配: '%.*s' (len=%zu)", (int)uri_len, uri_start, uri_len);
             const char* not_found = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
             send(sock, not_found, (int)strlen(not_found), 0);
             return -1;
         }
     }
 
-    if (strstr(buf, "Upgrade: websocket") == NULL && strstr(buf, "upgrade: websocket") == NULL) return -1;
+    if (strstr(buf, "Upgrade: websocket") == NULL && strstr(buf, "upgrade: websocket") == NULL) {
+        log_warn("[WebSocket握手] 缺少Upgrade: websocket头");
+        return -1;
+    }
     const char* key_marker = "Sec-WebSocket-Key:";
     const char* key_start = strstr(buf, key_marker);
     if (!key_start) {
         key_marker = "sec-websocket-key:";
         key_start = strstr(buf, key_marker);
     }
-    if (!key_start) return -1;
+    if (!key_start) { log_warn("[WebSocket握手] 缺少Sec-WebSocket-Key头"); return -1; }
     key_start += strlen(key_marker);
     while (*key_start == ' ') key_start++;
     char client_key[128];
@@ -363,7 +373,10 @@ static int ws_do_handshake(ws_socket_t sock)
     while (*key_start && *key_start != '\r' && ki < 127) client_key[ki++] = *key_start++;
     client_key[ki] = '\0';
     char accept_key[64];
-    if (ws_generate_accept_key(client_key, accept_key, 64) < 0) return -1;
+    if (ws_generate_accept_key(client_key, accept_key, 64) < 0) {
+        log_warn("[WebSocket握手] 生成Accept-Key失败");
+        return -1;
+    }
     char response[512];
     int rlen = snprintf(response, sizeof(response),
         "HTTP/1.1 101 Switching Protocols\r\n"
@@ -372,7 +385,13 @@ static int ws_do_handshake(ws_socket_t sock)
         "Sec-WebSocket-Accept: %s\r\n"
         "Access-Control-Allow-Origin: http://localhost:8080\r\n"  /* P3-10修复: 限制CORS来源，移除通配符 */
         "\r\n", accept_key);
-    return send(sock, response, rlen, 0) == rlen ? 0 : -1;
+    int send_ret = (int)send(sock, response, rlen, 0);
+    if (send_ret != rlen) {
+        log_warn("[WebSocket握手] send失败: ret=%d, rlen=%d, errno=%d", send_ret, rlen, (int)WS_ERRNO);
+        return -1;
+    }
+    log_info("[WebSocket握手] 成功! Accept-Key=%s", accept_key);
+    return 0;
 }
 
 static int ws_send_frame(ws_socket_t sock, uint8_t opcode, const unsigned char* data, size_t len)
@@ -503,6 +522,10 @@ static void* ws_push_accept_thread(void* arg)
         srv->clients[slot].active = 1;
         mutex_unlock(srv->mutex);
 
+        /* v9.11修复: 握手前强制设为阻塞模式。
+         * 关键: accept()继承监听socket的非阻塞属性(WSAEventSelect/ioctlsocket)，
+         * 必须显式设为阻塞模式才能完成WebSocket握手。 */
+        ws_set_nonblock(client, 0);
         if (ws_do_handshake(client) != 0) {
             WS_CLOSE(client);
             ws_client_close(&srv->clients[slot]);  /* C-007修复: 握手失败重置槽位，防止僵尸槽位泄漏 */
@@ -1001,7 +1024,8 @@ int ws_push_server_poll(WSPushServer* srv, int timeout_ms)
                 socklen_t addr_len = sizeof(client_addr);
                 ws_socket_t client = accept(srv->listen_sock, (struct sockaddr*)&client_addr, &addr_len);
                 if (client != WS_INVALID) {
-                    ws_set_nonblock(client, 1);
+                    /* v9.11修复: 先握手再设置非阻塞，防止recv()在非阻塞模式下立即返回失败。
+                     * 关键: accept()继承监听socket的非阻塞属性，必须显式设为阻塞模式完成握手。 */
                     mutex_lock(srv->mutex);
                     int found = -1;
                     for (int j = 0; j < WS_MAX_CLIENTS; j++) {
@@ -1011,14 +1035,17 @@ int ws_push_server_poll(WSPushServer* srv, int timeout_ms)
                         ws_client_init(&srv->clients[found], client, client_addr);
                         srv->clients[found].active = 1;
                         mutex_unlock(srv->mutex);
-                        /* 注册新客户端到epoll */
-                        struct epoll_event ev;
-                        ev.events = EPOLLIN | EPOLLRDHUP;
-                        ev.data.fd = client;
-                        epoll_ctl(srv->epoll_fd, EPOLL_CTL_ADD, client, &ev);
+                        /* 握手前强制设为阻塞模式 */
+                        ws_set_nonblock(client, 0);
                         if (ws_do_handshake(client) != 0) {
-                            epoll_ctl(srv->epoll_fd, EPOLL_CTL_DEL, client, NULL);
                             ws_client_close(&srv->clients[found]);
+                        } else {
+                            /* 握手成功后再设置非阻塞并注册epoll */
+                            ws_set_nonblock(client, 1);
+                            struct epoll_event ev;
+                            ev.events = EPOLLIN | EPOLLRDHUP;
+                            ev.data.fd = client;
+                            epoll_ctl(srv->epoll_fd, EPOLL_CTL_ADD, client, &ev);
                         }
                     } else {
                         mutex_unlock(srv->mutex);
@@ -1056,7 +1083,8 @@ int ws_push_server_poll(WSPushServer* srv, int timeout_ms)
                 socklen_t addr_len = sizeof(client_addr);
                 ws_socket_t client = accept(srv->listen_sock, (struct sockaddr*)&client_addr, &addr_len);
                 if (client != WS_INVALID) {
-                    ws_set_nonblock(client, 1);
+                    /* v9.11修复: 先握手再设置非阻塞。
+                     * 关键: accept()继承监听socket的非阻塞属性，必须显式设为阻塞模式完成握手。 */
                     mutex_lock(srv->mutex);
                     int found = -1;
                     for (int j = 0; j < WS_MAX_CLIENTS; j++) {
@@ -1066,13 +1094,16 @@ int ws_push_server_poll(WSPushServer* srv, int timeout_ms)
                         ws_client_init(&srv->clients[found], client, client_addr);
                         srv->clients[found].active = 1;
                         mutex_unlock(srv->mutex);
-                        struct kevent ev;
-                        EV_SET(&ev, client, EVFILT_READ, EV_ADD, 0, 0, (void*)(intptr_t)client);
-                        kevent(srv->kqueue_fd, &ev, 1, NULL, 0, NULL);
+                        /* 握手前强制设为阻塞模式 */
+                        ws_set_nonblock(client, 0);
                         if (ws_do_handshake(client) != 0) {
-                            EV_SET(&ev, client, EVFILT_READ, EV_DELETE, 0, 0, NULL);
-                            kevent(srv->kqueue_fd, &ev, 1, NULL, 0, NULL);
                             ws_client_close(&srv->clients[found]);
+                        } else {
+                            /* 握手成功后再设置非阻塞并注册kqueue */
+                            ws_set_nonblock(client, 1);
+                            struct kevent ev;
+                            EV_SET(&ev, client, EVFILT_READ, EV_ADD, 0, 0, (void*)(intptr_t)client);
+                            kevent(srv->kqueue_fd, &ev, 1, NULL, 0, NULL);
                         }
                     } else {
                         mutex_unlock(srv->mutex);
@@ -1132,8 +1163,9 @@ int ws_push_server_poll(WSPushServer* srv, int timeout_ms)
         socklen_t addr_len = sizeof(client_addr);
         ws_socket_t client = accept(srv->listen_sock, (struct sockaddr*)&client_addr, &addr_len);
         if (client != WS_INVALID) {
-            ws_set_nonblock(client, 1);
-            /* PF-003修复: poll中accept+槽位操作加互斥锁 */
+            /* v9.11修复: 先握手再设置非阻塞，防止recv()在非阻塞模式下立即返回失败。
+             * 关键: Windows上accept()继承监听socket的非阻塞属性，
+             * 必须显式设为阻塞模式才能完成握手。 */
             mutex_lock(srv->mutex);
             int found = -1;
             for (int i = 0; i < WS_MAX_CLIENTS; i++) {
@@ -1143,8 +1175,13 @@ int ws_push_server_poll(WSPushServer* srv, int timeout_ms)
                 ws_client_init(&srv->clients[found], client, client_addr);
                 srv->clients[found].active = 1;
                 mutex_unlock(srv->mutex);
+                /* 握手前强制设为阻塞模式 */
+                ws_set_nonblock(client, 0);
                 if (ws_do_handshake(client) != 0) {
                     ws_client_close(&srv->clients[found]);
+                } else {
+                    /* 握手成功后再设置非阻塞 */
+                    ws_set_nonblock(client, 1);
                 }
             } else {
                 mutex_unlock(srv->mutex);

@@ -302,7 +302,12 @@ static int filter_entities_by_quality(char*** entities, int* entity_count,
     /* 替换原数组 */
     for (int i = filtered_count; i < count; i++)
         safe_free((void**)&(*entities)[i]);
-    safe_free((void**)*entities);
+    /* D9修复: 原 safe_free((void**)*entities) 将数组指针值当作void**传入，
+     * safe_free内部*ptr获取的是数组第一个元素(实体指针)而非数组本身，
+     * 导致: 1)第一个实体被错误释放 2)数组内存泄漏
+     * 3)auto_learning_free中再次释放该实体时双重释放 → 堆损坏(0xC0000374)
+     * 正确做法: 传入entities的地址 safe_free((void**)entities) */
+    safe_free((void**)entities);
     *entities = filtered_ents;
     *entity_count = filtered_count;
     if (entity_types) *entity_types = types;
@@ -533,6 +538,7 @@ void auto_learning_free(AutoLearningSystem* system) {
     }
     safe_free((void**)&system->relation_buffer);
 
+    /* D9修复: 在 safe_free 释放 system 之前，检查 system 的 entries 指针是否已被正确置空 */
     safe_free((void**)&system);
 }
 
@@ -691,7 +697,10 @@ int auto_learning_learn_text(AutoLearningSystem* system, const char* text,
         int digit_count = 0;
         for (size_t i = 0; i < text_len && i < 4096; i++) {
             unsigned char c = (unsigned char)text[i];
-            if (c > 32 && c < 127) has_printable = 1;
+            /* D10修复: 原代码仅检查ASCII可打印字符(c>32 && c<127)，
+             * 导致UTF-8多字节字符(如中文0xE4/0xBA/0xBA)被误判为空白。
+             * 修复: 同时检查UTF-8多字节字符(>=0x80)和ASCII可打印字符 */
+            if ((c > 32 && c < 127) || (c >= 0x80)) has_printable = 1;
             if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) alpha_count++;
             if (c >= '0' && c <= '9') digit_count++;
         }

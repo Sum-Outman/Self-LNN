@@ -206,4 +206,4 @@
         generate: pdGenerate,
         checkStatus: pdCheckStatus
     };
-});
+})();

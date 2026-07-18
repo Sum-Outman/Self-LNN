@@ -556,6 +556,15 @@ class DialogueEnhanced {
 
     destroy() {
         this.stopSpeaking();
+        if (this._wsCloseHandler) {
+            try {
+                var ws = window.SelfLnnWebSocket;
+                if (ws && ws.ws) {
+                    ws.ws.removeEventListener('close', this._wsCloseHandler);
+                }
+            } catch(e) {}
+            this._wsCloseHandler = null;
+        }
         if (this._capturer) {
             this._capturer.destroy();
             this._capturer = null;

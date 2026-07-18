@@ -50,16 +50,7 @@
 #define DIALOGUE_SAVE_VERSION 1
 #define MAX_RESPONSE_TOKENS 256
 
-#ifndef safe_strdup
-/* 纯C实现的safe_strdup，跨平台兼容 */
-static char* safe_strdup(const char* s) {
-    if (!s) return NULL;
-    size_t len = strlen(s) + 1;
-    char* dup = (char*)safe_malloc(len);
-    if (dup) memcpy(dup, s, len);
-    return dup;
-}
-#endif
+/* v9.1: safe_strdup 由 string_utils.h 提供 static inline 实现，使用 _safe_malloc 跟踪 */
 
 /* ================================================================
  *: CfC对话权重存储 — 替代每次调用随机生成
@@ -119,9 +110,16 @@ DialogueProcessor* dialogue_get_global_processor(void) {
 
 /* 初始化对话CfC权重（Xavier均匀分布，权重迁移）
  * P1-03修复：当hs或in_dim增大时，先保存旧权重，分配新空间后迁移旧权重
- * 到对应位置，再初始化新增部分，最终释放旧空间，避免训练成果丢失。 */
+ * 到对应位置，再初始化新增部分，最终释放旧空间，避免训练成果丢失。
+ *
+ * D-5修复: 本函数操作全局共享权重 g_dialogue_cfc_weights，
+ * 调用者必须在外部持有 DIALOGUE_WEIGHTS_LOCK() 锁。
+ * 函数内部确保锁已初始化，但不重复加锁（避免非递归mutex死锁）。 */
 static void dialogue_cfc_weights_init(DialogueCfCWeights* w, size_t hs, size_t in_dim)
 {
+    /* D-5修复: 确保权重锁已初始化，防止多线程竞态条件 */
+    DIALOGUE_WEIGHTS_LOCK_INIT();
+
     if (w->initialized && w->max_hs >= hs && w->max_in >= in_dim) return;
 
     /* P1-03修复：保存旧权重和维度，用于权重迁移 */
@@ -528,8 +526,22 @@ int dialogue_evolve_state(DialogueProcessor* processor,
     if (!processor || !input_features || feature_count == 0) return -1;
     if (!processor->dialogue_state_buffer) return -1;
 
+    /* v9.13修复: NaN/Inf输入保护 */
+    {
+        int has_nan_inf = 0;
+        for (size_t i = 0; i < feature_count; i++) {
+            if (!isfinite(input_features[i])) { has_nan_inf = 1; break; }
+        }
+        if (has_nan_inf) {
+            log_warn("[对话演化] 输入特征包含NaN/Inf，拒绝状态演化");
+            return -1;
+        }
+    }
+
     size_t hs = processor->dialogue_buffer_size;
     float tau = processor->config.dialogue_time_constant;
+    /* v9.13修复: tau最小保护，防止expf(-dt/0)产生NaN */
+    if (tau < 1e-6f) tau = 1e-6f;
     float dt = (delta_t > 0.0f) ? delta_t : processor->config.dialogue_delta_t;
 
     if (processor->lnn_instance && processor->config.use_cfc_evolution) {
@@ -555,8 +567,12 @@ int dialogue_evolve_state(DialogueProcessor* processor,
                     CfCCell* cell = cfc->layers[0];
                     size_t cell_hs = cell->config.hidden_size;
                     size_t cell_in = cell->config.input_size;
-                    /* 维度匹配时才同步，避免越界 */
-                    if (cell_in <= w->max_in && cell_hs <= w->max_hs) {
+                    /* D-6修复: 维度匹配条件需同时检查对话缓冲维度和权重数组维度，
+                     * 确保cell维度完全兼容，避免部分同步导致的不一致。
+                     * 原条件仅检查cell_in <= w->max_in && cell_hs <= w->max_hs，
+                     * 未检查对话缓冲维度hs和in_dim，可能导致循环中部分同步。 */
+                    if (cell_in <= in_dim && cell_hs <= hs &&
+                        cell_in <= w->max_in && cell_hs <= w->max_hs) {
                         for (size_t i = 0; i < cell_hs && i < hs; i++) {
                             for (size_t j = 0; j < cell_in && j < in_dim; j++) {
                                 w->w_gate_input[i * w->max_in + j] =
@@ -591,15 +607,27 @@ int dialogue_evolve_state(DialogueProcessor* processor,
             h[i] = h[i] * decay + (1.0f - decay) * gate * act;
         }
 
+        /* v9.13修复: 演化后状态NaN/Inf清理 */
+        for (size_t i = 0; i < hs; i++) {
+            if (!isfinite(h[i])) h[i] = 0.0f;
+        }
+
         DIALOGUE_WEIGHTS_UNLOCK();
     } else {
         float alpha = 1.0f - expf(-dt / processor->config.dialogue_time_constant);
+        /* v9.13修复: alpha NaN检查 */
+        if (!isfinite(alpha)) alpha = 0.5f;
         size_t copy_count = (feature_count < processor->dialogue_buffer_size)
                             ? feature_count : processor->dialogue_buffer_size;
         for (size_t i = 0; i < copy_count; i++) {
             processor->dialogue_state_buffer[i] =
                 (1.0f - alpha) * processor->dialogue_state_buffer[i]
                 + alpha * input_features[i];
+        }
+        /* v9.13修复: 简单EMA后状态NaN/Inf清理 */
+        for (size_t i = 0; i < copy_count; i++) {
+            if (!isfinite(processor->dialogue_state_buffer[i]))
+                processor->dialogue_state_buffer[i] = 0.0f;
         }
     }
 
@@ -614,10 +642,10 @@ DialogueContext* dialogue_context_create(size_t max_messages)
 {
     if (max_messages == 0) max_messages = 50;
 
-    DialogueContext* ctx = (DialogueContext*)safe_calloc(1, sizeof(DialogueContext));
+    DialogueContext* ctx = (DialogueContext*)_safe_calloc(1, sizeof(DialogueContext), __FILE__, __LINE__);
     if (!ctx) return NULL;
 
-    ctx->messages = (DialogueMessage*)safe_calloc(max_messages, sizeof(DialogueMessage));
+    ctx->messages = (DialogueMessage*)_safe_calloc(max_messages, sizeof(DialogueMessage), __FILE__, __LINE__);
     if (!ctx->messages) {
         safe_free((void**)&ctx);
         return NULL;
@@ -642,7 +670,9 @@ void dialogue_context_free(DialogueContext* context)
         }
     }
     safe_free((void**)&context->messages);
-    memset(context, 0, sizeof(DialogueContext));
+    /* D-3修复: 不在此处memset——safe_free已处理指针置空，
+     * memset会清零结构体但若未来新增字符串指针字段将导致泄漏。
+     * 与dialogue_processor_free保持一致的释放策略。 */
     safe_free((void**)&context);
 }
 
@@ -763,13 +793,35 @@ int dialogue_context_save(const DialogueContext* context, const char* filepath)
     int64_t active = (int64_t)context->last_active;
     int32_t cid = context->context_id;
 
-    fwrite(&magic, sizeof(magic), 1, fp);
-    fwrite(&version, sizeof(version), 1, fp);
-    fwrite(&cid, sizeof(cid), 1, fp);
-    fwrite(&num, sizeof(num), 1, fp);
-    fwrite(&max, sizeof(max), 1, fp);
-    fwrite(&created, sizeof(created), 1, fp);
-    fwrite(&active, sizeof(active), 1, fp);
+    /* D-1修复: 所有fwrite调用后检查返回值，确保写入完整 */
+    if (fwrite(&magic, sizeof(magic), 1, fp) != 1) {
+        log_error("dialogue_context_save: 写入magic失败");
+        fclose(fp); return -1;
+    }
+    if (fwrite(&version, sizeof(version), 1, fp) != 1) {
+        log_error("dialogue_context_save: 写入version失败");
+        fclose(fp); return -1;
+    }
+    if (fwrite(&cid, sizeof(cid), 1, fp) != 1) {
+        log_error("dialogue_context_save: 写入cid失败");
+        fclose(fp); return -1;
+    }
+    if (fwrite(&num, sizeof(num), 1, fp) != 1) {
+        log_error("dialogue_context_save: 写入num失败");
+        fclose(fp); return -1;
+    }
+    if (fwrite(&max, sizeof(max), 1, fp) != 1) {
+        log_error("dialogue_context_save: 写入max失败");
+        fclose(fp); return -1;
+    }
+    if (fwrite(&created, sizeof(created), 1, fp) != 1) {
+        log_error("dialogue_context_save: 写入created失败");
+        fclose(fp); return -1;
+    }
+    if (fwrite(&active, sizeof(active), 1, fp) != 1) {
+        log_error("dialogue_context_save: 写入active失败");
+        fclose(fp); return -1;
+    }
 
     for (size_t i = 0; i < context->num_messages; i++) {
         DialogueMessage* m = &context->messages[i];
@@ -778,11 +830,28 @@ int dialogue_context_save(const DialogueContext* context, const char* filepath)
         float conf = m->confidence;
         int64_t ts = (int64_t)m->timestamp;
 
-        fwrite(&len, sizeof(len), 1, fp);
-        fwrite(&role, sizeof(role), 1, fp);
-        fwrite(&conf, sizeof(conf), 1, fp);
-        fwrite(&ts, sizeof(ts), 1, fp);
-        if (len > 0 && m->text) fwrite(m->text, 1, len, fp);
+        if (fwrite(&len, sizeof(len), 1, fp) != 1) {
+            log_error("dialogue_context_save: 写入消息[%zu]长度失败", i);
+            fclose(fp); return -1;
+        }
+        if (fwrite(&role, sizeof(role), 1, fp) != 1) {
+            log_error("dialogue_context_save: 写入消息[%zu]角色失败", i);
+            fclose(fp); return -1;
+        }
+        if (fwrite(&conf, sizeof(conf), 1, fp) != 1) {
+            log_error("dialogue_context_save: 写入消息[%zu]置信度失败", i);
+            fclose(fp); return -1;
+        }
+        if (fwrite(&ts, sizeof(ts), 1, fp) != 1) {
+            log_error("dialogue_context_save: 写入消息[%zu]时间戳失败", i);
+            fclose(fp); return -1;
+        }
+        if (len > 0 && m->text) {
+            if (fwrite(m->text, 1, len, fp) != len) {
+                log_error("dialogue_context_save: 写入消息[%zu]文本失败(期望%u字节)", i, len);
+                fclose(fp); return -1;
+            }
+        }
     }
 
     fclose(fp);
@@ -804,12 +873,32 @@ DialogueContext* dialogue_context_load(const char* filepath)
     uint32_t version, num, max;
     int32_t cid;
     int64_t created, active;
-    fread(&version, sizeof(version), 1, fp);
-    fread(&cid, sizeof(cid), 1, fp);
-    fread(&num, sizeof(num), 1, fp);
-    fread(&max, sizeof(max), 1, fp);
-    fread(&created, sizeof(created), 1, fp);
-    fread(&active, sizeof(active), 1, fp);
+
+    /* D-2修复: 所有fread调用后检查返回值，确保读取完整 */
+    if (fread(&version, sizeof(version), 1, fp) != 1) {
+        log_error("dialogue_context_load: 读取version失败");
+        fclose(fp); return NULL;
+    }
+    if (fread(&cid, sizeof(cid), 1, fp) != 1) {
+        log_error("dialogue_context_load: 读取cid失败");
+        fclose(fp); return NULL;
+    }
+    if (fread(&num, sizeof(num), 1, fp) != 1) {
+        log_error("dialogue_context_load: 读取num失败");
+        fclose(fp); return NULL;
+    }
+    if (fread(&max, sizeof(max), 1, fp) != 1) {
+        log_error("dialogue_context_load: 读取max失败");
+        fclose(fp); return NULL;
+    }
+    if (fread(&created, sizeof(created), 1, fp) != 1) {
+        log_error("dialogue_context_load: 读取created失败");
+        fclose(fp); return NULL;
+    }
+    if (fread(&active, sizeof(active), 1, fp) != 1) {
+        log_error("dialogue_context_load: 读取active失败");
+        fclose(fp); return NULL;
+    }
 
     DialogueContext* ctx = dialogue_context_create((size_t)max);
     if (!ctx) { fclose(fp); return NULL; }
@@ -823,16 +912,32 @@ DialogueContext* dialogue_context_load(const char* filepath)
         int32_t role;
         float conf;
         int64_t ts;
-        if (fread(&len, sizeof(len), 1, fp) != 1) break;
-        fread(&role, sizeof(role), 1, fp);
-        fread(&conf, sizeof(conf), 1, fp);
-        fread(&ts, sizeof(ts), 1, fp);
+        if (fread(&len, sizeof(len), 1, fp) != 1) {
+            log_error("dialogue_context_load: 读取消息[%u]长度失败", i);
+            break;
+        }
+        if (fread(&role, sizeof(role), 1, fp) != 1) {
+            log_error("dialogue_context_load: 读取消息[%u]角色失败", i);
+            break;
+        }
+        if (fread(&conf, sizeof(conf), 1, fp) != 1) {
+            log_error("dialogue_context_load: 读取消息[%u]置信度失败", i);
+            break;
+        }
+        if (fread(&ts, sizeof(ts), 1, fp) != 1) {
+            log_error("dialogue_context_load: 读取消息[%u]时间戳失败", i);
+            break;
+        }
 
         char* txt = NULL;
         if (len > 0) {
             txt = (char*)safe_malloc(len + 1);
             if (txt) {
-                fread(txt, 1, len, fp);
+                if (fread(txt, 1, len, fp) != len) {
+                    log_error("dialogue_context_load: 读取消息[%u]文本失败(期望%u字节)", i, len);
+                    safe_free((void**)&txt);
+                    break;
+                }
                 txt[len] = '\0';
             }
         }
@@ -1189,7 +1294,15 @@ DialogueResponse* dialogue_process_input_ext(DialogueProcessor* processor,
                 KnowledgeGraphNode* results[8];
                 size_t found = knowledge_graph_find_nodes_by_label(kg, user_input, results, 8);
                 if (found > 0) {
-                    pos = snprintf(output, (size_t)max_tokens, "根据知识图谱推理：");
+                    /* D-4修复: 检查snprintf返回值，截断则记录警告 */
+                    {
+                        int sw = snprintf(output, (size_t)max_tokens, "根据知识图谱推理：");
+                        if (sw < 0 || sw >= (int)max_tokens) {
+                            log_warn("dialogue: 知识图谱推理响应头截断(需要%d字节, 可用%d字节)",
+                                     sw, (int)max_tokens);
+                        }
+                        pos = sw;
+                    }
                     for (size_t k = 0; k < found && k < 3; k++) {
                         KnowledgeGraphNode* node = results[k];
                         if (node && node->label) {
@@ -1211,11 +1324,19 @@ DialogueResponse* dialogue_process_input_ext(DialogueProcessor* processor,
                                         if (sp && sp->length > 1) {
                                             path_desc = " (最短路径";
                                         }
-                                        pos += snprintf(output + pos,
-                                            (size_t)max_tokens - (size_t)pos,
-                                            "\n  · %s → ...(%zu跳)%s → %s",
-                                            node->label, (size_t)(2 + hi % 3), path_desc,
-                                            hops[hi]->label);
+                                        /* D-4修复: 检查snprintf返回值，截断则记录警告 */
+                                        {
+                                            int sw = snprintf(output + pos,
+                                                (size_t)max_tokens - (size_t)pos,
+                                                "\n  · %s → ...(%zu跳)%s → %s",
+                                                node->label, (size_t)(2 + hi % 3), path_desc,
+                                                hops[hi]->label);
+                                            if (sw < 0 || sw >= (int)((size_t)max_tokens - (size_t)pos)) {
+                                                log_warn("dialogue: 多跳推理响应截断(需要%d字节, 剩余%d字节)",
+                                                         sw, (int)((size_t)max_tokens - (size_t)pos));
+                                            }
+                                            pos += sw;
+                                        }
                                         if (sp) knowledge_graph_free_path(sp);
                                         if (pos >= (int)max_tokens - 1) break;
                                     }
@@ -1226,11 +1347,19 @@ DialogueResponse* dialogue_process_input_ext(DialogueProcessor* processor,
                                     if (node->edges[ei] && node->edges[ei]->target &&
                                         node->edges[ei]->label) {
                                         KnowledgeGraphNode* target = node->edges[ei]->target;
-                                        pos += snprintf(output + pos,
-                                            (size_t)max_tokens - (size_t)pos,
-                                            "\n  · %s → %s → %s",
-                                            node->label, node->edges[ei]->label,
-                                            target->label ? target->label : "(概念)");
+                                        /* D-4修复: 检查snprintf返回值，截断则记录警告 */
+                                        {
+                                            int sw = snprintf(output + pos,
+                                                (size_t)max_tokens - (size_t)pos,
+                                                "\n  · %s → %s → %s",
+                                                node->label, node->edges[ei]->label,
+                                                target->label ? target->label : "(概念)");
+                                            if (sw < 0 || sw >= (int)((size_t)max_tokens - (size_t)pos)) {
+                                                log_warn("dialogue: 邻居遍历响应截断(需要%d字节, 剩余%d字节)",
+                                                         sw, (int)((size_t)max_tokens - (size_t)pos));
+                                            }
+                                            pos += sw;
+                                        }
                                         if (pos >= (int)max_tokens - 1) break;
                                     }
                                 }
@@ -1268,17 +1397,33 @@ DialogueResponse* dialogue_process_input_ext(DialogueProcessor* processor,
                         if (sparql[0]) {
                             SparqlQueryResult* sqr = knowledge_graph_sparql_query(kg2, sparql);
                             if (sqr && sqr->row_count > 0) {
-                                pos = snprintf(output, (size_t)max_tokens,
-                                    "根据知识图谱SPARQL查询：");
+                                /* D-4修复: 检查snprintf返回值，截断则记录警告 */
+                                {
+                                    int sw = snprintf(output, (size_t)max_tokens,
+                                        "根据知识图谱SPARQL查询：");
+                                    if (sw < 0 || sw >= (int)max_tokens) {
+                                        log_warn("dialogue: SPARQL响应头截断(需要%d字节, 可用%d字节)",
+                                                 sw, (int)max_tokens);
+                                    }
+                                    pos = sw;
+                                }
                                 size_t max_rows = (sqr->row_count < 5) ? sqr->row_count : 5;
                                 for (size_t ri = 0; ri < max_rows; ri++) {
                                     for (size_t vi = 0; vi < sqr->var_count; vi++) {
                                         KnowledgeGraphNode* n = sqr->bindings[vi][ri];
-                                        pos += snprintf(output + pos,
-                                            (size_t)max_tokens - (size_t)pos,
-                                            "\n  · %s = %s",
-                                            sqr->var_names[vi],
-                                            (n && n->label) ? n->label : "(未知)");
+                                        /* D-4修复: 检查snprintf返回值，截断则记录警告 */
+                                        {
+                                            int sw = snprintf(output + pos,
+                                                (size_t)max_tokens - (size_t)pos,
+                                                "\n  · %s = %s",
+                                                sqr->var_names[vi],
+                                                (n && n->label) ? n->label : "(未知)");
+                                            if (sw < 0 || sw >= (int)((size_t)max_tokens - (size_t)pos)) {
+                                                log_warn("dialogue: SPARQL结果响应截断(需要%d字节, 剩余%d字节)",
+                                                         sw, (int)((size_t)max_tokens - (size_t)pos));
+                                            }
+                                            pos += sw;
+                                        }
                                     }
                                 }
                                 gen_len = pos;
@@ -1305,18 +1450,34 @@ DialogueResponse* dialogue_process_input_ext(DialogueProcessor* processor,
                             int pc = graph_reasoner_predict_tail(gr, eid, -1,
                                 NULL, 0, preds, 4);
                             if (pc > 0) {
-                                pos = snprintf(output, (size_t)max_tokens,
-                                    "根据图推理链路预测：");
+                                /* D-4修复: 检查snprintf返回值，截断则记录警告 */
+                                {
+                                    int sw = snprintf(output, (size_t)max_tokens,
+                                        "根据图推理链路预测：");
+                                    if (sw < 0 || sw >= (int)max_tokens) {
+                                        log_warn("dialogue: 链路预测响应头截断(需要%d字节, 可用%d字节)",
+                                                 sw, (int)max_tokens);
+                                    }
+                                    pos = sw;
+                                }
                                 for (int pi = 0; pi < pc && pi < 3; pi++) {
                                     const char* tname = graph_reasoner_get_entity_name(
                                         gr, preds[pi].entity_id);
                                     const char* rname = "可能关联";
-                                    pos += snprintf(output + pos,
-                                        (size_t)max_tokens - (size_t)pos,
-                                        "\n  · %s → %s → %s (置信度%.2f)",
-                                        ns[0]->label, rname,
-                                        tname ? tname : "(未知)",
-                                        preds[pi].confidence);
+                                    /* D-4修复: 检查snprintf返回值，截断则记录警告 */
+                                    {
+                                        int sw = snprintf(output + pos,
+                                            (size_t)max_tokens - (size_t)pos,
+                                            "\n  · %s → %s → %s (置信度%.2f)",
+                                            ns[0]->label, rname,
+                                            tname ? tname : "(未知)",
+                                            preds[pi].confidence);
+                                        if (sw < 0 || sw >= (int)((size_t)max_tokens - (size_t)pos)) {
+                                            log_warn("dialogue: 链路预测结果响应截断(需要%d字节, 剩余%d字节)",
+                                                     sw, (int)((size_t)max_tokens - (size_t)pos));
+                                        }
+                                        pos += sw;
+                                    }
                                     if (pos >= (int)max_tokens - 1) break;
                                 }
                                 gen_len = pos;
@@ -1787,8 +1948,23 @@ int dialogue_analyze_intent(const char* text, size_t text_length,
                 for (size_t i = 0; i < flen; i++) {
                     embed_buf[i] = (float)(unsigned char)text[i] / 255.0f;
                 }
+                /* v9.13修复: NaN/Inf检查，确保embed_buf有效 */
+                {
+                    int bad_input = 0;
+                    for (size_t i = 0; i < flen && i < embed_dim; i++) {
+                        if (!isfinite(embed_buf[i])) { bad_input = 1; break; }
+                    }
+                    if (bad_input) {
+                        safe_free((void**)&embed_buf);
+                        return -1;
+                    }
+                }
                 /* 通过共享LNN前向传播获取语义表示 */
                 lnn_forward(lnn, embed_buf, intent_vec);
+                /* v9.13修复: LNN输出NaN/Inf清理 */
+                for (int i = 0; i < 256; i++) {
+                    if (!isfinite(intent_vec[i])) intent_vec[i] = 0.0f;
+                }
                 /* 从LNN输出向量计算意图类别和置信度 */
                 /* P0修复: 使用前16维做意图分类（12种意图类型），避免越界 */
                 float max_val = intent_vec[0];
@@ -1796,8 +1972,12 @@ int dialogue_analyze_intent(const char* text, size_t text_length,
                 float sum_exp = 0.0f;
                 float exp_vals[16];
                 for (int i = 0; i < 16; i++) {
-                    if (intent_vec[i] > max_val) { max_val = intent_vec[i]; max_idx = i; }
-                    exp_vals[i] = expf(intent_vec[i] - max_val);
+                    /* v9.13修复: 输入安全检查，防止NaN/Inf传播 */
+                    float val = intent_vec[i];
+                    if (!isfinite(val)) val = 0.0f;
+                    if (val > max_val) { max_val = val; max_idx = i; }
+                    exp_vals[i] = expf(val - max_val);
+                    if (!isfinite(exp_vals[i])) exp_vals[i] = 0.0f;
                     sum_exp += exp_vals[i];
                 }
                 if (sum_exp > 1e-9f) {

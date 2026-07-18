@@ -420,13 +420,13 @@ static int find_connected_components(const float* binary, int width, int height,
     }
     
     // 初始化标签数组
-    memset(labels, 0, width * height * sizeof(int));
+    memset(labels, 0, (size_t)width * height * sizeof(int));
     
     int current_label = 0;
     
     // 使用栈进行泛洪填充避免递归深度问题
-    int* stack_x = (int*)safe_calloc(width * height, sizeof(int));
-    int* stack_y = (int*)safe_calloc(width * height, sizeof(int));
+    int* stack_x = (int*)safe_calloc((size_t)width * height, sizeof(int));
+    int* stack_y = (int*)safe_calloc((size_t)width * height, sizeof(int));
     if (!stack_x || !stack_y) {
         safe_free((void**)&stack_x);
         safe_free((void**)&stack_y);

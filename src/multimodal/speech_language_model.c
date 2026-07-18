@@ -216,9 +216,10 @@ int speech_language_model_train(const char* corpus_path, int n, const char* mode
                 char* ngram = (char*)safe_malloc(total_len);
                 if (!ngram) continue; /* 分配失败跳过 */
                 ngram[0] = '\0';
+                size_t off = 0;
                 for (int j = 0; j <= order; j++) {
-                    if (j > 0) strcat(ngram, " ");
-                    strcat(ngram, words[i + j]);
+                    if (j > 0) off += (size_t)snprintf(ngram + off, total_len - off, " ");
+                    off += (size_t)snprintf(ngram + off, total_len - off, "%s", words[i + j]);
                 }
                 lm_insert_ngram(lm->ngram_maps[order], ngram, NULL);
                 safe_free((void**)&ngram);
@@ -382,12 +383,13 @@ float speech_language_model_score(void* model, const int* tokens, int num_tokens
             char* ngram = (char*)safe_malloc(ngram_max_len);
             if (!ngram) continue; /* 分配失败跳过当前阶 */
             ngram[0] = '\0';
+            size_t off = 0;
             for (int j = pos - order; j <= pos; j++) {
                 if (j < 0) break;
                 char token_str[32];
                 snprintf(token_str, sizeof(token_str), "%d", tokens[j]);
-                if (j > pos - order) strcat(ngram, " ");
-                strcat(ngram, token_str);
+                if (j > pos - order) off += (size_t)snprintf(ngram + off, ngram_max_len - off, " ");
+                off += (size_t)snprintf(ngram + off, ngram_max_len - off, "%s", token_str);
             }
 
             unsigned int h = lm_hash_str(ngram);
@@ -415,12 +417,13 @@ float speech_language_model_score(void* model, const int* tokens, int num_tokens
                 if (ctx) {
                     ctx[0] = '\0';
                     if (order > 0 && pos > 0) {
+                        size_t off = 0;
                         for (int j = pos - order; j < pos; j++) {
                             if (j < 0) break;
                             char token_str[32];
                             snprintf(token_str, sizeof(token_str), "%d", tokens[j]);
-                            if (j > pos - order) strcat(ctx, " ");
-                            strcat(ctx, token_str);
+                            if (j > pos - order) off += (size_t)snprintf(ctx + off, ctx_max_len - off, " ");
+                            off += (size_t)snprintf(ctx + off, ctx_max_len - off, "%s", token_str);
                         }
                         unsigned int ctx_h = lm_hash_str(ctx);
                         LmHashMap* ctx_map = lm->ngram_maps[order - 1];

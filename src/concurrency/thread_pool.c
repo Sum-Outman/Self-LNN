@@ -914,6 +914,21 @@ ThreadPool* thread_pool_create(const ThreadPoolConfig* config) {
                 CloseHandle(pool->threads[j].handle);
             }
             safe_free((void**)&pool->threads);
+            /* P1修复7: CreateThread失败时补充清理工作窃取资源，
+             * 与行865-875（threads分配失败路径）保持一致，防止内存/句柄泄漏。
+             * 注意: 必须在DeleteCriticalSection(&pool->lock)之前执行，
+             * 因为queue_locks依赖于pool结构体尚有效。 */
+            if (config->enable_work_stealing) {
+                for (size_t j = 0; j < config->num_threads; j++) {
+#ifdef _WIN32
+                    DeleteCriticalSection(&pool->queue_locks[j]);
+#else
+                    pthread_mutex_destroy(&pool->queue_locks[j]);
+#endif
+                }
+                safe_free((void**)&pool->queue_locks);
+                safe_free((void**)&pool->thread_queues);
+            }
 #ifdef _WIN32
             DeleteCriticalSection(&pool->lock);
             DeleteCriticalSection(&pool->node_lock);  /* DEEP-FIX: 创建失败时清理node_lock */
@@ -933,6 +948,14 @@ ThreadPool* thread_pool_create(const ThreadPoolConfig* config) {
                 pthread_cancel(pool->threads[j].handle);
             }
             safe_free((void**)&pool->threads);
+            /* P1修复7: pthread_create失败时同样补充清理工作窃取资源 */
+            if (config->enable_work_stealing) {
+                for (size_t j = 0; j < config->num_threads; j++) {
+                    pthread_mutex_destroy(&pool->queue_locks[j]);
+                }
+                safe_free((void**)&pool->queue_locks);
+                safe_free((void**)&pool->thread_queues);
+            }
             pthread_mutex_destroy(&pool->lock);
             pthread_mutex_destroy(&pool->node_lock);  /* DEEP-FIX */
             pthread_cond_destroy(&pool->task_cond);
@@ -996,7 +1019,11 @@ void thread_pool_free(ThreadPool* pool) {
 #endif
     
     // 等待所有线程结束
-    for (size_t i = 0; i < pool->config.num_threads; i++) {
+    /* P0修复6: 使用threads_capacity而非config.num_threads作为上界。
+     * 缩容时仅更新config.num_threads但不重新分配数组，被标记STOPPING的
+     * 孤立线程仍存在于threads[new_num_threads..threads_capacity)范围内，
+     * 必须全部join和CloseHandle，否则句柄泄漏且线程资源无法回收。 */
+    for (size_t i = 0; i < pool->threads_capacity; i++) {
 #ifdef _WIN32
         WaitForSingleObject(pool->threads[i].handle, INFINITE);
         CloseHandle(pool->threads[i].handle);
@@ -1012,7 +1039,10 @@ void thread_pool_free(ThreadPool* pool) {
     
     // 如果启用了工作窃取，清理每个线程的队列
     if (pool->config.enable_work_stealing && pool->thread_queues) {
-        for (size_t i = 0; i < pool->config.num_threads; i++) {
+        /* P0修复6: 同样使用threads_capacity，确保缩容后孤立线程的
+         * queue_locks也被DeleteCriticalSection/pthread_mutex_destroy清理。
+         * 缩容时仅清理了队列内容但未销毁锁，此处补全。 */
+        for (size_t i = 0; i < pool->threads_capacity; i++) {
             task_queue_clear(pool, &pool->thread_queues[i]);
 #ifdef _WIN32
             DeleteCriticalSection(&pool->queue_locks[i]);

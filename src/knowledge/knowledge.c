@@ -23,6 +23,7 @@
 #include "selflnn/cognition/abstraction.h"
 #include "selflnn/core/laplace.h"
 #include "selflnn/selflnn.h"            /* 修复#5: selflnn_get_shared_lnn() */
+#include "selflnn/knowledge/knowledge_self_check.h"  /* v9.19: 知识自检模块 */
 #ifdef _DEBUG
 #include <crtdbg.h>  /* _CrtCheckMemory() */
 #endif
@@ -926,9 +927,91 @@ int knowledge_base_add(KnowledgeBase* kb, const KnowledgeEntry* entry) {
     if (kb == NULL || entry == NULL) {
         return -1;
     }
-    KB_WLOCK(kb);
+    
+    /* 【v9.22重构】先去重检查（读锁下），再添加（写锁下）
+     * 原设计将昂贵的O(n)去重循环放在KB_WLOCK内部，导致写锁持有时间过长，
+     * 在知识库较大（446+条目）时阻塞所有读操作，造成死锁。
+     * 重构后：读锁阶段仅做只读去重检查，不阻塞其他读者；
+     * 写锁阶段仅做快速的添加操作。 */
+    
+    /* === 阶段1：读锁下去重检查 === */
+    int is_duplicate = 0;
+    size_t dup_index = 0;
+    int need_update_source = 0;
+    KnowledgeSource new_source = entry->source;
+    float new_weight = entry->weight;
+    
+    KB_RLOCK(kb);
     
     /* 检查容量限制 */
+    if (kb->max_entries > 0 && kb->size >= kb->max_entries) {
+        KB_RUNLOCK(kb);
+        return -1;
+    }
+    
+    /* 去重检查：仅在知识库已有数据时执行（前50条允许快速初始化） */
+    if (kb->size > 50 && entry->subject && entry->predicate && entry->object) {
+        SimilarityResult sim_results[4];
+        memset(sim_results, 0, sizeof(sim_results));
+        int sim_count = 0;
+        for (size_t i = 0; i < kb->size && sim_count < 4; i++) {
+            KnowledgeEntry* existing = &kb->entries[i].entry;
+            if (!existing->subject || !existing->predicate || !existing->object) continue;
+            float subj_sim = knowledge_string_similarity(entry->subject, existing->subject);
+            float pred_sim = knowledge_string_similarity(entry->predicate, existing->predicate);
+            float obj_sim = knowledge_string_similarity(entry->object, existing->object);
+            float total_sim = (subj_sim + pred_sim + obj_sim) / 3.0f;
+            if (total_sim >= 0.75f) {
+                sim_results[sim_count].similarity = total_sim;
+                sim_results[sim_count].index = i;
+                sim_count++;
+            }
+        }
+        if (sim_count > 0) {
+            float avg_sim = 0.0f;
+            for (int si = 0; si < sim_count && si < 4; si++) {
+                avg_sim += sim_results[si].similarity;
+            }
+            avg_sim /= (float)sim_count;
+            if (avg_sim > 0.85f || sim_results[0].similarity > 0.95f) {
+                is_duplicate = 1;
+                dup_index = sim_results[0].index;
+                InternalKnowledgeEntry* existing = &kb->entries[dup_index];
+                int existing_src_prio = (existing->entry.source == SOURCE_USER) ? 3 :
+                    (existing->entry.source == SOURCE_LEARNING || existing->entry.source == SOURCE_AUTO_LEARN) ? 2 : 1;
+                int new_src_prio = (entry->source == SOURCE_USER) ? 3 :
+                    (entry->source == SOURCE_LEARNING || entry->source == SOURCE_AUTO_LEARN) ? 2 : 1;
+                if (new_src_prio > existing_src_prio) {
+                    need_update_source = 1;
+                }
+            }
+        }
+    }
+    KB_RUNLOCK(kb);
+    
+    /* 如果是重复条目，在写锁下更新元数据 */
+    if (is_duplicate) {
+        KB_WLOCK(kb);
+        /* 重新检查索引有效性（读锁释放后可能被其他线程修改） */
+        if (dup_index < kb->size) {
+            InternalKnowledgeEntry* existing = &kb->entries[dup_index];
+            if (need_update_source) {
+                existing->entry.source = new_source;
+            }
+            if (new_weight > existing->entry.weight) {
+                existing->entry.weight = new_weight;
+            }
+            existing->entry.timestamp = entry->timestamp > 0 ?
+                entry->timestamp : (int64_t)time(NULL);
+        }
+        KB_WUNLOCK(kb);
+        return 0; /* 视为成功：条目已存在，已更新 */
+    }
+    
+    /* === 阶段2：写锁下添加新条目 === */
+    KB_WLOCK(kb);
+    
+    /* 重新检查容量（读锁释放后可能有其他线程添加了条目） */
     if (kb->max_entries > 0 && kb->size >= kb->max_entries) {
         KB_WUNLOCK(kb);
         return -1;
@@ -955,62 +1038,6 @@ int knowledge_base_add(KnowledgeBase* kb, const KnowledgeEntry* entry) {
         memset(&kb->entries[kb->size], 0, 
                (new_capacity - kb->size) * sizeof(InternalKnowledgeEntry));
     }
-    
-/* 在分配新条目之前检查重复
-     * 原knowledge_base_add()无任何去重检查，导致8条调用路径可添加重复知识
-     * 使用字符串相似度检测已有条目与新条目的重复度，高于阈值则跳过 */
-    if (kb->size > 0 && entry->subject && entry->predicate && entry->object) {
-        /* 仅在知识库已有数据时执行去重（前50条允许快速初始化） */
-        if (kb->size > 50) {
-            SimilarityResult sim_results[4];
-            memset(sim_results, 0, sizeof(sim_results));
-            int sim_count = 0;
-            /* 在内层遍历知识库计算相似度，同时获取准确条目索引 */
-            for (size_t i = 0; i < kb->size && sim_count < 4; i++) {
-                KnowledgeEntry* existing = &kb->entries[i].entry;
-                if (!existing->subject || !existing->predicate || !existing->object) continue;
-                float subj_sim = knowledge_string_similarity(entry->subject, existing->subject);
-                float pred_sim = knowledge_string_similarity(entry->predicate, existing->predicate);
-                float obj_sim = knowledge_string_similarity(entry->object, existing->object);
-                float total_sim = (subj_sim + pred_sim + obj_sim) / 3.0f;
-                if (total_sim >= 0.75f) {
-                    sim_results[sim_count].similarity = total_sim;
-                    sim_results[sim_count].index = i;
-                    sim_count++;
-                }
-            }
-            if (sim_count > 0) {
-                float avg_sim = 0.0f;
-                for (int si = 0; si < sim_count && si < 4; si++) {
-                    avg_sim += sim_results[si].similarity;
-                }
-                avg_sim /= (float)sim_count;
-                /* 平均相似度>0.85或单个高度匹配>0.95视为重复 */
-                if (avg_sim > 0.85f || sim_results[0].similarity > 0.95f) {
-/* 合并策略增强 - 来源优先级保留
-                     * SOURCE_USER(3) > SOURCE_LEARNING(2) > SOURCE_PRESET(8)
-                     * 用户手动输入的条目不应被自动学习覆盖 */
-                    InternalKnowledgeEntry* existing = &kb->entries[sim_results[0].index];
-                    /* 高优先级来源条目不被低优先级来源覆盖 */
-                    int existing_src_prio = (existing->entry.source == SOURCE_USER) ? 3 :
-                        (existing->entry.source == SOURCE_LEARNING || existing->entry.source == SOURCE_AUTO_LEARN) ? 2 : 1;
-                    int new_src_prio = (entry->source == SOURCE_USER) ? 3 :
-                        (entry->source == SOURCE_LEARNING || entry->source == SOURCE_AUTO_LEARN) ? 2 : 1;
-                    if (new_src_prio > existing_src_prio) {
-                        /* 高优先级来源覆盖: 更新来源标记 */
-                        existing->entry.source = entry->source;
-                    }
-                    if (entry->weight > existing->entry.weight) {
-                        existing->entry.weight = entry->weight;
-                    }
-                    existing->entry.timestamp = entry->timestamp > 0 ?
-                        entry->timestamp : (int64_t)time(NULL);
-                    KB_WUNLOCK(kb);
-                    return 0; /* 视为成功：条目已存在，已更新 */
-                }
-            }
-        }
-    }
 
     /* 分配新条目 */
     InternalKnowledgeEntry* internal_entry = &kb->entries[kb->size];
@@ -1031,8 +1058,7 @@ int knowledge_base_add(KnowledgeBase* kb, const KnowledgeEntry* entry) {
     kb->size++;
     kb->entry_count = kb->size;
 
-/* 新知识点加入后清除搜索结果缓存
-     * 缓存的查询结果可能因新知识加入而过期，立即失效避免返回过期数据 */
+    /* 新知识点加入后清除搜索结果缓存 */
     if (kb->search_results_cache) {
         safe_free((void**)&kb->search_results_cache);
         kb->cache_size = 0;
@@ -1079,6 +1105,19 @@ int knowledge_base_add(KnowledgeBase* kb, const KnowledgeEntry* entry) {
     }
 
     KB_WUNLOCK(kb);
+
+    /* v9.19: 每新增50条知识触发一次增量自检，保持知识库一致性 */
+    {
+        static volatile int kb_add_count = 0;
+        if (++kb_add_count >= 50) {
+            kb_add_count = 0;
+            KSSelfCheckConfig cfg = KS_SELF_CHECK_CONFIG_DEFAULT;
+            cfg.enable_auto_resolve = 1;
+            KSSelfCheckReport* report = ksc_run_self_check(kb, NULL, NULL, &cfg);
+            if (report) ksc_report_free(report);
+        }
+    }
+
     return internal_entry->id;
 }
 
@@ -1483,6 +1522,15 @@ int knowledge_base_get_by_id(KnowledgeBase* kb, int entry_id, KnowledgeEntry* en
     
     KB_RUNLOCK(kb);
     return -1;
+}
+
+/* v9.21新增: 安全索引访问器，处理InternalKnowledgeEntry与KnowledgeEntry的结构体偏移差异 */
+int knowledge_base_get_entry_by_index(KnowledgeBase* kb, size_t index, KnowledgeEntry* out_entry) {
+    if (!kb || !out_entry || index >= kb->size) return -1;
+    KB_RLOCK(kb);
+    memcpy(out_entry, &kb->entries[index].entry, sizeof(KnowledgeEntry));
+    KB_RUNLOCK(kb);
+    return 0;
 }
 
 int knowledge_base_get_stats(KnowledgeBase* kb, size_t* total_entries, size_t* memory_usage) {
@@ -2015,14 +2063,25 @@ static int tfidf_build_idf(KnowledgeBase* kb, TfIdfTerm* idf_table, int* idf_cou
     if (!kb || !idf_table || !idf_count) return -1;
     int max_idf = TFIDF_MAX_TERMS;
     *idf_count = 0;
+    
 
-    /* 为每个文档收集词项 */
+    /* 【v9.22优化】限制文档数量和总词项数，避免O(n²)性能瓶颈
+     * 原设计：max_idf * kb->size = 2048 * 446 = 913K → 31.4 MB分配
+     * 优化后：最多处理300个文档，最多5000个唯一词项 → 180 KB分配 */
+    const size_t MAX_DOCS = 300;
+    const int MAX_TOTAL_TERMS = 5000;
+    size_t num_docs = (kb->size < MAX_DOCS) ? kb->size : MAX_DOCS;
+    /* 采样策略：如果知识库很大，均匀采样MAX_DOCS个文档 */
+    size_t doc_step = (kb->size > MAX_DOCS) ? (kb->size / MAX_DOCS) : 1;
+
     typedef struct { char term[TFIDF_MAX_TERM_LEN]; int seen_in_doc; } TermSeen;
-    TermSeen* all_terms = (TermSeen*)safe_calloc((size_t)max_idf * (size_t)kb->size, sizeof(TermSeen));
+    TermSeen* all_terms = (TermSeen*)safe_calloc((size_t)MAX_TOTAL_TERMS, sizeof(TermSeen));
     if (!all_terms) return -1;
     int total_terms = 0;
 
-    for (size_t i = 0; i < kb->size; i++) {
+    for (size_t doc_idx = 0; doc_idx < num_docs; doc_idx++) {
+        size_t i = doc_idx * doc_step;
+        if (i >= kb->size) break;
         KnowledgeEntry* entry = &kb->entries[i].entry;
         /* 合并subject和object字段作为文档文本 */
         char doc_text[TFIDF_MAX_TERMS * TFIDF_MAX_TERM_LEN] = {0};
@@ -2066,7 +2125,7 @@ static int tfidf_build_idf(KnowledgeBase* kb, TfIdfTerm* idf_table, int* idf_cou
                     break;
                 }
             }
-            if (!found && total_terms < max_idf * (int)kb->size) {
+            if (!found && total_terms < MAX_TOTAL_TERMS) {
                 strncpy(all_terms[total_terms].term, terms[t], TFIDF_MAX_TERM_LEN - 1);
                 all_terms[total_terms].term[TFIDF_MAX_TERM_LEN - 1] = '\0';
                 all_terms[total_terms].seen_in_doc = (int)i + 1;
@@ -2086,12 +2145,13 @@ static int tfidf_build_idf(KnowledgeBase* kb, TfIdfTerm* idf_table, int* idf_cou
     safe_free((void**)&all_terms);
 
     /* 计算IDF值：log((N+1)/(df+1)) + 1 (Laplace平滑) */
-    float N = (float)kb->size;
+    float N = (float)num_docs;
     for (int i = 0; i < *idf_count; i++) {
         float df = (float)idf_table[i].doc_freq;
         idf_table[i].idf = logf((N + 1.0f) / (df + 1.0f)) + 1.0f;
     }
 
+    
     return 0;
 }
 
@@ -2172,12 +2232,14 @@ int knowledge_base_search_tfidf(KnowledgeBase* kb,
 
     /* KB-003修复: 添加读锁保护 */
     KB_RLOCK(kb);
+    
 
     /* 构建IDF表 */
     TfIdfTerm idf_table[TFIDF_MAX_TERMS];
     int idf_count = 0;
     if (tfidf_build_idf(kb, idf_table, &idf_count) != 0) { KB_RUNLOCK(kb); return -1; }
     if (idf_count == 0) { KB_RUNLOCK(kb); return 0; }
+    
 
     /* 计算查询的TF */
     TfIdfDocTerm query_terms[TFIDF_MAX_TERMS];
@@ -7069,7 +7131,7 @@ int knowledge_self_improve(KnowledgeBase* kb) {
                 ent.type = KNOWLEDGE_RELATION;
                 ent.confidence = 0.55f;
                 ent.weight = 1.0f;
-                if (knowledge_base_add(kb, &ent) == 0) improved++;
+                if (knowledge_base_add(kb, &ent) >= 0) improved++;
                 safe_free((void**)&ent.subject);
                 safe_free((void**)&ent.predicate);
                 safe_free((void**)&ent.object);

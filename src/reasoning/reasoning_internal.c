@@ -11,8 +11,10 @@
 
 #include "selflnn/reasoning/reasoning.h"
 #include "selflnn/reasoning/causal_reasoning.h"
-#include "selflnn/core/lnn.h"
 #include "selflnn/knowledge/knowledge.h"
+#include "selflnn/knowledge/logic_reasoning.h" /* v9.17: 接入FOL一阶逻辑归结引擎 */
+#include "selflnn/knowledge/semantic_network.h" /* v9.19: 语义网络扩散激活增强推理 */
+#include "selflnn/core/lnn.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/string_utils.h"
 #include "selflnn/utils/math_utils.h"
@@ -85,6 +87,10 @@ struct ReasoningEngine {
     float memory_sync_time;
     LNN* lnn_instance;
     BayesianNetwork* bayesian_network;
+    /* v9.17: 符号逻辑推理引擎 — FOL一阶逻辑归结 */
+    LogicReasoningEngine* logic_engine;
+    /* v9.19: 语义网络 — 扩散激活增强推理 */
+    SemanticNetwork* semantic_network;
     int inference_count;
     float* history_inputs;
     float* history_outputs;
@@ -156,6 +162,22 @@ ReasoningEngine* reasoning_engine_create(const ReasoningConfig* config) {
     engine->lnn_instance = NULL;
     engine->bayesian_network = bayesian_network_create(64);
     
+    /* v9.17: 初始化符号逻辑推理引擎（FOL一阶逻辑归结） */
+    {
+        LogicReasoningEngineConfig logic_config;
+        memset(&logic_config, 0, sizeof(LogicReasoningEngineConfig));
+        logic_config.mode = LOGIC_REASONING_MIXED_CHAINING;
+        logic_config.max_inference_steps = 200;
+        logic_config.min_confidence = 0.1f;
+        logic_config.enable_conflict_resolution = 1;
+        logic_config.enable_uncertainty_reasoning = 0;
+        logic_config.working_memory_size = 2000;
+        engine->logic_engine = logic_reasoning_engine_create(&logic_config);
+        if (engine->logic_engine) {
+            /* 默认逻辑规则已包含在引擎内部，无需额外添加 */
+        }
+    }
+    
     return engine;
 }
 
@@ -174,6 +196,11 @@ void reasoning_engine_free(ReasoningEngine* engine) {
     if (engine->bayesian_network) {
         bayesian_network_free(engine->bayesian_network);
         engine->bayesian_network = NULL;
+    }
+    /* v9.17: 释放符号逻辑推理引擎 */
+    if (engine->logic_engine) {
+        logic_reasoning_engine_free(engine->logic_engine);
+        engine->logic_engine = NULL;
     }
     if (engine->history_inputs) safe_free((void**)&engine->history_inputs);
     if (engine->history_outputs) safe_free((void**)&engine->history_outputs);
@@ -215,6 +242,18 @@ int reasoning_engine_set_lnn(ReasoningEngine* engine, LNN* lnn) {
     if (!engine) return -1;
     engine->lnn_instance = lnn;
     return 0;
+}
+
+/* v9.19: 语义网络集成 — 扩散激活增强推理 */
+int reasoning_engine_set_semantic_network(ReasoningEngine* engine, void* network) {
+    if (!engine) return -1;
+    engine->semantic_network = (SemanticNetwork*)network;
+    return 0;
+}
+
+void* reasoning_engine_get_semantic_network(const ReasoningEngine* engine) {
+    if (!engine) return NULL;
+    return (void*)engine->semantic_network;
 }
 
 /* ================================================================
@@ -301,6 +340,30 @@ int reasoning_infer_with_knowledge(ReasoningEngine* engine,
                 feature_vec[j] = tanhf(((float)(hash & 0xFFFF) / 32768.0f) - 1.0f);
             }
             feature_vec[63] = tanhf((float)plen / 512.0f);
+        }
+        
+        /* v9.19: 语义网络扩散激活 — 将前提在语义网络中扩散，增强嵌入向量 */
+        if (engine->semantic_network && semantic_network_get_concept_count(engine->semantic_network) > 3) {
+            SemanticConcept* seed = semantic_network_find_concept_by_name(
+                engine->semantic_network, premises[p]);
+            if (seed) {
+                ActivationEntry activations[16];
+                float seed_activation = 1.0f;
+                size_t act_count = semantic_network_spreading_activation(
+                    engine->semantic_network, &seed, &seed_activation, 1,
+                    0.75f, 0.15f, 5, activations, 16);
+                /* 将激活概念嵌入融入特征向量 */
+                for (size_t a = 0; a < act_count && a < 8; a++) {
+                    if (activations[a].concept && activations[a].concept->embedding) {
+                        float blend = activations[a].activation * 0.3f;
+                        int dim = activations[a].concept->embedding_size < 64 ?
+                                  (int)activations[a].concept->embedding_size : 64;
+                        for (int d = 0; d < dim; d++) {
+                            feature_vec[d] += activations[a].concept->embedding[d] * blend;
+                        }
+                    }
+                }
+            }
         }
         
         /* 通过LNN连续动态系统进行推理 */
@@ -1106,6 +1169,68 @@ void causal_model_free(StructuralCausalModel* model) {
     }
     safe_free((void**)&model->variables);
     safe_free((void**)&model);
+}
+
+/* ============================================================================
+ * v9.17: 符号演绎推理 — 基于FOL一阶逻辑归结 (MSVC编译路径)
+ * 这是真正的符号推理入口，与reasoning_infer()的浮点模糊匹配完全不同。
+ * 内部调用logic_fol_resolution()执行归结反驳证明。
+ * ============================================================================ */
+SELFLNN_API int reasoning_symbolic_deduce(ReasoningEngine* engine,
+                              const char** premises, int premise_count,
+                              const char* goal,
+                              char** result_json) {
+    if (!engine || !premises || premise_count < 1 || !goal || !result_json) {
+        return -1;
+    }
+    
+    if (!engine->logic_engine) {
+        return -1;
+    }
+    
+    int max_steps = 500;
+    int result_proved = 0;
+    char* proof_trace = NULL;
+    
+    int ret = logic_fol_resolution(premises, premise_count, goal, max_steps,
+                                   &proof_trace, &result_proved);
+    
+    if (ret != 0) {
+        *result_json = string_duplicate(
+            "{\"symbolic_reasoning\":{"
+            "\"status\":\"error\","
+            "\"message\":\"FOL归结执行失败\"}}");
+        return -1;
+    }
+    
+    char* json_buf = (char*)safe_malloc(4096);
+    if (!json_buf) return -1;
+    
+    const char* proof_str = proof_trace ? proof_trace : "";
+    
+    snprintf(json_buf, 4096,
+        "{\"symbolic_reasoning\":{"
+        "\"status\":\"%s\","
+        "\"goal\":\"%s\","
+        "\"proved\":%s,"
+        "\"method\":\"fol_resolution_refutation\","
+        "\"premise_count\":%d,"
+        "\"max_steps\":%d,"
+        "\"proof_trace\":\"%s\"}}",
+        result_proved ? "success" : "unproven",
+        goal,
+        result_proved ? "true" : "false",
+        premise_count,
+        max_steps,
+        proof_str);
+    
+    *result_json = json_buf;
+    
+    if (proof_trace) {
+        safe_free((void**)&proof_trace);
+    }
+    
+    return 0;
 }
 
 #endif /* _MSC_VER —— MSVC平台推理引擎实现结束 */

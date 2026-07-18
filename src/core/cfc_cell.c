@@ -2075,6 +2075,10 @@ static int cfc_cell_rosenbrock_parallel(CfCCell* cell, const float* input,
     float* J = cell->state->rosenbrock_jacobian;
     if (J) {
         /* R-005修复: 使用size_t安全乘法避免int溢出。n*n*sizeof(float)可能超出INT_MAX。 */
+        /* v9.15修复: 添加溢出前置检查，防止n*n在size_t空间内回绕 */
+        if (n > 0 && (size_t)n > SIZE_MAX / ((size_t)n * sizeof(float))) {
+            return -1;
+        }
         memset(J, 0, (size_t)n * (size_t)n * sizeof(float));
         float eps = cell->config.rosenbrock_config.finite_diff_eps > 0.0f ?
                      cell->config.rosenbrock_config.finite_diff_eps : 1e-6f;

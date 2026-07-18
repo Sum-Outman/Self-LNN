@@ -419,7 +419,8 @@ static int intel_ze_init(void) {
         LOG_WARN("未发现Intel Level Zero驱动");
         return 0;
     }
-    g_ze_lib.drivers = (ze_driver_handle_t*)calloc(driver_count, sizeof(ze_driver_handle_t));
+    /* v9.1修复: 统一使用safe_calloc，与cleanup中的safe_free保持一致 */
+    g_ze_lib.drivers = (ze_driver_handle_t*)safe_calloc(driver_count, sizeof(ze_driver_handle_t));
     /* H-MED-004a: calloc后NULL检查，防止内存分配失败导致空指针解引用 */
     if (!g_ze_lib.drivers) {
         LOG_ERROR("Intel Level Zero驱动句柄内存分配失败");
@@ -436,20 +437,21 @@ static int intel_ze_init(void) {
     }
     if (total_devices == 0) {
         LOG_WARN("Level Zero驱动无设备");
-        /* H-MED-004b: 释放已分配的驱动句柄内存，防止内存泄漏 */
-        free(g_ze_lib.drivers);
+        /* v9.1修复: 统一使用safe_free与cleanup保持一致 */
+        safe_free((void**)&g_ze_lib.drivers);
         g_ze_lib.drivers = NULL;
         return 0;
     }
 
-    g_ze_lib.devices = (ze_device_handle_t*)calloc(total_devices, sizeof(ze_device_handle_t));
-    g_ze_lib.device_props = (ze_device_properties_t*)calloc(total_devices, sizeof(ze_device_properties_t));
+    /* v9.1修复: 统一使用safe_calloc分配，与cleanup中的safe_free保持一致 */
+    g_ze_lib.devices = (ze_device_handle_t*)safe_calloc(total_devices, sizeof(ze_device_handle_t));
+    g_ze_lib.device_props = (ze_device_properties_t*)safe_calloc(total_devices, sizeof(ze_device_properties_t));
     /* H-MED-004c: calloc后NULL检查，防止内存分配失败导致空指针解引用 */
     if (!g_ze_lib.devices || !g_ze_lib.device_props) {
         LOG_ERROR("Intel Level Zero设备信息内存分配失败");
-        free(g_ze_lib.drivers);
-        free(g_ze_lib.devices);
-        free(g_ze_lib.device_props);
+        safe_free((void**)&g_ze_lib.drivers);
+        safe_free((void**)&g_ze_lib.devices);
+        safe_free((void**)&g_ze_lib.device_props);
         g_ze_lib.drivers = NULL;
         g_ze_lib.devices = NULL;
         g_ze_lib.device_props = NULL;
@@ -949,8 +951,9 @@ static void intel_backend_kernel_free(GpuKernel* kernel) {
         ze_kernel_handle_t ze_ker = (ze_kernel_handle_t)kernel->backend_data;
         g_ze_lib.zeKernelDestroy(ze_ker);
     }
-    if (kernel->kernel_source) free(kernel->kernel_source);
-    if (kernel->kernel_name) free(kernel->kernel_name);
+    /* v9.1修复: kernel_source/kernel_name由string_duplicate(safe_malloc)分配, 必须用safe_free释放 */
+    if (kernel->kernel_source) { safe_free((void**)&kernel->kernel_source); }
+    if (kernel->kernel_name) { safe_free((void**)&kernel->kernel_name); }
     if (kernel->arg_values) {
         for (int i = 0; i < kernel->arg_capacity; i++) {
             if (kernel->arg_values[i]) free(kernel->arg_values[i]);

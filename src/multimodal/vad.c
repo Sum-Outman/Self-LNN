@@ -975,6 +975,7 @@ int vad_save_model(const VadProcessor* processor, const char* filepath) {
         fwrite(&zero_history, sizeof(int), 1, file);
     }
     
+    if (ferror(file)) { fclose(file); return -1; }
     fclose(file);
     return 0;
 }

@@ -77,7 +77,7 @@
             return;
         }
         /* BUG-10修复：添加readyState严格检查，确保WebSocket真正处于OPEN状态 */
-        if (ws.isConnected && ws._ws && ws._ws.readyState === WebSocket.OPEN) {
+        if (ws.isConnected && ws.ws && ws.ws.readyState === WebSocket.OPEN) {
             graphState.backendOnline = true;
             showConnectionBanner('已连接知识图谱服务', 'connected');
             fetchKnowledgeFromBackend();
@@ -89,9 +89,9 @@
             ws.on('knowledge_update', function() { fetchKnowledgeFromBackend(); });
             ws.on('knowledge_added', function() { fetchKnowledgeFromBackend(); });
             ws.on('knowledge_deleted', function() { fetchKnowledgeFromBackend(); });
-            document.addEventListener('websocket-connection-status', function(e) {
-                /* D-006修复: 保存事件处理器引用,用于destroyKnowledgeGraph中移除 */
-                graphState._kgWsConnectionHandler = arguments.callee;
+            document.addEventListener('websocket-connection-status', function kgWsStatusHandler(e) {
+            /* D-006修复: 保存事件处理器引用,用于destroyKnowledgeGraph中移除 */
+            graphState._kgWsConnectionHandler = kgWsStatusHandler;
                 if (e.detail && e.detail.connected) {
                     graphState.backendOnline = true;
                     showConnectionBanner('已连接知识图谱服务', 'connected');
@@ -518,7 +518,8 @@
         canvas.addEventListener('wheel', onWheel);
         canvas.addEventListener('dblclick', onDoubleClick);
 
-        canvas.addEventListener('touchstart', function(e) {
+        /* v9.12修复: 将touch事件处理器提取为命名函数，加入清理列表防止内存泄漏 */
+        var onTouchStart = function(e) {
             e.preventDefault();
             var touch = e.touches[0];
             /* P1-005修复: 使用缓存的Rect代替实时getBoundingClientRect() */
@@ -537,9 +538,8 @@
                 panOffsetX = graphState.offsetX;
                 panOffsetY = graphState.offsetY;
             }
-        }, { passive: false });
-
-        canvas.addEventListener('touchmove', function(e) {
+        };
+        var onTouchMove = function(e) {
             e.preventDefault();
             var touch = e.touches[0];
             if (graphState.dragNode) {
@@ -551,12 +551,22 @@
                 graphState.offsetX = panOffsetX + (touch.clientX - panStartX) / graphState.zoom;
                 graphState.offsetY = panOffsetY + (touch.clientY - panStartY) / graphState.zoom;
             }
-        }, { passive: false });
-
-        canvas.addEventListener('touchend', function(e) {
+        };
+        var onTouchEnd = function(e) {
             graphState.dragNode = null;
             isPanning = false;
-        });
+        };
+        canvas.addEventListener('touchstart', onTouchStart, { passive: false });
+        canvas.addEventListener('touchmove', onTouchMove, { passive: false });
+        canvas.addEventListener('touchend', onTouchEnd);
+        /* 将touch处理器加入清理列表 */
+        if (window._kgCleanupList) {
+            window._kgCleanupList.push(function() {
+                canvas.removeEventListener('touchstart', onTouchStart);
+                canvas.removeEventListener('touchmove', onTouchMove);
+                canvas.removeEventListener('touchend', onTouchEnd);
+            });
+        }
 
         refreshGraph();
         animate();

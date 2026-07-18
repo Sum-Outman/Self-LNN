@@ -720,6 +720,12 @@ int teach_import_demos(TeachSystem* system, const char* file_path) {
         }
 
         size_t len = system->demos.trajectory_lengths[idx];
+        /* 修复缺陷10: 验证轨迹长度，防止越界 */
+        if (len > TEACH_MAX_STEPS_PER_DEMO) {
+            log_error("[示教导入] 第%zu条演示轨迹长度超限（len=%zu, max=%d）", i, len, TEACH_MAX_STEPS_PER_DEMO);
+            fclose(fp);
+            return -4;
+        }
         size_t obs_off = idx * TEACH_MAX_STEPS_PER_DEMO * system->obs_dim;
         size_t act_off = idx * TEACH_MAX_STEPS_PER_DEMO * system->act_dim;
 

@@ -1606,7 +1606,7 @@ void gpu_context_free(GpuContext* context) {
                 ctx->kernel_cache[i].kernel = NULL;
             }
         }
-        free(ctx->kernel_cache);
+        safe_free((void**)&ctx->kernel_cache);
         ctx->kernel_cache = NULL;
     }
     if (ctx->kernel_optimizer) {
@@ -2755,7 +2755,7 @@ int gpu_kernel_cache_set_capacity(GpuContext* context, int capacity) {
     }
     
     GpuKernelCacheEntry* new_cache = (GpuKernelCacheEntry*)
-        realloc(ctx->kernel_cache, (size_t)capacity * sizeof(GpuKernelCacheEntry));
+        safe_realloc(ctx->kernel_cache, (size_t)capacity * sizeof(GpuKernelCacheEntry));
     if (!new_cache) return -1;
     
     ctx->kernel_cache = new_cache;
@@ -4226,12 +4226,35 @@ NpuModel* gpu_npu_load_model(GpuContext* context, const char* model_path,
     if (model_path) {
         FILE* fp = fopen(model_path, "rb");
         if (fp) {
+            int load_ok = 1;
             for (int l = 0; l < model->num_layers; l++) {
                 CpuNpuDenseLayer* layer = &model->layers[l];
-                fread(layer->weights, sizeof(float), (size_t)layer->weights_size, fp);
-                fread(layer->biases, sizeof(float), (size_t)layer->biases_size, fp);
+                /* P0修复: 检查fread返回值，防止文件截断或损坏导致加载不完整数据 */
+                size_t r1 = fread(layer->weights, sizeof(float), (size_t)layer->weights_size, fp);
+                if (r1 != (size_t)layer->weights_size) {
+                    selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                                          "NPU模型加载: 权重数据读取不完整");
+                    load_ok = 0;
+                    break;
+                }
+                size_t r2 = fread(layer->biases, sizeof(float), (size_t)layer->biases_size, fp);
+                if (r2 != (size_t)layer->biases_size) {
+                    selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                                          "NPU模型加载: 偏置数据读取不完整");
+                    load_ok = 0;
+                    break;
+                }
             }
             fclose(fp);
+            if (!load_ok) {
+                /* P1修复: 加载失败时需先释放所有层的weights和biases，防止6块内存泄漏 */
+                for (int l = 0; l < model->num_layers; l++) {
+                    safe_free((void**)&model->layers[l].weights);
+                    safe_free((void**)&model->layers[l].biases);
+                }
+                safe_free((void**)&model);
+                return NULL;
+            }
         }
     }
 
@@ -4266,7 +4289,8 @@ int gpu_npu_infer(NpuModel* model, const float** inputs, float** outputs,
 
         /* 第一层：输入 → Layer0 */
         int cur_dim = in_dim;
-        float* cur_in = (float*)inputs[b];
+        /* P2修复: 移除const限定符丢弃，保持类型安全 */
+        const float* cur_in = inputs[b];
         float* cur_out = NULL;
 
         for (int l = 0; l < m->num_layers; l++) {

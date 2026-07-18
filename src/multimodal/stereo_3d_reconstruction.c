@@ -110,6 +110,8 @@ int sr3d_compute_dense_disparity(SR3DReconstructor* sr, const float* left, const
     size_t needed = (size_t)w * h * sizeof(float);
     if (needed > sr->disp_size) {
         safe_free((void**)&sr->disparity_buffer);
+        /* v9.12修复: 溢出检查，防止needed*2回绕 */
+        if (needed > SIZE_MAX / 2) return -1;
         sr->disparity_buffer = (float*)safe_malloc(needed * 2);
         if (!sr->disparity_buffer) return -1;
         sr->disp_size = needed * 2;
@@ -117,6 +119,8 @@ int sr3d_compute_dense_disparity(SR3DReconstructor* sr, const float* left, const
     float* right_disp = sr->disparity_buffer;
     int max_disp = SR3D_MAX_DISPARITY;
     /* ZSF-013修复：使用uint64_t数组保持Census位模式完整精度 */
+    /* v9.12修复: 溢出检查，防止w*h*sizeof(uint64_t)回绕 */
+    if ((size_t)w > SIZE_MAX / ((size_t)h * sizeof(uint64_t))) return -1;
     uint64_t* census_left = (uint64_t*)safe_malloc((size_t)w * h * sizeof(uint64_t));
     uint64_t* census_right = (uint64_t*)safe_malloc((size_t)w * h * sizeof(uint64_t));
     if (!census_left || !census_right) {

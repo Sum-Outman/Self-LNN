@@ -372,6 +372,7 @@ int multimodal_process_audio(MultimodalProcessor* processor, const AudioData* au
     int num_samples = audio_data->num_samples;
     int num_channels = audio_data->num_channels;
     float* data = audio_data->data;
+    SELFLNN_CHECK_NULL(data, "音频数据缓冲区为空");
     size_t total_samples = (size_t)num_samples * num_channels;
 
     SELFLNN_CHECK(total_samples > 0, SELFLNN_ERROR_INVALID_ARGUMENT,

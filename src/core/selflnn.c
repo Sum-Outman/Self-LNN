@@ -359,6 +359,12 @@ int selflnn_is_single_lnn_enforced(void) {
     return g_single_lnn_enforced;
 }
 
+/* 临时禁用单LNN强制策略，用于系统关闭时正确释放全局LNN */
+void selflnn_disable_single_lnn_enforcement(void) {
+    g_single_lnn_enforced = 0;
+    log_info("[单一LNN] 单LNN强制策略已临时解除，允许释放全局LNN");
+}
+
 LNN* selflnn_get_or_create_lnn(const LNNConfig* config) {
     /* M-1修复: 快速路径 —— 无锁读取已存在的单例（利用缓存一致性） */
     if (g_global_singleton_lnn) {
@@ -416,9 +422,28 @@ int selflnn_module_uses_shared_lnn(int module_id) {
  * 调用者在多线程/高并发场景下应使用此函数替代直接调用lnn_forward()。 */
 SELFLNN_API int selflnn_safe_forward(LNN* lnn, const float* input, float* output) {
     if (!lnn || !input || !output) return -1;
+    /* v9.13修复: NaN/Inf输入保护，防止污染LNN隐藏状态 */
+    size_t input_size = lnn_get_input_size(lnn);
+    if (input_size > 0) {
+        int has_nan_inf = 0;
+        for (size_t i = 0; i < input_size; i++) {
+            if (!isfinite(input[i])) { has_nan_inf = 1; break; }
+        }
+        if (has_nan_inf) {
+            log_warn("[LNN安全] 输入包含NaN/Inf，拒绝前向传播");
+            return -1;
+        }
+    }
     lnn_lock(lnn);
     int ret = lnn_forward(lnn, input, output);
     lnn_unlock(lnn);
+    /* v9.13修复: 输出NaN/Inf检查和清理 */
+    size_t output_size = lnn_get_output_size(lnn);
+    if (ret == 0 && output_size > 0) {
+        for (size_t i = 0; i < output_size; i++) {
+            if (!isfinite(output[i])) output[i] = 0.0f;
+        }
+    }
     return ret;
 }
 
@@ -1032,7 +1057,15 @@ static int detect_real_hardware(SystemStatus* status)
         ULONGLONG total = kernel.QuadPart + user.QuadPart;
         ULONGLONG idle_total = idle.QuadPart;
 
+        /* v9.15修复: 静态变量添加互斥锁保护，防止多线程竞态条件 */
         static ULONGLONG prev_total = 0, prev_idle = 0;
+        static CRITICAL_SECTION cpu_win_cs;
+        static volatile LONG cpu_win_cs_init = 0;
+        if (InterlockedCompareExchange(&cpu_win_cs_init, 2, 0) == 0) {
+            InitializeCriticalSection(&cpu_win_cs);
+            InterlockedExchange(&cpu_win_cs_init, 1);
+        }
+        EnterCriticalSection(&cpu_win_cs);
         if (prev_total > 0 && prev_idle > 0)
         {
             ULONGLONG total_diff = total - prev_total;
@@ -1044,6 +1077,7 @@ static int detect_real_hardware(SystemStatus* status)
         }
         prev_total = total;
         prev_idle = idle_total;
+        LeaveCriticalSection(&cpu_win_cs);
     }
     return 1;
 #elif defined(__linux__)
@@ -1091,8 +1125,11 @@ static int detect_real_hardware(SystemStatus* status)
             long user, nice, sys, idle_;
             if (sscanf(line, "cpu %ld %ld %ld %ld", &user, &nice, &sys, &idle_) == 4)
             {
+                /* v9.15修复: 静态变量添加互斥锁保护，防止多线程竞态条件 */
                 static long prev_total = 0, prev_idle = 0;
+                static pthread_mutex_t cpu_linux_mutex = PTHREAD_MUTEX_INITIALIZER;
                 long total = user + nice + sys + idle_;
+                pthread_mutex_lock(&cpu_linux_mutex);
                 if (prev_total > 0 && prev_idle > 0)
                 {
                     long total_diff = total - prev_total;
@@ -1104,6 +1141,7 @@ static int detect_real_hardware(SystemStatus* status)
                 }
                 prev_total = total;
                 prev_idle = idle_;
+                pthread_mutex_unlock(&cpu_linux_mutex);
             }
         }
         fclose(fp);
@@ -1596,7 +1634,13 @@ int selflnn_consume_knowledge_inference(void* lnn_instance, void* kie,
                 for (size_t i = 0; i < input_size; i++) {
                     combined_input[i] += bias;
                 }
-                lnn_forward(lnn, combined_input, output);
+                /* v9.13修复: NaN/Inf检查 */
+                {
+                    int bad = 0;
+                    for (size_t i = 0; i < input_size && !bad; i++)
+                        if (!isfinite(combined_input[i])) bad = 1;
+                    if (!bad) lnn_forward(lnn, combined_input, output);
+                }
                 safe_free((void**)&combined_input);
                 safe_free((void**)&output);
             } else {
@@ -1671,7 +1715,14 @@ int selflnn_consume_knowledge_inference(void* lnn_instance, void* kie,
     }
 
     /* LNN前向传播：叠加知识推理偏置后的状态 → 输出决策信号 */
-    lnn_forward(lnn, combined_input, output);
+    /* v9.13修复: NaN/Inf检查后调用 */
+    {
+        int bad = 0;
+        for (size_t i = 0; i < input_size && !bad; i++)
+            if (!isfinite(combined_input[i])) bad = 1;
+        if (!bad) lnn_forward(lnn, combined_input, output);
+        else memset(output, 0, output_size * sizeof(float));
+    }
 
     log_info("[知识推理→LNN] 查询概念='%s', 推理跳数=%d, "
              "推理事实数=%d, 扰动强度=%.3f, LNN输入维度=%zu, 输出维度=%zu",
@@ -1768,6 +1819,16 @@ static ArchitectureEvaluation* nas_builtin_minimal_evaluator(
         if (out_dim > 256) out_dim = 256;
     }
 
+    /* v9.13修复: NaN/Inf输入检查 */
+    {
+        int bad = 0;
+        for (size_t i = 0; i < 64 && !bad; i++)
+            if (!isfinite(input[i])) bad = 1;
+        if (bad) {
+            safe_free((void**)&eval);
+            return NULL;
+        }
+    }
     if (lnn_forward(lnn, input, output) != 0) {
         safe_free((void**)&eval);
         return NULL;
@@ -3034,8 +3095,25 @@ static void shutdown_subsystems(void)
     if (g_system_state.teaching_loop_system) { teaching_loop_free((TeachingLoopSystem*)g_system_state.teaching_loop_system); g_system_state.teaching_loop_system = NULL; }
     if (g_system_state.multimodal_teaching) { multimodal_teaching_destroy((MultimodalTeachingSystem*)g_system_state.multimodal_teaching); g_system_state.multimodal_teaching = NULL; }
     
-    // 7. 销毁LNN液态神经网络
-    if (g_system_state.lnn_instance) { lnn_free((LNN*)g_system_state.lnn_instance); g_system_state.lnn_instance = NULL; g_global_singleton_lnn = NULL; }
+    // 6.7. 销毁对话系统（在LNN之前销毁，因为dialogue_processor持有的text_processor引用全局LNN）
+    if (g_system_state.dialogue_processor) {
+        uintptr_t dp_val = (uintptr_t)g_system_state.dialogue_processor;
+        uintptr_t dp_high = (dp_val >> 47) & 0x1FFFF;
+        if (dp_high != 0 && dp_high != 0x1FFFF) {
+            log_error("dialogue_processor 指针损坏(0x%016llX)，跳过释放", (unsigned long long)dp_val);
+            g_system_state.dialogue_processor = NULL;
+        } else {
+            dialogue_processor_free((DialogueProcessor*)g_system_state.dialogue_processor);
+            g_system_state.dialogue_processor = NULL;
+        }
+    }
+    
+    // 6.5. 销毁内容过滤器（必须在LNN之前，因为filter->internal_cfc可能引用全局LNN）
+    // v7.1修复: 移至LNN销毁之前，确保单LNN保护仍然启用时销毁过滤器
+    if (g_system_state.content_filter) { content_filter_destroy(g_system_state.content_filter); g_system_state.content_filter = NULL; }
+    
+    // 7. 销毁LNN液态神经网络（先禁用单LNN保护，允许释放全局LNN）
+    if (g_system_state.lnn_instance) { selflnn_disable_single_lnn_enforcement(); lnn_free((LNN*)g_system_state.lnn_instance); g_system_state.lnn_instance = NULL; g_global_singleton_lnn = NULL; }
     
     // 8. 销毁自我编程引擎
     if (g_system_state.programming_engine) { self_programming_engine_destroy((SelfProgrammingEngine*)g_system_state.programming_engine); g_system_state.programming_engine = NULL; }
@@ -3055,19 +3133,6 @@ static void shutdown_subsystems(void)
     // 13. 销毁分布式训练系统
     if (g_system_state.distributed_training) { distributed_cleanup((DistributedContext*)g_system_state.distributed_training); g_system_state.distributed_training = NULL; }
     
-    // 14. 销毁对话系统
-    if (g_system_state.dialogue_processor) {
-        uintptr_t dp_val = (uintptr_t)g_system_state.dialogue_processor;
-        /* 检测x64非规范地址：位48-63必须等于位47（符号扩展） */
-        uintptr_t dp_high = (dp_val >> 47) & 0x1FFFF;
-        if (dp_high != 0 && dp_high != 0x1FFFF) {
-            log_error("dialogue_processor 指针损坏(0x%016llX)，跳过释放", (unsigned long long)dp_val);
-            g_system_state.dialogue_processor = NULL;
-        } else {
-            dialogue_processor_free((DialogueProcessor*)g_system_state.dialogue_processor);
-            g_system_state.dialogue_processor = NULL;
-        }
-    }
 /* P0修复 - 销毁对话记忆管理器，防止内存泄漏。
      * 对话记忆管理器在初始化时由dialogue_memory_create()创建(L1951)，
      * 此前shutdown中遗漏释放，导致内存泄漏。 */
@@ -3108,7 +3173,6 @@ static void shutdown_subsystems(void)
     if (g_system_state.tts_engine) { tts_engine_free((TTSEngine*)g_system_state.tts_engine); g_system_state.tts_engine = NULL; }
     if (g_system_state.computer_operation) { co_system_destroy(g_system_state.computer_operation); g_system_state.computer_operation = NULL; }
     if (g_system_state.audit_logger) { audit_logger_free(g_system_state.audit_logger); g_system_state.audit_logger = NULL; }
-    if (g_system_state.content_filter) { content_filter_destroy(g_system_state.content_filter); g_system_state.content_filter = NULL; }
     if (g_system_state.load_balancer) { lb_destroy(g_system_state.load_balancer); g_system_state.load_balancer = NULL; }
     if (g_system_state.pbft_system) { pbft_system_destroy((PbftSystem*)g_system_state.pbft_system); g_system_state.pbft_system = NULL; }  /* F-006 */
     if (g_system_state.rw_lock_map_system) { rw_lock_map_destroy((RwLockMap*)g_system_state.rw_lock_map_system); g_system_state.rw_lock_map_system = NULL; }  /* F-009 */
@@ -3818,6 +3882,18 @@ int selflnn_design_product(const ProductRequirement* requirement, ProductSpec* d
             return g_system_state.last_error;
         }
 
+        /* v9.13修复: NaN/Inf输入检查 */
+        {
+            int bad = 0;
+            for (size_t i = 0; i < input_size && !bad; i++)
+                if (!isfinite(input_vec[i])) bad = 1;
+            if (bad) {
+                safe_free((void**)&input_vec);
+                safe_free((void**)&lnn_output);
+                g_system_state.last_error = SELFLNN_ERROR_INVALID_PARAMETER;
+                return g_system_state.last_error;
+            }
+        }
         if (lnn_forward(lnn, input_vec, lnn_output) != 0) {
             safe_free((void**)&lnn_output);
             safe_free((void**)&input_vec);
@@ -4312,8 +4388,11 @@ static int collect_real_energy_data(size_t point_count, EnergyDataPoint* data_po
                  * 在32位系统或Windows LLP64模型下会溢出 */
                 int64_t user, nice, sys, idle;
                 if (sscanf(line, "cpu %ld %ld %ld %ld", &user, &nice, &sys, &idle) == 4) {
+                    /* v9.15修复: 静态变量添加互斥锁保护，防止多线程竞态条件 */
                     static int64_t prev_total = 0, prev_idle_load = 0;
+                    static pthread_mutex_t cpu_load_linux_mutex = PTHREAD_MUTEX_INITIALIZER;
                     int64_t total = user + nice + sys + idle;
+                    pthread_mutex_lock(&cpu_load_linux_mutex);
                     if (prev_total > 0) {
                         int64_t total_diff = total - prev_total;
                         int64_t idle_diff = idle - prev_idle_load;
@@ -4323,6 +4402,7 @@ static int collect_real_energy_data(size_t point_count, EnergyDataPoint* data_po
                     }
                     prev_total = total;
                     prev_idle_load = idle;
+                    pthread_mutex_unlock(&cpu_load_linux_mutex);
                 }
             }
             fclose(stat_f);
@@ -4333,11 +4413,19 @@ static int collect_real_energy_data(size_t point_count, EnergyDataPoint* data_po
     {
         FILETIME idle_f, kernel_f, user_f;
         if (GetSystemTimes(&idle_f, &kernel_f, &user_f)) {
+            /* v9.15修复: 静态变量添加互斥锁保护，防止多线程竞态条件 */
             static ULONGLONG prev_total_w = 0, prev_idle_w = 0;
+            static CRITICAL_SECTION cpu_load_win_cs;
+            static volatile LONG cpu_load_win_cs_init = 0;
+            if (InterlockedCompareExchange(&cpu_load_win_cs_init, 2, 0) == 0) {
+                InitializeCriticalSection(&cpu_load_win_cs);
+                InterlockedExchange(&cpu_load_win_cs_init, 1);
+            }
             ULONGLONG idle_v = ((ULONGLONG)idle_f.dwHighDateTime << 32) | idle_f.dwLowDateTime;
             ULONGLONG kernel_v = ((ULONGLONG)kernel_f.dwHighDateTime << 32) | kernel_f.dwLowDateTime;
             ULONGLONG user_v = ((ULONGLONG)user_f.dwHighDateTime << 32) | user_f.dwLowDateTime;
             ULONGLONG total_v = kernel_v + user_v;
+            EnterCriticalSection(&cpu_load_win_cs);
             if (prev_total_w > 0) {
                 ULONGLONG total_diff = total_v - prev_total_w;
                 ULONGLONG idle_diff = idle_v - prev_idle_w;
@@ -4347,6 +4435,7 @@ static int collect_real_energy_data(size_t point_count, EnergyDataPoint* data_po
             }
             prev_total_w = total_v;
             prev_idle_w = idle_v;
+            LeaveCriticalSection(&cpu_load_win_cs);
         }
     }
 #endif

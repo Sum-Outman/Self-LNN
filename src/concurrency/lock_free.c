@@ -382,9 +382,13 @@ static int is_hazard_protected(void* ptr) {
 void safe_free(void** ptr);
 static int compare_and_swap_pointer(void** ptr, void* expected, void* desired);
 
+/* P0修复2: 自定义延迟释放函数类型，用于释放需要特殊清理的资源（如哈希表节点的key/value） */
+typedef void (*DeferredFreeFn)(void* ptr);
+
 typedef struct DeferredNode {
     void* ptr;
     struct DeferredNode* next;
+    DeferredFreeFn free_fn;  /**< P0修复2: 自定义释放函数，NULL时使用safe_free */
 #if TP_HAS_POOL
     int is_pool_node;    /**< M-029: 标记该节点来自池，释放时仅清理DeferredNode本身 */
 #endif
@@ -394,7 +398,12 @@ typedef struct DeferredNode {
 static void deferred_free_scan(DeferredNode** list, volatile LONG* count);
 static void busy_wait_spin(int iterations);
 
-static void deferred_free_add(DeferredNode** list, volatile LONG* count, void* ptr) {
+/* P0修复3: deferred_free_scan自旋锁，防止并发线程同时遍历和修改延迟释放链表 */
+static volatile LONG g_deferred_free_scan_lock = 0;
+
+/* P0修复2: 带自定义释放函数的延迟释放添加。free_fn为NULL时退化为safe_free行为。 */
+static void deferred_free_add_with_fn(DeferredNode** list, volatile LONG* count,
+                                       void* ptr, DeferredFreeFn free_fn) {
     DeferredNode* node = NULL;
     /* H-009修复: 分配失败时采用忙等待+重试策略，而非直接safe_free。
      * 直接safe_free会导致并发读线程访问已释放节点(use-after-free)。
@@ -435,11 +444,17 @@ static void deferred_free_add(DeferredNode** list, volatile LONG* count, void* p
         }
         /* 最终释放前再次检查hazard保护 */
         if (!is_hazard_protected(ptr)) {
-            safe_free((void**)&ptr);
+            /* P0修复2: 有自定义释放函数时调用它，否则用safe_free */
+            if (free_fn) {
+                free_fn(ptr);
+            } else {
+                safe_free((void**)&ptr);
+            }
         }
         return;
     }
     node->ptr = ptr;
+    node->free_fn = free_fn;  /* P0修复2: 记录自定义释放函数 */
 #if TP_HAS_POOL
     node->is_pool_node = 0;
 #endif
@@ -447,6 +462,11 @@ static void deferred_free_add(DeferredNode** list, volatile LONG* count, void* p
         node->next = *list;
     } while (!compare_and_swap_pointer((void**)list, node->next, node));
     if (count) atomic_fetch_add(count, 1);
+}
+
+/* P0修复2: 原deferred_free_add退化为不带自定义释放函数的包装 */
+static void deferred_free_add(DeferredNode** list, volatile LONG* count, void* ptr) {
+    deferred_free_add_with_fn(list, count, ptr, NULL);
 }
 
 #if TP_HAS_POOL
@@ -460,6 +480,17 @@ static void deferred_free_add_pool(DeferredNode** list, volatile LONG* count, vo
 #endif
 
 static void deferred_free_scan(DeferredNode** list, volatile LONG* count) {
+    /* P0修复3: 使用自旋锁保护整个scan过程，防止并发线程同时遍历和修改链表
+     * 导致节点丢失或重复释放。原实现无锁修改链表(prev->next=next)在多线程
+     * 下会造成链表损坏。 */
+#ifdef _WIN32
+    while (InterlockedCompareExchange(&g_deferred_free_scan_lock, 1, 0) != 0) {
+#else
+    while (!__sync_bool_compare_and_swap(&g_deferred_free_scan_lock, 0, 1)) {
+#endif
+        /* 自旋等待获取锁 */
+    }
+
     DeferredNode* prev = NULL;
     DeferredNode* curr = *list;
     while (curr) {
@@ -468,12 +499,21 @@ static void deferred_free_scan(DeferredNode** list, volatile LONG* count) {
             if (prev) prev->next = next;
             else *list = next;
 #if TP_HAS_POOL
-            if (!curr->is_pool_node) {
+            /* P0修复2: 有自定义释放函数时调用它（正确释放key/value/data等子资源），
+             * 否则按原逻辑：池节点跳过safe_free(ptr)，非池节点用safe_free */
+            if (curr->free_fn) {
+                curr->free_fn(curr->ptr);
+            } else if (!curr->is_pool_node) {
                 safe_free((void**)&curr->ptr);
             }
 #else
-            /* 使用safe_free代替free，因为节点由safe_malloc分配 */
-            safe_free((void**)&curr->ptr);
+            /* P0修复2: 有自定义释放函数时调用它，否则用safe_free */
+            if (curr->free_fn) {
+                curr->free_fn(curr->ptr);
+            } else {
+                /* 使用safe_free代替free，因为节点由safe_malloc分配 */
+                safe_free((void**)&curr->ptr);
+            }
 #endif
             safe_free((void**)&curr);
             if (count) atomic_fetch_sub(count, 1);
@@ -483,6 +523,13 @@ static void deferred_free_scan(DeferredNode** list, volatile LONG* count) {
             curr = next;
         }
     }
+
+    /* P0修复3: 释放自旋锁 */
+#ifdef _WIN32
+    InterlockedExchange(&g_deferred_free_scan_lock, 0);
+#else
+    __sync_bool_compare_and_swap(&g_deferred_free_scan_lock, 1, 0);
+#endif
 }
 
 static void deferred_free_flush(DeferredNode** list, volatile LONG* count) {
@@ -490,13 +537,23 @@ static void deferred_free_flush(DeferredNode** list, volatile LONG* count) {
     while (curr) {
         DeferredNode* next = curr->next;
 #if TP_HAS_POOL
-        if (!curr->is_pool_node && !is_hazard_protected(curr->ptr)) {
-            safe_free((void**)&curr->ptr);
+        /* P0修复2: 有自定义释放函数时调用它，否则按原逻辑处理池节点 */
+        if (!is_hazard_protected(curr->ptr)) {
+            if (curr->free_fn) {
+                curr->free_fn(curr->ptr);
+            } else if (!curr->is_pool_node) {
+                safe_free((void**)&curr->ptr);
+            }
         }
 #else
-        /* 使用safe_free代替free，因为节点由safe_malloc分配 */
+        /* P0修复2: 有自定义释放函数时调用它，否则用safe_free */
         if (!is_hazard_protected(curr->ptr)) {
-            safe_free((void**)&curr->ptr);
+            if (curr->free_fn) {
+                curr->free_fn(curr->ptr);
+            } else {
+                /* 使用safe_free代替free，因为节点由safe_malloc分配 */
+                safe_free((void**)&curr->ptr);
+            }
         }
 #endif
         safe_free((void**)&curr);
@@ -588,6 +645,8 @@ struct LockFreeHashTable {
     float load_factor_threshold;         /**< 负载因子阈值 */
     int max_probe_length;                /**< 最大探测长度 */
     volatile LONG size;                  /**< 哈希表当前大小 */
+    DeferredNode* free_list_head;         /**< P0修复2: 延迟释放链表头 */
+    volatile LONG free_list_count;        /**< P0修复2: 延迟释放节点计数 */
 };
 
 /**
@@ -1200,6 +1259,11 @@ static void free_stack_node(LockFreeStackNode* node) {
 #endif
 }
 
+/* P0修复1: free_stack_node的void*包装，供延迟释放机制(DeferredFreeFn)使用 */
+static void deferred_free_stack_node_wrapper(void* ptr) {
+    free_stack_node((LockFreeStackNode*)ptr);
+}
+
 /**
  * @brief 压栈操作
  */
@@ -1299,7 +1363,12 @@ int lock_free_stack_pop(LockFreeStack* stack, void* element,
     int success = 0;
     
     while (!success && retries < stack->max_retries) {
-        /* 加载当前栈顶标记指针（含ABA版本标记） */
+        /* P0修复1: Hazard Pointer保护——参考lock_free_queue_dequeue模式
+         * 原代码在读取old_top->next前未设置危险指针，存在窗口期：
+         * 另一个线程可能已弹栈并释放old_top节点，导致解引用已释放内存(UAF)。
+         * 正确顺序: 加载old_top → 设置HP保护 → 重新验证一致性 → 安全读取next */
+
+        /* 步骤1: 加载栈顶标记指针并提取old_top（仅指针运算，不解引用节点内存） */
         TaggedPtr old_top_tp = stack->top_tagged;
         LockFreeStackNode* old_top = (LockFreeStackNode*)ptr_from_tagged(old_top_tp);
         
@@ -1310,7 +1379,19 @@ int lock_free_stack_pop(LockFreeStack* stack, void* element,
             result->success = 0;
             return -1;
         }
-        
+
+        /* 步骤2: 立即设置hazard_ptr[0]=old_top，在解引用old_top前保护该节点 */
+        hazard_ptr_set(old_top, 0);
+
+        /* 步骤3: 重新加载top_tagged确认一致性，若old_top已被其他线程弹栈则重试 */
+        if (stack->top_tagged != old_top_tp) {
+            hazard_ptr_clear(0);
+            retries++;
+            backoff_strategy_impl(retries, stack->backoff_strategy);
+            continue;
+        }
+
+        /* 步骤4: old_top已受HP保护，安全解引用读取next指针 */
         LockFreeStackNode* new_top = old_top->next;
         
         /* 尝试更新栈顶（使用标记CAS防止ABA） */
@@ -1321,12 +1402,22 @@ int lock_free_stack_pop(LockFreeStack* stack, void* element,
                 memcpy(element, old_top->data, element_size);
             }
             
-            /* 释放旧节点（标记指针确保ABA安全，立即释放可行） */
+            /* P0修复1: 使用延迟释放代替立即释放。
+             * 其他线程可能正通过HP保护访问old_top，立即free_stack_node会导致UAF。
+             * 延迟释放会在scan时检查hazard指针，确保无引用后再释放。 */
             atomic_fetch_sub(&stack->size, 1);
-            free_stack_node(old_top);
+            deferred_free_add_with_fn(&stack->free_list_head, &stack->free_list_count,
+                                       old_top, deferred_free_stack_node_wrapper);
+            /* 达到阈值时触发扫描释放 */
+            if (stack->free_list_count >= DEFERRED_FREE_THRESHOLD) {
+                deferred_free_scan(&stack->free_list_head, &stack->free_list_count);
+            }
             success = 1;
         }
-        
+
+        /* P0修复1: 无论CAS成功与否，都清除危险指针 */
+        hazard_ptr_clear(0);
+
         if (!success) {
             retries++;
             backoff_strategy_impl(retries, stack->backoff_strategy);
@@ -1608,6 +1699,11 @@ static void free_hash_table_node(LockFreeHashTableNode* node) {
     safe_free((void**)&node);
 }
 
+/* P0修复2: free_hash_table_node的void*包装，供延迟释放机制(DeferredFreeFn)使用 */
+static void deferred_free_hash_table_node_wrapper(void* ptr) {
+    free_hash_table_node((LockFreeHashTableNode*)ptr);
+}
+
 /* ========== 通用无锁操作实现 ========== */
 
 /**
@@ -1804,7 +1900,9 @@ static DWORD WINAPI worker_thread_main(LPVOID arg) {
             worker->is_executing = 1;
 
             /* 执行任务 */
-            InterlockedDecrement((volatile LONG*)&pool->pending_tasks);
+            /* P2修复5: pending_tasks为volatile size_t(64位)，使用InterlockedDecrement64
+             * 代替32位InterlockedDecrement，避免高32位丢失导致计数错误 */
+            InterlockedDecrement64((volatile LONG64*)&pool->pending_tasks);
             
             if (task->func) {
                 task->func(task->arg);
@@ -1812,7 +1910,8 @@ static DWORD WINAPI worker_thread_main(LPVOID arg) {
             
             /* 标记完成 */
             task->completed = 1;
-            InterlockedIncrement((volatile LONG*)&pool->completed_tasks);
+            /* P2修复5: completed_tasks为volatile size_t(64位)，使用InterlockedIncrement64 */
+            InterlockedIncrement64((volatile LONG64*)&pool->completed_tasks);
             worker->tasks_executed++;
             
             /* 触发完成事件 */
@@ -2038,7 +2137,8 @@ int64_t lock_free_thread_pool_submit(LockFreeThreadPool* pool,
                                sizeof(ThreadPoolTaskNode*), NULL);
     }
     
-    InterlockedIncrement((volatile LONG*)&pool->pending_tasks);
+    /* P2修复5: pending_tasks为volatile size_t(64位)，使用InterlockedIncrement64 */
+    InterlockedIncrement64((volatile LONG64*)&pool->pending_tasks);
     
     // 唤醒工作者线程
     if (pool->work_event) {
@@ -2058,6 +2158,19 @@ int64_t lock_free_thread_pool_submit(LockFreeThreadPool* pool,
  */
 int lock_free_thread_pool_wait(LockFreeThreadPool* pool, int64_t task_id) {
     if (!pool || task_id <= 0) return -1;
+    
+    /* P1修复4: 语义限制说明
+     * 原实现使用 completed_tasks(已完成任务计数) >= task_id(任务ID) 判断完成，
+     * 这在任务乱序完成时存在语义错误：若task_id=3但task 1/2/4先完成，
+     * completed_tasks=3 >= 3 判定为true，但task 3可能尚未完成。
+     * 
+     * 正确修复需通过task_id查找任务节点检查其completed标志，但无锁线程池中
+     * 任务节点会被出队并释放，无法安全地按ID查找。完整修复需引入任务ID注册表，
+     * 改动过大。此处保留近似检查+超时保护作为保守降级方案：
+     * - 近似检查在任务按序完成时正确
+     * - 30秒超时防止无限等待
+     * 后续如需精确等待，应改用completion_event机制（submit返回task_id，
+     * 调用方持有事件句柄直接WaitForSingleObject）。 */
     
     // 轮询检查任务是否完成（最多等待30秒）
     for (int i = 0; i < 30000; i++) {
@@ -2551,6 +2664,19 @@ int64_t lock_free_thread_pool_submit(LockFreeThreadPool* pool,
  */
 int lock_free_thread_pool_wait(LockFreeThreadPool* pool, int64_t task_id) {
     if (!pool || task_id <= 0) return -1;
+    
+    /* P1修复4: 语义限制说明
+     * 原实现使用 completed_tasks(已完成任务计数) >= task_id(任务ID) 判断完成，
+     * 这在任务乱序完成时存在语义错误：若task_id=3但task 1/2/4先完成，
+     * completed_tasks=3 >= 3 判定为true，但task 3可能尚未完成。
+     * 
+     * 正确修复需通过task_id查找任务节点检查其completed标志，但无锁线程池中
+     * 任务节点会被出队并释放，无法安全地按ID查找。完整修复需引入任务ID注册表，
+     * 改动过大。此处保留近似检查+超时保护作为保守降级方案：
+     * - 近似检查在任务按序完成时正确
+     * - 30秒超时防止无限等待
+     * 后续如需精确等待，应改用completion_cond机制（submit返回task_id，
+     * 调用方持有条件变量直接pthread_cond_wait）。 */
     
     for (int i = 0; i < 30000; i++) {
         if (pool->completed_tasks >= (size_t)task_id) {
@@ -3984,12 +4110,19 @@ LockFreeHashTable* lock_free_hash_table_create(const LockFreeHashTableConfig* co
     table->load_factor_threshold = (config->load_factor_threshold > 0.0f) ? config->load_factor_threshold : 0.75f;
     table->max_probe_length = (config->max_probe_length > 0) ? config->max_probe_length : 16;
     table->size = 0;
+    /* P0修复2: 初始化延迟释放链表 */
+    table->free_list_head = NULL;
+    table->free_list_count = 0;
     return table;
 }
 
 void lock_free_hash_table_free(LockFreeHashTable* table)
 {
     if (!table) return;
+    /* P0修复2: 先刷新延迟释放链表，释放所有延迟删除的节点 */
+    if (table->free_list_head) {
+        deferred_free_flush(&table->free_list_head, &table->free_list_count);
+    }
     for (size_t i = 0; i < table->capacity; i++) {
         LockFreeHashTableNode* node = (LockFreeHashTableNode*)table->buckets[i];
         while (node) {
@@ -4117,7 +4250,15 @@ int lock_free_hash_table_delete(LockFreeHashTable* table, const void* key, size_
                 __sync_fetch_and_sub(&table->size, 1);
 #endif
                 head->next = NULL;
-                free_hash_table_node(head);
+                /* P0修复2: 使用延迟释放代替立即释放。
+                 * 并发遍历线程可能正持有head指针读取key/value，
+                 * 立即free_hash_table_node会导致use-after-free。
+                 * 延迟释放会在scan时检查hazard指针，确保安全后释放。 */
+                deferred_free_add_with_fn(&table->free_list_head, &table->free_list_count,
+                                          head, deferred_free_hash_table_node_wrapper);
+                if (table->free_list_count >= DEFERRED_FREE_THRESHOLD) {
+                    deferred_free_scan(&table->free_list_head, &table->free_list_count);
+                }
                 if (result) {
                     result->success = 1;
                     result->retries = retries;
@@ -4141,7 +4282,12 @@ int lock_free_hash_table_delete(LockFreeHashTable* table, const void* key, size_
                     __sync_fetch_and_sub(&table->size, 1);
 #endif
                     curr->next = NULL;
-                    free_hash_table_node(curr);
+                    /* P0修复2: 使用延迟释放代替立即释放（同上原因） */
+                    deferred_free_add_with_fn(&table->free_list_head, &table->free_list_count,
+                                              curr, deferred_free_hash_table_node_wrapper);
+                    if (table->free_list_count >= DEFERRED_FREE_THRESHOLD) {
+                        deferred_free_scan(&table->free_list_head, &table->free_list_count);
+                    }
                     if (result) {
                         result->success = 1;
                         result->retries = retries;

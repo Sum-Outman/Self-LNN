@@ -273,6 +273,20 @@ int knowledge_base_query_by_source(KnowledgeBase* kb, const KnowledgeQuery* quer
 int knowledge_base_get_by_id(KnowledgeBase* kb, int entry_id, KnowledgeEntry* entry);
 
 /**
+ * @brief 通过索引获取知识条目（v9.21新增：安全访问器，避免结构体布局不匹配）
+ * 
+ * 由于KnowledgeBase内部使用InternalKnowledgeEntry（含id前缀字段），
+ * 外部文件通过公开头文件访问时存在结构体偏移差异。
+ * 此函数提供安全的索引访问，内部处理偏移转换。
+ * 
+ * @param kb 知识库句柄
+ * @param index 条目索引（0-based）
+ * @param out_entry 条目输出缓冲区（调用者提供）
+ * @return int 成功返回0，失败返回-1
+ */
+int knowledge_base_get_entry_by_index(KnowledgeBase* kb, size_t index, KnowledgeEntry* out_entry);
+
+/**
  * @brief 获取知识库统计信息
  * 
  * @param kb 知识库句柄

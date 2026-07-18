@@ -9660,7 +9660,13 @@ int slam_load_image_file(const char* filepath,
             bytes_read = fread(raw, 1, pixel_count, f);
         } else {
             /* 16位数据 - 需要转换 */
-            uint16_t* raw16 = (uint16_t*)safe_malloc(pixel_count * 2);
+            /* v9.12修复: 使用sizeof(uint16_t)替代硬编码2，并添加溢出检查 */
+            if (pixel_count > SIZE_MAX / sizeof(uint16_t)) {
+                safe_free((void**)&raw);
+                fclose(f);
+                return -1;
+            }
+            uint16_t* raw16 = (uint16_t*)safe_malloc(pixel_count * sizeof(uint16_t));
             if (!raw16) {
                 safe_free((void**)&raw);
                 fclose(f);

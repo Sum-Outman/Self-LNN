@@ -1723,26 +1723,36 @@ static void agi_background_loop_iteration(void) {
                 /* 构建 8x16 真实激活矩阵的JSON */
                 char act_json_buf[4096];
                 int act_offset = 0;
-                act_offset += snprintf(act_json_buf + act_offset,
-                    sizeof(act_json_buf) - (size_t)act_offset,
-                    "{\"type\":\"state_activation_data\",\"timestamp\":%lld,"
-                    "\"lnn_available\":%s,"
-                    "\"matrix\":{\"rows\":8,\"cols\":16,\"data\":[",
-                    (long long)now, got_state ? "true" : "false");
-                for (int r = 0; r < 8 && act_offset < (int)sizeof(act_json_buf) - 20; r++) {
+                int act_buf_size = (int)sizeof(act_json_buf);
+                /* v9.11修复: 每次snprintf前检查剩余空间，防止size_t下溢和缓冲区溢出 */
+                if (act_offset < act_buf_size - 5) {
                     act_offset += snprintf(act_json_buf + act_offset,
-                        sizeof(act_json_buf) - (size_t)act_offset,
-                        "%s", (r == 0) ? "" : ",");
-                    for (int c = 0; c < 16 && act_offset < (int)sizeof(act_json_buf) - 15; c++) {
+                        (size_t)(act_buf_size - act_offset),
+                        "{\"type\":\"state_activation_data\",\"timestamp\":%lld,"
+                        "\"lnn_available\":%s,"
+                        "\"matrix\":{\"rows\":8,\"cols\":16,\"data\":[",
+                        (long long)now, got_state ? "true" : "false");
+                }
+                for (int r = 0; r < 8 && act_offset < act_buf_size - 20; r++) {
+                    if (act_offset < act_buf_size - 5) {
                         act_offset += snprintf(act_json_buf + act_offset,
-                            sizeof(act_json_buf) - (size_t)act_offset,
+                            (size_t)(act_buf_size - act_offset),
+                            "%s", (r == 0) ? "" : ",");
+                    }
+                    for (int c = 0; c < 16 && act_offset < act_buf_size - 15; c++) {
+                        act_offset += snprintf(act_json_buf + act_offset,
+                            (size_t)(act_buf_size - act_offset),
                             "%s%.4f", (c == 0) ? "[" : ",", (double)act_state[r * 16 + c]);
                     }
-                    act_offset += snprintf(act_json_buf + act_offset,
-                        sizeof(act_json_buf) - (size_t)act_offset, "]");
+                    if (act_offset < act_buf_size - 5) {
+                        act_offset += snprintf(act_json_buf + act_offset,
+                            (size_t)(act_buf_size - act_offset), "]");
+                    }
                 }
-                act_offset += snprintf(act_json_buf + act_offset,
-                    sizeof(act_json_buf) - (size_t)act_offset, "]}}");
+                if (act_offset < act_buf_size - 5) {
+                    act_offset += snprintf(act_json_buf + act_offset,
+                        (size_t)(act_buf_size - act_offset), "]}}");
+                }
                 ws_push_broadcast_json(g_ws_push_server, act_json_buf);
             }
 

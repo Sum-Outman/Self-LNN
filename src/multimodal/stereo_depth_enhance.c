@@ -263,7 +263,7 @@ static void _median_filter_2d(float* data, int w, int h, int ksize,
                                float* out)
 {
     int half = ksize / 2;
-    int* values = (int*)malloc((size_t)ksize * (size_t)ksize * sizeof(int));
+    int* values = (int*)safe_malloc((size_t)ksize * (size_t)ksize * sizeof(int));
     if (!values) return;
 
     for (int y = 0; y < h; y++) {
@@ -290,7 +290,7 @@ static void _median_filter_2d(float* data, int w, int h, int ksize,
             out[y * w + x] = (float)values[count / 2];
         }
     }
-    free(values);
+    safe_free((void**)&values);
 }
 
 static void _gaussian_kernel(int size, float sigma, float* kernel)

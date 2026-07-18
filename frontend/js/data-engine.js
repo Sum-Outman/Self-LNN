@@ -38,7 +38,7 @@ class DataEngine {
 
         this._history = {};
         this._pollModules = new Map();
-        this._baseInterval = 2000;
+        this._baseInterval = 5000; /* v9.13修复: 从3000ms提升到5000ms，减少服务器并发压力，防止TIME_WAIT堆积 */
         this._consecutiveErrors = 0; /* 初始化连续错误计数器 */
     }
 

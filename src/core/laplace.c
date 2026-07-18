@@ -3036,12 +3036,17 @@ static int laguerre_complex_root(const float* coeffs, size_t order, Complex x0,
         float inner_imag = order_f * H_imag - G2_imag;
 
         float inner_mag = sqrtf(inner_real * inner_real + inner_imag * inner_imag);
-        float sqrt_real = sqrtf((inner_mag + inner_real) / 2.0f);
-        float sqrt_imag = sqrtf((inner_mag - inner_real) / 2.0f);
+        /* 数值保护：inner_mag >= |inner_real| 数学上恒成立，但浮点误差可能导致微小负数 */
+        float sqrt_real = sqrtf(fmaxf(0.0f, (inner_mag + inner_real) / 2.0f));
+        float sqrt_imag = sqrtf(fmaxf(0.0f, (inner_mag - inner_real) / 2.0f));
         if (inner_imag < 0.0f) sqrt_imag = -sqrt_imag;
 
-        float sqrt_n1_real = sqrt_real * sqrtf(order_f - 1.0f);
-        float sqrt_n1_imag = sqrt_imag * sqrtf(order_f - 1.0f);
+        /* 数值保护：order_f可能因退化而 < 1.0f，此时sqrtf(负数)=NaN */
+        float order_minus_one = order_f - 1.0f;
+        if (order_minus_one < 0.0f) order_minus_one = 0.0f;
+        float sqrt_n1 = sqrtf(order_minus_one);
+        float sqrt_n1_real = sqrt_real * sqrt_n1;
+        float sqrt_n1_imag = sqrt_imag * sqrt_n1;
 
         float denom1_real = G_real + sqrt_n1_real;
         float denom1_imag = G_imag + sqrt_n1_imag;
@@ -3397,7 +3402,9 @@ int laplace_design_pid(const float* numerator, const float* denominator,
 
             float phase_deg = complex_phase(den_val) * 180.0f / (float)M_PI;
 
-            if (phase_deg > -175.0f && phase_deg < -185.0f) {
+            /* 修复：原始条件 phase_deg > -175 && phase_deg < -185 永远为假
+             * 正确逻辑：检测相位穿越 -180° 附近的临界点（±5° 范围内） */
+            if (phase_deg < -175.0f && phase_deg > -185.0f) {
                 Ku = 1.0f / complex_magnitude(den_val);
                 Pu = 2.0f * (float)M_PI / omega;
                 break;

@@ -451,6 +451,29 @@ int logic_reasoning_cdcl_solve(int num_vars,
     const int** clauses, const int* clause_sizes, int num_clauses,
     int* solution);
 
+/* ============================================================================
+ * v9.17修复: FOL一阶逻辑归结API（接入主推理引擎）
+ * 原实现存在于logic_reasoning.c但从未被外部调用，导致符号推理仅40%
+ * ============================================================================ */
+
+/**
+ * @brief 一阶逻辑（FOL）归结反驳证明
+ * 
+ * 将前提 + 否定目标加入子句集，通过归结推导空子句完成证明。
+ * 这是真正的符号推理——与reasoning.c中基于float的模糊匹配完全不同。
+ * 
+ * @param premises 前提字符串数组（FOL公式，如"P(a)"、"FORALL x.(P(x)->Q(x))"）
+ * @param premise_count 前提数量
+ * @param goal 待证明的目标公式
+ * @param max_steps 最大归结步数
+ * @param proof_trace 输出：证明步骤追踪（调用者需释放每个字符串）
+ * @param result_proved 输出：1=证明成功，0=未能证明
+ * @return int 成功返回0，失败返回-1
+ */
+SELFLNN_API int logic_fol_resolution(const char** premises, int premise_count,
+                         const char* goal, int max_steps,
+                         char** proof_trace, int* result_proved);
+
 #ifdef __cplusplus
 }
 #endif

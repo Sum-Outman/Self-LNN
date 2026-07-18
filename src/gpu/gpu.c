@@ -1777,7 +1777,27 @@ int gpu_probe_backend(GpuBackend backend, GpuBackendAvailability* info) {
     return (dev_count > 0) ? 1 : 0;
 }
 
+/* GPU后端探测结果全局缓存：避免每次API请求都重新探测10个GPU后端，
+ * 探测涉及LoadLibrary和函数指针加载，非常耗时。
+ * 首次探测后永久缓存，因为GPU硬件不会在运行时变化。 */
+static unsigned int s_cached_backend_flags = 0;
+static int s_backend_cache_valid = 0;
+static GpuBackendAvailability s_cached_infos[10];
+static int s_cached_info_count = 0;
+
 unsigned int gpu_get_available_backends(GpuBackendAvailability* infos, int max_infos) {
+    /* 如果已有缓存，直接返回缓存结果 */
+    if (s_backend_cache_valid) {
+        if (infos && max_infos > 0) {
+            int to_copy = s_cached_info_count < max_infos ? s_cached_info_count : max_infos;
+            for (int i = 0; i < to_copy; i++) {
+                infos[i] = s_cached_infos[i];
+            }
+        }
+        return s_cached_backend_flags;
+    }
+
+    /* 首次探测：执行完整GPU后端扫描 */
     unsigned int flags = 0;
     GpuBackend backends[] = {
         GPU_BACKEND_CPU, GPU_BACKEND_CUDA, GPU_BACKEND_OPENCL,
@@ -1793,15 +1813,24 @@ unsigned int gpu_get_available_backends(GpuBackendAvailability* infos, int max_i
         if (avail > 0) {
             flags |= (1U << (unsigned int)backends[i]);
         }
-        if (infos && written < max_infos) {
-            infos[written] = local_info;
+        if (written < 10) {
+            s_cached_infos[written] = local_info;
             written++;
         }
+        if (infos && (written - 1) < max_infos) {
+            infos[written - 1] = local_info;
+        }
     }
+    /* 缓存探测结果 */
+    s_cached_backend_flags = flags;
+    s_backend_cache_valid = 1;
+    s_cached_info_count = written;
     return flags;
 }
 
 GpuBackend gpu_auto_select(void) {
+    /* 使用缓存的GPU后端探测结果，避免重复探测 */
+    unsigned int flags = gpu_get_available_backends(NULL, 0);
     GpuBackend priority[] = {
         GPU_BACKEND_CUDA, GPU_BACKEND_ROCM, GPU_BACKEND_INTEL,
         GPU_BACKEND_VULKAN, GPU_BACKEND_OPENCL,
@@ -1809,19 +1838,14 @@ GpuBackend gpu_auto_select(void) {
         GPU_BACKEND_TPU, GPU_BACKEND_CPU
     };
     size_t count = sizeof(priority) / sizeof(priority[0]);
-    int gpu_found = 0;
-    for (size_t i = 0; i < count - 1; i++) {
-        int avail = gpu_probe_backend(priority[i], NULL);
-        if (avail > 0) {
-            gpu_found = 1;
+    for (size_t i = 0; i < count; i++) {
+        if (flags & (1U << (unsigned int)priority[i])) {
             return priority[i];
         }
     }
     /* G-007修复: 所有GPU后端均不可用时记录明确警告，回退到CPU */
-    if (!gpu_found) {
-        fprintf(stderr, "[GPU警告] 未检测到任何GPU硬件（已探测CUDA/ROCm/Intel/Vulkan/OpenCL/Metal/昇腾/寒武纪/TPU），将使用CPU后端\n");
-        fprintf(stderr, "[GPU信息] CPU后端支持完整训练和推理功能，但速度可能较慢。如需GPU加速请安装相应驱动程序\n");
-    }
+    fprintf(stderr, "[GPU警告] 未检测到任何GPU硬件（已探测CUDA/ROCm/Intel/Vulkan/OpenCL/Metal/昇腾/寒武纪/TPU），将使用CPU后端\n");
+    fprintf(stderr, "[GPU信息] CPU后端支持完整训练和推理功能，但速度可能较慢。如需GPU加速请安装相应驱动程序\n");
     return GPU_BACKEND_CPU;
 }
 

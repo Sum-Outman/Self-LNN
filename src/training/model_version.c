@@ -154,7 +154,7 @@ static int expand_versions_capacity(ModelVersionManager* mgr) {
                           mgr->capacity * CAPACITY_GROWTH_FACTOR;
 
     ModelVersionEntry* new_versions = (ModelVersionEntry*)
-        realloc(mgr->versions, new_capacity * sizeof(ModelVersionEntry));
+        safe_realloc(mgr->versions, new_capacity * sizeof(ModelVersionEntry));
     if (!new_versions) {
         selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
                               "扩展版本数组失败");

@@ -11,9 +11,11 @@
 #include <stddef.h>
 #include <stdlib.h>
 
-/* 清理释放宏 — 安全释放单字段 */
+/* 清理释放宏 — 安全释放单字段
+ * DEEP-FIX: 使用 safe_free 替代裸 free，与 DEEP_COPY_STRING 等宏保持一致，
+ * 防止 mixed allocator (safe_malloc + raw free) 导致的堆损坏 */
 #define DEEP_COPY_CLEANUP_FREE(ptr) do { \
-    if (ptr) { free(ptr); (ptr) = NULL; } \
+    if (ptr) { safe_free((void**)&(ptr)); } \
 } while(0)
 
 #ifdef __cplusplus
@@ -143,6 +145,12 @@ void safe_free(void** ptr);
 
 /* P6-R90: enable bypass to standard malloc/free for debugging */
 void memory_utils_bypass_safe_alloc(int bypass);
+
+/* v9.1: 验证所有已跟踪内存块的完整性，返回损坏块数 */
+int memory_utils_validate_all_tracked(void);
+
+/* v9.1: 返回当前已跟踪的分配数量 */
+size_t memory_utils_tracked_count(void);
 
 /**
  * @brief 安全内存重新分配

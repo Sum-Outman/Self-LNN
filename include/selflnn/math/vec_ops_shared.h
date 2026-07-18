@@ -50,8 +50,10 @@ static inline float vec_tanh_f(float x) {
  * 公式：std = sqrt(2.0 / (fan_in + fan_out))
  * 使用Box-Muller变换生成正态分布随机数 */
 static inline void vec_init_kaiming(float* w, int fan_in, int fan_out) {
+    size_t cnt = (size_t)fan_in * (size_t)fan_out;
+    if (!w || cnt == 0) return;
     float scale = sqrtf(2.0f / (float)(fan_in + fan_out));
-    for (int i = 0; i < fan_in * fan_out; i++) {
+    for (size_t i = 0; i < cnt; i++) {
         float u1 = secure_random_float();
         float u2 = secure_random_float();
         if (u1 < 1e-7f) u1 = 1e-7f;
@@ -63,8 +65,10 @@ static inline void vec_init_kaiming(float* w, int fan_in, int fan_out) {
  * 公式：std = sqrt(2.0 / fan_in)
  * 对ReLU激活的层使用此初始化可以避免梯度消失，保持前向传播方差 */
 static inline void vec_init_he(float* w, int fan_in, int fan_out) {
+    size_t cnt = (size_t)fan_in * (size_t)fan_out;
+    if (!w || cnt == 0) return;
     float scale = sqrtf(2.0f / (float)fan_in);
-    for (int i = 0; i < fan_in * fan_out; i++) {
+    for (size_t i = 0; i < cnt; i++) {
         float u1 = secure_random_float();
         float u2 = secure_random_float();
         if (u1 < 1e-7f) u1 = 1e-7f;
@@ -162,6 +166,7 @@ static inline float vec_cos_sim(const float* a, const float* b, int n) {
 
 /* Softmax归一化: logits[i] = exp(logits[i] - max) / sum(exp) */
 static inline void vec_softmax(float* logits, int n) {
+    if (!logits || n <= 0) return;
     float mv = logits[0];
     for (int i = 1; i < n; i++) if (logits[i] > mv) mv = logits[i];
     float sum = 0.0f;

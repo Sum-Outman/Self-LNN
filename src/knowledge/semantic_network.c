@@ -1887,7 +1887,10 @@ int semantic_network_import_from_knowledge_base(SemanticNetwork* network,
     int imported = 0;
 
     for (size_t i = 0; i < kb->size && i < 100000; i++) {
-        KnowledgeEntry* entry = &kb->entries[i];
+        /* v9.21修复: 使用安全访问器，避免KnowledgeEntry结构体偏移不匹配 */
+        KnowledgeEntry entry_buf;
+        if (knowledge_base_get_entry_by_index(kb, i, &entry_buf) != 0) continue;
+        KnowledgeEntry* entry = &entry_buf;
         if (!entry->subject || entry->subject[0] == '\0') continue;
 
         float entry_conf = 0.3f;

@@ -795,6 +795,11 @@ int working_memory_deserialize(WorkingMemory* wm,
     memcpy(&wm->slot_count, buffer + pos, sizeof(wm->slot_count));
     pos += sizeof(wm->slot_count);
 
+    /* P0修复: 反序列化时对slot_count进行边界检查，防止恶意/损坏数据导致堆缓冲区溢出 */
+    if (wm->slot_count > WM_MAX_SLOTS) {
+        wm->slot_count = WM_MAX_SLOTS;
+    }
+
     if (pos + sizeof(float) > buffer_size) return -1;
     memcpy(&wm->global_time, buffer + pos, sizeof(wm->global_time));
     pos += sizeof(wm->global_time);

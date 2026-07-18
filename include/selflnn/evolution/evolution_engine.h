@@ -217,6 +217,9 @@ const EvolutionIndividual* evolution_get_best(const EvolutionEngine* engine);
 int evolution_get_pareto_front(const EvolutionEngine* engine, 
                                EvolutionIndividual** front, size_t* front_size);
 
+/* v9.1: 释放帕累托前沿内存（chromosome和objectives） */
+void evolution_free_pareto_front(EvolutionIndividual* front, size_t front_size);
+
 /**
  * @brief 获取种群
  */

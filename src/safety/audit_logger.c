@@ -1808,7 +1808,7 @@ int audit_flush_to_file(AuditLogger* logger) {
     cap = logger->operation_capacity;
     count = logger->operation_count;
     if (count > 0) {
-        op_copy = (AuditOperationEntry*)malloc(count * sizeof(AuditOperationEntry));
+        op_copy = (AuditOperationEntry*)safe_malloc(count * sizeof(AuditOperationEntry));
         if (op_copy) {
             for (size_t i = 0; i < count; i++) {
                 size_t idx = (logger->operation_next_id + cap - count + i) % cap;
@@ -1822,7 +1822,7 @@ int audit_flush_to_file(AuditLogger* logger) {
     cap = logger->decision_capacity;
     count = logger->decision_count;
     if (count > 0) {
-        dec_copy = (AuditDecisionEntry*)malloc(count * sizeof(AuditDecisionEntry));
+        dec_copy = (AuditDecisionEntry*)safe_malloc(count * sizeof(AuditDecisionEntry));
         if (dec_copy) {
             for (size_t i = 0; i < count; i++) {
                 size_t idx = (logger->decision_next_id + cap - count + i) % cap;
@@ -1836,7 +1836,7 @@ int audit_flush_to_file(AuditLogger* logger) {
     cap = logger->change_capacity;
     count = logger->change_count;
     if (count > 0) {
-        chg_copy = (AuditChangeEntry*)malloc(count * sizeof(AuditChangeEntry));
+        chg_copy = (AuditChangeEntry*)safe_malloc(count * sizeof(AuditChangeEntry));
         if (chg_copy) {
             for (size_t i = 0; i < count; i++) {
                 size_t idx = (logger->change_next_id + cap - count + i) % cap;
@@ -1958,9 +1958,9 @@ int audit_flush_to_file(AuditLogger* logger) {
     fclose(fp);
 
     /* 释放临时拷贝缓冲区 */
-    if (op_copy) free(op_copy);
-    if (dec_copy) free(dec_copy);
-    if (chg_copy) free(chg_copy);
+    if (op_copy) safe_free((void**)&op_copy);
+    if (dec_copy) safe_free((void**)&dec_copy);
+    if (chg_copy) safe_free((void**)&chg_copy);
 
     /* 更新最后刷新日期 */
     strncpy(logger->last_flush_date, date_str, sizeof(logger->last_flush_date) - 1);

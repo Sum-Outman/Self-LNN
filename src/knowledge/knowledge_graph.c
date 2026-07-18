@@ -113,6 +113,8 @@ static int expand_array(void*** array, size_t* capacity, size_t current_size, si
     (void)current_size; // 未使用参数，避免警告
     if (!array || !capacity) return -1;
     
+    /* 修复缺陷5: 检查*capacity*2是否溢出 */
+    if (*capacity > SIZE_MAX / 2) return -1;
     size_t new_capacity = (*capacity == 0) ? 16 : (*capacity * 2);
     void* new_array = safe_realloc(*array, new_capacity * element_size);
     if (!new_array) return -1;
@@ -935,6 +937,14 @@ int knowledge_graph_bfs(KnowledgeGraph* graph, KnowledgeGraphNode* start_node,
     }
 
     // 创建队列（使用循环数组）
+    /* 修复缺陷6: 检查BFS队列分配整数溢出 */
+    if (graph->node_count > SIZE_MAX / sizeof(KnowledgeGraphNode*)) {
+        safe_free((void**)&visited);
+        selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
+                              "广度优先搜索：节点数过大导致队列分配溢出");
+        GRAPH_UNLOCK(graph);
+        return -1;
+    }
     KnowledgeGraphNode** queue = (KnowledgeGraphNode**)safe_malloc(graph->node_count * sizeof(KnowledgeGraphNode*));
     if (!queue) {
         safe_free((void**)&visited);
@@ -5498,4 +5508,114 @@ size_t knowledge_graph_find_paths(KnowledgeGraph* graph, KnowledgeGraphNode* sta
     }
     safe_free((void**)&all);
     return count;
+}
+
+/* ================================================================
+ * v9.18: 连通分量 — BFS遍历识别所有连通分量
+ * 
+ * 使用广度优先搜索遍历无向图，为每个节点分配连通分量ID。
+ * 时间复杂度O(n+m)，空间复杂度O(n)。
+ * ================================================================ */
+int knowledge_graph_connected_components(KnowledgeGraph* graph, int* component_ids, size_t* component_count) {
+    if (!graph || !component_ids || !component_count) return -1;
+    if (graph->node_count == 0) {
+        *component_count = 0;
+        return 0;
+    }
+    
+    size_t n = graph->node_count;
+    /* 访问标记数组：0=未访问，1=已访问 */
+    int* visited = (int*)safe_calloc(n, sizeof(int));
+    if (!visited) return -1;
+    
+    /* BFS队列 */
+    size_t* queue = (size_t*)safe_malloc(n * sizeof(size_t));
+    if (!queue) {
+        safe_free((void**)&visited);
+        return -1;
+    }
+    
+    size_t comp_id = 0;
+    for (size_t i = 0; i < n; i++) {
+        component_ids[i] = -1; /* 初始化 */
+    }
+    
+    /* 遍历所有节点，对每个未访问节点启动BFS */
+    for (size_t i = 0; i < n; i++) {
+        if (visited[i]) continue;
+        
+        /* BFS初始化 */
+        size_t q_head = 0, q_tail = 0;
+        queue[q_tail++] = i;
+        visited[i] = 1;
+        component_ids[i] = (int)comp_id;
+        
+        /* BFS主循环 */
+        while (q_head < q_tail) {
+            size_t node_idx = queue[q_head++];
+            KnowledgeGraphNode* node = graph->nodes[node_idx];
+            if (!node) continue;
+            
+            /* 遍历所有邻居边 */
+            for (size_t e = 0; e < node->edge_count; e++) {
+                KnowledgeGraphEdge* edge = node->edges[e];
+                if (!edge || !edge->is_active) continue;
+                
+                /* 确定邻居节点索引 */
+                KnowledgeGraphNode* neighbor = (edge->source == node) ? edge->target : edge->source;
+                if (!neighbor) continue;
+                
+                /* 在节点数组中查找邻居索引 */
+                for (size_t j = 0; j < n; j++) {
+                    if (graph->nodes[j] == neighbor && !visited[j]) {
+                        visited[j] = 1;
+                        component_ids[j] = (int)comp_id;
+                        queue[q_tail++] = j;
+                        break;
+                    }
+                }
+            }
+        }
+        comp_id++;
+    }
+    
+    *component_count = comp_id;
+    safe_free((void**)&queue);
+    safe_free((void**)&visited);
+    return 0;
+}
+
+/* ================================================================
+ * v9.18: 度分布 — 计算度频率直方图
+ * 
+ * 统计每个度值（0到max_degree-1）的节点数量。
+ * 度=节点的有效边数（is_active=1的边）。
+ * ================================================================ */
+int knowledge_graph_degree_distribution(KnowledgeGraph* graph, int* degree_counts, size_t max_degree) {
+    if (!graph || !degree_counts || max_degree == 0) return -1;
+    
+    /* 清零计数数组 */
+    memset(degree_counts, 0, max_degree * sizeof(int));
+    
+    for (size_t i = 0; i < graph->node_count; i++) {
+        KnowledgeGraphNode* node = graph->nodes[i];
+        if (!node) continue;
+        
+        /* 计算有效出边数 */
+        int degree = 0;
+        for (size_t e = 0; e < node->edge_count; e++) {
+            if (node->edges[e] && node->edges[e]->is_active) {
+                degree++;
+            }
+        }
+        
+        /* 截断到max_degree-1 */
+        if ((size_t)degree >= max_degree) {
+            degree_counts[max_degree - 1]++;
+        } else {
+            degree_counts[degree]++;
+        }
+    }
+    
+    return 0;
 }

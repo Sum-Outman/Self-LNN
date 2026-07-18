@@ -115,6 +115,10 @@ CfCNetwork* cfc_create(const CfCNetworkConfig* config) {
         selflnn_set_last_error(SELFLNN_ERROR_NETWORK_CONFIG, __func__, __FILE__, __LINE__,
                               "CfC缓冲区大小溢出: total_layers=%zu, max_layer_size=%zu",
                               total_layers, max_layer_size);
+        /* v9.14修复: 溢出路径中释放已创建的cell，防止内存泄漏 */
+        for (int i = 0; i < config->num_layers; i++) {
+            if (network->layers[i]) cfc_cell_free(network->layers[i]);
+        }
         safe_free((void**)&network->layers);
         safe_free((void**)&network);
         return NULL;
@@ -812,12 +816,15 @@ int cfc_backward_ex(CfCNetwork* network, const float* error,
         if (output_size > max_layer_size) max_layer_size = output_size;
     }
 
-    /* 保存输入信号（第一层反向传播需要） */
+    /* 保存输入信号（第一层反向传播需要）
+     * P0致命修复: 之前从layer_gradients读取（calloc分配的全零缓冲区），
+     * 导致saved_input始终为零，输入层权重梯度计算完全失效。
+     * 正确的输入来源是activation_buffer，它在cfc_forward中被写入后不再修改。 */
     float* saved_input = NULL;
     if (input_size > 0) {
         saved_input = (float*)safe_malloc(input_size * sizeof(float));
         if (saved_input) {
-            memcpy(saved_input, network->layer_gradients, input_size * sizeof(float));
+            memcpy(saved_input, network->activation_buffer, input_size * sizeof(float));
         }
     }
 
@@ -876,16 +883,12 @@ int cfc_backward_ex(CfCNetwork* network, const float* error,
         }
 
         // 清零上一层梯度（准备接收）
-        // 对于外部梯度缓冲区(gradient/layer==0)，只清零 input_size 个元素
-        // 因为 cfc_cell_backward 只会写入 input_size 个元素
-        // 对于内部梯度缓冲区(layer_gradients)，使用 max_layer_size
-        if (layer == 0) {
-            /* FIX: gradient已在lnn.c:806清零(hidden_size), 此处不再重复memset
-             * input_size <= hidden_size, 避免损坏堆边界 */
-            if (input_size < hidden_size) {
-                memset(prev_gradient + input_size, 0, (hidden_size - input_size) * sizeof(float));
-            }
-        } else {
+        // P0修复: 移除第886行越界memset。
+        // gradient缓冲区由调用方分配为input_size大小，当input_size < hidden_size时，
+        // 向gradient+input_size写入(hidden_size-input_size)字节会破坏堆元数据。
+        // cfc_cell_backward内部已对input_gradient做完整清零(cfc_cell.c:3213-3215)，
+        // 此处memset完全冗余。对于内部梯度缓冲区(layer_gradients)，使用max_layer_size。
+        if (layer != 0) {
             memset(prev_gradient, 0, max_layer_size * sizeof(float));
         }
 
@@ -964,8 +967,11 @@ int cfc_backward_ex(CfCNetwork* network, const float* error,
 
     if (saved_input) safe_free((void**)&saved_input);
 
+    /* P0修复: gradient缓冲区由调用方分配为input_size大小，
+     * 当hidden_size > input_size时读取超出边界。使用min值限制。 */
     float gradient_norm = 0.0f;
-    for (size_t i = 0; i < hidden_size; i++) {
+    size_t grad_read_limit = (input_size < hidden_size) ? input_size : hidden_size;
+    for (size_t i = 0; i < grad_read_limit; i++) {
         gradient_norm += gradient[i] * gradient[i];
     }
     network->current_gradient_norm = sqrtf(gradient_norm);
@@ -1002,14 +1008,9 @@ int cfc_accumulate_gradients(CfCNetwork* network, const float* error,
     size_t max_layer_size = (input_size > hidden_size) ? input_size : hidden_size;
     max_layer_size = (max_layer_size > output_size) ? max_layer_size : output_size;
     
-    // 对于单层网络，保存输入信号（在layer_gradients中）到临时缓冲区
+    // P0修复: 移除死分配。saved_input在此函数中从未被使用，
+    // 且从layer_gradients读取的是垃圾数据（前向传播不写入layer_gradients）。
     float* saved_input = NULL;
-    if (num_layers == 1 && input_size > 0) {
-        saved_input = (float*)safe_malloc(input_size * sizeof(float));
-        if (saved_input) {
-            memcpy(saved_input, network->layer_gradients, input_size * sizeof(float));
-        }
-    }
     
     // 初始化梯度缓冲区（使用最大层大小作为步长）
     memset(network->layer_gradients, 0, 
@@ -1071,8 +1072,8 @@ int cfc_accumulate_gradients(CfCNetwork* network, const float* error,
         
         if (result != 0) {
             safe_free((void**)&saved_input);
-            selflnn_set_last_error(SELFLNN_ERROR_INITIALIZATION_FAILED, __func__, __FILE__, __LINE__, "CfC网络离散演化失败");
-            return SELFLNN_ERROR_INITIALIZATION_FAILED;
+            selflnn_set_last_error(SELFLNN_ERROR_TRAINING_FAILED, __func__, __FILE__, __LINE__, "CfC网络反向传播失败");
+            return SELFLNN_ERROR_TRAINING_FAILED;
         }
         
 /* 使用前一层(layer-1)的dropout掩码，与cfc_backward_ex一致 */
@@ -1157,9 +1158,11 @@ int cfc_accumulate_gradients(CfCNetwork* network, const float* error,
         }
     }
     
-    // 计算梯度范数
+    /* P0修复: gradient缓冲区由调用方分配为input_size大小，
+     * 当hidden_size > input_size时读取超出边界。使用min值限制。 */
     float gradient_norm = 0.0f;
-    for (size_t i = 0; i < hidden_size; i++) {
+    size_t grad_read_limit = (input_size < hidden_size) ? input_size : hidden_size;
+    for (size_t i = 0; i < grad_read_limit; i++) {
         gradient_norm += gradient[i] * gradient[i];
     }
     network->current_gradient_norm = sqrtf(gradient_norm);

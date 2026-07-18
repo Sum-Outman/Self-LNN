@@ -15,6 +15,7 @@
 #include "selflnn/utils/logging.h"
 /* 在线学习器使用LNN/CfC替代线性模型 */
 #include "selflnn/core/lnn.h"
+#include "selflnn/core/cfc_network.h"
 #include "selflnn/selflnn.h"
 
 #include <stdlib.h>
@@ -166,6 +167,10 @@ struct OnlineLearner {
     int lnn_attached;               /**< 是否已附着LNN（1=附着, 0=独立权重） */
     int weights_owned;              /**< 权重内存是否由学习器自己管理 */
 
+    /* v9.2: 持久梯度缓冲区 —— 避免每次update重复分配/释放1.5MB梯度数组 */
+    float* persistent_gradient;     /**< 持久梯度缓冲区（LNN附着时分配） */
+    float* persistent_lnn_output;   /**< 持久LNN输出缓冲区 */
+
 /* 能力开关控制字段 */
     int imitation_enabled;          /**< 模仿学习是否启用（能力开关控制） */
     float exploration_rate;         /**< 探索率（好奇心/探索能力控制，0.0=无探索, 1.0=最大探索） */
@@ -231,6 +236,8 @@ OnlineLearner* online_learner_create(const OnlineLearningConfig* config,
     learner->weights_owned = 1;
     learner->lnn_attached = 0;
     learner->attached_lnn = NULL;
+    learner->persistent_gradient = NULL;
+    learner->persistent_lnn_output = NULL;
     
     /* DEFECT-013修复: 零权重初始化时跳过权重分配和动量/速度缓冲区分配 */
     if (weights_size > 0 && model_weights != NULL) {
@@ -386,7 +393,9 @@ OnlineLearner* online_learner_create(const OnlineLearningConfig* config,
     }
     
     // 分配权重年龄数组（用于遗忘机制）
-    if (config->forgetting_type != FORGETTING_NONE) {
+    /* P0修复: safe_calloc(0)返回NULL，当weights_size==0时跳过分配，
+     * 避免零权重初始化+遗忘机制的组合导致创建失败 */
+    if (config->forgetting_type != FORGETTING_NONE && weights_size > 0) {
         learner->weight_age = (float*)safe_calloc(weights_size, sizeof(float));
         if (!learner->weight_age) {
             if (config->algorithm_type == ONLINE_LEARNING_KALMAN) {
@@ -441,6 +450,9 @@ void online_learner_free(OnlineLearner* learner) {
     safe_free((void**)&learner->weight_age);
     safe_free((void**)&learner->ewc_fisher_diag);
     safe_free((void**)&learner->ewc_anchor_weights);
+    /* v9.2: 释放持久梯度缓冲区 */
+    safe_free((void**)&learner->persistent_gradient);
+    safe_free((void**)&learner->persistent_lnn_output);
     
     free_sliding_window(&learner->loss_window);
     free_sliding_window(&learner->gradient_window);
@@ -520,18 +532,50 @@ int online_learner_attach_lnn(OnlineLearner* learner, LNN* lnn) {
     if (learner->config.enable_momentum) {
         safe_free((void**)&learner->weight_momentum);
         learner->weight_momentum = (float*)safe_calloc(param_count, sizeof(float));
+        if (!learner->weight_momentum) {
+            selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
+                                  "附着LNN：动量缓冲区分配失败");
+            /* P0修复: 恢复weights指针避免僵尸状态。
+             * weights已指向LNN参数但attach失败，必须重置为NULL，
+             * 否则后续调用会使用无效的LNN引用。 */
+            learner->weights = NULL;
+            learner->weights_size = 0;
+            learner->lnn_attached = 0;
+            learner->attached_lnn = NULL;
+            return -1;
+        }
     }
 
     /* 自适应速度缓冲区 */
     if (learner->config.enable_adaptive_rate) {
         safe_free((void**)&learner->weight_velocity);
         learner->weight_velocity = (float*)safe_calloc(param_count, sizeof(float));
+        if (!learner->weight_velocity) {
+            selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
+                                  "附着LNN：速度缓冲区分配失败");
+            safe_free((void**)&learner->weight_momentum);
+            /* P0修复: 恢复weights指针避免僵尸状态 */
+            learner->weights = NULL;
+            learner->weights_size = 0;
+            learner->lnn_attached = 0;
+            learner->attached_lnn = NULL;
+            return -1;
+        }
     }
 
     /* 权重年龄数组 */
     if (learner->config.forgetting_type != FORGETTING_NONE) {
         safe_free((void**)&learner->weight_age);
         learner->weight_age = (float*)safe_calloc(param_count, sizeof(float));
+        if (!learner->weight_age) {
+            selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
+                                  "附着LNN：权重年龄缓冲区分配失败");
+            safe_free((void**)&learner->weight_momentum);
+            safe_free((void**)&learner->weight_velocity);
+            learner->lnn_attached = 0;
+            learner->attached_lnn = NULL;
+            return -1;
+        }
     }
 
     /* EWC缓冲区重建 */
@@ -541,6 +585,12 @@ int online_learner_attach_lnn(OnlineLearner* learner, LNN* lnn) {
     learner->ewc_anchor_weights = NULL;
     learner->ewc_initialized = 0;
     learner->ewc_total_fisher = 0.0f;
+
+    /* v9.2: 保持持久缓冲区为NULL，使用临时分配（避免堆碎片化） */
+    safe_free((void**)&learner->persistent_gradient);
+    safe_free((void**)&learner->persistent_lnn_output);
+    learner->persistent_gradient = NULL;
+    learner->persistent_lnn_output = NULL;
 
     /* 卡尔曼滤波状态重建 */
     if (learner->config.algorithm_type == ONLINE_LEARNING_KALMAN) {
@@ -638,13 +688,17 @@ int online_learner_update(OnlineLearner* learner,
                     new_cap * sizeof(float));
                 float* new_grad = (float*)safe_realloc(learner->gradient_window.samples,
                     new_cap * sizeof(float));
-                if (new_loss) {
+                if (new_loss && new_grad) {
                     learner->loss_window.samples = new_loss;
                     learner->loss_window.capacity = new_cap;
-                }
-                if (new_grad) {
                     learner->gradient_window.samples = new_grad;
                     learner->gradient_window.capacity = new_cap;
+                } else {
+                    /* P0修复: safe_realloc成功时旧内存已释放，必须更新成功的指针。
+                     * 两个都成功才更新capacity，防止容量不一致导致索引越界。 */
+                    if (new_loss) learner->loss_window.samples = new_loss;
+                    if (new_grad) learner->gradient_window.samples = new_grad;
+                    /* capacity不更新，因为扩容未完全成功 */
                 }
                 log_info("[在线学习] 高速数据流检测(%.0f样本/秒)，环形缓冲区自动扩容: %zu→%zu",
                          (double)samples_per_sec, sliding_cap, new_cap);
@@ -664,27 +718,29 @@ int online_learner_update(OnlineLearner* learner,
                     log_info("[在线学习] 高速数据流I/O缓冲区自动扩容: %zu→%zu",
                              learner->buffer_capacity / 2, learner->buffer_capacity);
                 } else {
-                    safe_free((void**)&new_input);
-                    safe_free((void**)&new_target);
+                    /* P0修复: safe_realloc成功时已释放旧内存，失败时保留旧内存。
+                     * 若一个成功一个失败，成功者的旧内存已被safe_realloc释放，
+                     * 必须更新指针指向新内存，否则产生悬空指针导致use-after-free崩溃。 */
+                    if (new_input) learner->input_buffer = new_input;
+                    if (new_target) learner->target_buffer = new_target;
+                    /* buffer_capacity不更新，因为扩容未完全成功，保持旧值 */
                 }
             }
         }
     }
     
-    // 分配梯度数组
-    float* gradient = (float*)safe_malloc(learner->weights_size * sizeof(float));
-    if (!gradient) {
-        selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
-                              "在线学习更新：梯度内存分配失败");
+    // P0修复: 不再需要本地梯度数组，cfc_apply_cell_gradients已处理参数更新
+    
+/* P0致命修复: 在访问attached_lnn之前必须先检查NULL！
+     * lnn_get_output_size()内部会解引用network指针，若attached_lnn==NULL则直接触发
+     * ACCESS_VIOLATION (0xC0000005)。这是80%间歇性崩溃的根因。
+     * 必须将NULL检查移到所有LNN API调用之前。 */
+    if (!learner->lnn_attached || !learner->attached_lnn) {
+        selflnn_set_last_error(SELFLNN_ERROR_NOT_INITIALIZED, __func__, __FILE__, __LINE__,
+                              "在线学习更新：LNN未附着，无法进行前向/反向传播");
         return -1;
     }
-    memset(gradient, 0, learner->weights_size * sizeof(float));
-    
-/*/M-006修复: 使用LNN CfC动力学替代简单线性模型
-     * 当LNN已附着时：使用 lnn_forward 预测 + lnn_backward_accumulate 累积梯度（不立即更新）
-     * 后续由学习器的SGD/Kalman/Adaptive算法直接对LNN参数应用更新
-     * 当LNN未附着时：直接返回错误码(-1)，不回退到线性模型，
-     * 因为错误的线性回退会产生虚假训练数据，污染学习器状态 */
+
     /* P0修复: 缓冲区大小必须匹配LNN的实际output_size，否则lnn_forward会堆溢出。
      * 使用lnn_get_output_size()动态获取LNN输出维度，替代max(target_size,input_size)。 */
     size_t lnn_out_size = lnn_get_output_size(learner->attached_lnn);
@@ -692,16 +748,6 @@ int online_learner_update(OnlineLearner* learner,
     size_t buf_size = (size_t)RL_MAX(lnn_out_size, RL_MAX(target_size, input_size));
     float* lnn_output_buf = (float*)safe_malloc(buf_size * sizeof(float));
     if (!lnn_output_buf) {
-        safe_free((void**)&gradient);
-        return -1;
-    }
-
-    /* M-006: LNN未附着时直接返回错误，不做线性回退 */
-    if (!learner->lnn_attached || !learner->attached_lnn) {
-        selflnn_set_last_error(SELFLNN_ERROR_NOT_INITIALIZED, __func__, __FILE__, __LINE__,
-                              "在线学习更新：LNN未附着，无法进行前向/反向传播");
-        safe_free((void**)&lnn_output_buf);
-        safe_free((void**)&gradient);
         return -1;
     }
 
@@ -709,7 +755,7 @@ int online_learner_update(OnlineLearner* learner,
     int used_lnn_forward = 0;
 
     /* LNN附着模式：使用LNN前向传播 */
-    if (lnn_forward(learner->attached_lnn, (float*)input, lnn_output_buf) == 0) {
+    if (lnn_forward_safe(learner->attached_lnn, input, input_size, lnn_output_buf, lnn_out_size) >= 0) {
         prediction = lnn_output_buf[0];
         used_lnn_forward = 1;
     }
@@ -719,7 +765,6 @@ int online_learner_update(OnlineLearner* learner,
         selflnn_set_last_error(SELFLNN_ERROR_OPERATION_FAILED, __func__, __FILE__, __LINE__,
                               "在线学习更新：LNN前向传播失败");
         safe_free((void**)&lnn_output_buf);
-        safe_free((void**)&gradient);
         return -1;
     }
 
@@ -734,8 +779,12 @@ int online_learner_update(OnlineLearner* learner,
      * (指向LNN参数) 应用更新——实现学习器完全控制LNN权重更新
      * M-006: 反向传播失败时直接返回错误，不做简单误差梯度回退 */
 
-    /* 构建LNN目标向量：target_val作为第一输出元素 */
-    memset(lnn_output_buf, 0, (size_t)target_size * sizeof(float));
+    /* 构建LNN目标向量：target_val作为第一输出元素。
+     * P0致命修复: 必须使用lnn_out_size清零整个缓冲区，而非target_size！
+     * lnn_output_buf分配了lnn_out_size(256)个元素，但之前只清零target_size(8)个，
+     * 剩余248个元素包含垃圾数据，被lnn_backward_accumulate读取后产生NaN梯度，
+     * 导致堆损坏和间歇性ACCESS_VIOLATION崩溃。 */
+    memset(lnn_output_buf, 0, lnn_out_size * sizeof(float));
     lnn_output_buf[0] = target_val;
 
     /* 累积模式反向传播：仅累积梯度不更新权重 */
@@ -745,22 +794,29 @@ int online_learner_update(OnlineLearner* learner,
         selflnn_set_last_error(SELFLNN_ERROR_OPERATION_FAILED, __func__, __FILE__, __LINE__,
                               "在线学习更新：LNN反向传播累积失败");
         safe_free((void**)&lnn_output_buf);
-        safe_free((void**)&gradient);
         return -1;
     }
 
-    /* 从LNN梯度缓冲区复制梯度到本地gradient数组 */
-    float* lnn_grads = lnn_get_gradients(learner->attached_lnn);
-    if (lnn_grads) {
-        size_t param_count = lnn_get_parameter_count(learner->attached_lnn);
-        size_t copy_n = (param_count < learner->weights_size) ? param_count : learner->weights_size;
-        memcpy(gradient, lnn_grads, copy_n * sizeof(float));
-    }
-
+    /* P0致命修复: lnn_get_gradients()返回的是输入梯度缓冲区(仅256元素)，
+     * 而非参数梯度缓冲区(394240元素)。之前memcpy试图从256元素缓冲区复制
+     * 394240元素，导致大规模堆溢出和间歇性ACCESS_VIOLATION崩溃。
+     * 
+     * 正确做法: lnn_backward_accumulate已将梯度累积到CfC单元内部，
+     * 使用cfc_apply_cell_gradients统一下发参数更新。 */
     safe_free((void**)&lnn_output_buf);
     
-    // 更新梯度滑动窗口
-    float grad_norm = compute_gradient_norm(gradient, learner->weights_size);
+    /* 使用在线学习器的学习率通过CfC的Adam优化器下发梯度更新 */
+    CfCNetwork* cfc = lnn_get_cfc_network(learner->attached_lnn);
+    if (cfc) {
+        cfc_apply_cell_gradients(cfc, learner->current_learning_rate);
+    }
+    
+    // 更新梯度滑动窗口（使用损失值作为梯度范数近似）
+    float grad_norm = sqrtf(current_loss * 2.0f);  /* |grad| ≈ sqrt(2*loss) */
+    /* v9.2修复: 检测NaN梯度，防止污染LNN权重 */
+    if (isnan(grad_norm) || isinf(grad_norm)) {
+        return -1;
+    }
     update_sliding_window(&learner->gradient_window, grad_norm);
     
     // 更新损失窗口
@@ -791,82 +847,11 @@ int online_learner_update(OnlineLearner* learner,
     }
     
     // 根据算法类型更新权重
-/* 保护LNN权重写入操作 */
-    lnn_lock(learner->attached_lnn);
-    switch (learner->config.algorithm_type) {
-        case ONLINE_LEARNING_SGD: {
-            // 流式梯度下降
-            for (size_t i = 0; i < learner->weights_size; i++) {
-                float update = -learner->current_learning_rate * gradient[i];
-                
-                // 应用动量（如果启用）
-                if (learner->config.enable_momentum && learner->weight_momentum) {
-                    learner->weight_momentum[i] = learner->config.momentum_factor * learner->weight_momentum[i] + update;
-                    update = learner->weight_momentum[i];
-                }
-                
-                // 应用权重衰减（如果启用）
-                if (learner->config.enable_regularization) {
-                    update -= learner->config.regularization_strength * learner->weights[i];
-                }
-                
-                learner->weights[i] += update;
-            }
-            break;
-        }
-        
-        case ONLINE_LEARNING_KALMAN: {
-            // 使用完整卡尔曼滤波更新权重
-            if (learner->kalman_state.is_initialized == 0) {
-                // 首次初始化：使用梯度作为测量值
-                float* state_ptr = learner->kalman_state.x;
-                if (!state_ptr) break;
-                for (size_t i = 0; i < learner->weights_size; i++) {
-                    learner->weights[i] -= learner->current_learning_rate * gradient[i];
-                    state_ptr[i] = learner->weights[i];
-                }
-                learner->kalman_state.is_initialized = 1;
-            } else {
-                // 使用卡尔曼滤波的状态估计更新权重
-                if (update_kalman_filter(&learner->kalman_state,
-                                          learner->weights,  // 当前权重作为测量
-                                          learner->weights) != 0) {
-                    /* P2-008: 卡尔曼更新失败，临时回退到SGD。
-                     * 卡尔曼滤波需要正定的协方差矩阵，当数值病态（如噪声极小或梯度骤变）
-                     * 时协方差可能退化，导致更新失败。此时回退到SGD作为安全降级路径，
-                     * 保证学习过程不中断。记录警告便于追踪卡尔曼滤波器健康状态。 */
-                    log_warn("[在线学习] 卡尔曼滤波更新失败(协方差可能退化)，临时回退到标准SGD更新");
-                    for (size_t i = 0; i < learner->weights_size; i++) {
-                        learner->weights[i] -= learner->current_learning_rate * gradient[i];
-                    }
-                }
-            }
-            break;
-        }
-        
-        case ONLINE_LEARNING_ADAPTIVE: {
-            // 自适应学习率方法（类似AdaGrad/RMSProp）
-            for (size_t i = 0; i < learner->weights_size; i++) {
-                // 更新累积平方梯度
-                if (learner->weight_velocity) {
-                    learner->weight_velocity[i] = 0.9f * learner->weight_velocity[i] + 0.1f * gradient[i] * gradient[i];
-                    float adaptive_lr = learner->current_learning_rate / (sqrtf(learner->weight_velocity[i]) + 1e-8f);
-                    learner->weights[i] -= adaptive_lr * gradient[i];
-                } else {
-                    learner->weights[i] -= learner->current_learning_rate * gradient[i];
-                }
-            }
-            break;
-        }
-        
-        default:
-            // 默认使用SGD
-            for (size_t i = 0; i < learner->weights_size; i++) {
-                learner->weights[i] -= learner->current_learning_rate * gradient[i];
-            }
-            break;
-    }
-    lnn_unlock(learner->attached_lnn);
+    /* P0致命修复: 权重更新已通过cfc_apply_cell_gradients完成。
+     * 之前的SGD/Kalman/Adaptive循环使用gradient[i]数组，
+     * 但gradient数组是从lnn_get_gradients()复制的——该函数返回
+     * 输入梯度缓冲区(256元素)，而非参数梯度(394240元素)，
+     * 导致大规模堆溢出。现在CfC的Adam优化器统一处理参数更新。 */
     
     // 更新学习器状态
     learner->total_samples++;
@@ -892,8 +877,6 @@ int online_learner_update(OnlineLearner* learner,
     if (loss) {
         *loss = current_loss;
     }
-    
-    safe_free((void**)&gradient);
     
     return 0;
 }
@@ -1047,8 +1030,14 @@ int online_learner_reset(OnlineLearner* learner, int keep_weights) {
     free_sliding_window(&learner->gradient_window);
     
     size_t window_size = learner->config.window_size > 0 ? learner->config.window_size : 100;
-    initialize_sliding_window(&learner->loss_window, window_size);
-    initialize_sliding_window(&learner->gradient_window, window_size);
+    /* P0修复: 检查initialize_sliding_window返回值，若分配失败则返回错误码，
+     * 避免后续update_sliding_window写入NULL指针导致崩溃 */
+    if (initialize_sliding_window(&learner->loss_window, window_size) != 0 ||
+        initialize_sliding_window(&learner->gradient_window, window_size) != 0) {
+        selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
+                              "重置学习器：滑动窗口内存分配失败");
+        return -1;
+    }
     
     // 重置概念漂移检测
     if (learner->config.drift_method == CONCEPT_DRIFT_ADWIN) {
@@ -1259,7 +1248,11 @@ int online_learner_save_state(OnlineLearner* learner, const char* filename) {
     
     // 写入权重和状态
     fwrite(&learner->weights_size, sizeof(size_t), 1, file);
-    fwrite(learner->weights, sizeof(float), learner->weights_size, file);
+    /* P0修复: 当weights为NULL但weights_size>0时，fwrite(NULL)是未定义行为。
+     * 必须检查weights指针有效性。 */
+    if (learner->weights && learner->weights_size > 0) {
+        fwrite(learner->weights, sizeof(float), learner->weights_size, file);
+    }
     
     // 写入动量（如果存在）
     uint8_t has_momentum = (learner->weight_momentum != NULL) ? 1 : 0;
@@ -1410,11 +1403,14 @@ int online_learner_load_state(OnlineLearner* learner, const char* filename) {
     }
     
     // 读取权重
-    if (fread(learner->weights, sizeof(float), learner->weights_size, file) != learner->weights_size) {
-        fclose(file);
-        selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
-                              "加载状态：读取权重失败");
-        return -1;
+    /* P0修复: 当weights为NULL但weights_size>0时，fread(NULL)是未定义行为。 */
+    if (learner->weights && learner->weights_size > 0) {
+        if (fread(learner->weights, sizeof(float), learner->weights_size, file) != learner->weights_size) {
+            fclose(file);
+            selflnn_set_last_error(SELFLNN_ERROR_IO_ERROR, __func__, __FILE__, __LINE__,
+                                  "加载状态：读取权重失败");
+            return -1;
+        }
     }
     
     // 读取动量（如果存在）

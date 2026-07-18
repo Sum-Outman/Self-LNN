@@ -245,11 +245,18 @@ static JsonValue* json_parse_object(JsonParser* p, int depth) {
 
         if (v->data.object.count >= cap) {
             cap *= 2;
+            /* P0修复: 分步realloc并立即更新指针，避免部分成功导致双重free。
+             * 原代码同时调用两个safe_realloc，若keys成功但values失败，
+             * keys的旧指针已被realloc释放，但v->data.object.keys仍指向旧地址，
+             * 后续json_free(v)会再次释放旧地址造成双重free。 */
             char** nk = (char**)safe_realloc(v->data.object.keys, cap * sizeof(char*));
+            if (!nk) { safe_free((void**)&key); json_free(val); json_free(v); return NULL; }
+            v->data.object.keys = nk;  /* 立即更新，确保后续json_free能正确释放 */
+
             JsonValue** nv = (JsonValue**)safe_realloc(v->data.object.values, cap * sizeof(JsonValue*));
-            if (!nk || !nv) { safe_free((void**)&key); json_free(val); json_free(v); return NULL; }
-            v->data.object.keys = nk;
-            v->data.object.values = nv;
+            if (!nv) { safe_free((void**)&key); json_free(val); json_free(v); return NULL; }
+            v->data.object.values = nv;  /* 立即更新 */
+
             v->data.object.capacity = cap;
         }
         v->data.object.keys[v->data.object.count] = key;

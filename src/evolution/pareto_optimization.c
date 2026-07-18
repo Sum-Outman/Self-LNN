@@ -713,6 +713,11 @@ int pareto_moead_evolve(Population* pop, MultiObjectiveFunction obj_func,
     if (T > num_weights) T = num_weights - 1;
     if (T < 2) T = 2;
 
+    /* v9.15修复: 三元乘法溢出检查，防止num_weights*T*sizeof(int)回绕 */
+    if (num_weights > 0 && T > 0 && (size_t)num_weights > SIZE_MAX / ((size_t)T * sizeof(int))) {
+        safe_free((void**)&weights);
+        return -1;
+    }
     int* neighborhood = (int*)safe_malloc((size_t)num_weights * (size_t)T * sizeof(int));
     if (!neighborhood) { safe_free((void**)&weights); return -1; }
 

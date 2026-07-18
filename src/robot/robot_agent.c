@@ -967,6 +967,7 @@ int robot_agent_save(const RobotAgent* agent, const char* filepath) {
     fwrite(&agent->policy.learning_rate, sizeof(float), 1, f);
     fwrite(&agent->policy.discount_factor, sizeof(float), 1, f);
 
+    if (ferror(f)) { fclose(f); return -1; }
     fclose(f);
     return 0;
 }
@@ -991,11 +992,13 @@ int robot_agent_load(RobotAgent* agent, const char* filepath) {
     /* 当前目标和技能 */
     fread(&agent->current_goal, sizeof(AgentGoal), 1, f);
     fread(&agent->skill_count, sizeof(int), 1, f);
+    if (agent->skill_count < 0) agent->skill_count = 0;
     if (agent->skill_count > AGENT_SKILL_MAX) agent->skill_count = AGENT_SKILL_MAX;
     fread(agent->skills, sizeof(AgentSkill), agent->skill_count, f);
 
     /* 知识库 */
     fread(&agent->knowledge_count, sizeof(int), 1, f);
+    if (agent->knowledge_count < 0) agent->knowledge_count = 0;
     if (agent->knowledge_count > AGENT_KNOWLEDGE_MAX) agent->knowledge_count = AGENT_KNOWLEDGE_MAX;
     fread(agent->knowledge_base, sizeof(KnowledgeEntry), agent->knowledge_count, f);
 
@@ -1018,11 +1021,13 @@ int robot_agent_load(RobotAgent* agent, const char* filepath) {
     /* 规划数据 */
     fread(&agent->plan_horizon, sizeof(int), 1, f);
     fread(&agent->plan_count, sizeof(int), 1, f);
+    if (agent->plan_count < 0) agent->plan_count = 0;
     if (agent->plan_count > AGENT_PLAN_MAX_STEPS) agent->plan_count = AGENT_PLAN_MAX_STEPS;
     fread(agent->plan_steps, sizeof(float)*AGENT_ACTION_DIM, agent->plan_count, f);
 
     /* 状态历史和统计 */
     fread(&agent->history_count, sizeof(int), 1, f);
+    if (agent->history_count < 0) agent->history_count = 0;
     if (agent->history_count > 100) agent->history_count = 100;
     fread(agent->state_history, sizeof(float)*AGENT_STATE_DIM, agent->history_count, f);
     fread(agent->state_mean, sizeof(agent->state_mean), 1, f);
@@ -1054,15 +1059,15 @@ int robot_agent_load(RobotAgent* agent, const char* filepath) {
 /* raw malloc → safe_malloc */
     if (sd > 0 && hd > 0) {
         agent->policy.weights_ih = (float*)safe_malloc((size_t)sd * hd * sizeof(float));
-        if (agent->policy.weights_ih) fread(agent->policy.weights_ih, sizeof(float), sd * hd, f);
+        if (agent->policy.weights_ih) fread(agent->policy.weights_ih, sizeof(float), (size_t)sd * hd, f);
         agent->policy.bias_h1 = (float*)safe_malloc((size_t)hd * sizeof(float));
         if (agent->policy.bias_h1) fread(agent->policy.bias_h1, sizeof(float), hd, f);
     }
     if (hd > 0) {
         agent->policy.weights_hh = (float*)safe_malloc((size_t)hd * hd * sizeof(float));
-        if (agent->policy.weights_hh) fread(agent->policy.weights_hh, sizeof(float), hd * hd, f);
+        if (agent->policy.weights_hh) fread(agent->policy.weights_hh, sizeof(float), (size_t)hd * hd, f);
         agent->policy.weights_hh2 = (float*)safe_malloc((size_t)hd * hd * sizeof(float));
-        if (agent->policy.weights_hh2) fread(agent->policy.weights_hh2, sizeof(float), hd * hd, f);
+        if (agent->policy.weights_hh2) fread(agent->policy.weights_hh2, sizeof(float), (size_t)hd * hd, f);
         agent->policy.bias_h2 = (float*)safe_malloc((size_t)hd * sizeof(float));
         if (agent->policy.bias_h2) fread(agent->policy.bias_h2, sizeof(float), hd, f);
         agent->policy.bias_h3 = (float*)safe_malloc((size_t)hd * sizeof(float));
@@ -1070,7 +1075,7 @@ int robot_agent_load(RobotAgent* agent, const char* filepath) {
     }
     if (hd > 0 && ad > 0) {
         agent->policy.weights_ho = (float*)safe_malloc((size_t)hd * ad * sizeof(float));
-        if (agent->policy.weights_ho) fread(agent->policy.weights_ho, sizeof(float), hd * ad, f);
+        if (agent->policy.weights_ho) fread(agent->policy.weights_ho, sizeof(float), (size_t)hd * ad, f);
         agent->policy.bias_o = (float*)safe_malloc((size_t)ad * sizeof(float));
         if (agent->policy.bias_o) fread(agent->policy.bias_o, sizeof(float), ad, f);
     }

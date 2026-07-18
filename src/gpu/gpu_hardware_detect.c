@@ -304,7 +304,11 @@ static int detect_gpu_linux(GpuHardwareInfo* info, int max_devices, int* num_fou
             if (!fp) continue;
 
             unsigned int vendor_id = 0;
-            fscanf(fp, "0x%x", &vendor_id);
+            /* P2修复: 检查fscanf返回值，读取失败时跳过该设备 */
+            if (fscanf(fp, "0x%x", &vendor_id) != 1) {
+                fclose(fp);
+                continue;
+            }
             fclose(fp);
 
             GpuVendor vendor = GPU_VENDOR_UNKNOWN;
@@ -355,7 +359,11 @@ static int detect_gpu_linux(GpuHardwareInfo* info, int max_devices, int* num_fou
         if (!fp) continue;
 
         unsigned int vendor_id = 0;
-        fscanf(fp, "0x%x", &vendor_id);
+        /* P2修复: 检查fscanf返回值，读取失败时跳过该设备 */
+        if (fscanf(fp, "0x%x", &vendor_id) != 1) {
+            fclose(fp);
+            continue;
+        }
         fclose(fp);
 
         GpuVendor vendor = GPU_VENDOR_UNKNOWN;

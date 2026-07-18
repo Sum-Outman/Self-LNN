@@ -443,6 +443,10 @@ int hierarchical_planning_generate(HierarchicalPlanningSystem* system,
     }
     
     // 将任务网络转换为规划序列：深度优先遍历任务树，收集原始任务
+    /* H-6注释: plan_steps表示从任务树中收集到的原始任务(primitive task)数量，
+     * 每个原始任务对应一个独立的执行步骤(step)。该值不等于任务树节点总数，
+     * 仅统计is_primitive=1或children_count=0的叶子节点。
+     * 返回值plan_steps用于向调用方报告规划包含的可执行步骤数。 */
     int plan_steps = 0;
     float* plan_ptr = plan;
     size_t remaining_size = max_plan_size;
@@ -471,21 +475,29 @@ int hierarchical_planning_generate(HierarchicalPlanningSystem* system,
             plan_steps++;
             remaining_size -= copy_size;
         } else {
-            // 非原始任务：将子任务按逆序压栈（保持顺序）
+            /* H-3修复: 在压入子任务前，提前检查并确保容量足够容纳所有子节点。
+             * 一次性扩容到位，避免循环内逐次扩容导致的性能开销和潜在越界风险。
+             * 如果扩容失败，释放所有资源并返回错误。 */
+            size_t required_cap = stack_top + current->children_count;
+            if (required_cap > stack_cap) {
+                size_t new_cap = stack_cap;
+                while (new_cap < required_cap) {
+                    new_cap *= 2;
+                }
+                HierarchicalTaskNode** new_stack = (HierarchicalTaskNode**)safe_realloc(
+                    node_stack, new_cap * sizeof(HierarchicalTaskNode*));
+                if (!new_stack) {
+                    safe_free((void**)&node_stack);
+                    free_task_node(root_node);
+                    return -1;
+                }
+                node_stack = new_stack;
+                stack_cap = new_cap;
+            }
+            // 非原始任务：将子任务按逆序压栈（保持顺序），容量已确保足够
             for (size_t i = current->children_count; i > 0; i--) {
                 size_t idx = i - 1;
                 if (!current->children[idx]) continue;
-                if (stack_top >= stack_cap) {
-                    stack_cap *= 2;
-                    HierarchicalTaskNode** new_stack = (HierarchicalTaskNode**)safe_realloc(
-                        node_stack, stack_cap * sizeof(HierarchicalTaskNode*));
-                    if (!new_stack) {
-                        safe_free((void**)&node_stack);
-                        free_task_node(root_node);
-                        return -1;
-                    }
-                    node_stack = new_stack;
-                }
                 node_stack[stack_top++] = current->children[idx];
             }
         }
@@ -601,9 +613,13 @@ int hierarchical_task_decomposition(HierarchicalPlanningSystem* system,
     // 收集子任务：深度优先遍历所有非原始子任务
     int subtask_count = 0;
     if (task_node->children_count > 0 && max_subtasks > 0) {
-        // 使用栈遍历所有层次的下级任务
+        /* H-2修复: 使用动态容量栈，避免栈满时静默丢弃任务。
+         * 初始容量基于直接子任务数，但深度遍历可能遇到多层子任务，
+         * 当容量不足时自动扩容（2倍策略），并记录警告日志。 */
+        size_t cs_cap = task_node->children_count + 1;
+        if (cs_cap < 16) cs_cap = 16; /* 最小保证容量 */
         HierarchicalTaskNode** collect_stack = (HierarchicalTaskNode**)safe_malloc(
-            (task_node->children_count + 1) * sizeof(HierarchicalTaskNode*));
+            cs_cap * sizeof(HierarchicalTaskNode*));
         if (!collect_stack) {
             free_task_node(task_node);
             return -1;
@@ -629,8 +645,27 @@ int hierarchical_task_decomposition(HierarchicalPlanningSystem* system,
                        copy_size * sizeof(float));
                 subtask_count++;
             } else {
-                // 非原始任务：在缓冲区空间允许时，将子节点入栈
-                if (cs_top + current->children_count <= task_node->children_count + 1) {
+                /* H-2修复: 非原始任务，将子节点入栈前检查容量。
+                 * 若容量不足则扩容，确保不会静默丢弃任何任务。 */
+                while (cs_top + current->children_count > cs_cap) {
+                    size_t new_cap = cs_cap * 2;
+                    if (new_cap < cs_top + current->children_count) {
+                        new_cap = cs_top + current->children_count + 16;
+                    }
+                    HierarchicalTaskNode** new_stack = (HierarchicalTaskNode**)safe_realloc(
+                        collect_stack, new_cap * sizeof(HierarchicalTaskNode*));
+                    if (!new_stack) {
+                        /* 扩容失败：记录警告并继续处理当前已有任务，避免丢失 */
+                        fprintf(stderr, "[警告] hierarchical_task_decomposition: "
+                                "collect_stack扩容失败(cap=%zu->%zu)，部分深层子任务可能丢失\n",
+                                (size_t)cs_cap, (size_t)new_cap);
+                        break; /* 跳出扩容循环，当前子节点不入栈 */
+                    }
+                    collect_stack = new_stack;
+                    cs_cap = new_cap;
+                }
+                /* 扩容成功后再入栈，避免越界 */
+                if (cs_top + current->children_count <= cs_cap) {
                     for (size_t i = current->children_count; i > 0; i--) {
                         size_t idx = i - 1;
                         if (current->children[idx]) {
@@ -935,9 +970,12 @@ int hierarchical_planning_get_state(HierarchicalPlanningSystem* system,
         return -1;
     }
     
-    memcpy(state, &system->state, sizeof(HierarchicalPlanningState));
+    /* H-4修复: 先清零目标state，再按字段逐一拷贝，避免memcpy造成
+     * abstract_state的浅拷贝。先分配深拷贝abstract_state，
+     * 分配成功后再拷贝其余字段，失败时state保持全零状态。 */
+    memset(state, 0, sizeof(HierarchicalPlanningState));
     
-    // 复制抽象状态（如果需要）
+    // 先深拷贝抽象状态（如果存在），避免memcpy导致的浅拷贝
     if (system->state.abstract_state && system->state.abstract_state_size > 0) {
         state->abstract_state = (float*)safe_malloc(
             system->state.abstract_state_size * sizeof(float));
@@ -950,6 +988,14 @@ int hierarchical_planning_get_state(HierarchicalPlanningSystem* system,
               system->state.abstract_state_size * sizeof(float));
         state->abstract_state_size = system->state.abstract_state_size;
     }
+    
+    // 拷贝其余非指针字段（显式逐字段拷贝，避免memcpy带着浅拷贝的指针）
+    state->current_network = system->state.current_network;
+    state->current_level = system->state.current_level;
+    state->decomposition_depth = system->state.decomposition_depth;
+    state->backtrack_count = system->state.backtrack_count;
+    state->cumulative_reward = system->state.cumulative_reward;
+    state->is_initialized = system->state.is_initialized;
     
     return 0;
 }
@@ -975,6 +1021,15 @@ int hierarchical_planning_reset(HierarchicalPlanningSystem* system) {
         safe_free((void**)&system->task_networks);
         system->networks_count = 0;
         system->networks_capacity = 0;
+    }
+    
+    /* H-1修复: 在memset整个state结构体之前，先释放抽象状态内存，
+     * 否则memset会将abstract_state指针清零，导致已分配的内存泄漏。
+     * 显式safe_free后置NULL，再memset做双重保险。 */
+    if (system->state.abstract_state) {
+        safe_free((void**)&system->state.abstract_state);
+        system->state.abstract_state = NULL;
+        system->state.abstract_state_size = 0;
     }
     
     // 重置状态
@@ -1225,7 +1280,18 @@ static int decompose_task_htn(HierarchicalPlanningSystem* system,
     for (int i = 0; i < child_count; i++) {
         size_t subtask_size = task_dim;
         float* subtask = (float*)safe_malloc(subtask_size * sizeof(float));
-        if (!subtask) return -1;
+        /* H-5修复: subtask分配失败时，回滚释放已分配的子任务内存，
+         * 然后重置children_count，确保不会泄漏。 */
+        if (!subtask) {
+            for (int j = 0; j < i; j++) {
+                if (task_node->children && j < (int)task_node->children_count) {
+                    free_task_node(task_node->children[j]);
+                    task_node->children[j] = NULL;
+                }
+            }
+            task_node->children_count = 0;
+            return -1;
+        }
         
         switch (method_type) {
             case 0: { /* 均匀分割：划分子空间 */
@@ -1334,7 +1400,15 @@ static int decompose_task_pop(HierarchicalPlanningSystem* system,
     for (int i = 0; i < child_count; i++) {
         size_t subtask_size = task_dim;
         float* subtask = (float*)safe_malloc(subtask_size * sizeof(float));
+        /* H-5修复: subtask分配失败时，回滚释放已分配的子任务内存和辅助结构 */
         if (!subtask) {
+            for (int j = 0; j < i; j++) {
+                if (task_node->children && j < (int)task_node->children_count) {
+                    free_task_node(task_node->children[j]);
+                    task_node->children[j] = NULL;
+                }
+            }
+            task_node->children_count = 0;
             for (int j = 0; j < child_count; j++) safe_free((void**)&causal_links[j]);
             safe_free((void**)&causal_links);
             safe_free((void**)&profiles);
@@ -1503,7 +1577,17 @@ static int decompose_task_hrl(HierarchicalPlanningSystem* system,
         // 使用选项发现：基于任务描述和上下文生成子任务
         size_t subtask_size = task_dim;
         float* subtask = (float*)safe_malloc(subtask_size * sizeof(float));
-        if (!subtask) return -1;
+        /* H-5修复: subtask分配失败时，回滚释放已分配的子任务内存 */
+        if (!subtask) {
+            for (int j = 0; j < i; j++) {
+                if (task_node->children && j < (int)task_node->children_count) {
+                    free_task_node(task_node->children[j]);
+                    task_node->children[j] = NULL;
+                }
+            }
+            task_node->children_count = 0;
+            return -1;
+        }
         
         // 每个子选项专注于任务描述的不同方面
         float option_focus = (float)i / (float)child_count;
@@ -1608,7 +1692,17 @@ static int decompose_task_abstract(HierarchicalPlanningSystem* system,
             // 使用抽象映射：将任务描述映射到子抽象空间
             size_t abstract_dim = (task_dim + (size_t)child_count - 1) / (size_t)child_count;
             float* subtask = (float*)safe_malloc(abstract_dim * sizeof(float));
-            if (!subtask) return -1;
+            /* H-5修复: subtask分配失败时，回滚释放已分配的子任务内存 */
+            if (!subtask) {
+                for (int j = 0; j < i; j++) {
+                    if (task_node->children && j < (int)task_node->children_count) {
+                        free_task_node(task_node->children[j]);
+                        task_node->children[j] = NULL;
+                    }
+                }
+                task_node->children_count = 0;
+                return -1;
+            }
             
             // 对任务描述块进行抽象聚合（平均池化）
             size_t start = (size_t)i * abstract_dim;
@@ -2770,7 +2864,7 @@ int htn_add_method(HTNPlanningDomain* domain, const HTNMethod* method)
     if (domain->method_count >= domain->method_capacity) {
         // 自动扩容
         size_t new_capacity = domain->method_capacity == 0 ? 8 : domain->method_capacity * 2;
-        HTNMethod* new_methods = (HTNMethod*)realloc(domain->methods,
+        HTNMethod* new_methods = (HTNMethod*)safe_realloc(domain->methods,
                                     new_capacity * sizeof(HTNMethod));
         if (!new_methods) return -1;
         domain->methods = new_methods;
@@ -2867,7 +2961,7 @@ int htn_add_operator(HTNPlanningDomain* domain, const HTNOperator* op)
     
     if (domain->operator_count >= domain->operator_capacity) {
         size_t new_capacity = domain->operator_capacity == 0 ? 8 : domain->operator_capacity * 2;
-        HTNOperator* new_ops = (HTNOperator*)realloc(domain->operators,
+        HTNOperator* new_ops = (HTNOperator*)safe_realloc(domain->operators,
                                   new_capacity * sizeof(HTNOperator));
         if (!new_ops) return -1;
         domain->operators = new_ops;
@@ -2917,7 +3011,7 @@ int htn_add_resource(HTNPlanningDomain* domain, const HTNResource* resource)
     
     if (domain->resource_count >= domain->resource_capacity) {
         size_t new_capacity = domain->resource_capacity == 0 ? 8 : domain->resource_capacity * 2;
-        HTNResource* new_res = (HTNResource*)realloc(domain->resources,
+        HTNResource* new_res = (HTNResource*)safe_realloc(domain->resources,
                                   new_capacity * sizeof(HTNResource));
         if (!new_res) return -1;
         domain->resources = new_res;

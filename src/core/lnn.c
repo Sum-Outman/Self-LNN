@@ -1398,6 +1398,35 @@ LNN* lnn_load(const char* filepath) {
         memset(network->hidden_state, 0, config.hidden_size * sizeof(float));
         memset(network->cell_state, 0, config.hidden_size * sizeof(float));
 
+        /* v7.1修复: 分配前向传播所需的缓冲区。
+         * lnn_create()在lnn.c:214-224分配了input_buffer/output_buffer/error_buffer/gradient_buffer，
+         * 但lnn_load()此前遗漏了这些分配，导致_lnn_forward_internal的memcpy(network->input_buffer,...)
+         * 写入NULL指针，触发访问违例(Release模式崩溃/Debug模式CRT断言弹窗挂起)。 */
+        size_t input_size = config.input_size;
+        size_t output_size = config.output_size;
+        network->input_buffer = (float*)safe_calloc(input_size, sizeof(float));
+        network->output_buffer = (float*)safe_calloc(output_size, sizeof(float));
+        network->error_buffer = (float*)safe_calloc(output_size, sizeof(float));
+        /* gradient_buffer需要容纳cfc_backward中max_layer_size个浮点数的写入 */
+        size_t max_layer = (input_size > config.hidden_size) ? input_size : config.hidden_size;
+        max_layer = (max_layer > output_size) ? max_layer : output_size;
+        network->gradient_buffer = (float*)safe_calloc(max_layer, sizeof(float));
+        if (!network->input_buffer || !network->output_buffer ||
+            !network->error_buffer || !network->gradient_buffer) {
+            safe_free((void**)&network->input_buffer);
+            safe_free((void**)&network->output_buffer);
+            safe_free((void**)&network->error_buffer);
+            safe_free((void**)&network->gradient_buffer);
+            safe_free((void**)&network->hidden_state);
+            safe_free((void**)&network->cell_state);
+            mutex_destroy(network->lock);
+            safe_free((void**)&network);
+            selflnn_set_last_error(SELFLNN_ERROR_MEMORY_ALLOCATION, __func__, __FILE__, __LINE__,
+                                  "分配LNN工作缓冲区失败");
+            fclose(file);
+            return NULL;
+        }
+
         /* 初始化互斥锁 */
         network->lock = mutex_create();
         if (!network->lock) {

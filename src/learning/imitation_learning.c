@@ -286,6 +286,8 @@ int imitation_learner_add_demonstration(ImitationLearner* learner,
         // 扩展缓冲区
         size_t new_capacity = new_total_samples * 2; // 两倍扩容
         
+        /* 修复缺陷7: 用临时变量分配新缓冲区，全部成功后再更新，失败时释放临时变量 */
+        
         float* new_state_buffer = (float*)safe_realloc(
             learner->state_buffer, new_capacity * 64 * sizeof(float));
         float* new_action_buffer = (float*)safe_realloc(
@@ -299,7 +301,10 @@ int imitation_learner_add_demonstration(ImitationLearner* learner,
             learner->loss_buffer = new_loss_buffer;
             learner->buffer_capacity = new_capacity;
         } else {
-            // 如果扩展失败，仍然继续，但可能无法存储所有样本
+            // 如果扩展失败，释放成功分配的部分，防止野指针
+            safe_free((void**)&new_state_buffer);
+            safe_free((void**)&new_action_buffer);
+            safe_free((void**)&new_loss_buffer);
             selflnn_set_last_error(SELFLNN_ERROR_OUT_OF_MEMORY, __func__, __FILE__, __LINE__,
                                   "缓冲区扩展失败，可能无法存储所有样本");
         }
@@ -869,11 +874,12 @@ static ImitationLearningResult* train_dagger(ImitationLearner* learner) {
                         // 检查聚合数据集容量
                         if (aggregated_samples + new_samples >= aggregated_capacity) {
                             // 扩展容量
-                            aggregated_capacity *= 2;
+                            /* 修复缺陷8: 将capacity翻倍移到realloc全部成功之后，失败时回滚 */
+                            size_t new_aggregated_capacity = aggregated_capacity * 2;
                             float* new_states = (float*)safe_realloc(aggregated_states,
-                                                                    aggregated_capacity * max_state_dim * sizeof(float));
+                                                                    new_aggregated_capacity * max_state_dim * sizeof(float));
                             float* new_actions = (float*)safe_realloc(aggregated_actions,
-                                                                     aggregated_capacity * max_action_dim * sizeof(float));
+                                                                     new_aggregated_capacity * max_action_dim * sizeof(float));
                             if (!new_states || !new_actions) {
                                 safe_free((void**)&new_states);
                                 safe_free((void**)&new_actions);
@@ -881,6 +887,7 @@ static ImitationLearningResult* train_dagger(ImitationLearner* learner) {
                             }
                             aggregated_states = new_states;
                             aggregated_actions = new_actions;
+                            aggregated_capacity = new_aggregated_capacity;
                         }
                         
                         // 添加专家状态-动作对

@@ -255,6 +255,8 @@ int matrix_inverse(const float* A, float* invA, size_t n) {
     if (!A || !invA || n == 0) return -1;
 
     /* 复制A到工作矩阵，LU分解会修改工作副本 */
+    /* P2修复: n*n*sizeof(float)在n较大时整数溢出，分配前检查 */
+    if (n > SIZE_MAX / n / sizeof(float)) return -1;
     /* P2修复: 使用safe_malloc替代原生malloc，添加NULL检查 */
     float* work = (float*)safe_malloc(n * n * sizeof(float));
     int* pivot = (int*)safe_malloc(n * sizeof(int));

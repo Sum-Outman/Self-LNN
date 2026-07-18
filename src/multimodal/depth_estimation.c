@@ -5546,13 +5546,13 @@ static int sgbm_postprocess(float* disparity_map, const float* aggregated_cost,
         if (speckle_window < 50) speckle_window = 50;
         if (speckle_range <= 0) speckle_range = 4;
 
-        int* visited = (int*)calloc((size_t)width * height, sizeof(int));
+        int* visited = (int*)safe_calloc((size_t)width * height, sizeof(int));
         if (!visited) return 0;
 
-        int* qx = (int*)malloc((size_t)width * (size_t)height * sizeof(int));
-        int* qy = (int*)malloc((size_t)width * (size_t)height * sizeof(int));
-        int* rx = (int*)malloc((size_t)width * (size_t)height * sizeof(int));
-        int* ry = (int*)malloc((size_t)width * (size_t)height * sizeof(int));
+        int* qx = (int*)safe_malloc((size_t)width * (size_t)height * sizeof(int));
+        int* qy = (int*)safe_malloc((size_t)width * (size_t)height * sizeof(int));
+        int* rx = (int*)safe_malloc((size_t)width * (size_t)height * sizeof(int));
+        int* ry = (int*)safe_malloc((size_t)width * (size_t)height * sizeof(int));
 
         if (qx && qy && rx && ry) {
             for (int y = half_window; y < height - half_window; y++) {
@@ -5584,7 +5584,7 @@ static int sgbm_postprocess(float* disparity_map, const float* aggregated_cost,
                 }
             }
         }
-        free(qx); free(qy); free(rx); free(ry); free(visited);
+        safe_free((void**)&qx); safe_free((void**)&qy); safe_free((void**)&rx); safe_free((void**)&ry); safe_free((void**)&visited);
     }
     return 0;
 }

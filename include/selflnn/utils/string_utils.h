@@ -449,9 +449,19 @@ void string_reverse(char* str);
  */
 unsigned int string_hash(const char* str, unsigned int seed);
 
-/* 安全字符串复制 */
+/* v9.1修复: safe_strdup 使用 _safe_malloc 替代 _strdup，确保内存跟踪一致。
+ * 前向声明 _safe_malloc (定义在 memory_utils.h 中，但该头文件可能未被包含)。
+ * 使用 static inline 函数实现，避免宏展开带来的副作用和 _strdup 的未跟踪问题。 */
 #ifndef safe_strdup
-#define safe_strdup(s) ((s) ? _strdup(s) : NULL)
+extern void* _safe_malloc(size_t size, const char* file, int line);
+#include <string.h>
+static inline char* safe_strdup(const char* s) {
+    if (!s) return NULL;
+    size_t len = strlen(s) + 1;
+    char* buf = (char*)_safe_malloc(len, "string_utils", 0);
+    if (buf) memcpy(buf, s, len);
+    return buf;
+}
 #endif
 
 #ifdef __cplusplus

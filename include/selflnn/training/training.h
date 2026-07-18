@@ -2093,6 +2093,12 @@ int trainer_collect_gradient_health(Trainer* trainer, GradientHealthReport* repo
 /** @brief 检查梯度是否健康（快速检查，不生成完整报告） */
 int trainer_check_gradient_health(Trainer* trainer);
 
+/* v9.19: CfC元优化器接入 — 训练器getter/setter，避免opaque struct访问 */
+int trainer_set_meta_optimizer(Trainer* trainer, void* meta_optimizer);
+void* trainer_get_meta_optimizer(Trainer* trainer);
+int trainer_set_use_meta_optimizer(Trainer* trainer, int enable);
+int trainer_get_use_meta_optimizer(Trainer* trainer);
+
 #ifdef __cplusplus
 }
 #endif

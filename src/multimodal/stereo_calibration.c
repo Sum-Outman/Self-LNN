@@ -384,7 +384,7 @@ static void solve_dlt_8pt(const float* A, int num_eq, float* result, int result_
 CameraCalibrator* camera_calibrator_create(const CalibrationConfig* config)
 {
     if (!config) return NULL;
-    CameraCalibrator* calib = (CameraCalibrator*)calloc(1, sizeof(CameraCalibrator));
+    CameraCalibrator* calib = (CameraCalibrator*)safe_calloc(1, sizeof(CameraCalibrator));
     if (!calib) return NULL;
     calib->config = *config;
     calib->total_images = 0;
@@ -400,13 +400,13 @@ void camera_calibrator_free(CameraCalibrator* calibrator)
 {
     if (!calibrator) return;
 
-    free(calibrator->all_object_points);
+    safe_free((void**)&calibrator->all_object_points);
     calibrator->all_object_points = NULL;
-    free(calibrator->all_image_points);
+    safe_free((void**)&calibrator->all_image_points);
     calibrator->all_image_points = NULL;
-    free(calibrator->point_counts);
+    safe_free((void**)&calibrator->point_counts);
     calibrator->point_counts = NULL;
-    free(calibrator);
+    safe_free((void**)&calibrator);
 }
 
 int camera_calibrate_monocular(CameraCalibrator* calibrator,
@@ -425,20 +425,20 @@ int camera_calibrate_monocular(CameraCalibrator* calibrator,
     calibrator->total_images = 0;
     calibrator->total_points = 0;
 
-    if (calibrator->point_counts) free(calibrator->point_counts);
-    calibrator->point_counts = (int*)calloc(num_images, sizeof(int));
+    if (calibrator->point_counts) safe_free((void**)&calibrator->point_counts);
+    calibrator->point_counts = (int*)safe_calloc(num_images, sizeof(int));
     if (!calibrator->point_counts) return -1;
 
     int total_corners = 0;
-    int* detected_counts = (int*)calloc(num_images, sizeof(int));
-    float* all_image_corners = (float*)calloc(num_images * corners_per_image * 2, sizeof(float));
-    float* all_object_corners = (float*)calloc(num_images * corners_per_image * 3, sizeof(float));
+    int* detected_counts = (int*)safe_calloc(num_images, sizeof(int));
+    float* all_image_corners = (float*)safe_calloc((size_t)num_images * corners_per_image * 2, sizeof(float));
+    float* all_object_corners = (float*)safe_calloc((size_t)num_images * corners_per_image * 3, sizeof(float));
 
     if (!detected_counts || !all_image_corners || !all_object_corners)
     {
-        free(detected_counts);
-        free(all_image_corners);
-        free(all_object_corners);
+        safe_free((void**)&detected_counts);
+        safe_free((void**)&all_image_corners);
+        safe_free((void**)&all_object_corners);
         return -1;
     }
 
@@ -467,24 +467,24 @@ int camera_calibrate_monocular(CameraCalibrator* calibrator,
 
     calibrator->total_points = total_corners;
 
-    if (calibrator->all_image_points) free(calibrator->all_image_points);
-    if (calibrator->all_object_points) free(calibrator->all_object_points);
+    if (calibrator->all_image_points) safe_free((void**)&calibrator->all_image_points);
+    if (calibrator->all_object_points) safe_free((void**)&calibrator->all_object_points);
 
-    calibrator->all_image_points = (float*)malloc((size_t)total_corners * 2 * sizeof(float));
-    calibrator->all_object_points = (float*)malloc((size_t)total_corners * 3 * sizeof(float));
+    calibrator->all_image_points = (float*)safe_malloc((size_t)total_corners * 2 * sizeof(float));
+    calibrator->all_object_points = (float*)safe_malloc((size_t)total_corners * 3 * sizeof(float));
 
     if (!calibrator->all_image_points || !calibrator->all_object_points)
     {
         /* P0修复: 释放已分配的成员，防止内存泄漏。
          * 场景: 第一处malloc成功、第二处失败时，已分配内存需释放。
          * free(NULL)安全，故两处均释放无需判断。 */
-        free(calibrator->all_image_points);
+        safe_free((void**)&calibrator->all_image_points);
         calibrator->all_image_points = NULL;
-        free(calibrator->all_object_points);
+        safe_free((void**)&calibrator->all_object_points);
         calibrator->all_object_points = NULL;
-        free(detected_counts);
-        free(all_image_corners);
-        free(all_object_corners);
+        safe_free((void**)&detected_counts);
+        safe_free((void**)&all_image_corners);
+        safe_free((void**)&all_object_corners);
         return -1;
     }
 
@@ -503,9 +503,9 @@ int camera_calibrate_monocular(CameraCalibrator* calibrator,
         }
     }
 
-    free(detected_counts);
-    free(all_image_corners);
-    free(all_object_corners);
+    safe_free((void**)&detected_counts);
+    safe_free((void**)&all_image_corners);
+    safe_free((void**)&all_object_corners);
 
     if (calibrator->total_images < 3)
     {
@@ -612,11 +612,11 @@ int camera_calibrate_stereo(CameraCalibrator* calibrator,
     int total_left_images = calibrator->total_images;
     int obj_size = total_left_images * corners_per_image * 3;
     int img_size = total_left_images * corners_per_image * 2;
-    float* saved_obj_points = (float*)malloc((size_t)total_left_images * (size_t)corners_per_image * 3 * sizeof(float));
-    float* saved_left_points = (float*)malloc((size_t)total_left_images * (size_t)corners_per_image * 2 * sizeof(float));
+    float* saved_obj_points = (float*)safe_malloc((size_t)total_left_images * (size_t)corners_per_image * 3 * sizeof(float));
+    float* saved_left_points = (float*)safe_malloc((size_t)total_left_images * (size_t)corners_per_image * 2 * sizeof(float));
     if (!saved_obj_points || !saved_left_points) {
-        free(saved_obj_points);
-        free(saved_left_points);
+        safe_free((void**)&saved_obj_points);
+        safe_free((void**)&saved_left_points);
         return -1;
     }
     memcpy(saved_obj_points, calibrator->all_object_points, (size_t)obj_size * sizeof(float));
@@ -626,8 +626,8 @@ int camera_calibrate_stereo(CameraCalibrator* calibrator,
                                                width, height, channels, &right_result);
 
     if (right_ret != 0) {
-        free(saved_obj_points);
-        free(saved_left_points);
+        safe_free((void**)&saved_obj_points);
+        safe_free((void**)&saved_left_points);
         return -1;
     }
 
@@ -680,8 +680,8 @@ int camera_calibrate_stereo(CameraCalibrator* calibrator,
 
     /* ZSFIII-P1-001修复: return -0在IEEE754下等于0，导致调用方无法检测立体标定失败 */
     if (valid_pairs < 3) {
-        free(saved_obj_points);
-        free(saved_left_points);
+        safe_free((void**)&saved_obj_points);
+        safe_free((void**)&saved_left_points);
         return -1;
     }
 
@@ -734,8 +734,8 @@ int camera_calibrate_stereo(CameraCalibrator* calibrator,
     result->calibration_time_ms = 0.0f;
     calib->is_calibrated = 1;
 
-    free(saved_obj_points);
-    free(saved_left_points);
+    safe_free((void**)&saved_obj_points);
+    safe_free((void**)&saved_left_points);
     return 0;
 }
 
@@ -1040,10 +1040,10 @@ int stereo_compute_rectification_map(const StereoCalibration* calibration,
     rectification_map->map_width = width;
     rectification_map->map_height = height;
 
-    rectification_map->map_left_x = (float*)calloc(width * height, sizeof(float));
-    rectification_map->map_left_y = (float*)calloc(width * height, sizeof(float));
-    rectification_map->map_right_x = (float*)calloc(width * height, sizeof(float));
-    rectification_map->map_right_y = (float*)calloc(width * height, sizeof(float));
+    rectification_map->map_left_x = (float*)safe_calloc((size_t)width * height, sizeof(float));
+    rectification_map->map_left_y = (float*)safe_calloc((size_t)width * height, sizeof(float));
+    rectification_map->map_right_x = (float*)safe_calloc((size_t)width * height, sizeof(float));
+    rectification_map->map_right_y = (float*)safe_calloc((size_t)width * height, sizeof(float));
 
     if (!rectification_map->map_left_x || !rectification_map->map_left_y ||
         !rectification_map->map_right_x || !rectification_map->map_right_y)
@@ -1102,13 +1102,13 @@ int stereo_compute_rectification_map(const StereoCalibration* calibration,
 void stereo_rectification_map_free(StereoRectificationMap* map)
 {
     if (!map) return;
-    free(map->map_left_x);
+    safe_free((void**)&map->map_left_x);
     map->map_left_x = NULL;
-    free(map->map_left_y);
+    safe_free((void**)&map->map_left_y);
     map->map_left_y = NULL;
-    free(map->map_right_x);
+    safe_free((void**)&map->map_right_x);
     map->map_right_x = NULL;
-    free(map->map_right_y);
+    safe_free((void**)&map->map_right_y);
     map->map_right_y = NULL;
     map->map_width = 0;
     map->map_height = 0;
@@ -1366,14 +1366,14 @@ int camera_calibration_detect_corners(const float* image,
     int expected_corners = pattern_width * pattern_height;
     if (max_corners < expected_corners) return -1;
 
-    int* grad_x = (int*)calloc(width * height, sizeof(int));
-    int* grad_y = (int*)calloc(width * height, sizeof(int));
-    float* grad_mag = (float*)calloc(width * height, sizeof(float));
-    float* grad_orient = (float*)calloc(width * height, sizeof(float));
+    int* grad_x = (int*)safe_calloc((size_t)width * height, sizeof(int));
+    int* grad_y = (int*)safe_calloc((size_t)width * height, sizeof(int));
+    float* grad_mag = (float*)safe_calloc((size_t)width * height, sizeof(float));
+    float* grad_orient = (float*)safe_calloc((size_t)width * height, sizeof(float));
 
     if (!grad_x || !grad_y || !grad_mag || !grad_orient)
     {
-        free(grad_x); free(grad_y); free(grad_mag); free(grad_orient);
+        safe_free((void**)&grad_x); safe_free((void**)&grad_y); safe_free((void**)&grad_mag); safe_free((void**)&grad_orient);
         return -1;
     }
 
@@ -1411,10 +1411,10 @@ int camera_calibration_detect_corners(const float* image,
         }
     }
 
-    int* corner_score = (int*)calloc(width * height, sizeof(int));
+    int* corner_score = (int*)safe_calloc((size_t)width * height, sizeof(int));
     if (!corner_score)
     {
-        free(grad_x); free(grad_y); free(grad_mag); free(grad_orient);
+        safe_free((void**)&grad_x); safe_free((void**)&grad_y); safe_free((void**)&grad_mag); safe_free((void**)&grad_orient);
         return -1;
     }
 
@@ -1482,10 +1482,10 @@ int camera_calibration_detect_corners(const float* image,
         }
     }
 
-    int* sorted_indices = (int*)malloc((size_t)width * (size_t)height * sizeof(int));
+    int* sorted_indices = (int*)safe_malloc((size_t)width * (size_t)height * sizeof(int));
     if (!sorted_indices)
     {
-        free(grad_x); free(grad_y); free(grad_mag); free(grad_orient); free(corner_score);
+        safe_free((void**)&grad_x); safe_free((void**)&grad_y); safe_free((void**)&grad_mag); safe_free((void**)&grad_orient); safe_free((void**)&corner_score);
         return -1;
     }
 
@@ -1617,8 +1617,8 @@ int camera_calibration_detect_corners(const float* image,
 
 cleanup_corners:
 
-    free(grad_x); free(grad_y); free(grad_mag); free(grad_orient);
-    free(corner_score); free(sorted_indices);
+    safe_free((void**)&grad_x); safe_free((void**)&grad_y); safe_free((void**)&grad_mag); safe_free((void**)&grad_orient);
+    safe_free((void**)&corner_score); safe_free((void**)&sorted_indices);
 
     return corners_found;
 }

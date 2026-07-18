@@ -516,6 +516,8 @@ void agent_message_destroy(AgentMessage* message) {
     
     safe_free((void**)&message->message_type);
     safe_free((void**)&message->message_data);
+    /* G5修复: 释放content字段 */
+    safe_free((void**)&message->content);
     safe_free((void**)&message);
 }
 
@@ -1349,8 +1351,14 @@ MultiAgentSystem* multi_agent_system_create(const MultiAgentConfig* config) {
     system->shared_knowledge_size = system->config.knowledge_size;
     system->shared_knowledge = init_parameter_array(system->shared_knowledge_size, 0.0f);
     system->global_state = init_parameter_array(system->shared_knowledge_size, 0.0f);
-    system->consensus_values = init_parameter_array(system->agent_count, 0.5f);
-    if (!system->shared_knowledge || !system->global_state || !system->consensus_values) {
+    /* B2修复: agent_count=0时跳过consensus_values分配，
+     * 因为init_parameter_array(0, ...) → safe_malloc(0) → NULL，
+     * 导致后续NULL检查失败。agent_count=0时无需共识缓冲区。 */
+    system->consensus_values = (system->agent_count > 0)
+        ? init_parameter_array(system->agent_count, 0.5f)
+        : NULL;
+    if (!system->shared_knowledge || !system->global_state ||
+        (system->agent_count > 0 && !system->consensus_values)) {
         safe_free((void**)&system->shared_knowledge);
         safe_free((void**)&system->global_state);
         safe_free((void**)&system->consensus_values);
@@ -1364,6 +1372,13 @@ MultiAgentSystem* multi_agent_system_create(const MultiAgentConfig* config) {
         safe_free((void**)&system);
         return NULL;
     }
+
+    /* G3修复: 分配performance.metrics浮点数组。
+     * MultiAgentPerformance.metrics是float*指针(非嵌入数组)，
+     * safe_calloc将其初始化为NULL，multi_agent_evaluate_performance
+     * 直接写入NULL指针导致ACCESS_VIOLATION崩溃。 */
+    system->performance.metrics = init_parameter_array(8, 0.0f);
+    system->performance.metric_count = 0;
     
     // 初始化同步状态
     system->synchronization_counter = 0;
@@ -1426,6 +1441,8 @@ void multi_agent_system_destroy(MultiAgentSystem* system) {
         if (system->global_messages[i]) {
             safe_free((void**)&system->global_messages[i]->message_type);
             safe_free((void**)&system->global_messages[i]->message_data);
+            /* G5修复: 释放content字段，multi_agent_send_message深拷贝了content */
+            safe_free((void**)&system->global_messages[i]->content);
             safe_free((void**)&system->global_messages[i]);
         }
     }
@@ -1463,7 +1480,10 @@ void multi_agent_system_destroy(MultiAgentSystem* system) {
     if (system->cfc_private_data) {
         safe_free((void**)&system->cfc_private_data);
     }
-    
+
+    /* G3修复: 释放performance.metrics */
+    safe_free((void**)&system->performance.metrics);
+
     // 释放系统结构体本身
     safe_free((void**)&system);
 }
@@ -1525,6 +1545,8 @@ int multi_agent_set_enabled(MultiAgentSystem* system, int enabled) {
             if (system->global_messages[i]) {
                 safe_free((void**)&system->global_messages[i]->message_type);
                 safe_free((void**)&system->global_messages[i]->message_data);
+                /* G5修复: 释放content字段 */
+                safe_free((void**)&system->global_messages[i]->content);
                 safe_free((void**)&system->global_messages[i]);
             }
         }
@@ -4245,6 +4267,16 @@ int multi_agent_send_message(MultiAgentSystem* system, const AgentMessage* messa
     AgentMessage* msg_copy = (AgentMessage*)safe_malloc(sizeof(AgentMessage));
     if (!msg_copy) return -1;
     memcpy(msg_copy, message, sizeof(AgentMessage));
+
+    /* G4修复: 深拷贝message_type字符串。
+     * memcpy浅拷贝导致副本与原消息共享message_type指针。
+     * 原消息被agent_message_destroy释放后，副本的message_type成为悬空指针，
+     * multi_agent_system_destroy再次释放时发生double-free崩溃。 */
+    msg_copy->message_type = message->message_type
+        ? string_duplicate_nullable(message->message_type) : NULL;
+    msg_copy->message_data = NULL;  /* 不共享原消息的data指针 */
+    msg_copy->data_size = 0;
+
     if (message->content && message->content_size > 0) {
         msg_copy->content = safe_malloc(message->content_size);
         if (msg_copy->content) {

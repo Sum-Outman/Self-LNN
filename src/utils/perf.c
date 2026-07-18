@@ -33,7 +33,9 @@ uint64_t perf_timestamp_ns(void) {
     QueryPerformanceFrequency(&frequency);
     QueryPerformanceCounter(&counter);
 
-    return (uint64_t)((counter.QuadPart * 1000000000ULL) / frequency.QuadPart);
+    /* P2修复: counter.QuadPart * 1000000000ULL 在大值时整数溢出，
+     * 改用浮点运算避免溢出 */
+    return (uint64_t)((double)counter.QuadPart * 1e9 / (double)frequency.QuadPart);
 #else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);

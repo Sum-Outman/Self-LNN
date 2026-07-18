@@ -477,7 +477,12 @@ int rw_lock_map_contains_int_key(RwLockMap* map, int64_t key) {
 
 size_t rw_lock_map_size(RwLockMap* map) {
     if (!map) return 0;
-    return map->entry_count;
+    /* P2修复: 无锁读取entry_count在并发insert/remove时可能读到不一致的值，
+     * 添加global_lock保护读取 */
+    rw_map_spin_lock(&map->global_lock);
+    size_t count = map->entry_count;
+    rw_map_spin_unlock(&map->global_lock);
+    return count;
 }
 
 int rw_lock_map_clear(RwLockMap* map) {

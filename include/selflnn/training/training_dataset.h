@@ -46,6 +46,10 @@ TrainingDataset* dataset_create(const char* name, size_t num_samples,
                                size_t input_dim, size_t output_dim);
 void dataset_free(TrainingDataset* ds);
 
+/* 数据集属性查询（修复C4013: 原缺失声明导致编译器假设返回int） */
+size_t dataset_get_num_samples(const TrainingDataset* ds);
+size_t dataset_get_epoch(const TrainingDataset* ds);
+
 /* 序列化和统计 */
 int dataset_save(const TrainingDataset* ds, const char* file_path);
 TrainingDataset* dataset_load(const char* file_path);

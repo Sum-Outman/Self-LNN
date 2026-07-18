@@ -636,8 +636,8 @@ int audio_enum_devices(AudioDeviceInfo* devices, int max_devices) {
         if (name && desc) {
             /* 判断输入输出方向 */
             int isInput = 0, isOutput = 0;
-            if (!ioid || strcmp(ioid, "Input") == 0) isOutput = 1;
-            if (!ioid || strcmp(ioid, "Output") == 0) isInput = 1;
+            if (!ioid || strcmp(ioid, "Input") == 0) isInput = 1;
+            if (!ioid || strcmp(ioid, "Output") == 0) isOutput = 1;
 
             /* 过滤掉一些系统设备 */
             if (strstr(name, "surround") || strstr(name, "iec958") ||

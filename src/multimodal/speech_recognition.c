@@ -1626,6 +1626,17 @@ SpeechRecognizer* speech_recognizer_create(const SpeechRecognitionConfig* config
     return sr;
 }
 
+/* 前向声明: 清理回退CfC静态全局资源 */
+static void sr_cleanup_fallback_cfc(void);
+
+/* 清理语音识别静态全局资源（词汇表等） */
+static void sr_cleanup_static_globals(void) {
+    /* 释放基础词汇表 */
+    if (SR_BASE_VOCABULARY) {
+        safe_free((void**)&SR_BASE_VOCABULARY);
+    }
+}
+
 void speech_recognizer_free(SpeechRecognizer* recognizer) {
     if (!recognizer) return;
 
@@ -1653,6 +1664,12 @@ void speech_recognizer_free(SpeechRecognizer* recognizer) {
     safe_free((void**)&recognizer->adam_v_proj_b);
 
     // 方案C: self_contained_cfc已移除（状态演化由共享LNN统一管理）
+
+    /* 释放回退CfC静态全局资源（首次使用后一直存活，关闭时统一清理） */
+    sr_cleanup_fallback_cfc();
+    
+    /* 释放词汇表等静态全局资源 */
+    sr_cleanup_static_globals();
 
     safe_free((void**)&recognizer);
 }
@@ -1692,6 +1709,18 @@ static float  g_sr_fallback_hidden_state[64];      /* 隐藏状态缓冲区 */
 static float  g_sr_fallback_aggregated_input[64];  /* 聚合输入缓冲区(最大支持64维特征) */
 static int    g_sr_fallback_initialized = 0;
 static int    g_sr_fallback_input_dim = 0;         /* 记录创建时的输入维度 */
+
+/* 清理回退CfC静态全局资源（关闭时由speech_recognizer_free调用） */
+static void sr_cleanup_fallback_cfc(void) {
+    if (g_sr_fallback_cfc) {
+        cfc_cell_free(g_sr_fallback_cfc);
+        g_sr_fallback_cfc = NULL;
+    }
+    safe_free((void**)&g_sr_fallback_output_proj);
+    safe_free((void**)&g_sr_fallback_output_bias);
+    g_sr_fallback_initialized = 0;
+    g_sr_fallback_input_dim = 0;
+}
 
 /* 小型CfC回退网络初始化(仅首次调用时执行) */
 static int sr_fallback_cfc_ensure_init(int feat_dim) {

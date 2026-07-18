@@ -5353,13 +5353,21 @@ int cuda_cross_entropy_loss_gradient(GpuContext* ctx, const float* logits,
             if (h_logits) free(h_logits);
             if (h_targets_local) free(h_targets_local);
             /* C-004修复: kernel未声明，直接释放GPU分配 */
-            cudaFree(d_logits); cudaFree(d_targets); cudaFree(d_loss);
+            /* C-013修复: 添加d_gradients释放，防止GPU内存泄漏 */
+            cudaFree(d_logits); cudaFree(d_gradients); cudaFree(d_targets); cudaFree(d_loss);
             return -1;
         }
         cudaMemcpy(h_logits, d_logits, logits_bytes, cudaMemcpyDeviceToHost);
         cudaMemcpy(h_targets_local, d_targets, targets_bytes, cudaMemcpyDeviceToHost);
 
         float* h_gradients = (float*)calloc(num_elements, sizeof(float));
+        /* C-014修复: 添加h_gradients的NULL检查，防止空指针解引用 */
+        if (!h_gradients) {
+            free(h_logits);
+            free(h_targets_local);
+            cudaFree(d_logits); cudaFree(d_gradients); cudaFree(d_targets); cudaFree(d_loss);
+            return -1;
+        }
         float total_loss = 0.0f;
 
         for (size_t b = 0; b < batch_size; b++) {
