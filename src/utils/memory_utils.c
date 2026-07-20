@@ -1029,13 +1029,25 @@ void safe_free(void** ptr) {
     
 
     
-    // 计算总大小（与新safe_malloc布局匹配）
-    size_t total_size = BLOCK_OVERHEAD + align_size(header->size, 16) + guard_size;
+    /* P1-FIX-20260720: 修复safe_aligned_malloc与safe_free的total_size不对称导致的内存统计异常幻象泄漏。
+     * safe_aligned_malloc计算total_allocated时包含alignment对齐填充字节(alignment + BLOCK_HEADER_SIZE + aligned_size + guard_size + BLOCK_FOOTER_SIZE)，
+     * 而原safe_free仅计算BLOCK_OVERHEAD + aligned_size + guard_size，漏掉了alignment字节。
+     * 导致每次对齐分配在统计中产生(alignment)字节的幻象泄漏，积累后报告数GB。
+     * 修复: 从真实内存布局反推total_size = footer_end - raw_ptr，与分配端的实际malloc大小完全一致。
+     * 注意: aligned_size/guard_size复用函数前部(line 996-997)已声明的变量。 */
+    /* footer_end紧接在data_ptr + aligned_size + guard_size + BLOCK_FOOTER_SIZE之后 */
+    size_t actual_total_size = (size_t)((char*)data_ptr + aligned_size + guard_size + BLOCK_FOOTER_SIZE - (char*)header->raw_ptr);
+    
+    /* 防止极端情况下的整数回绕（raw_ptr应始终在data_ptr之前） */
+    if ((char*)header->raw_ptr > (char*)data_ptr + aligned_size + guard_size + BLOCK_FOOTER_SIZE) {
+        /* 内存损坏或不合理的raw_ptr，回退到基础计算 */
+        actual_total_size = BLOCK_OVERHEAD + aligned_size + guard_size;
+    }
     
     // 更新统计（R13-003: 加锁保护并发安全）
     MEM_LOCK();
-    g_memory_stats.total_freed += total_size;
-    g_memory_stats.current_usage -= total_size;
+    g_memory_stats.total_freed += actual_total_size;
+    g_memory_stats.current_usage -= actual_total_size;
     g_memory_stats.free_count++;
     MEM_UNLOCK();
     

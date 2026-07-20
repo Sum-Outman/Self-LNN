@@ -5177,7 +5177,11 @@ int backend_load_config(BackendConfig* config, const char* path) {
         return -1;
     }
 
-    FILE* fp = fopen(resolved, "r");
+    /* P3-FIX-20260720: 使用二进制模式 "rb" 打开配置文件。
+     * Windows文本模式 "r" 下 fread 将 \r\n 转换为 \n 导致 read_size < fsize (ftell返回值),
+     * 触发 "配置文件读取不完整" 错误中止加载。
+     * JSON标准兼容 \r\n 和 \n, 二进制模式读取后解析器可正确处理两种换行格式。 */
+    FILE* fp = fopen(resolved, "rb");
     if (!fp) {
         log_warning("配置文件 %s 不存在，使用默认配置", resolved);
         return 1;
@@ -18772,9 +18776,12 @@ static int handle_api_post_simulation_start(BackendServer* server,
     /* S-NEW-2修复: 根据engine参数路由到对应的仿真引擎
      * 原实现忽略engine参数，始终使用internal_simulator */
     if (strcmp(engine, "pybullet") == 0) {
-        /* 尝试连接PyBullet仿真器 */
+        /* F1-FIX-20260720: 尝试连接PyBullet仿真器。
+         * 修复: pybullet_is_available是函数声明而非指针，必须加()调用。
+         * 原代码 `if (pybullet_is_available)` 检测的是函数地址(永真)，导致
+         * 尝试调用不存在的pybullet_connect() → 未定义行为/崩溃/500。 */
         extern int pybullet_is_available(void);
-        if (pybullet_is_available) {
+        if (pybullet_is_available()) {
             PyBulletConfig pb_config;
             memset(&pb_config, 0, sizeof(pb_config));
             pb_config.time_step = dt;
@@ -18786,11 +18793,9 @@ static int handle_api_post_simulation_start(BackendServer* server,
         }
         if (!sim_started) log_warning("[仿真] PyBullet不可用，回退到内部仿真器");
     } else if (strcmp(engine, "gazebo") == 0) {
-        /* 尝试连接Gazebo仿真器
-         * R9-C修复: extern签名修正 — gazebo_connect返回GazeboBridge*而非int，
-         * 调用时传递GazeboConfig参数而非void */
+        /* F1-FIX-20260720: 与pybullet同 — gazebo_is_available必须加()调用 */
         extern int gazebo_is_available(void);
-        if (gazebo_is_available) {
+        if (gazebo_is_available()) {
             extern GazeboBridge* gazebo_connect(const GazeboConfig* config);
             GazeboConfig gz_cfg;
             memset(&gz_cfg, 0, sizeof(gz_cfg));
@@ -18829,7 +18834,8 @@ static int handle_api_post_simulation_start(BackendServer* server,
                 engine, scene, (double)dt);
         response->data = json_data;
         response->data_length = strlen(json_data);
-        response->status_code = sim_started ? 200 : 500;
+        /* F1-FIX-20260720: 仿真引擎不可用时返回503(子系统不可用)，而非500(内部错误) */
+        response->status_code = sim_started ? 200 : 503;
     }
     return 0;
 }
@@ -20314,6 +20320,7 @@ static int handle_api_get_system_diagnostic(BackendServer* server,
     double mem_usage_mb = 0.0;
     double mem_total_mb = 0.0;
     double uptime = 0.0;
+    int active_tasks = 0, total_knowledge = 0, total_memories = 0;
     SystemStatus status;
     memset(&status, 0, sizeof(SystemStatus));
     if (selflnn_get_status(&status) == 0) {
@@ -20322,6 +20329,9 @@ static int handle_api_get_system_diagnostic(BackendServer* server,
         mem_total_mb = status.real_memory_total_mb > 0 ? status.real_memory_total_mb : 
                        (status.real_memory_total_mb < 0 ? 0 : 8192);
         uptime = status.uptime;
+        active_tasks = status.active_tasks;
+        total_knowledge = status.total_knowledge;
+        total_memories = status.total_memories;
     }
     double mem_pct = mem_total_mb > 0 ? (mem_usage_mb / mem_total_mb) * 100.0 : 0.0;
     /* P26修复: 查询真实磁盘使用率 */
@@ -20342,11 +20352,45 @@ static int handle_api_get_system_diagnostic(BackendServer* server,
         }
     }
 #endif
-    json_data = (char*)safe_malloc(1024);
+
+    /* P2-FIX-20260720: 诊断端点补充组件状态、活跃任务、熔断器、知识/记忆计数。
+     * 原实现仅有CPU/内存/磁盘/uptime，前端解析components默认0对用户无信息价值。
+     * 现在从Server实例和SystemStatus中获取完整组件运行状态。 */
+    const char* multimodal_status = (server && server->multimodal_manager) ? "running" : "unavailable";
+    const char* reasoning_status = (server && server->reasoning_engine) ? "running" : "unavailable";
+    const char* learning_status   = (server && server->learning_engine) ? "running" : "unavailable";
+    const char* memory_status     = (server && server->memory_manager) ? "running" : "unavailable";
+    const char* robot_status      = (server && (server->robot_instance || server->ros_controller)) ? "running" : "unavailable";
+    const char* dialogue_status   = (server && server->dialogue_processor) ? "running" : "unavailable";
+    const char* cognition_status  = (server && server->cognition_system) ? "running" : "unavailable";
+    const char* trainer_status    = (server && server->trainer) ? "running" : "unavailable";
+
+    json_data = (char*)safe_malloc(2048);
     if (json_data) {
-        snprintf(json_data, 1024,
-            "{\"system\":{\"cpu\":{\"usage\":%.1f},\"memory\":{\"total_mb\":%.0f,\"usage_mb\":%.0f,\"usage\":%.1f},\"disk\":{\"usage\":%.1f},\"uptime\":%.0f,\"status\":\"ok\"}}",
-            cpu_usage, mem_total_mb, mem_usage_mb, mem_pct, disk_usage, uptime);
+        snprintf(json_data, 2048,
+            "{\"system\":{"
+            "\"cpu\":{\"usage\":%.1f},"
+            "\"memory\":{\"total_mb\":%.0f,\"usage_mb\":%.0f,\"usage\":%.1f},"
+            "\"disk\":{\"usage\":%.1f},"
+            "\"uptime\":%.0f,"
+            "\"active_tasks\":%d,"
+            "\"knowledge_count\":%d,"
+            "\"memory_count\":%d,"
+            "\"components\":{"
+                "\"multimodal\":\"%s\","
+                "\"reasoning\":\"%s\","
+                "\"learning\":\"%s\","
+                "\"memory\":\"%s\","
+                "\"robot\":\"%s\","
+                "\"dialogue\":\"%s\","
+                "\"cognition\":\"%s\","
+                "\"trainer\":\"%s\""
+            "},"
+            "\"status\":\"ok\"}}",
+            cpu_usage, mem_total_mb, mem_usage_mb, mem_pct, disk_usage, uptime,
+            active_tasks, total_knowledge, total_memories,
+            multimodal_status, reasoning_status, learning_status, memory_status,
+            robot_status, dialogue_status, cognition_status, trainer_status);
         response->data = json_data;
         response->data_length = strlen(json_data);
         response->status_code = 200;
@@ -22270,7 +22314,7 @@ static int handle_api_post_agi_evolve(BackendServer* server,
     char* json_data = (char*)safe_malloc(3072);
     if (!json_data) return -1;
 
-    int generations = 10;
+    int generations = 1;  /* F1-FIX-20260720: 默认1代避免超时，同步API不宜大批量演化 */
     char evolve_target[64] = {0};
     if (request_data && request_length > 2) {
         parse_json_int(request_data, "generations", &generations);
@@ -22278,7 +22322,26 @@ static int handle_api_post_agi_evolve(BackendServer* server,
     }
 
     if (generations < 1) generations = 1;
-    if (generations > 100) generations = 100;
+    if (generations > 5) generations = 5;   /* F1-FIX-20260720: 最大5代上限，防止同步API超时 */
+
+    /* F1-FIX-20260720: 快速检查——演化引擎未就绪或LNN未训练时立即返回503，避免长时间阻塞 */
+    void* evo = selflnn_get_evolution_engine();
+    if (!evo) {
+        snprintf(json_data, 3072,
+            "{\"success\":false,\"message\":\"演化引擎未就绪\",\"status\":\"unavailable\"}");
+        response->data = json_data;
+        response->data_length = strlen(json_data);
+        response->status_code = 503;
+        return 0;
+    }
+    if (!capability_is_enabled(CAP_SELF_EVOLUTION)) {
+        snprintf(json_data, 3072,
+            "{\"success\":false,\"message\":\"自我演化能力已禁用\",\"status\":\"disabled\"}");
+        response->data = json_data;
+        response->data_length = strlen(json_data);
+        response->status_code = 503;
+        return 0;
+    }
 
     int evolve_result = -1;
     float best_fitness = 0.0f;
@@ -22287,10 +22350,7 @@ static int handle_api_post_agi_evolve(BackendServer* server,
     int final_gen = 0;
 
 /* 实现真实的演化触发 —— 调用evolution_step并通过后台循环完成 */
-    void* evo = selflnn_get_evolution_engine();
-    (void)evolve_result;
-    
-    if (evo && capability_is_enabled(CAP_SELF_EVOLUTION)) {
+    {
         EvolutionStats evo_stats;
         memset(&evo_stats, 0, sizeof(evo_stats));
         evolve_result = evolution_step((EvolutionEngine*)evo);
@@ -22304,7 +22364,7 @@ static int handle_api_post_agi_evolve(BackendServer* server,
             int applied = evolution_engine_apply_best_to_lnn((EvolutionEngine*)evo);
             (void)applied;
         }
-    }
+    }   /* evolution_step block */
 
     snprintf(json_data, 3072,
         "{"
@@ -24805,7 +24865,9 @@ static int handle_api_get_metacognition_state(BackendServer* server,
     MetacognitionModelState model_state;
     memset(&model_state, 0, sizeof(model_state));
     if (has_meta) {
-        /* metacognition_get_statistics 返回纯文本而非JSON，暂用{}占位 */
+        /* F3-FIX-20260720: 从{}占位升级为真实统计输出。
+         * metacognition_get_statistics返回格式化纯文本(多行key:value)，
+         * 同时从model_state获取结构化数值字段填充JSON。 */
         metacognition_get_statistics(server->metacognition_system, stats_buf, sizeof(stats_buf));
         metacognition_get_self_model_state(server->metacognition_system, &model_state);
     }
@@ -24815,7 +24877,8 @@ static int handle_api_get_metacognition_state(BackendServer* server,
             "{\"metacognition\":{"
             "\"has_metacognition\":%s,"
             "\"has_cognition\":%s,"
-            "\"statistics\":{},"
+            /* stats_buf包含多行统计文本, 作为原始统计字段透传 */
+            "\"statistics\":{\"raw_stats\":\"%s\"},"
             "\"self_model\":{"
                 "\"model_confidence\":%.3f,"
                 "\"model_accuracy\":%.3f,"
@@ -24824,6 +24887,7 @@ static int handle_api_get_metacognition_state(BackendServer* server,
             "}}}",
             has_meta ? "true" : "false",
             has_cog ? "true" : "false",
+            has_meta ? stats_buf : "元认知系统未初始化",
             has_meta ? model_state.model_confidence : 0.0f,
             has_meta ? model_state.model_accuracy : 0.0f,
             has_meta ? model_state.update_count : (size_t)0,
@@ -31272,8 +31336,8 @@ static int handle_api_get_learning_experiences(BackendServer* server, ApiRequest
 
     size_t exp_count = 0;
     if (server->learning_engine) {
-        /* learning_engine 存在，获取经验计数 */
-        exp_count = (size_t)(server->learning_engine ? 1 : 0); /* 占位：实际需调用引擎API */
+        /* F3-FIX-20260720: 从硬编码占位改为调用真实引擎API获取实际经验计数 */
+        exp_count = learning_engine_get_experience_count(server->learning_engine);
     }
 
     snprintf(json_data, 2048,
