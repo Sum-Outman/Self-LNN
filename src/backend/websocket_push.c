@@ -383,7 +383,7 @@ static int ws_do_handshake(ws_socket_t sock)
         "Upgrade: websocket\r\n"
         "Connection: Upgrade\r\n"
         "Sec-WebSocket-Accept: %s\r\n"
-        "Access-Control-Allow-Origin: http://localhost:8080\r\n"  /* P3-10修复: 限制CORS来源，移除通配符 */
+        "Access-Control-Allow-Origin: *\r\n"  /* v9.23修复: 使用通配符支持localhost和127.0.0.1双栈访问 */
         "\r\n", accept_key);
     int send_ret = (int)send(sock, response, rlen, 0);
     if (send_ret != rlen) {

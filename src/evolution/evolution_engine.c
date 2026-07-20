@@ -1120,8 +1120,8 @@ int evolution_step(EvolutionEngine* engine) {
             /* rank_selection可返回-1(内存分配失败)，需下界检查 */
             if (p1_idx < 0 || p1_idx >= (int)pop_size) p1_idx = 0;
             if (p2_idx < 0 || p2_idx >= (int)pop_size) p2_idx = (pop_size > 1) ? 1 : 0;
+            int max_retries = 20;  /* v9.23修复: 移到循环外部防止无限循环 */
             while (p2_idx == p1_idx && pop_size > 1) {
-                int max_retries = 20;  /* 防止select_parent反复返回-1导致无限循环 */
                 p2_idx = select_parent(engine, pop);
                 if (p2_idx < 0 || p2_idx >= (int)pop_size) p2_idx = (int)(rand_float(rng) * (float)pop_size);
                 if (--max_retries <= 0) break;
@@ -2067,7 +2067,8 @@ int evolution_engine_structural_mutate(EvolutionEngine* engine,
                         memcpy(new_chrom, old, copy_n * sizeof(float));
                         /* 新增部分随机初始化 */
                         for (size_t j = copy_n; j < new_param_count; j++) {
-                            new_chrom[j] = ((float)(rand() % 20000) / 10000.0f - 1.0f) * 0.01f;
+                            /* EV-FIX-001: 使用secure_random_float替代非线程安全的rand() */
+                            new_chrom[j] = (secure_random_float() * 2.0f - 1.0f) * 0.01f;
                         }
                         safe_free((void**)&old);
                         engine->population.individuals[i].chromosome = new_chrom;

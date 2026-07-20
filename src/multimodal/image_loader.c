@@ -1054,8 +1054,15 @@ uint8_t* image_load_jpeg(const char* filepath, int* width_out, int* height_out) 
                 break;
             }
             case JPEG_M_DQT: {
-                /* 定义量化表 */
+                /* 定义量化表
+                 * IL-FIX-001: 限制table_id范围，quant_tables只有[4][64]，
+                 * 恶意JPEG可通过table_id(0-15)越界写入 */
                 int table_id = raw[seg_start + 0] & 0x0F;
+                if (table_id >= 4) {
+                    log_warn("image_loader: JPEG量化表ID=%d超出范围[0-3]，跳过");
+                    pos += seg_len + 2;
+                    break;
+                }
                 int is_16bit = (raw[seg_start + 0] >> 4) & 1;
                 if (is_16bit) {
                     for (int i = 0; i < 64; i++) {
@@ -1091,9 +1098,10 @@ uint8_t* image_load_jpeg(const char* filepath, int* width_out, int* height_out) 
                 for (int i = 0; i < num_scan_comps && i < 4; i++) {
                     int comp_id = raw[seg_start + 1 + i * 2];
                     int table_spec = raw[seg_start + 2 + i * 2];
-                    /* 将component ID映射到component索引 */
+                    /* 将component ID映射到component索引
+                     * IL-FIX-002: 添加上限检查，防止num_components极大时越界 */
                     int comp_idx = 0;
-                    for (int c = 0; c < js.num_components; c++) {
+                    for (int c = 0; c < js.num_components && c < JPEG_MAX_COMPS; c++) {
                         if (js.comp_id[c] == comp_id) { comp_idx = c; break; }
                     }
                     js.scan_comps[si][i] = comp_idx;
@@ -1332,6 +1340,8 @@ static uint8_t* png_inflate(const uint8_t* in, size_t in_len, size_t* out_len) {
     size_t pos = 2;
 
     /* 预估输出大小（通常比输入大2-6倍），动态扩展 */
+    /* IL-FIX-003: 防止in_len*6溢出回绕为小值 */
+    if (in_len > SIZE_MAX / 6) return NULL;
     size_t cap = in_len * 6;
     uint8_t* out = (uint8_t*)safe_malloc(cap);
     if (!out) return NULL;

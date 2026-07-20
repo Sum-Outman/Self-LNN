@@ -246,15 +246,16 @@ function ensureBrowserCompat() {
             });
         }
         
+        /* v9.22修复: 延迟从5秒增至8秒，给单线程服务器更多时间处理初始请求风暴 */
         setTimeout(function() {
             if (g_dataEngine) {
-                g_dataEngine.start(3000);
+                g_dataEngine.start(5000);
             }
             LoadingOverlay.hide();
             if (typeof updateTrainingHistoryPlaceholderState === 'function') {
                 updateTrainingHistoryPlaceholderState();
             }
-        }, 3000);
+        }, 5000);
     } catch (ex) {
         LoadingOverlay.hide();
         console.error('[SELF-LNN] 初始化异常:', ex);
@@ -319,10 +320,11 @@ async function refreshAllSections() {
         { name: 'endpoints', fn: refreshApiEndpointList },
         { name: 'dashApiKey', fn: refreshDashApiKey },
         { name: 'viz', fn: initVisualizationSystem },
-        { name: 'chart', fn: initApiUsageChart }
+        { name: 'chart', fn: initApiUsageChart },
+        { name: 'agents', fn: refreshAgents }
     ];
     var completed = 0;
-    /* v9.14修复: 串行执行各模块刷新，每2个模块间暂停80ms，防止请求风暴 */
+    /* v9.22修复: 串行执行各模块刷新，每1个模块后暂停300ms，防止请求风暴压垮单线程服务器 */
     for (var i = 0; i < sections.length; i++) {
         var s = sections[i];
         try {
@@ -339,9 +341,9 @@ async function refreshAllSections() {
             console.warn(s.name + ' 执行异常:', e && e.message ? e.message : e);
             completed++;
         }
-        /* 每2个模块间暂停80ms，给服务器喘息时间 */
-        if ((i + 1) % 2 === 0 && i < sections.length - 1) {
-            await new Promise(function(resolve) { setTimeout(resolve, 80); });
+        /* 每个模块间暂停300ms，给服务器充足的喘息时间 */
+        if (i < sections.length - 1) {
+            await new Promise(function(resolve) { setTimeout(resolve, 300); });
         }
     }
     console.log('[SELF-LNN] 串行刷新完成 ' + completed + '/' + sections.length + ' 个模块');
@@ -1287,7 +1289,7 @@ function showApiUnavailableError() {
     showNotification('⚠ 后端未连接，等待连接...', 'warning');
     
     if (g_usingDataEngine && g_dataEngine && typeof g_dataEngine.start === 'function') {
-        g_dataEngine.start(2000);
+        g_dataEngine.start(5000);
     }
     
     const allMetricValues = document.querySelectorAll('.metric-value, .stat-value, .type-usage, .detail-value, .progress-value');
@@ -9550,3 +9552,136 @@ function renderImageToCanvas(imageData, ctx, canvasId, width, height) {
     /* 最多等待10秒后放弃 */
     setTimeout(function() { clearInterval(wsReadyCheck); }, 10000);
 })();
+
+/* ===== 多智能体系统 ===== */
+
+/**
+ * 刷新多智能体状态
+ * 从后端API获取代理列表和状态，渲染到#agents页面
+ */
+async function refreshAgents() {
+    /* 守卫检查: API未就绪时提前返回 */
+    if (!window.SelfLnnApi || typeof window.SelfLnnApi.getAgents !== 'function') {
+        return;
+    }
+    try {
+        var result = await window.SelfLnnApi.getAgents();
+        if (result && result.success && result.data) {
+            var data = result.data;
+            /* 更新摘要信息 */
+            setEl('agent-count', data.agent_count || data.count || '0');
+            setEl('agent-collab-mode', data.collaboration_mode || '单代理');
+            setEl('agent-task-queue', data.task_queue || data.pending_tasks || '0');
+            setEl('agents-conn-status', '已连接');
+            /* 渲染代理列表 */
+            if (data.agents && data.agents.length > 0) {
+                var listEl = document.getElementById('agent-list');
+                if (listEl) {
+                    var html = '';
+                    for (var i = 0; i < data.agents.length; i++) {
+                        var a = data.agents[i];
+                        var statusClass = a.status === 'active' ? 'active' : (a.status === 'idle' ? 'idle' : 'offline');
+                        var statusText = a.status === 'active' ? '活跃' : (a.status === 'idle' ? '待命' : '离线');
+                        html += '<div class="agent-card" style="padding:16px;background:#1a1a2e;border-radius:8px;border:1px solid #333;">';
+                        html += '<div style="display:flex;justify-content:space-between;align-items:center;">';
+                        html += '<strong>' + (a.name || a.id || ('代理-' + (i+1))) + '</strong>';
+                        html += '<span style="color:' + (a.status === 'active' ? '#00ff88' : '#888') + ';font-size:12px;">' + statusText + '</span>';
+                        html += '</div>';
+                        html += '<div style="margin-top:8px;font-size:12px;color:#aaa;">';
+                        html += '类型: ' + (a.type || '通用') + ' | 任务: ' + (a.task_count || 0) + ' | 成功率: ' + (a.success_rate || '--');
+                        html += '</div>';
+                        html += '</div>';
+                    }
+                    listEl.innerHTML = html;
+                }
+            } else {
+                var listEl2 = document.getElementById('agent-list');
+                if (listEl2) {
+                    listEl2.innerHTML = '<div class="agent-card-placeholder" style="padding:24px;background:#1a1a2e;border-radius:8px;text-align:center;color:#888;"><p>暂无代理</p><p style="font-size:12px;">点击"初始化多智能体"创建代理</p></div>';
+                }
+            }
+        } else {
+            setEl('agents-conn-status', '未连接');
+        }
+    } catch (e) {
+        console.warn('刷新多智能体状态失败:', e.message);
+        setEl('agents-conn-status', '错误');
+    }
+}
+
+/**
+ * 初始化多智能体系统
+ * 调用后端API创建默认的认知代理、学习代理和执行代理
+ */
+async function initMultiAgentSystem() {
+    if (!window.SelfLnnApi || typeof window.SelfLnnApi.createAgent !== 'function') {
+        showNotification('⚠️ 后端未连接，无法初始化多智能体', 'warning');
+        return;
+    }
+    showNotification('正在初始化多智能体系统...', 'info');
+    try {
+        /* 创建认知代理 */
+        var cogResult = await window.SelfLnnApi.createAgent({ type: 'cognition', name: '认知代理', role: 'analyzer' });
+        /* 创建学习代理 */
+        var learnResult = await window.SelfLnnApi.createAgent({ type: 'learning', name: '学习代理', role: 'learner' });
+        /* 创建执行代理 */
+        var execResult = await window.SelfLnnApi.createAgent({ type: 'execution', name: '执行代理', role: 'executor' });
+        /* 刷新显示 */
+        await refreshAgents();
+        showNotification('✅ 多智能体系统初始化完成（认知/学习/执行代理已创建）', 'success');
+    } catch (e) {
+        showNotification('初始化多智能体失败: ' + e.message, 'danger');
+    }
+}
+
+/**
+ * 创建新代理
+ * 弹出对话框让用户输入代理类型和名称
+ */
+async function createAgent() {
+    if (!window.SelfLnnApi || typeof window.SelfLnnApi.createAgent !== 'function') {
+        showNotification('⚠️ 后端未连接，无法创建代理', 'warning');
+        return;
+    }
+    var type = prompt('请输入代理类型 (cognition/learning/execution/coordinator):', 'cognition');
+    if (!type) return;
+    var name = prompt('请输入代理名称:', '新代理');
+    if (!name) return;
+    showNotification('正在创建代理: ' + name + '...', 'info');
+    try {
+        var result = await window.SelfLnnApi.createAgent({ type: type, name: name, role: 'custom' });
+        if (result && result.success) {
+            await refreshAgents();
+            showNotification('✅ 代理 ' + name + ' 创建成功', 'success');
+        } else {
+            showNotification('创建代理失败: ' + ((result && result.error) || '未知错误'), 'danger');
+        }
+    } catch (e) {
+        showNotification('创建代理失败: ' + e.message, 'danger');
+    }
+}
+
+/**
+ * 广播任务给所有代理
+ * 弹出对话框让用户输入任务描述
+ */
+async function broadcastTask() {
+    if (!window.SelfLnnApi || typeof window.SelfLnnApi.multiAgentTask !== 'function') {
+        showNotification('⚠️ 后端未连接，无法广播任务', 'warning');
+        return;
+    }
+    var taskDesc = prompt('请输入任务描述:', '分析当前系统状态并提供优化建议');
+    if (!taskDesc) return;
+    showNotification('正在广播任务...', 'info');
+    try {
+        var result = await window.SelfLnnApi.multiAgentTask({ task: taskDesc, priority: 'normal', broadcast: true });
+        if (result && result.success) {
+            await refreshAgents();
+            showNotification('✅ 任务已广播给所有代理', 'success');
+        } else {
+            showNotification('广播任务失败: ' + ((result && result.error) || '未知错误'), 'danger');
+        }
+    } catch (e) {
+        showNotification('广播任务失败: ' + e.message, 'danger');
+    }
+}

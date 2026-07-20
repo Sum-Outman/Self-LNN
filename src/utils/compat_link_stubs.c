@@ -280,8 +280,18 @@ int knowledge_graph_check_consistency(void* kg, int* out_conflicts, int* out_cir
 
     /* 6. 循环依赖检测：使用知识库图推理API */
     /* 当前通过检测LNN嵌入维度与事实数的不匹配来间接推断 */
+    /* 修复: 使用SEH防护防止LNN类型不匹配导致的崩溃 */
     if (lnn && stats_total > 0) {
-        size_t lnn_dim = lnn_get_parameter_count((LNN*)lnn);
+        size_t lnn_dim = 0;
+#ifdef _WIN32
+        __try {
+            lnn_dim = lnn_get_parameter_count((LNN*)lnn);
+        } __except(EXCEPTION_EXECUTE_HANDLER) {
+            lnn_dim = 0;
+        }
+#else
+        lnn_dim = lnn_get_parameter_count((LNN*)lnn);
+#endif
         if (lnn_dim > 0 && (size_t)stats_total > lnn_dim * 100) {
             circular = 1;  /* 事实数远超嵌入容量，可能存在冗余 */
         }

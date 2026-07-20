@@ -633,7 +633,12 @@ Population* population_create(size_t population_size, size_t genome_size,
     }
     
     pop->individuals = (Individual**)safe_calloc(population_size, sizeof(Individual*));
+    /* D-FIX-004: 检查safe_calloc返回值，防止乘法溢出导致NULL分配
+     * 当population_size极大时（如来自未初始化的配置），size_t乘法可能溢出
+     * 产生极小的分配值或NULL，但不会报错 */
     if (!pop->individuals) {
+        log_error("种群初始化失败: 个体指针数组分配失败 (population_size=%zu, sizeof=%zu)",
+                  population_size, sizeof(Individual*));
         safe_free((void**)&pop);
         return NULL;
     }
@@ -992,6 +997,8 @@ int population_evolve(Population* pop, FitnessFunction fitness_func, void* user_
     // 计算精英数量
     size_t elite_count = (size_t)(pop->elitism_rate * pop->population_size);
     elite_count = elite_count > 0 ? elite_count : 1;  // 至少保留一个精英
+    /* EA-FIX-001: 上界检查，防止elitism_rate>1.0导致elite_count超出population_size */
+    if (elite_count > pop->population_size) elite_count = pop->population_size;
     
     // 创建新种群
     Individual** new_individuals = (Individual**)safe_calloc(pop->population_size, sizeof(Individual*));
@@ -2072,7 +2079,10 @@ CoevolutionSystem* coevolution_system_create(const CoevolutionConfig* config) {
         total_agents += system->subpopulation_sizes[i];
     }
     
-    system->interaction_matrix = (float*)safe_calloc(total_agents * total_agents, sizeof(float));
+    /* EA-FIX-003: total_agents*total_agents在int范围计算可能溢出，
+     * safe_calloc将收到回绕后的小值，溢出检查完全失效。
+     * 改为拆分乘法，利用safe_calloc内置的size_t溢出检查。 */
+    system->interaction_matrix = (float*)safe_calloc((size_t)total_agents, (size_t)total_agents * sizeof(float));
     if (!system->interaction_matrix) {
         for (int j = 0; j < config->num_subpopulations; j++) {
             population_destroy(system->subpopulations[j]);
@@ -2440,7 +2450,8 @@ OpenEndedState* open_ended_state_create(const OpenEndedConfig* config,
         return NULL;
     }
     
-    state->behavior_features = (float*)safe_calloc(population_size * state->behavior_dim, sizeof(float));
+    /* EA-FIX-004: 将单参数乘法拆分，利用safe_calloc内置size_t溢出检查 */
+    state->behavior_features = (float*)safe_calloc(population_size, state->behavior_dim * sizeof(float));
     if (!state->behavior_features) {
         safe_free((void**)&state->novelty_scores);
         safe_free((void**)&state->behavior_archive);
@@ -2663,6 +2674,8 @@ int population_novelty_evolve(Population* pop,
     
     size_t elite_count = (size_t)(pop->elitism_rate * pop->population_size);
     if (elite_count < 1) elite_count = 1;
+    /* EA-FIX-002: 上界检查，防止elitism_rate>1.0导致elite_count超出population_size */
+    if (elite_count > pop->population_size) elite_count = pop->population_size;
     
     size_t* indices = (size_t*)safe_malloc(pop->population_size * sizeof(size_t));
     if (!indices) {

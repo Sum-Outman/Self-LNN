@@ -90,12 +90,14 @@ static void _hc_mat_identity(float* M, int n) {
     for (int i = 0; i < n; i++) M[i * n + i] = 1.0f;
 }
 
-/* CfC ODE步进（封闭形式解） */
+/* CfC ODE步进（封闭形式解）
+ * HE-FIX-001: 添加input_dim参数，防止输入向量维度小于hs时越界读取 */
 static void _hc_cfc_ode_step(const float* h_in, const float* input,
                               float* h_out,
                               const float* W_h, const float* W_in,
                               const float* b_g, const float* b_a,
-                              const float* tau, int hs, float dt) {
+                              const float* tau, int hs, float dt, int input_dim) {
+    int in_len = (input_dim < hs) ? input_dim : hs;
     float* gate = (float*)safe_malloc(hs * sizeof(float));
     float* act = (float*)safe_malloc(hs * sizeof(float));
     if (!gate || !act) { safe_free((void**)&gate); safe_free((void**)&act); return; }
@@ -103,7 +105,7 @@ static void _hc_cfc_ode_step(const float* h_in, const float* input,
         float g = b_g[i];
         float a = b_a[i];
         for (int j = 0; j < hs; j++) { g += W_h[i * hs + j] * h_in[j]; a += W_h[i * hs + j] * h_in[j]; }
-        for (int j = 0; j < hs; j++) { g += W_in[i * hs + j] * input[j]; }
+        for (int j = 0; j < in_len; j++) { g += W_in[i * hs + j] * input[j]; }
         gate[i] = _hc_sig(g);
         act[i] = _hc_tanh(a);
     }
@@ -118,14 +120,14 @@ static void _hc_cfc_ode_predict(const float* h_in, const float* input,
                                  float* h_out,
                                  const float* W_h, const float* W_in,
                                  const float* b_g, const float* b_a,
-                                 const float* tau, int hs, float dt, int steps) {
+                                 const float* tau, int hs, float dt, int steps, int input_dim) {
     float* h_tmp = (float*)safe_malloc(hs * sizeof(float));
     if (!h_tmp) return;
     memcpy(h_tmp, h_in, hs * sizeof(float));
     float dt_sub = dt / (float)(steps > 0 ? steps : 1);
     for (int s = 0; s < steps; s++) {
         float* h_cur = (s == 0) ? h_tmp : h_tmp;
-        _hc_cfc_ode_step(h_cur, input, h_tmp, W_h, W_in, b_g, b_a, tau, hs, dt_sub);
+        _hc_cfc_ode_step(h_cur, input, h_tmp, W_h, W_in, b_g, b_a, tau, hs, dt_sub, input_dim);
     }
     memcpy(h_out, h_tmp, hs * sizeof(float));
     safe_free((void**)&h_tmp);
@@ -303,7 +305,7 @@ int haptic_cfc_process(HapticCfcProcessor* proc,
     _hc_cfc_ode_predict(proc->hidden_state, input, proc->hidden_state,
                         proc->W_h, proc->W_in,
                         proc->b_g, proc->b_a,
-                        proc->tau, hs, adaptive_dt, steps);
+                        proc->tau, hs, adaptive_dt, steps, hs);
     /* 输出特征向量（从隐藏状态投影） */
     int out_dim = feature_dim < hs ? feature_dim : hs;
     for (int i = 0; i < out_dim; i++)
@@ -572,7 +574,7 @@ int haptic_texture_analyze(HapticTextureAnalyzer* ta,
         _hc_cfc_ode_predict(ta->cfc_hidden, cfc_input, ta->cfc_hidden,
                             ta->cfc_W_h, ta->cfc_W_in,
                             ta->cfc_b_g, ta->cfc_b_a,
-                            ta->cfc_tau, hs, dt, 1);
+                            ta->cfc_tau, hs, dt, 1, hs);
         for (int i = 0; i < 64 && i < hs; i++)
             descriptor->feature_vector[i] = _hc_tanh(ta->cfc_hidden[i]);
         if (descriptor->feature_count < 64)
@@ -753,7 +755,7 @@ int haptic_object_recognize(HapticObjectRecognizer* rec,
         _hc_cfc_ode_predict(rec->cfc_hidden, input, rec->cfc_hidden,
                             rec->cfc_W_h, rec->cfc_W_in,
                             rec->cfc_b_g, rec->cfc_b_a,
-                            rec->cfc_tau, hs, t, 2);
+                            rec->cfc_tau, hs, t, 2, hs);
         safe_free((void**)&input);
     }
     /* 提取嵌入向量 */
@@ -818,7 +820,7 @@ int haptic_object_learn(HapticObjectRecognizer* rec,
         _hc_cfc_ode_predict(rec->cfc_hidden, input, rec->cfc_hidden,
                             rec->cfc_W_h, rec->cfc_W_in,
                             rec->cfc_b_g, rec->cfc_b_a,
-                            rec->cfc_tau, hs, t, 2);
+                            rec->cfc_tau, hs, t, 2, hs);
         safe_free((void**)&input);
     }
     int idx = rec->num_objects;
@@ -966,7 +968,7 @@ int haptic_grasp_control(HapticGraspLearner* gl,
     _hc_cfc_ode_predict(gl->cfc_hidden, input, gl->cfc_hidden,
                         gl->W_h, gl->W_h,
                         gl->b_g, gl->b_a,
-                        gl->tau, hs, dt, 2);
+                        gl->tau, hs, dt, 2, input_dim);
     /* 从隐藏状态解码控制信号 */
     float* control = (float*)safe_malloc(nf * 4 * sizeof(float));
     if (!control) { safe_free((void**)&input); return -1; }
@@ -1040,7 +1042,7 @@ int haptic_grasp_learn_from_demo(HapticGraspLearner* gl,
             _hc_cfc_ode_predict(gl->cfc_hidden, inp, gl->cfc_hidden,
                                 gl->W_h, gl->W_h,
                                 gl->b_g, gl->b_a,
-                                gl->tau, hs, dt, 2);
+                                gl->tau, hs, dt, 2, input_dim);
             float* control_target = (float*)safe_malloc(nf * 4 * sizeof(float));
             if (control_target && h_before) {
                 for (int i = 0; i < nf; i++) {
@@ -1211,7 +1213,7 @@ int vision_haptic_fusion_fuse(VisionHapticFusion* vf,
         _hc_cfc_ode_predict(vf->fusion_hidden, combined_input, vf->fusion_hidden,
                             vf->W_h, vf->W_h,
                             vf->b_g, vf->b_a,
-                            vf->tau, hs, dt, 2);
+                            vf->tau, hs, dt, 2, hs);
         safe_free((void**)&combined_input);
     } else {
         /* Phase2: 投影拼接路径（默认）—— 固定线性投影替代CfC ODE

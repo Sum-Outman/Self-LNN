@@ -7,6 +7,7 @@
 
 #define SELFLNN_IMPLEMENTATION
 #define SELFLNN_CORE_INTERNAL
+#include <time.h>  /* 用于速率限制警告的时间戳 */
 #include "selflnn/core/cfc_network.h"
 #include "selflnn/core/cfc_cell.h"
 #include "selflnn/core/cfc_enhanced.h"  /* P0-001修复: 集成CfC增强层(SIMD/自动求解器/刚度检测) */
@@ -416,7 +417,13 @@ int cfc_forward(CfCNetwork* network, const float* input,
     // 初始化状态检查
     SELFLNN_CHECK_INITIALIZED(network, "CfC网络未初始化");
     if (!network->is_trained) {
-        log_warning("CfC网络未训练，推理结果可能不准确");
+        /* 速率限制: 最多每10秒打印一次警告，防止后台循环洪泛 */
+        static time_t last_warn_time = 0;
+        time_t now = time(NULL);
+        if (now - last_warn_time >= 10) {
+            log_warning("CfC网络未训练，推理结果可能不准确");
+            last_warn_time = now;
+        }
     }
     
     const CfCNetworkConfig* config = &network->config;

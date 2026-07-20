@@ -27,117 +27,26 @@ extern "C" {
  */
 
 /* ================================================================
- * CfC网络级API统一声明（实现在 src/core/cfc_network.c）
- * 类型定义已通过 cfc_network.h 引入
+ * CfC网络级API统一入口
+ *
+ * H-FIX-001: 移除12处重复声明。cfc_network.h（本文件第6行已include）
+ * 已提供全部CfC网络级API声明。此处仅保留注释作为API文档索引。
+ *
+ * 通过 cfc_network.h 提供的函数：
+ *   cfc_create()              — 创建CfC网络
+ *   cfc_free()                — 释放CfC网络
+ *   cfc_forward()             — 前向传播（已通过M-001修复移除重复）
+ *   cfc_backward()            — 反向传播
+ *   cfc_accumulate_gradients()— 累积梯度
+ *   cfc_save() / cfc_load()   — 模型保存/加载
+ *   cfc_set_config() / cfc_get_config() — 配置管理
+ *   cfc_reset()               — 重置状态
+ *   cfc_get_stats()           — 统计信息
+ *   cfc_get_weight_matrix()   — 获取权重矩阵
+ *   cfc_get_bias_vector()     — 获取偏置向量
+ *
+ * 外部模块只需包含 cfc.h 即可获得完整CfC能力（经 cfc_network.h 传递）。
  * ================================================================ */
-
-/**
- * @brief 创建CfC网络实例
- * @param config 网络配置
- * @return CfC网络句柄，失败返回NULL
- */
-CfCNetwork* cfc_create(const CfCNetworkConfig* config);
-
-/**
- * @brief 释放CfC网络实例
- * @param network 网络句柄
- */
-void cfc_free(CfCNetwork* network);
-
-/* M-001修复: cfc_forward声明由 cfc_network.h 提供（本文件第6行已include）。
- * 此处不再重复声明，避免双文件同步维护负担。
- * 调用方通过包含 cfc.h 即可获得完整CfC API（经由 cfc_network.h 传递）。 */
-
-/**
- * @brief CfC网络反向传播（梯度计算与参数更新）
- * @param network CfC网络句柄
- * @param error 误差向量 [output_size]
- * @param gradient 输入梯度输出缓冲区 [input_size]
- * @param learning_rate 学习率
- * @return 0成功，负值失败
- */
-int cfc_backward(CfCNetwork* network, const float* error,
-                 float* gradient, float learning_rate);
-
-/**
- * @brief CfC网络累积梯度（批量训练专用）
- * @param network CfC网络句柄
- * @param error 误差向量
- * @param gradient 输入梯度输出
- * @param weight_gradients 权重梯度累积缓冲区
- * @param bias_gradients 偏置梯度累积缓冲区
- * @return 0成功，负值失败
- */
-int cfc_accumulate_gradients(CfCNetwork* network, const float* error,
-                            float* gradient,
-                            float* weight_gradients, float* bias_gradients);
-
-/**
- * @brief 保存CfC网络到文件
- * @param network CfC网络句柄
- * @param file 已打开的文件句柄
- * @return 0成功，负值失败
- */
-int cfc_save(const CfCNetwork* network, FILE* file);
-
-/**
- * @brief 从文件加载CfC网络
- * @param network CfC网络句柄
- * @param file 已打开的文件句柄
- * @return 0成功，负值失败
- */
-int cfc_load(CfCNetwork* network, FILE* file);
-
-/**
- * @brief 设置CfC网络配置
- * @param network CfC网络句柄
- * @param config 新配置
- * @return 0成功，负值失败
- */
-int cfc_set_config(CfCNetwork* network, const CfCNetworkConfig* config);
-
-/**
- * @brief 获取CfC网络配置
- * @param network CfC网络句柄
- * @param config 输出配置
- * @return 0成功，负值失败
- */
-int cfc_get_config(const CfCNetwork* network, CfCNetworkConfig* config);
-
-/**
- * @brief 重置CfC网络状态
- * @param network CfC网络句柄
- */
-void cfc_reset(CfCNetwork* network);
-
-/**
- * @brief 获取CfC网络统计信息
- * @param network CfC网络句柄
- * @param avg_activation 输出平均激活度
- * @param max_activation 输出最大激活度
- * @param gradient_norm 输出梯度范数
- * @return 0成功，负值失败
- */
-int cfc_get_stats(const CfCNetwork* network, float* avg_activation,
-                  float* max_activation, float* gradient_norm);
-
-/**
- * @brief 获取CfC网络权重矩阵（用于拉普拉斯分析等）
- * @param network CfC网络句柄
- * @param weight_matrix 输出权重矩阵指针
- * @param weight_count 输出权重元素数量
- * @return 0成功，负值失败
- */
-int cfc_get_weight_matrix(CfCNetwork* network, float** weight_matrix, size_t* weight_count);
-
-/**
- * @brief 获取CfC网络偏置向量
- * @param network CfC网络句柄
- * @param bias_vector 输出偏置向量指针
- * @param bias_count 输出偏置元素数量
- * @return 0成功，负值失败
- */
-int cfc_get_bias_vector(CfCNetwork* network, float** bias_vector, size_t* bias_count);
 
 #ifdef __cplusplus
 }

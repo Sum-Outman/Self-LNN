@@ -589,14 +589,22 @@ int socket_setsockopt(SocketHandle sock, int level, int optname, const void* opt
 
 void socket_close(SocketHandle sock) {
 #if defined(_WIN32) || defined(_WIN64)
+    /* v9.21修复: 禁用SO_LINGER，使用操作系统默认的优雅关闭（FIN序列）。
+     * 之前SO_LINGER(l_onoff=1, l_linger=0)导致每次closesocket()发送RST硬重置，
+     * 客户端收到ERR_CONNECTION_RESET，表现为前端"网络连接失败"和WebSocket错误。
+     * 优雅关闭流程: shutdown(SD_SEND)→发送FIN→recv等待客户端FIN→closesocket()。
+     * recv使用短超时(50ms)，避免阻塞但确保客户端有足够时间收到响应。 */
     {
         struct linger l;
-        l.l_onoff = 1;
-        l.l_linger = 2;
+        l.l_onoff = 0;  /* 禁用SO_LINGER，使用默认优雅关闭 */
+        l.l_linger = 0;
         setsockopt(sock, SOL_SOCKET, SO_LINGER, (const char*)&l, sizeof(l));
     }
     shutdown(sock, SD_SEND);
     {
+        /* 短暂等待客户端发送FIN（recv返回0），超时50ms后继续关闭 */
+        DWORD rcv_timeout = 50;
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&rcv_timeout, sizeof(rcv_timeout));
         char discard[64];
         int total = 0;
         while (total < 200) {
@@ -609,14 +617,14 @@ void socket_close(SocketHandle sock) {
 #else
     {
         struct linger l;
-        l.l_onoff = 1;
-        l.l_linger = 2;
+        l.l_onoff = 0;  /* 禁用SO_LINGER，使用默认优雅关闭 */
+        l.l_linger = 0;
         setsockopt(sock, SOL_SOCKET, SO_LINGER, &l, sizeof(l));
     }
     shutdown(sock, SHUT_WR);
     {
         char discard[64];
-        struct timeval tv = {0, 200000};
+        struct timeval tv = {0, 50000};
         setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
         while (recv(sock, discard, sizeof(discard), 0) > 0) {}
     }

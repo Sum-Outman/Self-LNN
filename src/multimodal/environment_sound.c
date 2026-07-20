@@ -341,7 +341,7 @@ void environment_sound_classifier_free(void* classifier) {
      * 原来的顺序: safe_free(&classifier) 将 classifier 置为 NULL
      * 然后 g_esc == NULL 永远为假，全局指针无法清空，造成悬空指针 */
     if (g_esc == classifier) g_esc = NULL;
-    safe_free(&classifier);
+    safe_free((void**)&classifier);
 }
 
 /**

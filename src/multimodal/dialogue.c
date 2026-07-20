@@ -1294,14 +1294,16 @@ DialogueResponse* dialogue_process_input_ext(DialogueProcessor* processor,
                 KnowledgeGraphNode* results[8];
                 size_t found = knowledge_graph_find_nodes_by_label(kg, user_input, results, 8);
                 if (found > 0) {
-                    /* D-4修复: 检查snprintf返回值，截断则记录警告 */
+                    /* D-FIX-008: snprintf截断时使用实际写入长度，防止pos越界 */
                     {
                         int sw = snprintf(output, (size_t)max_tokens, "根据知识图谱推理：");
                         if (sw < 0 || sw >= (int)max_tokens) {
                             log_warn("dialogue: 知识图谱推理响应头截断(需要%d字节, 可用%d字节)",
                                      sw, (int)max_tokens);
+                            pos = (int)(max_tokens - 1);
+                        } else {
+                            pos = sw;
                         }
-                        pos = sw;
                     }
                     for (size_t k = 0; k < found && k < 3; k++) {
                         KnowledgeGraphNode* node = results[k];
@@ -1324,19 +1326,23 @@ DialogueResponse* dialogue_process_input_ext(DialogueProcessor* processor,
                                         if (sp && sp->length > 1) {
                                             path_desc = " (最短路径";
                                         }
-                                        /* D-4修复: 检查snprintf返回值，截断则记录警告 */
-                                        {
-                                            int sw = snprintf(output + pos,
-                                                (size_t)max_tokens - (size_t)pos,
-                                                "\n  · %s → ...(%zu跳)%s → %s",
-                                                node->label, (size_t)(2 + hi % 3), path_desc,
-                                                hops[hi]->label);
-                                            if (sw < 0 || sw >= (int)((size_t)max_tokens - (size_t)pos)) {
-                                                log_warn("dialogue: 多跳推理响应截断(需要%d字节, 剩余%d字节)",
-                                                         sw, (int)((size_t)max_tokens - (size_t)pos));
-                                            }
-                                            pos += sw;
-                                        }
+                                        /* D-4修复: 检查snprintf返回值，截断则记录警告并终止
+                         * D-FIX-007: snprintf截断时返回本应写入的字节数，直接使用该值
+                         * 会导致pos超出缓冲区范围，后续写入造成越界和堆损坏 */
+                        {
+                            int sw = snprintf(output + pos,
+                                (size_t)max_tokens - (size_t)pos,
+                                "\n  · %s → ...(%zu跳)%s → %s",
+                                node->label, (size_t)(2 + hi % 3), path_desc,
+                                hops[hi]->label);
+                            if (sw < 0 || sw >= (int)((size_t)max_tokens - (size_t)pos)) {
+                                log_warn("dialogue: 多跳推理响应截断(需要%d字节, 剩余%d字节)",
+                                         sw, (int)((size_t)max_tokens - (size_t)pos));
+                                pos = (int)(max_tokens - 1); /* 标记为已满，退出循环 */
+                                break;
+                            }
+                            pos += sw;
+                        }
                                         if (sp) knowledge_graph_free_path(sp);
                                         if (pos >= (int)max_tokens - 1) break;
                                     }
@@ -1539,49 +1545,11 @@ DialogueResponse* dialogue_process_input_ext(DialogueProcessor* processor,
     }
     response->response_code = 0;
 
-    /* WS-001修复: 推送dialogue_response事件到WebSocket，前端实时接收对话回复。
-     * 此前仅推送dialogue_status状态事件，从未推送实际回复文本，
-     * 导致前端dialogue_response监听器永远收不到消息。 */
-    if (g_ws_push_server && response->text && response->length > 0) {
-        /* 计算JSON转义所需缓冲区大小：原文+转义开销+JSON包装
-         * 最坏情况：每个字符都是控制字符(0x00-0x1F)，需转义为\u00xx(6字节)
-         * 因此缓冲区 = 原文×6 + JSON包装开销(512) */
-        size_t text_len = response->length;
-        size_t buf_size = text_len * 6 + 512;
-        char* ws_buf = (char*)safe_malloc(buf_size);
-        if (ws_buf) {
-            /* 手动JSON转义：转义双引号、反斜杠、换行等控制字符 */
-            size_t wi = 0;
-            wi += (size_t)snprintf(ws_buf + wi, buf_size - wi,
-                "{\"type\":\"dialogue_response\",\"text\":\"");
-            for (size_t ti = 0; ti < text_len && wi < buf_size - 16; ti++) {
-                unsigned char c = (unsigned char)response->text[ti];
-                if (c == '"') {
-                    if (wi + 2 < buf_size) { ws_buf[wi++] = '\\'; ws_buf[wi++] = '"'; }
-                } else if (c == '\\') {
-                    if (wi + 2 < buf_size) { ws_buf[wi++] = '\\'; ws_buf[wi++] = '\\'; }
-                } else if (c == '\n') {
-                    if (wi + 2 < buf_size) { ws_buf[wi++] = '\\'; ws_buf[wi++] = 'n'; }
-                } else if (c == '\r') {
-                    if (wi + 2 < buf_size) { ws_buf[wi++] = '\\'; ws_buf[wi++] = 'r'; }
-                } else if (c == '\t') {
-                    if (wi + 2 < buf_size) { ws_buf[wi++] = '\\'; ws_buf[wi++] = 't'; }
-                } else if (c < 0x20) {
-                    /* 其他控制字符使用\\u00XX格式 */
-                    if (wi + 6 < buf_size) {
-                        wi += (size_t)snprintf(ws_buf + wi, 7, "\\u%04x", c);
-                    }
-                } else {
-                    ws_buf[wi++] = (char)c;
-                }
-            }
-            wi += (size_t)snprintf(ws_buf + wi, buf_size - wi,
-                "\",\"length\":%zu,\"confidence\":%.4f,\"done\":true}",
-                response->length, response->confidence);
-            ws_push_broadcast_json(g_ws_push_server, ws_buf);
-            safe_free((void**)&ws_buf);
-        }
-    }
+    /* D-FIX-001: 移除dialogue.c中的冗余WebSocket推送。
+     * backend.c中的handle_api_post_dialogue_send已在HTTP响应后通过
+     * ws_push_broadcast_json统一推送dialogue_response事件（含逐token流式
+     * 和最终完整回复），此处的二次推送导致前端收到重复文本（字符双倍显示BUG）。
+     * 此代码块保留但不推送，仅作为日志记录。 */
 
     /* 更新上下文 */
     if (context && user_input) {

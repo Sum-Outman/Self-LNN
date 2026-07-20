@@ -874,10 +874,23 @@ void safe_free(void** ptr) {
         if (!freed) {
             fprintf(stderr, "警告: 指针 %p 非safe_malloc分配, 使用系统free释放(避免静默泄漏)\n", data_ptr);
 #ifdef _WIN32
-            __try {
-                free(data_ptr);
-            } __except(EXCEPTION_EXECUTE_HANDLER) {
-                fprintf(stderr, "错误: free(%p) 崩溃, 指针可能已损坏, 跳过释放\n", data_ptr);
+            /* K08修复: 使用VirtualQuery验证指针是否在有效堆区域再free，
+             * 避免对代码段/栈/未映射地址调用free()导致进程崩溃。
+             * 原SEH __try/__except在某些Release优化下可能失效。 */
+            {
+                MEMORY_BASIC_INFORMATION mbi;
+                memset(&mbi, 0, sizeof(mbi));
+                if (VirtualQuery(data_ptr, &mbi, sizeof(mbi)) > 0 &&
+                    mbi.State == MEM_COMMIT && mbi.Type == MEM_PRIVATE) {
+                    __try {
+                        free(data_ptr);
+                    } __except(EXCEPTION_EXECUTE_HANDLER) {
+                        fprintf(stderr, "错误: free(%p) 崩溃, 跳过释放\n", data_ptr);
+                    }
+                } else {
+                    fprintf(stderr, "警告: 指针 %p 不在有效堆区域(State=%lu Type=%lu), 跳过释放防止崩溃\n",
+                            data_ptr, (unsigned long)(mbi.State), (unsigned long)(mbi.Type));
+                }
             }
 #else
             free(data_ptr);

@@ -482,7 +482,7 @@ typedef enum {
     API_GET_MODEL_INFO = 276,                /**< 获取LNN模型详细信息 /api/model/info */
     API_GET_EVOLUTION_STATUS = 277,          /**< 获取自我演化系统状态 /api/evolution/status */
 
-    API_POST_PRODUCT_SPEC = 330,           /**< POST产品规格生成 /api/product/spec */
+    API_POST_PRODUCT_SPEC = 332,           /**< POST产品规格生成 /api/product/spec (v9.23: 从330移出，避免与KG连通分量冲突) */
 
     /* ===== 前端-后端API端点对齐修复 ===== */
     API_GET_PROGRAMMING_SAMPLE = 285,      /**< 获取编程示例代码 /api/programming/sample */

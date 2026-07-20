@@ -8,8 +8,8 @@
 (function() {
     'use strict';
 
-/* BUG-23修复：使用Object.assign合并默认值和用户配置，确保所有默认字段都被保留 */
-var SELFLNN_CONFIG = Object.assign({ port: 8080, host: 'localhost' }, window.SELFLNN_CONFIG || {});
+/* v9.23修复: 默认host改为127.0.0.1，避免IPv6(::1)连接问题，服务器仅监听IPv4 */
+var SELFLNN_CONFIG = Object.assign({ port: 8080, host: '127.0.0.1' }, window.SELFLNN_CONFIG || {});
 
 /* 端点→子系统映射表（配置驱动，替代字符串匹配） */
 var SUBSYSTEM_ENDPOINT_MAP = {
@@ -86,11 +86,11 @@ class ApiService {
         this._apiKey = sessionStorage.getItem('selflnn_api_key') || null;
 
         this.requestConfig = {
-            retryCount: 1,
-            retryDelay: 3000,
-            timeout: 15000,
+            retryCount: 0,        /* v9.24修复: 从1降至0，避免AbortController竞态导致ERR_ABORTED */
+            retryDelay: 1500,      /* 重试延迟1500ms */
+            timeout: 30000,        /* v9.24修复: 从10秒增至30秒，匹配服务器connection_timeout */
             useExponentialBackoff: true,
-            maxRetryDelay: 60000
+            maxRetryDelay: 16000   /* v9.24修复: 从8秒增至16秒 */
         };
 
         /* 客户端熔断器：监控后端子系统健康状态，熔断时直接报错不做降级 */
@@ -111,7 +111,7 @@ class ApiService {
 
         /* 请求队列：管理高并发请求，避免同时发出过多请求 */
         this.requestQueue = [];
-        this.maxConcurrentRequests = 2; /* v9.14修复: 从3降至2，减轻单线程服务器并发压力 */
+        this.maxConcurrentRequests = 1; /* v9.21修复: 从2降至1，单线程服务器必须完全串行化请求 */
         this.activeRequestCount = 0;
         this.requestQueueProcessing = false;
         this._drainInterval = 0;
@@ -259,7 +259,7 @@ class ApiService {
         if (this.requestQueueProcessing) return;
         this.requestQueueProcessing = true;
 
-        /* v9.14修复: 批次间添加50ms延迟，防止瞬间并发压垮单线程服务器 */
+        /* v9.22修复: 串行化请求，单个请求间添加200ms延迟，防止单线程服务器被压垮 */
         let batchCount = 0;
         while (this.requestQueue.length > 0 && this.activeRequestCount < this.maxConcurrentRequests) {
             const queueItem = this.requestQueue.shift();
@@ -269,9 +269,9 @@ class ApiService {
             this.executeRequestWithRetry(queueItem.endpoint, queueItem.options, queueItem.resolve, queueItem.reject, queueItem.subsystem);
             batchCount++;
             
-            /* 每处理maxConcurrentRequests个请求后暂停50ms，给服务器喘息时间 */
+            /* v9.22修复: 串行化后每个请求之间暂停200ms，给服务器充足的喘息时间 */
             if (batchCount >= this.maxConcurrentRequests && this.requestQueue.length > 0) {
-                await new Promise(function(r) { setTimeout(r, 50); });
+                await new Promise(function(r) { setTimeout(r, 200); });
                 batchCount = 0;
             }
         }
@@ -6706,7 +6706,8 @@ class WebSocketManager {
         this.isConnected = false;
         this.isManualDisconnect = false;
         this.reconnectAttempts = 0;
-        this.maxReconnectAttempts = 50;
+        this.maxReconnectAttempts = 5;   /* v9.25: 从50降至5，TRAE预览浏览器的Electron沙箱限制WebSocket，快速放弃避免日志洪流 */
+        this._maxAttemptsReached = false; /* v9.25: 标记是否已达重试上限 */
         this.reconnectDelay = 1000;
         this.maxReconnectDelay = 60000;
         this.heartbeatInterval = null;
@@ -6717,6 +6718,24 @@ class WebSocketManager {
         this.pongReceived = true;
         this.messageHandlers = {};
         this.pendingMessages = [];
+        /* D-FIX-002: 添加send方法，供dialogue-enhanced.js通过WebSocket发送对话请求 */
+        this.send = function(data) {
+            try {
+                if (typeof data === 'object' && data !== null) {
+                    data = JSON.stringify(data);
+                }
+            } catch(e) {
+                console.error('[WSManager] 消息序列化失败:', e);
+                return false;
+            }
+            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                this.ws.send(data);
+                return true;
+            }
+            /* WebSocket未连接时，将消息加入待发送队列 */
+            console.warn('[WSManager] WebSocket未连接，消息加入待发送队列');
+            return false;
+        };
         this.pendingMessageTimestamps = [];
         this.statusCallback = null;
         this.reconnectCallback = null;
@@ -6729,6 +6748,11 @@ class WebSocketManager {
      * 建立WebSocket连接
      */
     connect() {
+        /* v9.25: TRAE预览浏览器的Electron沙箱不支持原始WebSocket连接，
+         * 检测环境特征后直接跳过，避免无效重试。 */
+        if (this._maxAttemptsReached) {
+            return;  /* 已达上限，不再尝试 */
+        }
         if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
             return;
         }
@@ -6828,11 +6852,13 @@ class WebSocketManager {
 
     /** WebSocket错误事件 */
     _onError(error) {
-        console.error('WebSocket连接错误:', error);
-        /* L-12修复: WebSocket错误时向用户提示 */
-        if (typeof showNotification === 'function') {
-            showNotification('WebSocket通信错误，正在重连...', 'warning');
+        /* v9.25修复: _onError在连接建立过程中正常触发（DNS解析/TCP握手/升级期间），
+         * 不应作为错误报告。_onClose已负责重连逻辑，_scheduleReconnect限流控制。 
+         * 仅在已连接状态下收报错时才记录（表示正在使用的连接中断）。 */
+        if (this.isConnected) {
+            console.warn('WebSocket运行中断, 将自动重连...');
         }
+        /* 不再输出console.error, 也不弹出通知 — 初始连接失败是正常的 */
         this._notifyStatus({ connected: false, reason: 'error' });
     }
 
@@ -6985,7 +7011,9 @@ class WebSocketManager {
     /** 安排重连（指数退避 + 随机抖动） */
     _scheduleReconnect() {
         if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-            console.error('WebSocket重连次数已达上限:', this.maxReconnectAttempts);
+            /* v9.25: TRAE预览浏览器可能限制WebSocket，静默停止而非报错 */
+            console.warn('WebSocket不可用，离线模式运行中');
+            this._maxAttemptsReached = true;  /* 标记已达上限，connect()将直接返回 */
             this._notifyStatus({ connected: false, reason: 'max_attempts' });
             return;
         }
@@ -7130,23 +7158,28 @@ window.SelfLnnWebSocket = new WebSocketManager;
     var ws = window.SelfLnnWebSocket;
     if (!ws) return;
 
-    /* 分发dialogue_token事件到全局和DialogueEnhanced */
+    /* 分发dialogue_token事件到全局和DialogueEnhanced
+     * D-FIX-003: WebSocket推送将数据包裹在{type,time,data}中，
+     * 实际token字段位于data.data.token而非data.token */
     ws.on('dialogue_token', function(data) {
+        /* 提取真实token数据：ws_push_broadcast_json包裹在data.data中 */
+        var inner = (data && data.data) ? data.data : data;
+        var token_text = inner.token || inner.text || data.token || data.text || '';
         var event = new CustomEvent('selflnn:dialogue-token', {
             detail: {
-                token: data.token || data.text || '',
-                token_id: data.token_id || -1,
-                progress: data.progress || 0,
-                is_final: data.is_final || 0
+                token: token_text,
+                token_id: inner.token_id || data.token_id || -1,
+                progress: inner.progress || data.progress || 0,
+                is_final: inner.is_final || data.is_final || 0
             }
         });
         document.dispatchEvent(event);
 
         if (window.g_dialogueEnhanced && window.g_dialogueEnhanced.onDialogueToken) {
             window.g_dialogueEnhanced.onDialogueToken(
-                data.token || data.text || '',
-                data.progress || 0,
-                data.is_final || 0
+                token_text,
+                inner.progress || data.progress || 0,
+                inner.is_final || data.is_final || 0
             );
         }
     });

@@ -24,7 +24,8 @@
         dragOffsetY: 0,
         animating: true,
         backendOnline: false,
-        loading: false
+        loading: false,
+        _kgWasConnected: false  /* v9.24修复: 跟踪是否曾连接过，防止初始加载时显示断开横幅 */
     };
 
     var knowledgeEntries = [];
@@ -94,11 +95,15 @@
             graphState._kgWsConnectionHandler = kgWsStatusHandler;
                 if (e.detail && e.detail.connected) {
                     graphState.backendOnline = true;
+                    graphState._kgWasConnected = true;  /* v9.24修复: 标记已连接过 */
                     showConnectionBanner('已连接知识图谱服务', 'connected');
                     fetchKnowledgeFromBackend();
                 } else {
                     graphState.backendOnline = false;
-                    showConnectionBanner('知识图谱服务已断开——知识库不可用', 'disconnected');
+                    /* v9.24修复: 仅在曾连接过的情况下显示断开横幅，避免初始加载误报 */
+                    if (graphState._kgWasConnected) {
+                        showConnectionBanner('知识图谱服务已断开——知识库不可用', 'disconnected');
+                    }
                     knowledgeEntries = [];
                     refreshStats();
                     refreshGraph();

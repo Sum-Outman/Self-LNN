@@ -22,16 +22,16 @@
         .fa-check-circle:before { content: "✅"; }
     </style>
 
-    <!-- v9.11修复: 必须在api-service.js加载前设置SELFLNN_CONFIG，否则host默认localhost与127.0.0.1跨域不匹配 -->
+    <!-- v9.23修复: 强制使用127.0.0.1避免IPv6(::1)连接问题，服务器仅监听IPv4 -->
     <script>
         window.SELFLNN_CONFIG = window.SELFLNN_CONFIG || {
-            host: window.location.hostname || 'localhost',
+            host: '127.0.0.1',
             port: 8080,
             wsPort: 8081
         };
     </script>
 
-    <script src="js/api-service.js?v=19"></script>
+    <script src="js/api-service.js?v=24"></script>
     <script src="js/selflnn-chart.js?v=1"></script>
     <script>
         window.__PAGE_READY = false;
@@ -64,9 +64,9 @@
             _notify: function(msg) { this.listeners.forEach(function(fn){try{fn(msg)}catch(e){}}); }
         };
         setTimeout(function() { window._wsManager.init(); }, 3000);
-        /* 前端配置 - 可在此处修改服务器地址和端口 */
+        /* v9.23修复: 前端配置 - 强制使用127.0.0.1避免IPv6连接问题 */
         window.SELFLNN_CONFIG = window.SELFLNN_CONFIG || {
-            host: window.location.hostname || 'localhost',
+            host: '127.0.0.1',
             port: 8080,        /* HTTP API端口 */
             wsPort: 8081       /* WebSocket独立端口（与port_config.h中SELFLNN_WEBSOCKET_PORT=8081一致） */
         };
@@ -3717,6 +3717,7 @@
                                     <div class="form-group">
                                         <label>CORS允许来源:</label>
                                         <input type="text" class="form-input" id="setting-cors-origins" value="*" placeholder="* 或 http://localhost:8080" onchange="updateNetworkSetting('cors_origins', this.value)">
+                                    </div>
                                 </div>
                                 
                                 <div class="network-status">
@@ -6592,7 +6593,9 @@ response = requests.get(
         </section>
 
         <!-- 前端修复: 系统运行日志面板从hardware-setup内移出，作为独立板块 -->
-        <section id="sys-log-panel-section" class="card full-width" style="margin-bottom:20px">
+        <!-- v9.23修复: 使用section类以正确参与页面切换，内部card保留原有样式 -->
+        <section id="sys-log-panel-section" class="section">
+            <div class="card full-width" style="margin-bottom:20px">
             <div class="card-header" style="display:flex;justify-content:space-between;align-items:center">
                 <h3>📋 系统运行日志</h3>
                 <button onclick="var p=document.getElementById('sys-log-panel');p.innerHTML='';" class="btn btn-sm" style="background:#333;color:#aaa;border:1px solid #555">清空</button>
@@ -6601,6 +6604,7 @@ response = requests.get(
                 <div id="sys-log-panel" style="max-height:200px;overflow-y:auto;font-family:Consolas,monospace;font-size:11px;color:#aaa;background:#0a0a14;border-radius:4px;padding:8px;line-height:1.6">
                     <div style="color:#666">等待系统事件...</div>
                 </div>
+            </div>
             </div>
         </section>
 
@@ -6916,7 +6920,7 @@ response = requests.get(
 
     <!-- JavaScript -->
     <script src="js/compatibility.js"></script>
-    <script src="js/data-engine.js?v=18"></script>
+    <script src="js/data-engine.js?v=19"></script>
     <script src="js/device-manager.js?v=1"></script>
     <script src="js/voice-capture-util.js?v=17"></script>
     <script src="js/voice-command.js"></script>
@@ -6924,12 +6928,12 @@ response = requests.get(
     <script src="js/visualization.js"></script>
     <script src="js/agi-controller.js"></script>
     <script src="js/dialogue-enhanced.js"></script>
-    <script src="js/knowledge-graph.js?v=2"></script>
+    <script src="js/knowledge-graph.js?v=3"></script>
     <script src="js/training-push.js"></script>
     <script src="js/training-center.js"></script>
     <!-- H-001修复: simulation-control.js移到main.js之前加载，避免初始化时序问题 -->
     <script src="js/simulation-control.js"></script>
-    <script src="js/main.js?v=214"></script>
+    <script src="js/main.js?v=218"></script>
     <script>
         // 更新当前时间 - M-006修复: 注册定时器使状态栏时间实时更新
         function updateTime() {
@@ -8070,16 +8074,7 @@ response = requests.get(
                 }
             };
 
-            /* 智能代理模块 */
-            if (typeof window.initMultiAgentSystem !== 'function') {
-                window.initMultiAgentSystem = function() { notifyFn('初始化多智能体'); };
-            }
-            if (typeof window.createAgent !== 'function') {
-                window.createAgent = function() { notifyFn('创建代理'); };
-            }
-            if (typeof window.broadcastTask !== 'function') {
-                window.broadcastTask = function() { notifyFn('广播任务'); };
-            }
+            /* 智能代理模块 - 真实实现在main.js中，无需占位函数 */
 
             /* 数据集管理模块 */
             if (typeof window.loadDataset !== 'function') {

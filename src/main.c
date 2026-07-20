@@ -206,6 +206,11 @@ static volatile sig_atomic_t g_agi_running = 1;
  * 由后台训练循环通过selflnn_check_and_reset_training_trigger()检查并重置。
  * sig_atomic_t保证信号处理和普通线程间的基本原子性。 */
 static volatile sig_atomic_t g_training_trigger_flag = 0;
+/* v1.5.1修复: AGI认知循环运行标志，用于防止API端点阻塞。
+ * 当认知循环运行时，阻塞性API端点将返回"系统繁忙"而非阻塞等待锁。
+ * HTTP处理线程和主线程（认知循环）并发运行，锁争用会导致API超时。
+ * 非static，允许backend.c跨文件访问。 */
+volatile LONG g_agi_cycle_running = 0;
 static time_t g_start_time = 0;  /* 仅启动时写入一次,无需原子保护 */
 /* P1-3修复: 时间戳改为volatile LONG64并用原子操作保护跨线程读写(保持64位精度) */
 static volatile LONG64 g_last_online_learn = 0;
@@ -2671,7 +2676,7 @@ int main(int argc, char** argv)
     BackendConfig config;
     memset(&config, 0, sizeof(config));
     config.port = SELFLNN_DEFAULT_PORT;
-    config.max_connections = 100;
+    config.max_connections = 256;  /* v9.21修复: 从100增至256，减少高并发场景下的ERR_CONNECTION_REFUSED */
     config.enable_logging = 1;
     config.log_file = "selflnn_server.log";
     config.enable_multimodal = 1;
@@ -3465,7 +3470,9 @@ main_loop_restart:
                         memset(cycle_input, 0, sizeof(cycle_input));
                     }
                 }
+                g_agi_cycle_running = 1;
                 agi_system_cognitive_cycle(g_agi_system, cycle_input, 256, cycle_output, 256);
+                g_agi_cycle_running = 0;
                 agi_cycle_counter = 0;
             }
         }
