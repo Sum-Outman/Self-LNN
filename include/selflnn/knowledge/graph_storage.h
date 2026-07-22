@@ -684,6 +684,229 @@ RDFTripleStore* rdf_triple_store_load(const char* filename);
 /** @brief 释放属性值 */
 void property_value_free(PropertyValue* value);
 
+/* ============================================================================
+ * M-006修复：统一图存储引擎抽象层
+ * 将三种图存储引擎（邻接表、属性图、RDF三元组）统一为单一接口。
+ * 上层系统无需关心底层使用哪种引擎，通过统一接口操作。
+ * 实现日期: 2026-07-22
+ * ============================================================================ */
+
+/** @brief 图存储引擎类型 */
+typedef enum {
+    GRAPH_STORAGE_ADJACENCY_LIST = 0, /**< 邻接表存储 */
+    GRAPH_STORAGE_PROPERTY_GRAPH = 1, /**< 属性图存储 */
+    GRAPH_STORAGE_RDF_TRIPLE = 2,     /**< RDF三元组存储 */
+    GRAPH_STORAGE_AUTO = 3            /**< 自动选择最优引擎 */
+} GraphStorageType;
+
+/** @brief 统一图存储句柄（不透明类型） */
+typedef struct GraphStorage GraphStorage;
+
+/** @brief 统一图节点 */
+typedef struct {
+    int node_id;               /**< 节点ID */
+    char* label;               /**< 节点标签 */
+    GraphStorageType origin;   /**< 来源引擎类型 */
+    void* internal_node;       /**< 内部节点指针（引擎特定） */
+} GSGraphNode;
+
+/** @brief 统一图边 */
+typedef struct {
+    int edge_id;               /**< 边ID */
+    int source_id;             /**< 源节点ID */
+    int target_id;             /**< 目标节点ID */
+    char* label;               /**< 边标签 */
+    float weight;              /**< 边权重 */
+    int directed;              /**< 是否有向 */
+    GraphStorageType origin;   /**< 来源引擎类型 */
+} GSGraphEdge;
+
+/** @brief 统一图存储配置 */
+typedef struct {
+    GraphStorageType engine_type;   /**< 引擎类型 */
+    size_t initial_node_capacity;   /**< 初始节点容量 */
+    size_t initial_edge_capacity;   /**< 初始边容量 */
+    int enable_property_index;      /**< 是否启用属性索引 */
+    int enable_rdf_inference;       /**< 是否启用RDF推理 */
+} GraphStorageConfig;
+
+/** @brief 图存储统计信息 */
+typedef struct {
+    size_t node_count;          /**< 总节点数 */
+    size_t edge_count;          /**< 总边数 */
+    size_t memory_usage_bytes;  /**< 内存使用量 */
+    GraphStorageType engine_type; /**< 当前引擎类型 */
+    int is_initialized;         /**< 是否已初始化 */
+} GraphStorageStats;
+
+/**
+ * @brief 获取默认图存储配置
+ * @param config 输出配置
+ */
+void graph_storage_config_get_default(GraphStorageConfig* config);
+
+/**
+ * @brief 创建统一图存储
+ * 
+ * 根据配置创建指定类型的图存储引擎。
+ * 如果指定GRAPH_STORAGE_AUTO，则根据数据特征自动选择。
+ * 
+ * @param config 配置（NULL则使用默认配置）
+ * @return GraphStorage* 图存储句柄，失败返回NULL
+ */
+GraphStorage* graph_storage_create(const GraphStorageConfig* config);
+
+/**
+ * @brief 销毁统一图存储
+ * @param gs 图存储句柄
+ */
+void graph_storage_free(GraphStorage* gs);
+
+/**
+ * @brief 添加节点
+ * 
+ * 统一接口：根据底层引擎类型调用对应的添加节点方法。
+ * 
+ * @param gs 图存储句柄
+ * @param label 节点标签（可为NULL）
+ * @return int 节点ID，失败返回-1
+ */
+int graph_storage_add_node(GraphStorage* gs, const char* label);
+
+/**
+ * @brief 添加边
+ * 
+ * 统一接口：根据底层引擎类型调用对应的添加边方法。
+ * 
+ * @param gs 图存储句柄
+ * @param source_id 源节点ID
+ * @param target_id 目标节点ID
+ * @param label 边标签（可为NULL）
+ * @param weight 边权重
+ * @param directed 是否有向
+ * @return int 边ID，失败返回-1
+ */
+int graph_storage_add_edge(GraphStorage* gs, int source_id, int target_id,
+                           const char* label, float weight, int directed);
+
+/**
+ * @brief 获取节点
+ * 
+ * @param gs 图存储句柄
+ * @param node_id 节点ID
+ * @param node 输出节点信息
+ * @return int 成功返回0，失败返回-1
+ */
+int graph_storage_get_node(GraphStorage* gs, int node_id, GSGraphNode* node);
+
+/**
+ * @brief 获取边
+ * 
+ * @param gs 图存储句柄
+ * @param edge_id 边ID
+ * @param edge 输出边信息
+ * @return int 成功返回0，失败返回-1
+ */
+int graph_storage_get_edge(GraphStorage* gs, int edge_id, GSGraphEdge* edge);
+
+/**
+ * @brief 获取节点的邻居
+ * 
+ * @param gs 图存储句柄
+ * @param node_id 节点ID
+ * @param neighbors 邻居节点ID输出缓冲区
+ * @param weights 边权重输出缓冲区（可为NULL）
+ * @param max_count 最大邻居数
+ * @return int 实际邻居数，失败返回-1
+ */
+int graph_storage_get_neighbors(GraphStorage* gs, int node_id,
+                                int* neighbors, float* weights, size_t max_count);
+
+/**
+ * @brief 检查边是否存在
+ * 
+ * @param gs 图存储句柄
+ * @param source_id 源节点ID
+ * @param target_id 目标节点ID
+ * @return int 存在返回1，不存在返回0，失败返回-1
+ */
+int graph_storage_has_edge(GraphStorage* gs, int source_id, int target_id);
+
+/**
+ * @brief 获取图存储统计信息
+ * 
+ * @param gs 图存储句柄
+ * @param stats 输出统计信息
+ * @return int 成功返回0，失败返回-1
+ */
+int graph_storage_get_stats(GraphStorage* gs, GraphStorageStats* stats);
+
+/**
+ * @brief 获取节点数
+ * 
+ * @param gs 图存储句柄
+ * @return size_t 节点数
+ */
+size_t graph_storage_node_count(GraphStorage* gs);
+
+/**
+ * @brief 获取边数
+ * 
+ * @param gs 图存储句柄
+ * @return size_t 边数
+ */
+size_t graph_storage_edge_count(GraphStorage* gs);
+
+/**
+ * @brief 获取底层引擎类型
+ * 
+ * @param gs 图存储句柄
+ * @return GraphStorageType 引擎类型
+ */
+GraphStorageType graph_storage_get_engine_type(GraphStorage* gs);
+
+/**
+ * @brief 获取底层引擎句柄（用于高级操作）
+ * 
+ * 返回底层引擎的不透明句柄，可用于调用引擎特定的高级功能。
+ * 调用者需要根据graph_storage_get_engine_type()判断引擎类型后转换。
+ * 
+ * @param gs 图存储句柄
+ * @return void* 引擎句柄，失败返回NULL
+ */
+void* graph_storage_get_internal_engine(GraphStorage* gs);
+
+/**
+ * @brief 保存图存储到文件
+ * 
+ * @param gs 图存储句柄
+ * @param filename 文件名
+ * @return int 成功返回0，失败返回-1
+ */
+int graph_storage_save(GraphStorage* gs, const char* filename);
+
+/**
+ * @brief 从文件加载图存储
+ * 
+ * 自动检测文件格式并选择合适的引擎加载。
+ * 
+ * @param filename 文件名
+ * @return GraphStorage* 图存储句柄，失败返回NULL
+ */
+GraphStorage* graph_storage_load(const char* filename);
+
+/**
+ * @brief 释放统一图节点
+ * @param node 节点
+ */
+void graph_node_free(GSGraphNode* node);
+
+/**
+ * @brief 释放统一图边
+ * @param edge 边
+ */
+void graph_edge_free(GSGraphEdge* edge);
+
 #ifdef __cplusplus
 }
 #endif

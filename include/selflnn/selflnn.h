@@ -354,6 +354,14 @@ typedef struct {
     int system_auto_save_interval_minutes; /* 自动保存间隔(分钟) */
     char system_log_level[32];            /* 日志级别字符串 */
     int system_web_ui_enabled;            /* Web UI开关 */
+
+    /* H-003修复: training嵌套段配置字段 —— 从system_config.json的training子对象中解析 */
+    int training_epochs;                   /* 训练轮数 (默认100) */
+    int training_batch_size;               /* 批大小 (默认32) */
+    float training_learning_rate;          /* 学习率 (默认0.001) */
+    float training_validation_split;       /* 验证集分割比例 (默认0.1) */
+    int training_early_stopping_patience;  /* 早停耐心值 (默认10) */
+    int training_distributed_enabled;      /* 分布式训练开关 (默认0) */
 } SystemConfig;
 
 typedef struct {

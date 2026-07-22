@@ -483,6 +483,98 @@ int ontology_evolution_diff(OntologyEvolution* evo, int version1, int version2,
  */
 char* ontology_export_owl(Ontology* ont);
 
+/* =========================================================================
+ * L-005修复: OWL/RDF 互操作层 — 导入/导出双向格式转换
+ * ========================================================================= */
+
+/**
+ * @brief OWL/RDF格式类型枚举
+ */
+typedef enum {
+    ONT_FORMAT_OWL_XML = 0,     /**< OWL/XML格式 */
+    ONT_FORMAT_RDF_TURTLE = 1,  /**< RDF/Turtle (TTL) 格式 */
+    ONT_FORMAT_RDF_XML = 2,     /**< RDF/XML格式 */
+    ONT_FORMAT_AUTO = 3         /**< 自动检测格式 */
+} OntologyFormat;
+
+/**
+ * @brief 从OWL/XML文件导入本体
+ *
+ * 解析OWL/XML格式文件，提取类、对象属性、数据属性、实例、
+ * 以及公理(子类、等价、不相交、定义域、值域等)。
+ *
+ * @param ont 本体句柄（如果为NULL则自动创建）
+ * @param owl_path OWL/XML文件路径
+ * @return Ontology* 成功返回本体句柄，失败返回NULL
+ */
+Ontology* ontology_import_owl(Ontology* ont, const char* owl_path);
+
+/**
+ * @brief 从OWL/XML字符串导入本体
+ *
+ * @param ont 本体句柄（如果为NULL则自动创建）
+ * @param owl_xml OWL/XML字符串
+ * @param xml_len 字符串长度
+ * @return Ontology* 成功返回本体句柄，失败返回NULL
+ */
+Ontology* ontology_import_owl_string(Ontology* ont, const char* owl_xml, size_t xml_len);
+
+/**
+ * @brief 从RDF/Turtle文件导入本体
+ *
+ * 解析Turtle (TTL) 格式文件，提取三元组并构建本体结构。
+ * 支持@prefix声明、rdf:type、rdfs:subClassOf等标准谓词。
+ *
+ * @param ont 本体句柄（如果为NULL则自动创建）
+ * @param ttl_path Turtle文件路径
+ * @return Ontology* 成功返回本体句柄，失败返回NULL
+ */
+Ontology* ontology_import_rdf(Ontology* ont, const char* ttl_path);
+
+/**
+ * @brief 从RDF/Turtle字符串导入本体
+ *
+ * @param ont 本体句柄（如果为NULL则自动创建）
+ * @param ttl_str Turtle格式字符串
+ * @param ttl_len 字符串长度
+ * @return Ontology* 成功返回本体句柄，失败返回NULL
+ */
+Ontology* ontology_import_rdf_string(Ontology* ont, const char* ttl_str, size_t ttl_len);
+
+/**
+ * @brief 导出本体为RDF/Turtle格式字符串
+ *
+ * 将本体的类、属性、实例、公理序列化为W3C标准Turtle格式。
+ *
+ * @param ont 本体句柄
+ * @return char* Turtle格式字符串，调用者负责释放
+ */
+char* ontology_export_rdf(Ontology* ont);
+
+/**
+ * @brief 自动检测格式并导入本体文件
+ *
+ * 根据文件扩展名(.owl, .rdf, .ttl, .xml)或文件内容自动判断格式，
+ * 然后调用对应的导入函数。
+ *
+ * @param ont 本体句柄（如果为NULL则自动创建）
+ * @param file_path 文件路径
+ * @return Ontology* 成功返回本体句柄，失败返回NULL
+ */
+Ontology* ontology_import_auto(Ontology* ont, const char* file_path);
+
+/**
+ * @brief 保存本体到文件（自动选择格式）
+ *
+ * 根据文件扩展名自动选择导出格式。
+ *
+ * @param ont 本体句柄
+ * @param file_path 文件路径
+ * @param format 导出格式（ONT_FORMAT_AUTO则根据扩展名决定）
+ * @return int 成功返回0，失败返回-1
+ */
+int ontology_save_to_file(Ontology* ont, const char* file_path, OntologyFormat format);
+
 #ifdef __cplusplus
 }
 #endif

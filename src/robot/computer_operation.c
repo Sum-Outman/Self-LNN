@@ -1,4 +1,4 @@
-﻿#define SELFLNN_IMPLEMENTATION 1
+#define SELFLNN_IMPLEMENTATION 1
 #include "selflnn/robot/computer_operation.h"
 #include "selflnn/core/lnn.h"
 #include "selflnn/selflnn.h"
@@ -243,6 +243,13 @@ struct COSystem {
     int window_list_dirty;
 
     float system_volume;
+
+    /* M-008修复: 无头模式支持 */
+    int headless_mode;               /* 1=无头模式(虚拟屏幕) */
+    float* virtual_screen_buffer;    /* 虚拟屏幕缓冲区 */
+    size_t virtual_screen_width;     /* 虚拟屏幕宽度 */
+    size_t virtual_screen_height;    /* 虚拟屏幕高度 */
+    size_t virtual_screen_channels;  /* 虚拟屏幕通道数 */
 };
 
 static float pixel_diff(const float* a, const float* b, size_t n) {
@@ -1027,6 +1034,36 @@ static int co_os_scroll(int delta) {
 static int co_os_screenshot_real(COSystem* system, const COAction* action) {
     if (!system || !action) return -1;
 
+    /* M-008修复: 无头模式 - 使用虚拟屏幕替代真实截图 */
+    if (system->headless_mode && system->virtual_screen_buffer) {
+        size_t target_w = CO_SCREEN_WIDTH;
+        size_t target_h = CO_SCREEN_HEIGHT;
+        safe_free((void**)&system->last_screen_cache);
+
+        system->last_screen_cache = (float*)safe_malloc(target_w * target_h * 3 * sizeof(float));
+        system->last_width = target_w;
+        system->last_height = target_h;
+
+        if (system->last_screen_cache) {
+            /* 将虚拟屏幕数据缩放到标准分辨率 */
+            for (size_t dy = 0; dy < target_h; dy++) {
+                for (size_t dx = 0; dx < target_w; dx++) {
+                    size_t sx = dx * system->virtual_screen_width / target_w;
+                    size_t sy = dy * system->virtual_screen_height / target_h;
+                    size_t src_idx = (sy * system->virtual_screen_width + sx) * system->virtual_screen_channels;
+                    size_t dst_idx = (dy * target_w + dx) * 3;
+                    if (src_idx + 2 < system->virtual_screen_width * system->virtual_screen_height * system->virtual_screen_channels) {
+                        /* 复制RGB通道，缺少通道则补0 */
+                        system->last_screen_cache[dst_idx] = system->virtual_screen_buffer[src_idx];
+                        system->last_screen_cache[dst_idx + 1] = (system->virtual_screen_channels >= 2) ? system->virtual_screen_buffer[src_idx + 1] : 0.0f;
+                        system->last_screen_cache[dst_idx + 2] = (system->virtual_screen_channels >= 3) ? system->virtual_screen_buffer[src_idx + 2] : 0.0f;
+                    }
+                }
+            }
+        }
+        return 0;
+    }
+
 #ifdef _WIN32
     int w = GetSystemMetrics(SM_CXSCREEN);
     int h = GetSystemMetrics(SM_CYSCREEN);
@@ -1486,6 +1523,13 @@ COSystem* co_system_create(COConfig config) {
     system->num_safety_rules = 0;
     system->system_volume = 1.0f;
 
+    /* M-008修复: 初始化无头模式 */
+    system->headless_mode = config.headless_mode;
+    system->virtual_screen_buffer = NULL;
+    system->virtual_screen_width = 0;
+    system->virtual_screen_height = 0;
+    system->virtual_screen_channels = 0;
+
     /* 获取全局共享LNN（单一模型原则） */
     system->global_lnn = (LNN*)selflnn_get_lnn();
     if (system->global_lnn) {
@@ -1540,6 +1584,8 @@ void co_system_destroy(COSystem* system) {
     safe_free((void**)&system->demo_screen_buffer);
     safe_free((void**)&system->demo_action_buffer);
     safe_free((void**)&system->demo_label);
+    /* M-008修复: 清理虚拟屏幕缓冲区 */
+    safe_free((void**)&system->virtual_screen_buffer);
     safe_free((void**)&system);
 }
 
@@ -3194,5 +3240,92 @@ int co_system_set_volume(void* co_sys, float volume) {
     if (volume < 0.0f) volume = 0.0f;
     if (volume > 1.0f) volume = 1.0f;
     ctx->system_volume = volume;
+    return 0;
+}
+
+/* ================================================================
+ * M-008修复: 无头模式支持
+ *
+ * 允许计算机操作在无真实屏幕的环境下运行，通过虚拟屏幕缓冲区
+ * 模拟屏幕截图。支持以下场景:
+ *   1. 无显示器服务器(SSH远程)
+ *   2. 容器环境(Docker)
+ *   3. 无图形界面的嵌入式系统
+ *   4. 自动化测试(无需真实桌面)
+ *
+ * 虚拟屏幕数据可以是:
+ *   - 预录制的屏幕截图
+ *   - 合成的UI测试界面
+ *   - 远程桌面传输的帧数据
+ * ================================================================ */
+
+int co_set_headless_mode(COSystem* system, int enabled) {
+    if (!system) return -1;
+    system->headless_mode = (enabled != 0) ? 1 : 0;
+    if (system->headless_mode) {
+        log_info("[电脑操作] 无头模式已启用 - 使用虚拟屏幕数据");
+    } else {
+        log_info("[电脑操作] 无头模式已禁用 - 使用真实屏幕采集");
+    }
+    return 0;
+}
+
+int co_is_headless_mode(const COSystem* system) {
+    if (!system) return -1;
+    return system->headless_mode;
+}
+
+int co_set_virtual_screen(COSystem* system, const float* screen_data,
+                           size_t width, size_t height, size_t channels) {
+    if (!system || !screen_data || width == 0 || height == 0 || channels == 0) return -1;
+
+    /* 分配或重新分配虚拟屏幕缓冲区 */
+    size_t needed = width * height * channels;
+    if (!system->virtual_screen_buffer ||
+        system->virtual_screen_width != width ||
+        system->virtual_screen_height != height ||
+        system->virtual_screen_channels != channels) {
+        safe_free((void**)&system->virtual_screen_buffer);
+        system->virtual_screen_buffer = (float*)safe_malloc(needed * sizeof(float));
+        if (!system->virtual_screen_buffer) {
+            system->virtual_screen_width = 0;
+            system->virtual_screen_height = 0;
+            system->virtual_screen_channels = 0;
+            return -1;
+        }
+    }
+
+    memcpy(system->virtual_screen_buffer, screen_data, needed * sizeof(float));
+    system->virtual_screen_width = width;
+    system->virtual_screen_height = height;
+    system->virtual_screen_channels = channels;
+
+    /* 自动启用无头模式 */
+    system->headless_mode = 1;
+
+    return 0;
+}
+
+int co_get_virtual_screen(const COSystem* system, float* screen_data,
+                           size_t* width, size_t* height, size_t* channels) {
+    if (!system || !screen_data || !width || !height || !channels) return -1;
+    if (!system->virtual_screen_buffer) return -1;
+
+    size_t needed = system->virtual_screen_width * system->virtual_screen_height *
+                    system->virtual_screen_channels;
+    memcpy(screen_data, system->virtual_screen_buffer, needed * sizeof(float));
+    *width = system->virtual_screen_width;
+    *height = system->virtual_screen_height;
+    *channels = system->virtual_screen_channels;
+    return 0;
+}
+
+int co_clear_virtual_screen(COSystem* system) {
+    if (!system) return -1;
+    safe_free((void**)&system->virtual_screen_buffer);
+    system->virtual_screen_width = 0;
+    system->virtual_screen_height = 0;
+    system->virtual_screen_channels = 0;
+    system->headless_mode = 0;
     return 0;
 }

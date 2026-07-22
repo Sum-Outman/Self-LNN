@@ -1,5 +1,6 @@
 #include "selflnn/core/ode_solvers.h"
 #include "selflnn/utils/memory_utils.h"
+#include "selflnn/utils/logging.h"          /* log_warn等日志宏 */
 #include <string.h>
 #include <math.h>
 #include <stdlib.h>

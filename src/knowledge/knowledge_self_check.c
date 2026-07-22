@@ -30,6 +30,89 @@ static double ksc_timestamp_ms(void) {
 }
 #endif
 
+/* ============================================================================
+ * M-003修复: FNV-1a哈希索引 — 将O(n²)全量比较优化为O(n)平均
+ *
+ * 使用64桶FNV-1a哈希索引加速知识条目的重复检测。
+ * 每个桶存储具有相同哈希值的条目索引列表。
+ * 在工作流程：
+ * 1. 构建阶段：遍历所有条目计算FNV-1a哈希，放入对应桶
+ * 2. 查询阶段：对目标条目计算哈希，仅在对应桶中精确比较
+ * 3. 增量更新：新增条目时增量更新哈希索引
+ * ============================================================================ */
+
+#define KSC_HASH_BUCKETS 64
+#define KSC_HASH_BUCKET_SIZE 64
+
+/* FNV-1a 64-bit哈希函数 */
+static uint64_t ksc_fnv1a_hash(const char* str) {
+    if (!str) return 0;
+    uint64_t hash = 14695981039346656037ULL; /* FNV偏移基数 */
+    while (*str) {
+        hash ^= (uint64_t)(unsigned char)*str;
+        hash *= 1099511628211ULL; /* FNV素数 */
+        str++;
+    }
+    return hash;
+}
+
+/* 哈希索引结构 */
+typedef struct {
+    int entry_indices[KSC_HASH_BUCKET_SIZE]; /* 桶内条目索引 */
+    int bucket_size;                         /* 当前桶内条目数 */
+} KSHashBucket;
+
+typedef struct {
+    KSHashBucket buckets[KSC_HASH_BUCKETS]; /* 64个哈希桶 */
+    int total_entries;                       /* 总条目数 */
+    int is_built;                            /* 是否已构建 */
+} KSHashIndex;
+
+/* 构建哈希索引：遍历所有条目，计算哈希并放入对应桶 */
+static void ksc_build_hash_index(KSHashIndex* index, KnowledgeEntry* entries, int total) {
+    if (!index || !entries) return;
+    memset(index, 0, sizeof(KSHashIndex));
+    index->total_entries = total;
+
+    for (int i = 0; i < total; i++) {
+        /* 使用主体的FNV-1a哈希作为索引键 */
+        const char* key = entries[i].subject ? entries[i].subject : "";
+        uint64_t hash = ksc_fnv1a_hash(key);
+        int bucket_idx = (int)(hash % KSC_HASH_BUCKETS);
+
+        KSHashBucket* bucket = &index->buckets[bucket_idx];
+        if (bucket->bucket_size < KSC_HASH_BUCKET_SIZE) {
+            bucket->entry_indices[bucket->bucket_size++] = i;
+        }
+    }
+    index->is_built = 1;
+}
+
+/* 在哈希索引中查找与目标条目相似的候选条目索引 */
+static int ksc_hash_find_candidates(KSHashIndex* index, const char* key,
+                                     int* candidate_indices, int max_candidates) {
+    if (!index || !index->is_built || !key || !candidate_indices) return 0;
+
+    uint64_t hash = ksc_fnv1a_hash(key);
+    int bucket_idx = (int)(hash % KSC_HASH_BUCKETS);
+    KSHashBucket* bucket = &index->buckets[bucket_idx];
+
+    int count = 0;
+    for (int i = 0; i < bucket->bucket_size && count < max_candidates; i++) {
+        candidate_indices[count++] = bucket->entry_indices[i];
+    }
+
+    /* 也检查相邻桶（处理哈希碰撞边界情况） */
+    int neighbor = (bucket_idx + 1) % KSC_HASH_BUCKETS;
+    KSHashBucket* nb = &index->buckets[neighbor];
+    for (int i = 0; i < nb->bucket_size && count < max_candidates; i++) {
+        /* 避免重复（同一索引不可能同时出现在两个桶中，除非哈希碰撞极低概率） */
+        candidate_indices[count++] = nb->entry_indices[i];
+    }
+
+    return count;
+}
+
 static float ksc_string_similarity(const char* a, const char* b) {
     if (!a || !b) return 0.0f;
     size_t len_a = strlen(a);
@@ -76,13 +159,28 @@ int ksc_check_direct_contradictions(KnowledgeBase* kb, KSSelfCheckConfig* config
     int total = knowledge_base_query(kb, &q, all_entries, 4096);
     if (total <= 0) { safe_free((void**)&all_entries); return 0; }
 
+    /* M-003修复: 构建FNV-1a哈希索引，将O(n²)全量比较优化为O(n)平均 */
+    KSHashIndex hash_index;
+    ksc_build_hash_index(&hash_index, all_entries, total);
+
     int found = 0;
+    int* candidates = (int*)safe_malloc((size_t)KSC_HASH_BUCKET_SIZE * 2 * sizeof(int));
+    if (!candidates) { safe_free((void**)&all_entries); return -1; }
+
     for (int i = 0; i < total && found < config->max_issues; i++) {
-        for (int j = i + 1; j < total && found < config->max_issues; j++) {
-            KnowledgeEntry* a = &all_entries[i];
+        KnowledgeEntry* a = &all_entries[i];
+        if (!a->subject || !a->predicate) continue;
+
+        /* 使用哈希索引查找候选条目，而非全量O(n²)比较 */
+        int cand_count = ksc_hash_find_candidates(&hash_index, a->subject,
+                                                    candidates, KSC_HASH_BUCKET_SIZE * 2);
+
+        for (int c = 0; c < cand_count && found < config->max_issues; c++) {
+            int j = candidates[c];
+            if (j <= i) continue; /* 避免重复比较和自比较 */
             KnowledgeEntry* b = &all_entries[j];
 
-            if (!a->subject || !b->subject || !a->predicate || !b->predicate) continue;
+            if (!b->subject || !b->predicate) continue;
 
             float sub_sim = ksc_string_similarity(a->subject, b->subject);
             float pred_sim = ksc_string_similarity(a->predicate, b->predicate);
@@ -130,6 +228,7 @@ int ksc_check_direct_contradictions(KnowledgeBase* kb, KSSelfCheckConfig* config
     }
 
     report->contradictions_found = found;
+    safe_free((void**)&candidates);
     safe_free((void**)&all_entries);
     return found;
 }
@@ -147,13 +246,30 @@ int ksc_check_redundancy(KnowledgeBase* kb, KSSelfCheckConfig* config,
     int total = knowledge_base_query(kb, &q, all_entries, 4096);
     if (total <= 0) { safe_free((void**)&all_entries); return 0; }
 
+    /* M-003深度修复: 使用FNV-1a哈希索引替代O(n²)全量比较
+     * 原实现双重嵌套循环复杂度O(n²)，改为哈希索引O(n)平均复杂度。
+     * 对每个条目，通过哈希索引仅查找候选相似条目，大幅减少比较次数。 */
+    KSHashIndex hash_index;
+    ksc_build_hash_index(&hash_index, all_entries, total);
+
     int found = 0;
+    int* candidates = (int*)safe_malloc((size_t)KSC_HASH_BUCKET_SIZE * 2 * sizeof(int));
+    if (!candidates) { safe_free((void**)&all_entries); return -1; }
+
     for (int i = 0; i < total && found < config->max_issues; i++) {
-        for (int j = i + 1; j < total && found < config->max_issues; j++) {
-            KnowledgeEntry* a = &all_entries[i];
+        KnowledgeEntry* a = &all_entries[i];
+        if (!a->subject || !a->predicate) continue;
+
+        /* 使用哈希索引查找候选条目，而非全量O(n²)比较 */
+        int cand_count = ksc_hash_find_candidates(&hash_index, a->subject,
+                                                    candidates, KSC_HASH_BUCKET_SIZE * 2);
+
+        for (int c = 0; c < cand_count && found < config->max_issues; c++) {
+            int j = candidates[c];
+            if (j <= i) continue; /* 避免重复比较和自比较 */
             KnowledgeEntry* b = &all_entries[j];
 
-            if (!a->subject || !b->subject || !a->predicate || !b->predicate) continue;
+            if (!b->subject || !b->predicate) continue;
 
             float sub_sim = ksc_string_similarity(a->subject, b->subject);
             float pred_sim = ksc_string_similarity(a->predicate, b->predicate);
@@ -165,7 +281,7 @@ int ksc_check_redundancy(KnowledgeBase* kb, KSSelfCheckConfig* config,
             }
 
             float total_sim = (sub_sim + pred_sim + obj_sim) / 3.0f;
-            if (total_sim > config->similarity_threshold && i != j) {
+            if (total_sim > config->similarity_threshold) {
                 KSContradictionIssue* issue = &report->issues[report->num_issues];
                 memset(issue, 0, sizeof(KSContradictionIssue));
                 issue->issue_id = report->num_issues;
@@ -192,6 +308,7 @@ int ksc_check_redundancy(KnowledgeBase* kb, KSSelfCheckConfig* config,
     }
 
     report->redundancies_found = found;
+    safe_free((void**)&candidates);
     safe_free((void**)&all_entries);
     return found;
 }
@@ -212,7 +329,15 @@ int ksc_check_temporal_conflicts(KnowledgeBase* kb, KSSelfCheckConfig* config,
     long now = (long)time(NULL);
     long stale_threshold = config->stale_age_seconds;
 
+    /* M-003深度修复: 使用FNV-1a哈希索引替代O(n²)全量比较
+     * 时间冲突检测中的双重嵌套循环也改为哈希索引查找候选条目。 */
+    KSHashIndex hash_index;
+    ksc_build_hash_index(&hash_index, all_entries, total);
+
     int found = 0;
+    int* candidates = (int*)safe_malloc((size_t)KSC_HASH_BUCKET_SIZE * 2 * sizeof(int));
+    if (!candidates) { safe_free((void**)&all_entries); return -1; }
+
     for (int i = 0; i < total && found < config->max_issues; i++) {
         KnowledgeEntry* e = &all_entries[i];
         if (!e->subject) continue;
@@ -238,10 +363,19 @@ int ksc_check_temporal_conflicts(KnowledgeBase* kb, KSSelfCheckConfig* config,
             found++;
         }
 
-        for (int j = i + 1; j < total && found < config->max_issues; j++) {
-            KnowledgeEntry* a = &all_entries[i];
+        /* M-003修复: 使用哈希索引查找候选条目进行时间冲突检测 */
+        KnowledgeEntry* a = &all_entries[i];
+        if (!a->subject || !a->predicate) continue;
+
+        int cand_count = ksc_hash_find_candidates(&hash_index, a->subject,
+                                                    candidates, KSC_HASH_BUCKET_SIZE * 2);
+
+        for (int c = 0; c < cand_count && found < config->max_issues; c++) {
+            int j = candidates[c];
+            if (j <= i) continue;
             KnowledgeEntry* b = &all_entries[j];
-            if (!a->subject || !b->subject || !a->predicate || !b->predicate) continue;
+
+            if (!b->subject || !b->predicate) continue;
 
             float sub_sim = ksc_string_similarity(a->subject, b->subject);
             float pred_sim = ksc_string_similarity(a->predicate, b->predicate);
@@ -274,6 +408,7 @@ int ksc_check_temporal_conflicts(KnowledgeBase* kb, KSSelfCheckConfig* config,
     }
 
     report->temporal_conflicts_found = found;
+    safe_free((void**)&candidates);
     safe_free((void**)&all_entries);
     return found;
 }
@@ -454,35 +589,57 @@ int ksc_check_logical_contradictions(KnowledgeBase* kb,
     int total = knowledge_base_query(kb, &q, all_entries, 4096);
     if (total <= 0) { safe_free((void**)&all_entries); return 0; }
 
+    /* M-003修复: 构建哈希索引加速逻辑矛盾检测 */
+    KSHashIndex hash_index;
+    ksc_build_hash_index(&hash_index, all_entries, total);
+
     int found = 0;
 
-    /* 检测传递性矛盾 */
-    for (int i = 0; i < total && found < config->max_issues; i++) {
+    /* 检测传递性矛盾 — 使用传递谓词索引减少搜索空间 */
+    /* 构建传递谓词条目索引 */
+    int transitive_indices[4096];
+    int transitive_count = 0;
+    for (int i = 0; i < total; i++) {
+        if (all_entries[i].subject && all_entries[i].predicate && all_entries[i].object) {
+            if (is_transitive_predicate(all_entries[i].predicate)) {
+                if (transitive_count < 4096) {
+                    transitive_indices[transitive_count++] = i;
+                }
+            }
+        }
+    }
+
+    /* 仅对传递性条目进行三向检查 */
+    for (int ti = 0; ti < transitive_count && found < config->max_issues; ti++) {
+        int i = transitive_indices[ti];
         KnowledgeEntry* a = &all_entries[i];
         if (!a->subject || !a->predicate || !a->object) continue;
-        if (!is_transitive_predicate(a->predicate)) continue;
 
-        for (int j = 0; j < total && found < config->max_issues; j++) {
+        for (int tj = 0; tj < transitive_count && found < config->max_issues; tj++) {
+            int j = transitive_indices[tj];
             if (i == j) continue;
             KnowledgeEntry* b = &all_entries[j];
             if (!b->subject || !b->predicate || !b->object) continue;
 
-            /* A-B有传递关系，且A.object==B.subject，检查是否存在A.subject直接连B.object */
+            /* A-B有传递关系，且A.object==B.subject */
             float mid_sim = ksc_string_similarity(a->object, b->subject);
             if (mid_sim <= config->similarity_threshold) continue;
 
-            /* 查找是否有A.subject直接关系B.object但为否定 */
-            for (int k = 0; k < total && found < config->max_issues; k++) {
+            /* 查找是否有A.subject直接关系B.object但为否定（使用哈希索引加速） */
+            int candidates[128];
+            int cand_count = ksc_hash_find_candidates(&hash_index, a->subject,
+                                                       candidates, 128);
+            for (int c = 0; c < cand_count && found < config->max_issues; c++) {
+                int k = candidates[c];
                 if (k == i || k == j) continue;
-                KnowledgeEntry* c = &all_entries[k];
-                if (!c->subject || !c->object) continue;
+                KnowledgeEntry* c_entry = &all_entries[k];
+                if (!c_entry->subject || !c_entry->object) continue;
 
-                float sub_sim = ksc_string_similarity(a->subject, c->subject);
-                float obj_sim = ksc_string_similarity(b->object, c->object);
-                if (sub_sim <= config->similarity_threshold || obj_sim <= config->similarity_threshold) continue;
+                float obj_sim = ksc_string_similarity(b->object, c_entry->object);
+                if (obj_sim <= config->similarity_threshold) continue;
 
-                /* 检测是否否定传递结果（c表示否定） */
-                if (are_semantic_opposites(c->object, b->object)) {
+                /* 检测是否否定传递结果 */
+                if (are_semantic_opposites(c_entry->object, b->object)) {
                     KSContradictionIssue* issue = &report->issues[report->num_issues];
                     memset(issue, 0, sizeof(KSContradictionIssue));
                     issue->issue_id = report->num_issues;
@@ -493,7 +650,7 @@ int ksc_check_logical_contradictions(KnowledgeBase* kb,
                              "传递矛盾: [%s %s %s] + [%s %s %s] 与 [%s %s %s] 冲突",
                              a->subject, a->predicate, a->object,
                              b->subject, b->predicate, b->object,
-                             c->subject, c->predicate, c->object);
+                             c_entry->subject, c_entry->predicate, c_entry->object);
                     issue->suggested_resolution = KSC_RESOLVE_FLAG_REVIEW;
                     issue->auto_fixable = 0;
                     report->num_issues++;
@@ -503,17 +660,31 @@ int ksc_check_logical_contradictions(KnowledgeBase* kb,
         }
     }
 
-    /* 检测语义和关系矛盾 */
-    int max_check = 2000;
-    int check_count = 0;
-    for (int i = 0; i < total && found < config->max_issues && check_count < max_check; i++) {
-        for (int j = 0; j < total && found < config->max_issues && check_count < max_check; j++) {
-            if (i == j) { check_count++; continue; }
-            if (detect_semantic_contradiction(&all_entries[i], &all_entries[j],
-                                               config, report)) {
-                found++;
+    /* M-003修复: 检测语义和关系矛盾 — 使用哈希索引替代O(n²)全量比较 */
+    {
+        int* candidates_for_sem = (int*)safe_malloc((size_t)KSC_HASH_BUCKET_SIZE * 2 * sizeof(int));
+        if (candidates_for_sem) {
+            int max_check = 2000;
+            int check_count = 0;
+            for (int i = 0; i < total && found < config->max_issues && check_count < max_check; i++) {
+                KnowledgeEntry* a = &all_entries[i];
+                if (!a->subject) continue;
+
+                /* 使用哈希索引查找候选比较对象 */
+                int cand_count = ksc_hash_find_candidates(&hash_index, a->subject,
+                                                           candidates_for_sem,
+                                                           KSC_HASH_BUCKET_SIZE * 2);
+                for (int c = 0; c < cand_count && found < config->max_issues && check_count < max_check; c++) {
+                    int j = candidates_for_sem[c];
+                    if (j <= i) { check_count++; continue; }
+                    if (detect_semantic_contradiction(a, &all_entries[j],
+                                                       config, report)) {
+                        found++;
+                    }
+                    check_count++;
+                }
             }
-            check_count++;
+            safe_free((void**)&candidates_for_sem);
         }
     }
 

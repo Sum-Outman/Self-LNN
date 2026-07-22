@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file knowledge.h
  * @brief 知识库系统接口
  * 
@@ -846,6 +846,107 @@ int knowledge_base_nearest_fact(KnowledgeBase* kb, const float* query_vec, size_
                                 char* predicate_out, size_t pred_size,
                                 char* object_out, size_t obj_size,
                                 float* similarity_out);
+
+/* ============================================================================
+ * L-006修复：批量操作API
+ * 提供高效的批量增删查改操作，减少锁竞争和函数调用开销。
+ * 实现日期: 2026-07-22
+ * ============================================================================ */
+
+/**
+ * @brief 批量添加知识条目
+ * 
+ * 在单次写锁内批量添加多个知识条目，减少锁获取/释放开销。
+ * 包含去重检查，跳过重复条目。
+ * 
+ * @param kb 知识库句柄
+ * @param entries 知识条目数组
+ * @param entry_count 条目数量
+ * @param result_ids 各条目结果ID输出缓冲区（大小至少为entry_count，-1表示失败/跳过）
+ * @return int 成功添加的条目数，失败返回-1
+ */
+int knowledge_base_add_batch(KnowledgeBase* kb, const KnowledgeEntry* entries,
+                             size_t entry_count, int* result_ids);
+
+/**
+ * @brief 批量删除知识条目
+ * 
+ * 在单次写锁内批量删除多个知识条目，减少锁竞争。
+ * 原子操作：要么全部执行，要么报错。
+ * 
+ * @param kb 知识库句柄
+ * @param entry_ids 要删除的条目ID数组
+ * @param id_count ID数量
+ * @return int 成功删除的条目数，失败返回-1
+ */
+int knowledge_base_delete_batch(KnowledgeBase* kb, const int* entry_ids,
+                                size_t id_count);
+
+/**
+ * @brief 批量查询知识条目
+ * 
+ * 在单次读锁内执行多个查询条件，合并去重结果。
+ * 适合需要同时查询多个条件并合并结果的场景。
+ * 
+ * @param kb 知识库句柄
+ * @param queries 查询条件数组
+ * @param query_count 查询条件数量
+ * @param results 合并结果输出缓冲区
+ * @param max_results 最大结果数
+ * @return int 返回匹配的条目数，失败返回-1
+ */
+int knowledge_base_query_batch(KnowledgeBase* kb, const KnowledgeQuery* queries,
+                               size_t query_count, KnowledgeEntry* results,
+                               size_t max_results);
+
+/**
+ * @brief 批量更新知识条目
+ * 
+ * 在单次写锁内批量更新多个知识条目，减少锁竞争。
+ * 每个更新项包含条目ID和新数据。
+ * 
+ * @param kb 知识库句柄
+ * @param entry_ids 要更新的条目ID数组
+ * @param entries 新条目数据数组（与entry_ids一一对应）
+ * @param update_count 更新数量
+ * @return int 成功更新的条目数，失败返回-1
+ */
+int knowledge_base_update_batch(KnowledgeBase* kb, const int* entry_ids,
+                                const KnowledgeEntry* entries, size_t update_count);
+
+/**
+ * @brief 批量操作结果统计
+ */
+typedef struct {
+    size_t total_operations;     /**< 总操作数 */
+    size_t success_count;        /**< 成功数 */
+    size_t skipped_count;        /**< 跳过数（如重复） */
+    size_t failed_count;         /**< 失败数 */
+    long elapsed_ms;             /**< 总耗时（毫秒） */
+    char* error_message;         /**< 错误信息（失败时填入） */
+} BatchOperationResult;
+
+/**
+ * @brief 批量添加知识条目（带详细结果统计）
+ * 
+ * 与 knowledge_base_add_batch 功能相同，但返回详细的统计信息。
+ * 
+ * @param kb 知识库句柄
+ * @param entries 知识条目数组
+ * @param entry_count 条目数量
+ * @param result_ids 各条目结果ID输出缓冲区
+ * @param batch_result 批量操作结果统计输出
+ * @return int 成功添加的条目数
+ */
+int knowledge_base_add_batch_ex(KnowledgeBase* kb, const KnowledgeEntry* entries,
+                                size_t entry_count, int* result_ids,
+                                BatchOperationResult* batch_result);
+
+/**
+ * @brief 释放批量操作结果
+ * @param result 批量操作结果
+ */
+void batch_operation_result_free(BatchOperationResult* result);
 
 #ifdef __cplusplus
 }

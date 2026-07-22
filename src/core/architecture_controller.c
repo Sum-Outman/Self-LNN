@@ -1129,3 +1129,679 @@ int arch_controller_rollback(ArchitectureController* controller,
     log_info("[架构控制器] 安全回滚成功: 已从 %s 恢复到变更前状态", archive_path);
     return 0;
 }
+
+/* ================================================================
+ * H-004修复: 运行时激活度监控与在线结构调整
+ *
+ * 实现需求R49: "当任务复杂度升高时自动增加神经元、
+ * 移除冗余或低激活度神经元、调整层数"
+ *
+ * 核心机制:
+ *   1. 指数移动平均(EMA)收集每层神经元激活统计
+ *      - 均值: 反映神经元平均活跃度
+ *      - 方差: 反映神经元响应多样性
+ *      - 最小/最大值: 检测死亡/饱和神经元
+ *   2. 激活熵评估任务复杂度
+ *      - 高熵 → 任务复杂 → 需要更多神经元
+ *      - 低熵 → 任务简单 → 可修剪冗余神经元
+ *   3. 连续确认机制防止误触发
+ *      - 需要连续N次检查都满足触发条件
+ *   4. 自适应阈值
+ *      - 基于历史复杂度动态调整触发阈值
+ * ================================================================ */
+
+/* ============ 激活度监控器生命周期 ============ */
+
+ArchActivationMonitor* arch_controller_create_activation_monitor(
+    int num_layers,
+    const size_t* hidden_sizes,
+    int check_interval)
+{
+    int i;
+    ArchActivationMonitor* monitor;
+
+    if (num_layers <= 0 || num_layers > ARCH_MAX_LAYERS || !hidden_sizes) {
+        log_error("[激活监控] 创建失败: 参数无效 (num_layers=%d)", num_layers);
+        return NULL;
+    }
+
+    monitor = (ArchActivationMonitor*)safe_calloc(1, sizeof(ArchActivationMonitor));
+    if (!monitor) {
+        log_error("[激活监控] 内存分配失败");
+        return NULL;
+    }
+
+    monitor->num_layers = num_layers;
+    monitor->layers = (ArchLayerActivationStats*)safe_calloc(
+        (size_t)num_layers, sizeof(ArchLayerActivationStats));
+    if (!monitor->layers) {
+        safe_free((void**)&monitor);
+        return NULL;
+    }
+
+    for (i = 0; i < num_layers; i++) {
+        size_t hs = hidden_sizes[i];
+        if (hs == 0) hs = ARCH_MIN_HIDDEN_SIZE;
+
+        monitor->layers[i].hidden_size = hs;
+        monitor->layers[i].ema_decay = 0.99f;
+        monitor->layers[i].sample_count = 0;
+
+        monitor->layers[i].ema_mean = (float*)safe_calloc(hs, sizeof(float));
+        monitor->layers[i].ema_variance = (float*)safe_calloc(hs, sizeof(float));
+        monitor->layers[i].ema_min = (float*)safe_calloc(hs, sizeof(float));
+        monitor->layers[i].ema_max = (float*)safe_calloc(hs, sizeof(float));
+
+        if (!monitor->layers[i].ema_mean || !monitor->layers[i].ema_variance ||
+            !monitor->layers[i].ema_min || !monitor->layers[i].ema_max) {
+            /* 清理已分配资源 */
+            arch_controller_free_activation_monitor(monitor);
+            return NULL;
+        }
+
+        /* 初始化最小值/最大值 */
+        {
+            size_t j;
+            for (j = 0; j < hs; j++) {
+                monitor->layers[i].ema_min[j] = 1.0f;
+                monitor->layers[i].ema_max[j] = 0.0f;
+            }
+        }
+    }
+
+    monitor->check_interval = (check_interval > 0) ? check_interval : 100;
+    monitor->low_activity_threshold = 0.01f;
+    monitor->saturation_threshold = 0.95f;
+    monitor->low_activity_ratio_trigger = 0.15f;
+    monitor->saturation_ratio_trigger = 0.10f;
+    monitor->consecutive_checks_required = 3;
+    monitor->total_samples = 0;
+    monitor->is_initialized = 1;
+    monitor->current_complexity_score = 0.0f;
+    monitor->complexity_history_idx = 0;
+    monitor->complexity_history_count = 0;
+    {
+        int ci;
+        for (ci = 0; ci < 16; ci++) {
+            monitor->complexity_history[ci] = 0.0f;
+        }
+    }
+
+    log_info("[激活监控] 初始化完成: %d层, 检查间隔=%d, 低激活阈值=%.3f, 饱和阈值=%.3f",
+             num_layers, monitor->check_interval,
+             monitor->low_activity_threshold, monitor->saturation_threshold);
+    return monitor;
+}
+
+void arch_controller_free_activation_monitor(ArchActivationMonitor* monitor) {
+    int i;
+    if (!monitor) return;
+
+    if (monitor->layers) {
+        for (i = 0; i < monitor->num_layers; i++) {
+            safe_free((void**)&monitor->layers[i].ema_mean);
+            safe_free((void**)&monitor->layers[i].ema_variance);
+            safe_free((void**)&monitor->layers[i].ema_min);
+            safe_free((void**)&monitor->layers[i].ema_max);
+        }
+        safe_free((void**)&monitor->layers);
+    }
+    memset(monitor, 0, sizeof(ArchActivationMonitor));
+    safe_free((void**)&monitor);
+}
+
+/* ============ 激活值记录 ============ */
+
+void arch_controller_record_activation(ArchActivationMonitor* monitor,
+                                        int layer_idx,
+                                        const float* activations,
+                                        size_t hidden_size) {
+    size_t j;
+    float decay;
+    ArchLayerActivationStats* layer;
+
+    if (!monitor || !monitor->is_initialized || !activations) return;
+    if (layer_idx < 0 || layer_idx >= monitor->num_layers) return;
+    if (hidden_size == 0) return;
+
+    layer = &monitor->layers[layer_idx];
+    decay = layer->ema_decay;
+    {
+        size_t hs = (hidden_size < layer->hidden_size) ? hidden_size : layer->hidden_size;
+
+        for (j = 0; j < hs; j++) {
+            float val = activations[j];
+            float old_mean = layer->ema_mean[j];
+            float old_var = layer->ema_variance[j];
+
+            /* NaN/Inf保护 */
+            if (isnan(val) || isinf(val)) {
+                val = 0.0f;
+            }
+
+            /* EMA更新均值: mean = decay * old_mean + (1-decay) * val */
+            layer->ema_mean[j] = decay * old_mean + (1.0f - decay) * val;
+
+            /* EMA更新方差: var = decay * old_var + (1-decay) * (val - old_mean)^2 */
+            {
+                float diff = val - old_mean;
+                layer->ema_variance[j] = decay * old_var + (1.0f - decay) * diff * diff;
+            }
+
+            /* 更新最小值/最大值 */
+            if (val < layer->ema_min[j]) {
+                layer->ema_min[j] = decay * layer->ema_min[j] + (1.0f - decay) * val;
+            } else {
+                layer->ema_min[j] = decay * layer->ema_min[j] + (1.0f - decay) * layer->ema_min[j];
+            }
+            if (val > layer->ema_max[j]) {
+                layer->ema_max[j] = decay * layer->ema_max[j] + (1.0f - decay) * val;
+            } else {
+                layer->ema_max[j] = decay * layer->ema_max[j] + (1.0f - decay) * layer->ema_max[j];
+            }
+        }
+    }
+
+    layer->sample_count++;
+    monitor->total_samples++;
+
+    /* 定期记录日志 */
+    if (monitor->total_samples % 1000 == 0) {
+        log_debug("[激活监控] 已收集 %zu 个样本 (层%d: %zu样本)",
+                  monitor->total_samples, layer_idx, layer->sample_count);
+    }
+}
+
+/* ============ 任务复杂度评估 ============ */
+
+int arch_controller_assess_complexity(ArchActivationMonitor* monitor,
+                                       ArchComplexityMetrics* metrics) {
+    int li;
+    size_t total_neurons;
+    size_t low_activity_total;
+    size_t saturated_total;
+    float total_entropy;
+    float total_variance;
+    size_t j;
+
+    if (!monitor || !monitor->is_initialized || !metrics) return -1;
+    if (monitor->total_samples == 0) {
+        memset(metrics, 0, sizeof(ArchComplexityMetrics));
+        snprintf(metrics->diagnosis, sizeof(metrics->diagnosis), "无激活数据，无法评估复杂度");
+        return -1;
+    }
+
+    memset(metrics, 0, sizeof(ArchComplexityMetrics));
+    total_neurons = 0;
+    low_activity_total = 0;
+    saturated_total = 0;
+    total_entropy = 0.0f;
+    total_variance = 0.0f;
+
+    for (li = 0; li < monitor->num_layers; li++) {
+        ArchLayerActivationStats* layer = &monitor->layers[li];
+        size_t hs = layer->hidden_size;
+        float layer_entropy = 0.0f;
+        float layer_variance_sum = 0.0f;
+        size_t layer_low = 0;
+        size_t layer_saturated = 0;
+
+        if (layer->sample_count == 0) continue;
+
+        for (j = 0; j < hs; j++) {
+            float mean_val = layer->ema_mean[j];
+            float var_val = layer->ema_variance[j];
+
+            /* NaN检查 */
+            if (isnan(mean_val)) mean_val = 0.0f;
+            if (isnan(var_val)) var_val = 0.0f;
+
+            /* 激活熵: 基于均值归一化后的分布熵
+             * 使用 |mean| 作为概率估计，计算 -p*log(p) */
+            {
+                float abs_mean = fabsf(mean_val);
+                float p = (abs_mean < 1e-7f) ? 0.0f : abs_mean;
+                if (p > 0.0f) {
+                    layer_entropy -= p * logf(p + 1e-10f);
+                }
+            }
+
+            layer_variance_sum += var_val;
+
+            /* 检测低激活度神经元: ema_max < 0.01 表示持续不活跃 */
+            if (layer->ema_max[j] < monitor->low_activity_threshold) {
+                layer_low++;
+            }
+
+            /* 检测饱和神经元: ema_max > 0.95 且 ema_min > 0.9 表示持续饱和 */
+            if (layer->ema_max[j] > monitor->saturation_threshold &&
+                layer->ema_min[j] > 0.9f) {
+                layer_saturated++;
+            }
+        }
+
+        total_neurons += hs;
+        low_activity_total += layer_low;
+        saturated_total += layer_saturated;
+        total_entropy += layer_entropy / (float)hs;
+        total_variance += layer_variance_sum / (float)hs;
+    }
+
+    if (total_neurons == 0) {
+        memset(metrics, 0, sizeof(ArchComplexityMetrics));
+        return -1;
+    }
+
+    /* 填充指标 */
+    metrics->activation_entropy = total_entropy / (float)monitor->num_layers;
+    metrics->activation_variance = total_variance / (float)monitor->num_layers;
+    metrics->gradient_norm = 0.0f; /* 推理时不可用 */
+    metrics->saturation_ratio = (float)saturated_total / (float)total_neurons;
+    metrics->low_activity_ratio = (float)low_activity_total / (float)total_neurons;
+
+    /* 综合复杂度评分: 熵加权 + 方差加权 + 饱和惩罚
+     * 熵越高 → 任务越复杂
+     * 方差越高 → 响应多样性越大 → 需要更多容量
+     * 饱和度高 → 网络容量不足 → 需要扩展 */
+    {
+        float entropy_score = metrics->activation_entropy * 2.5f;  /* 熵最大贡献 */
+        float variance_score = metrics->activation_variance * 1.5f;
+        float saturation_score = metrics->saturation_ratio * 5.0f;  /* 饱和是强烈信号 */
+        float low_activity_penalty = metrics->low_activity_ratio * 3.0f; /* 低激活度惩罚 */
+
+        metrics->overall_complexity = entropy_score + variance_score + saturation_score;
+        /* 钳制到[0,1] */
+        if (metrics->overall_complexity > 1.0f) metrics->overall_complexity = 1.0f;
+        if (metrics->overall_complexity < 0.0f) metrics->overall_complexity = 0.0f;
+
+        /* 诊断 */
+        metrics->needs_expansion = 0;
+        metrics->needs_pruning = 0;
+        metrics->needs_layer_adjustment = 0;
+
+        if (metrics->saturation_ratio > monitor->saturation_ratio_trigger) {
+            metrics->needs_expansion = 1;
+        }
+        if (metrics->low_activity_ratio > monitor->low_activity_ratio_trigger) {
+            metrics->needs_pruning = 1;
+        }
+        if (metrics->overall_complexity > 0.8f && metrics->needs_expansion) {
+            metrics->needs_layer_adjustment = 1;
+        }
+
+        snprintf(metrics->diagnosis, sizeof(metrics->diagnosis),
+                "复杂度=%.3f 熵=%.3f 方差=%.3f 饱和率=%.1f%% 低活率=%.1f%% → %s%s%s",
+                metrics->overall_complexity,
+                metrics->activation_entropy,
+                metrics->activation_variance,
+                metrics->saturation_ratio * 100.0f,
+                metrics->low_activity_ratio * 100.0f,
+                metrics->needs_expansion ? "需扩展 " : "",
+                metrics->needs_pruning ? "需修剪 " : "",
+                metrics->needs_layer_adjustment ? "需调整层" : "无需调整");
+    }
+
+    /* 更新复杂度历史 */
+    monitor->complexity_history[monitor->complexity_history_idx] = metrics->overall_complexity;
+    monitor->complexity_history_idx = (monitor->complexity_history_idx + 1) % 16;
+    if (monitor->complexity_history_count < 16) {
+        monitor->complexity_history_count++;
+    }
+    monitor->current_complexity_score = metrics->overall_complexity;
+
+    return 0;
+}
+
+/* ============ 异常检测 ============ */
+
+int arch_controller_detect_activity_anomalies(ArchActivationMonitor* monitor,
+                                               size_t* low_activity_count,
+                                               size_t* saturated_count) {
+    int li;
+    size_t total_low;
+    size_t total_sat;
+    size_t j;
+
+    if (!monitor || !monitor->is_initialized) return -1;
+
+    total_low = 0;
+    total_sat = 0;
+
+    for (li = 0; li < monitor->num_layers; li++) {
+        ArchLayerActivationStats* layer = &monitor->layers[li];
+        size_t hs = layer->hidden_size;
+
+        if (layer->sample_count == 0) continue;
+
+        for (j = 0; j < hs; j++) {
+            if (layer->ema_max[j] < monitor->low_activity_threshold) {
+                total_low++;
+            }
+            if (layer->ema_max[j] > monitor->saturation_threshold &&
+                layer->ema_min[j] > 0.9f) {
+                total_sat++;
+            }
+        }
+    }
+
+    if (low_activity_count) *low_activity_count = total_low;
+    if (saturated_count) *saturated_count = total_sat;
+
+    return 0;
+}
+
+/* ============ 在线调整评估 ============ */
+
+int arch_controller_evaluate_online_adaptation(ArchActivationMonitor* monitor,
+                                                const LNN* lnn,
+                                                ArchOnlineAdaptationAdvice* advice) {
+    ArchComplexityMetrics metrics;
+    LNNConfig cfg;
+    float avg_complexity;
+    int ci;
+    float complexity_trend;
+    size_t j;
+
+    if (!monitor || !monitor->is_initialized || !lnn || !advice) return -1;
+
+    memset(advice, 0, sizeof(ArchOnlineAdaptationAdvice));
+
+    /* 评估当前复杂度 */
+    if (arch_controller_assess_complexity(monitor, &metrics) != 0) {
+        snprintf(advice->reason, sizeof(advice->reason), "无法评估复杂度（样本不足）");
+        return 0;
+    }
+
+    /* 获取当前配置 */
+    if (lnn_get_config(lnn, &cfg) != 0) {
+        return -1;
+    }
+
+    /* 计算复杂度趋势: 最近N个样本的移动平均 */
+    {
+        int valid_count = (monitor->complexity_history_count < 8) ?
+                          monitor->complexity_history_count : 8;
+        int start_idx = (monitor->complexity_history_idx + 16 - valid_count) % 16;
+        avg_complexity = 0.0f;
+        for (ci = 0; ci < valid_count; ci++) {
+            avg_complexity += monitor->complexity_history[(start_idx + ci) % 16];
+        }
+        avg_complexity /= (float)valid_count;
+
+        /* 趋势: 最近一半 vs 前一半 */
+        if (valid_count >= 4) {
+            float recent_half = 0.0f;
+            float older_half = 0.0f;
+            int half = valid_count / 2;
+            for (ci = 0; ci < half; ci++) {
+                recent_half += monitor->complexity_history[(start_idx + half + ci) % 16];
+                older_half += monitor->complexity_history[(start_idx + ci) % 16];
+            }
+            recent_half /= (float)half;
+            older_half /= (float)half;
+            complexity_trend = recent_half - older_half;
+        } else {
+            complexity_trend = 0.0f;
+        }
+    }
+
+    /* 检测异常神经元 */
+    {
+        size_t low_count = 0;
+        size_t sat_count = 0;
+        arch_controller_detect_activity_anomalies(monitor, &low_count, &sat_count);
+        advice->low_activity_count = low_count;
+        advice->saturated_count = sat_count;
+    }
+
+    /* 决策逻辑 */
+    advice->recommend_expand = 0;
+    advice->recommend_prune = 0;
+    advice->recommend_add_layer = 0;
+    advice->recommend_remove_layer = 0;
+    advice->target_hidden_size = cfg.hidden_size;
+    advice->target_num_layers = cfg.num_layers;
+
+    /* 扩展决策: 饱和率高 + 复杂度上升趋势 */
+    if (metrics.saturation_ratio > monitor->saturation_ratio_trigger &&
+        complexity_trend > 0.02f) {
+        advice->recommend_expand = 1;
+        /* 按饱和比例扩展: 扩展比例 = 饱和率 * 0.5 */
+        {
+            size_t expand_amount = (size_t)((float)cfg.hidden_size * metrics.saturation_ratio * 0.5f);
+            if (expand_amount < 32) expand_amount = 32;
+            advice->target_hidden_size = cfg.hidden_size + expand_amount;
+            if (advice->target_hidden_size > ARCH_MAX_HIDDEN_SIZE) {
+                advice->target_hidden_size = ARCH_MAX_HIDDEN_SIZE;
+            }
+        }
+        /* 如果已接近最大隐藏层维度，考虑增加层 */
+        if (cfg.hidden_size >= ARCH_MAX_HIDDEN_SIZE * 3 / 4 &&
+            cfg.num_layers < ARCH_MAX_LAYERS) {
+            advice->recommend_add_layer = 1;
+            advice->target_num_layers = cfg.num_layers + 1;
+        }
+        advice->confidence = metrics.saturation_ratio * 0.8f + fabsf(complexity_trend) * 2.0f;
+        if (advice->confidence > 0.95f) advice->confidence = 0.95f;
+        snprintf(advice->reason, sizeof(advice->reason),
+                "饱和率%.1f%%偏高+复杂度趋势%.3f上升, 建议扩展至%zu神经元",
+                metrics.saturation_ratio * 100.0f, complexity_trend,
+                advice->target_hidden_size);
+    }
+    /* 修剪决策: 低激活率高 + 复杂度下降趋势 */
+    else if (metrics.low_activity_ratio > monitor->low_activity_ratio_trigger &&
+             complexity_trend < -0.02f) {
+        advice->recommend_prune = 1;
+        /* 按低激活比例修剪: 修剪比例 = 低活率 * 0.4 */
+        {
+            size_t prune_amount = (size_t)((float)cfg.hidden_size * metrics.low_activity_ratio * 0.4f);
+            if (prune_amount < 16) prune_amount = 16;
+            if (prune_amount >= cfg.hidden_size) {
+                prune_amount = cfg.hidden_size / 4;
+            }
+            advice->target_hidden_size = cfg.hidden_size - prune_amount;
+            if (advice->target_hidden_size < ARCH_MIN_HIDDEN_SIZE) {
+                advice->target_hidden_size = ARCH_MIN_HIDDEN_SIZE;
+            }
+        }
+        /* 如果低激活率极高，考虑移除冗余层 */
+        if (metrics.low_activity_ratio > 0.3f && cfg.num_layers > 2) {
+            advice->recommend_remove_layer = 1;
+            advice->target_num_layers = cfg.num_layers - 1;
+        }
+        advice->confidence = metrics.low_activity_ratio * 0.7f;
+        if (advice->confidence > 0.9f) advice->confidence = 0.9f;
+        snprintf(advice->reason, sizeof(advice->reason),
+                "低活率%.1f%%偏高+复杂度趋势%.3f下降, 建议修剪至%zu神经元",
+                metrics.low_activity_ratio * 100.0f, complexity_trend,
+                advice->target_hidden_size);
+    }
+    /* 层调整决策: 仅在复杂度极高且已经最大化隐藏维度时 */
+    else if (metrics.needs_layer_adjustment && cfg.num_layers < ARCH_MAX_LAYERS) {
+        advice->recommend_add_layer = 1;
+        advice->target_num_layers = cfg.num_layers + 1;
+        advice->confidence = 0.7f;
+        snprintf(advice->reason, sizeof(advice->reason),
+                "复杂度%.3f极高, 建议增加层数 %d→%d",
+                metrics.overall_complexity, cfg.num_layers, advice->target_num_layers);
+    }
+    else {
+        advice->confidence = 0.0f;
+        snprintf(advice->reason, sizeof(advice->reason),
+                "无需调整: 复杂度=%.3f 饱和率=%.1f%% 低活率=%.1f%%",
+                metrics.overall_complexity,
+                metrics.saturation_ratio * 100.0f,
+                metrics.low_activity_ratio * 100.0f);
+    }
+
+    log_info("[激活监控] 评估完成: %s (置信度=%.2f)", advice->reason, advice->confidence);
+
+    return 0;
+}
+
+/* ============ 在线自适应调整执行 ============ */
+
+int arch_controller_online_adapt(ArchitectureController* controller,
+                                  LNN** lnn_ptr,
+                                  ArchActivationMonitor* monitor,
+                                  ArchitectureChangeResult* result) {
+    ArchOnlineAdaptationAdvice advice;
+    int ret;
+    ArchitectureChangeRequest req;
+    size_t j;
+
+    if (!controller || !lnn_ptr || !*lnn_ptr || !monitor || !monitor->is_initialized) {
+        if (result) {
+            memset(result, 0, sizeof(ArchitectureChangeResult));
+            result->success = 0;
+            result->error_code = SELFLNN_ERROR_INVALID_ARGUMENT;
+            snprintf(result->error_message, sizeof(result->error_message),
+                    "在线调整失败: 参数无效");
+        }
+        return -1;
+    }
+
+    /* 评估是否需要调整 */
+    ret = arch_controller_evaluate_online_adaptation(monitor, *lnn_ptr, &advice);
+    if (ret != 0) {
+        if (result) {
+            memset(result, 0, sizeof(ArchitectureChangeResult));
+            result->success = 0;
+            result->error_code = -400;
+        }
+        return ret;
+    }
+
+    /* 如果不需要调整，直接返回 */
+    if (advice.confidence < 0.5f) {
+        if (result) {
+            memset(result, 0, sizeof(ArchitectureChangeResult));
+            result->success = 1;
+            result->error_code = 0;
+            snprintf(result->error_message, sizeof(result->error_message),
+                    "无需在线调整: %s", advice.reason);
+        }
+        return 0;
+    }
+
+    /* 构建变更请求 */
+    req = arch_controller_default_request();
+    req.confidence = advice.confidence;
+    snprintf(req.source_module, sizeof(req.source_module), "OnlineAdaptation");
+    snprintf(req.reason, sizeof(req.reason), "%s", advice.reason);
+
+    if (advice.recommend_expand) {
+        req.type = ARCH_CHANGE_EXPAND_HIDDEN;
+        req.target_hidden_size = advice.target_hidden_size;
+    } else if (advice.recommend_prune) {
+        req.type = ARCH_CHANGE_SHRINK_HIDDEN;
+        req.target_hidden_size = advice.target_hidden_size;
+    } else if (advice.recommend_add_layer) {
+        req.type = ARCH_CHANGE_ADD_LAYER;
+        req.target_num_layers = advice.target_num_layers;
+    } else if (advice.recommend_remove_layer) {
+        req.type = ARCH_CHANGE_REMOVE_LAYER;
+        req.target_num_layers = advice.target_num_layers;
+    } else {
+        /* 理论上不会到达这里 */
+        return 0;
+    }
+
+    log_info("[激活监控] 在线调整触发: 类型=%d 置信度=%.2f 原因=%s",
+             req.type, req.confidence, req.reason);
+
+    /* 提交变更 */
+    ret = arch_controller_submit_change(controller, lnn_ptr, &req, result);
+
+    /* 变更后重置激活统计，开始新一轮监控 */
+    arch_controller_reset_activation_stats(monitor);
+
+    if (ret == SELFLNN_SUCCESS) {
+        /* 更新监控器的层配置以匹配新LNN */
+        LNN* new_lnn = *lnn_ptr;
+        if (new_lnn) {
+            LNNConfig new_cfg;
+            if (lnn_get_config(new_lnn, &new_cfg) == 0) {
+                /* 如果层数变化，重新分配监控层 */
+                if (new_cfg.num_layers != monitor->num_layers) {
+                    /* 释放旧层 */
+                    {
+                        int li;
+                        for (li = 0; li < monitor->num_layers; li++) {
+                            safe_free((void**)&monitor->layers[li].ema_mean);
+                            safe_free((void**)&monitor->layers[li].ema_variance);
+                            safe_free((void**)&monitor->layers[li].ema_min);
+                            safe_free((void**)&monitor->layers[li].ema_max);
+                        }
+                        safe_free((void**)&monitor->layers);
+                    }
+                    /* 分配新层 */
+                    monitor->num_layers = new_cfg.num_layers;
+                    monitor->layers = (ArchLayerActivationStats*)safe_calloc(
+                        (size_t)new_cfg.num_layers, sizeof(ArchLayerActivationStats));
+                    if (monitor->layers) {
+                        int li;
+                        for (li = 0; li < new_cfg.num_layers; li++) {
+                            size_t hs = (li == 0) ? new_cfg.input_size : new_cfg.hidden_size;
+                            monitor->layers[li].hidden_size = hs;
+                            monitor->layers[li].ema_decay = 0.99f;
+                            monitor->layers[li].ema_mean = (float*)safe_calloc(hs, sizeof(float));
+                            monitor->layers[li].ema_variance = (float*)safe_calloc(hs, sizeof(float));
+                            monitor->layers[li].ema_min = (float*)safe_calloc(hs, sizeof(float));
+                            monitor->layers[li].ema_max = (float*)safe_calloc(hs, sizeof(float));
+                            /* 初始化最小值/最大值 */
+                            {
+                                size_t j;
+                                for (j = 0; j < hs; j++) {
+                                    monitor->layers[li].ema_min[j] = 1.0f;
+                                    monitor->layers[li].ema_max[j] = 0.0f;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        log_info("[激活监控] 在线调整成功: %s", advice.reason);
+    } else {
+        log_warning("[激活监控] 在线调整失败: 错误码=%d", ret);
+    }
+
+    return ret;
+}
+
+/* ============ 统计重置 ============ */
+
+void arch_controller_reset_activation_stats(ArchActivationMonitor* monitor) {
+    int li;
+    size_t j;
+
+    if (!monitor || !monitor->is_initialized) return;
+
+    for (li = 0; li < monitor->num_layers; li++) {
+        ArchLayerActivationStats* layer = &monitor->layers[li];
+        size_t hs = layer->hidden_size;
+
+        /* 清零EMA统计 */
+        for (j = 0; j < hs; j++) {
+            layer->ema_mean[j] = 0.0f;
+            layer->ema_variance[j] = 0.0f;
+            layer->ema_min[j] = 1.0f;
+            layer->ema_max[j] = 0.0f;
+        }
+        layer->sample_count = 0;
+    }
+
+    monitor->total_samples = 0;
+    monitor->current_complexity_score = 0.0f;
+    monitor->complexity_history_idx = 0;
+    monitor->complexity_history_count = 0;
+    {
+        int ci;
+        for (ci = 0; ci < 16; ci++) {
+            monitor->complexity_history[ci] = 0.0f;
+        }
+    }
+
+    log_info("[激活监控] 统计已重置");
+}

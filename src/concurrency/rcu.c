@@ -623,3 +623,121 @@ int rcu_reset(RcuDomain* domain) {
     }
     return 0;
 }
+
+/* ============================================================================
+ * M-014修复: RCU Windows高精度定时
+ *
+ * 使用QueryPerformanceCounter替代Sleep(1)实现微秒级精度等待。
+ * 短等待(<1ms)使用自旋循环，长等待让出CPU时间片。
+ * ============================================================================ */
+
+#ifdef _WIN32
+/**
+ * @brief Windows高精度微秒级等待
+ *
+ * 使用QueryPerformanceCounter实现微秒级精度。
+ * 短等待(<1ms)使用自旋循环+_mm_pause()降低功耗。
+ * 长等待(>=1ms)使用Sleep(0)让出CPU时间片。
+ *
+ * @param wait_us 等待时间（微秒）
+ */
+static void rcu_high_precision_wait_us(uint64_t wait_us) {
+    static LARGE_INTEGER freq = {0};
+    static int freq_initialized = 0;
+
+    /* 首次调用时初始化频率 */
+    if (!freq_initialized) {
+        QueryPerformanceFrequency(&freq);
+        freq_initialized = 1;
+    }
+
+    if (freq.QuadPart == 0) {
+        /* QueryPerformanceCounter不可用，回退到Sleep */
+        if (wait_us >= 1000) {
+            Sleep((DWORD)(wait_us / 1000));
+        }
+        return;
+    }
+
+    /* 短等待(<1ms): 自旋循环 */
+    if (wait_us < 1000) {
+        LARGE_INTEGER start, current;
+        QueryPerformanceCounter(&start);
+        uint64_t target_ticks = (wait_us * (uint64_t)freq.QuadPart) / 1000000ULL;
+
+        do {
+            /* _mm_pause()提示CPU这是自旋等待，降低功耗 */
+            YieldProcessor();
+            QueryPerformanceCounter(&current);
+        } while ((uint64_t)(current.QuadPart - start.QuadPart) < target_ticks);
+    } else {
+        /* 长等待(>=1ms): Sleep(0)让出时间片 */
+        Sleep(0);
+    }
+}
+
+/**
+ * @brief 获取定时器精度（纳秒）
+ *
+ * @return 定时器精度（纳秒），失败返回0
+ */
+static uint64_t rcu_get_timer_resolution_ns(void) {
+    static LARGE_INTEGER freq = {0};
+    static int freq_initialized = 0;
+
+    if (!freq_initialized) {
+        QueryPerformanceFrequency(&freq);
+        freq_initialized = 1;
+    }
+
+    if (freq.QuadPart == 0) return 0;
+    /* 分辨率 = 1/频率 (秒) = 1e9/频率 (纳秒) */
+    return 1000000000ULL / (uint64_t)freq.QuadPart;
+}
+#else
+/**
+ * @brief POSIX高精度微秒级等待
+ */
+static void rcu_high_precision_wait_us(uint64_t wait_us) {
+    struct timespec ts;
+    ts.tv_sec = (time_t)(wait_us / 1000000);
+    ts.tv_nsec = (long)((wait_us % 1000000) * 1000);
+    nanosleep(&ts, NULL);
+}
+
+static uint64_t rcu_get_timer_resolution_ns(void) {
+    struct timespec ts;
+    if (clock_getres(CLOCK_MONOTONIC, &ts) == 0) {
+        return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+    }
+    return 0;
+}
+#endif
+
+/**
+ * @brief 高精度宽限期等待
+ *
+ * 替代原有sleep_ms(DEFAULT_GRACE_PERIOD_MS)的毫秒等待，
+ * 使用微秒级精度降低RCU同步延迟。
+ *
+ * @param grace_period_us 宽限期（微秒），默认10000(10ms)
+ */
+int rcu_grace_period_wait_precise(uint64_t grace_period_us) {
+    if (grace_period_us == 0) {
+        grace_period_us = 10000; /* 默认10ms */
+    }
+    rcu_high_precision_wait_us(grace_period_us);
+    return 0;
+}
+
+/**
+ * @brief 查询当前定时器精度
+ *
+ * @param resolution_ns_out 输出精度（纳秒）
+ * @return int 成功返回0，失败返回-1
+ */
+int rcu_get_timer_resolution(uint64_t* resolution_ns_out) {
+    if (!resolution_ns_out) return -1;
+    *resolution_ns_out = rcu_get_timer_resolution_ns();
+    return (*resolution_ns_out > 0) ? 0 : -1;
+}

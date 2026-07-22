@@ -339,6 +339,182 @@ int arch_controller_structural_mutate(ArchitectureController* controller,
                                        const StructuralMutationConfig* config,
                                        ArchitectureChangeResult* result);
 
+/* ================================================================
+ * H-004修复: 运行时激活度监控与在线结构调整
+ * 实现需求R49: "当任务复杂度升高时自动增加神经元、
+ * 移除冗余或低激活度神经元、调整层数"
+ *
+ * 核心设计:
+ *   1. 激活度监控器(ArchActivationMonitor) - 在推理过程中持续收集
+ *      每层神经元的激活统计(EMA均值/方差/最小/最大)
+ *   2. 任务复杂度评估器 - 基于激活熵、激活幅度方差、梯度范数
+ *      综合评估当前任务复杂度
+ *   3. 在线触发机制 - 每N次推理后自动评估是否需要结构调整
+ *   4. 低激活度检测 - 识别持续低于阈值的神经元用于修剪
+ *   5. 饱和检测 - 识别持续饱和的神经元触发扩展
+ * ================================================================ */
+
+/** @brief 单层激活统计 */
+typedef struct {
+    float*  ema_mean;          /**< 指数移动平均均值 [hidden_size] */
+    float*  ema_variance;      /**< 指数移动平均方差 [hidden_size] */
+    float*  ema_min;           /**< 指数移动平均最小值 [hidden_size] */
+    float*  ema_max;           /**< 指数移动平均最大值 [hidden_size] */
+    size_t  sample_count;      /**< 采样计数 */
+    size_t  hidden_size;       /**< 该层隐藏维度 */
+    float   ema_decay;         /**< EMA衰减因子 (默认0.99) */
+} ArchLayerActivationStats;
+
+/** @brief 激活度监控器 */
+typedef struct {
+    ArchLayerActivationStats* layers;     /**< 每层激活统计 [num_layers] */
+    int     num_layers;                   /**< 监控的层数 */
+    size_t  total_samples;                /**< 总采样数 */
+    int     check_interval;               /**< 每隔多少次推理检查一次 (默认100) */
+    float   low_activity_threshold;       /**< 低激活度阈值 (默认0.01) */
+    float   saturation_threshold;         /**< 饱和阈值 (默认0.95) */
+    float   low_activity_ratio_trigger;   /**< 低激活神经元比例触发修剪 (默认0.15) */
+    float   saturation_ratio_trigger;     /**< 饱和神经元比例触发扩展 (默认0.10) */
+    int     consecutive_checks_required;  /**< 连续检查次数要求 (默认3) */
+    int     is_initialized;               /**< 初始化标志 */
+    float   current_complexity_score;     /**< 当前任务复杂度评分 */
+    float   complexity_history[16];       /**< 复杂度历史环形缓冲 */
+    int     complexity_history_idx;       /**< 环形缓冲索引 */
+    int     complexity_history_count;     /**< 有效历史条目数 */
+} ArchActivationMonitor;
+
+/** @brief 任务复杂度指标 */
+typedef struct {
+    float   activation_entropy;           /**< 激活熵 (越高=越复杂) */
+    float   activation_variance;          /**< 激活幅度方差 */
+    float   gradient_norm;                /**< 最近梯度范数 (0=不可用) */
+    float   saturation_ratio;             /**< 饱和神经元比例 */
+    float   low_activity_ratio;           /**< 低激活度神经元比例 */
+    float   overall_complexity;           /**< 综合复杂度评分 [0,1] */
+    int     needs_expansion;              /**< 是否需要扩展神经元 */
+    int     needs_pruning;                /**< 是否需要修剪神经元 */
+    int     needs_layer_adjustment;       /**< 是否需要调整层数 */
+    char    diagnosis[256];               /**< 诊断说明 */
+} ArchComplexityMetrics;
+
+/** @brief 在线调整建议 */
+typedef struct {
+    int     recommend_expand;             /**< 建议扩展神经元 */
+    int     recommend_prune;              /**< 建议修剪神经元 */
+    int     recommend_add_layer;          /**< 建议增加层 */
+    int     recommend_remove_layer;       /**< 建议移除层 */
+    size_t  target_hidden_size;           /**< 建议目标隐藏层大小 */
+    int     target_num_layers;            /**< 建议目标层数 */
+    float   confidence;                   /**< 建议置信度 */
+    char    reason[256];                  /**< 建议原因 */
+    size_t  low_activity_count;           /**< 低激活度神经元数量 */
+    size_t  saturated_count;              /**< 饱和神经元数量 */
+} ArchOnlineAdaptationAdvice;
+
+/**
+ * @brief 创建激活度监控器
+ *
+ * @param num_layers 监控的层数
+ * @param hidden_sizes 每层隐藏维度数组 [num_layers]
+ * @param check_interval 每隔多少次推理检查一次
+ * @return 监控器实例，失败返回NULL
+ */
+ArchActivationMonitor* arch_controller_create_activation_monitor(
+    int num_layers,
+    const size_t* hidden_sizes,
+    int check_interval);
+
+/**
+ * @brief 销毁激活度监控器
+ */
+void arch_controller_free_activation_monitor(ArchActivationMonitor* monitor);
+
+/**
+ * @brief 记录一次推理的激活值
+ *
+ * 在每次lnn_forward后调用，传入每层的激活向量。
+ * 使用EMA更新统计信息。
+ *
+ * @param monitor 监控器
+ * @param layer_idx 层索引
+ * @param activations 激活值数组 [hidden_size]
+ * @param hidden_size 该层隐藏维度
+ */
+void arch_controller_record_activation(ArchActivationMonitor* monitor,
+                                        int layer_idx,
+                                        const float* activations,
+                                        size_t hidden_size);
+
+/**
+ * @brief 评估当前任务复杂度
+ *
+ * 综合分析激活熵、方差、饱和度和低激活度比例，
+ * 给出综合复杂度评分和诊断建议。
+ *
+ * @param monitor 监控器
+ * @param metrics 复杂度指标输出
+ * @return 0=成功，-1=失败
+ */
+int arch_controller_assess_complexity(ArchActivationMonitor* monitor,
+                                       ArchComplexityMetrics* metrics);
+
+/**
+ * @brief 检测低激活度神经元
+ *
+ * 扫描所有层，找出持续低于阈值的神经元索引。
+ *
+ * @param monitor 监控器
+ * @param low_activity_count 低激活度神经元总数输出
+ * @param saturated_count 饱和神经元总数输出
+ * @return 0=成功
+ */
+int arch_controller_detect_activity_anomalies(ArchActivationMonitor* monitor,
+                                               size_t* low_activity_count,
+                                               size_t* saturated_count);
+
+/**
+ * @brief 在线自适应调整评估
+ *
+ * 综合激活监控数据，评估是否需要在线调整架构。
+ * 不直接执行变更，而是返回建议供调用者决策。
+ *
+ * @param monitor 监控器
+ * @param lnn 当前LNN实例
+ * @param advice 调整建议输出
+ * @return 0=成功，-1=失败
+ */
+int arch_controller_evaluate_online_adaptation(ArchActivationMonitor* monitor,
+                                                const LNN* lnn,
+                                                ArchOnlineAdaptationAdvice* advice);
+
+/**
+ * @brief 执行在线自适应调整
+ *
+ * 结合监控数据和建议，自动执行神经元增长/修剪/层调整。
+ * 完整的在线调整流程:
+ *   1. 评估当前激活状态
+ *   2. 生成调整建议
+ *   3. 如果置信度足够，提交架构变更
+ *   4. 重置激活统计以开始新一轮监控
+ *
+ * @param controller 架构控制器
+ * @param lnn_ptr LNN实例指针的指针
+ * @param monitor 激活监控器
+ * @param result 调整结果输出
+ * @return 0=成功/无需调整，-1=失败
+ */
+int arch_controller_online_adapt(ArchitectureController* controller,
+                                  LNN** lnn_ptr,
+                                  ArchActivationMonitor* monitor,
+                                  ArchitectureChangeResult* result);
+
+/**
+ * @brief 重置激活统计
+ *
+ * 在架构变更后调用，清除旧网络的激活统计。
+ */
+void arch_controller_reset_activation_stats(ArchActivationMonitor* monitor);
+
 #ifdef __cplusplus
 }
 #endif

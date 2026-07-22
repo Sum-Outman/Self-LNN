@@ -299,6 +299,12 @@ struct CfCCell {
     void* enhanced_state;            /* CfcEnhancedState* */
     void* enhanced_config;           /* CfcEnhancedConfig* (曾为值类型) */
     uint32_t enhanced_config_type_tag; /* D-011修复: 类型标签 0x43464345="CFCE" 用于void*安全检查 */
+    /* M-012修复: 液时域缩放动态性增强 */
+    float* tau_state;              /**< 历史tau状态（EMA平滑用） [hidden_size] */
+    float tau_smooth_alpha;        /**< EMA平滑系数（0=不平滑, 1=完全平滑, 默认0.3） */
+    int use_state_dependent_tau;   /**< 是否启用状态依赖tau调制 */
+    float* tau_state_weights;      /**< 状态→tau调制权重 [hidden_size] */
+    float* tau_state_bias;         /**< 状态→tau调制偏置 [hidden_size] */
 };
 #endif
 
@@ -1082,6 +1088,60 @@ int cfc_cell_memory_gate_apply(CfCCell* cell, const float* hidden_pre,
  * @return 0=成功, -1=参数无效
  */
 int cfc_liquid_layernorm(float* tau_projection, size_t hidden_size);
+
+/* =========================================================================
+ * M-012修复: 液时域缩放动态性增强 API
+ * ========================================================================= */
+
+/**
+ * @brief 基于隐藏状态动态调制时间常数
+ *
+ * τ_final = τ_base + σ(W_state * h + b_state) * Δτ_max
+ * 其中σ是sigmoid函数，h是当前隐藏状态。
+ * 状态依赖tau使网络能根据当前激活模式自适应调整时间尺度。
+ *
+ * @param cell CfC单元句柄
+ * @param hidden_state 当前隐藏状态 [hidden_size]
+ * @param tau_out 输出调制后的tau值 [hidden_size]
+ * @return int 成功返回0，失败返回-1
+ */
+int cfc_state_dependent_tau(CfCCell* cell, const float* hidden_state, float* tau_out);
+
+/**
+ * @brief EMA平滑时间常数避免突变
+ *
+ * τ_smoothed = α * τ_new + (1-α) * τ_old
+ * 平滑后的tau存储到cell->tau_state中。
+ *
+ * @param cell CfC单元句柄
+ * @param tau_new 新计算的时间常数 [hidden_size]
+ * @param tau_smoothed 输出平滑后的tau [hidden_size]
+ * @return int 成功返回0，失败返回-1
+ */
+int cfc_tau_smooth(CfCCell* cell, const float* tau_new, float* tau_smoothed);
+
+/**
+ * @brief 运行时配置tau范围
+ *
+ * @param cell CfC单元句柄
+ * @param tau_min 最小时间常数（>0）
+ * @param tau_max 最大时间常数（>tau_min）
+ * @return int 成功返回0，失败返回-1
+ */
+int cfc_set_tau_range(CfCCell* cell, float tau_min, float tau_max);
+
+/**
+ * @brief 查询tau统计信息
+ *
+ * @param cell CfC单元句柄
+ * @param mean_out 输出tau均值（可为NULL）
+ * @param std_out 输出tau标准差（可为NULL）
+ * @param min_out 输出tau最小值（可为NULL）
+ * @param max_out 输出tau最大值（可为NULL）
+ * @return int 成功返回0，失败返回-1
+ */
+int cfc_get_tau_statistics(CfCCell* cell, float* mean_out, float* std_out,
+                           float* min_out, float* max_out);
 
 #ifdef __cplusplus
 }

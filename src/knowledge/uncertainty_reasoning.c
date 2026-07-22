@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file uncertainty_reasoning.c
  * @brief 不确定性推理引擎完整实现
  *
@@ -10,6 +10,7 @@
 #include "selflnn/knowledge/uncertainty_reasoning.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/secure_random.h"
+#include "selflnn/utils/logging.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -372,6 +373,72 @@ int fuzzy_engine_evaluate(FuzzyEngine* engine) {
                     }
                     break;
                 }
+                /* L-008修复: 高度法 — 取隶属度函数最高点对应的x值 */
+                case DEFUZZ_HEIGHT: {
+                    static float height_max_mu = 0.0f;
+                    static float height_best_x = 0.0f;
+                    if (s == 0) { height_max_mu = 0.0f; height_best_x = var->min_value; }
+                    if (clipped > height_max_mu) {
+                        height_max_mu = clipped;
+                        height_best_x = x;
+                    }
+                    if (s == UR_FUZZY_SAMPLES - 1) {
+                        engine->crisp_outputs[var_idx] += height_best_x;
+                    }
+                    break;
+                }
+                /* L-008修复: 和中心法 — 各规则输出MF的中心加权和 */
+                case DEFUZZ_CENTER_OF_SUMS: {
+                    static float cos_numerator = 0.0f;
+                    static float cos_denominator = 0.0f;
+                    if (s == 0) { cos_numerator = 0.0f; cos_denominator = 0.0f; }
+                    /* 计算当前MF的质心 */
+                    float mf_area = 0.0f;
+                    float mf_moment = 0.0f;
+                    for (int m = 0; m < UR_FUZZY_SAMPLES; m++) {
+                        float xm = var->min_value + m * step;
+                        float mm = fuzzy_membership(conc_mf, xm);
+                        float cm = (mm < activation) ? mm : activation;
+                        mf_area += cm * step;
+                        mf_moment += xm * cm * step;
+                    }
+                    /* 中心 = 力矩/面积 */
+                    float mf_center = (mf_area > 1e-10f) ? mf_moment / mf_area :
+                        (var->min_value + var->max_value) * 0.5f;
+                    cos_numerator += mf_center * mf_area;
+                    cos_denominator += mf_area;
+                    /* 在最后一个样本时输出结果 */
+                    if (s == UR_FUZZY_SAMPLES - 1 && cos_denominator > 1e-10f) {
+                        engine->crisp_outputs[var_idx] += cos_numerator / cos_denominator;
+                    }
+                    break;
+                }
+                /* L-008修复: 加权平均法 — 对称隶属度函数使用中心加权 */
+                case DEFUZZ_WEIGHTED_AVG: {
+                    /* 对每个MF计算其中心位置和最大高度 */
+                    float mf_center = 0.0f;
+                    float mf_max_h = 0.0f;
+                    /* 三角/梯形MF：取顶点作为中心 */
+                    if (conc_mf->type == MF_TRIANGULAR) {
+                        mf_center = conc_mf->params[1]; /* 三角形顶点 */
+                    } else if (conc_mf->type == MF_TRAPEZOIDAL) {
+                        mf_center = (conc_mf->params[1] + conc_mf->params[2]) * 0.5f; /* 梯形上底中心 */
+                    } else if (conc_mf->type == MF_GAUSSIAN) {
+                        mf_center = conc_mf->params[1]; /* 高斯均值 */
+                    } else {
+                        mf_center = (var->min_value + var->max_value) * 0.5f;
+                    }
+                    /* 寻找最大隶属度 */
+                    for (int m = 0; m < UR_FUZZY_SAMPLES; m++) {
+                        float xm = var->min_value + m * step;
+                        float mm = fuzzy_membership(conc_mf, xm);
+                        float cm = (mm < activation) ? mm : activation;
+                        if (cm > mf_max_h) mf_max_h = cm;
+                    }
+                    /* 加权平均: 中心 * 高度 / 高度总和 */
+                    engine->crisp_outputs[var_idx] += mf_center * mf_max_h;
+                    break;
+                }
                 case DEFUZZ_MOM:
                 case DEFUZZ_LOM:
                 case DEFUZZ_ROM:
@@ -382,6 +449,40 @@ int fuzzy_engine_evaluate(FuzzyEngine* engine) {
 
             if (engine->defuzz == DEFUZZ_CENTROID && denominator > 1e-10f) {
                 engine->crisp_outputs[var_idx] += numerator / denominator;
+            }
+        }
+
+        /* L-008修复: 加权平均法后处理 — 归一化加权和 */
+        if (engine->defuzz == DEFUZZ_WEIGHTED_AVG) {
+            /* 重新遍历规则计算高度总和用于归一化 */
+            float* height_sum = (float*)safe_calloc(max_out_vars, sizeof(float));
+            if (height_sum) {
+                for (int r = 0; r < engine->rule_count; r++) {
+                    FuzzyRule* rule = &engine->rules[r];
+                    if (!rule->is_active || engine->rule_activations[r] < 1e-8f) continue;
+                    int vi = fuzzy_find_var(engine, rule->conclusion_var);
+                    if (vi < 0) continue;
+                    FuzzyVariable* vr = &engine->variables[vi];
+                    int ti = fuzzy_find_term(vr, rule->conclusion_term);
+                    if (ti < 0) continue;
+                    MembershipFunction* cmf = &vr->terms[ti];
+                    float act = engine->rule_activations[r];
+                    float max_h = 0.0f;
+                    float st = (vr->max_value - vr->min_value) / UR_FUZZY_SAMPLES;
+                    for (int m = 0; m < UR_FUZZY_SAMPLES; m++) {
+                        float xm = vr->min_value + m * st;
+                        float mm = fuzzy_membership(cmf, xm);
+                        float cm = (mm < act) ? mm : act;
+                        if (cm > max_h) max_h = cm;
+                    }
+                    height_sum[vi] += max_h;
+                }
+                for (int i = 0; i < max_out_vars; i++) {
+                    if (height_sum[i] > 1e-10f) {
+                        engine->crisp_outputs[i] /= height_sum[i];
+                    }
+                }
+                safe_free((void**)&height_sum);
             }
         }
 
@@ -1842,7 +1943,7 @@ LogicInferenceResult* uncertainty_integrated_reason(UncertaintyEngine* uncertain
 
     /* 执行逻辑推理 */
     LogicInferenceResult* logic_result = logic_reasoning_engine_forward_chain(
-        logic_engine, enhanced_facts, fact_count + 3, NULL, 0);
+        (LogicReasoningEngine*)logic_engine, enhanced_facts, fact_count + 3, NULL, 0);
 
     /* 将不确定性置信度传播到逻辑推理结果 */
     if (logic_result && ur_result.confidence > 0.0f) {

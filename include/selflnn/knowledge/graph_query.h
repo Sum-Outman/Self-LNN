@@ -354,6 +354,103 @@ void subgraph_match_set_free(SubgraphMatchSet* set);
  */
 QueryOptions query_options_default(void);
 
+/* ============================================================================
+ * L-001: 图遍历算法 —— DFS深度优先、A*启发式搜索、Dijkstra最短路径
+ * ============================================================================ */
+
+/** @brief DFS遍历回调函数类型 */
+typedef int (*GraphTraverseCallback)(int node_id, const char* node_label,
+                                     int depth, void* user_data);
+
+/**
+ * @brief L-001: 深度优先遍历（DFS）
+ *
+ * 从指定起始节点开始，沿出边递归遍历图。
+ * 支持最大深度限制、循环检测（visited标记）、访问回调。
+ *
+ * @param al           邻接表图
+ * @param start_node_id 起始节点ID
+ * @param max_depth     最大深度限制（0=无限制）
+ * @param callback      每访问一个节点时回调（可为NULL）
+ * @param user_data     回调用户数据
+ * @return int 访问的节点数，失败返回-1
+ */
+int graph_query_dfs_traverse(AdjacencyList* al, int start_node_id,
+                             int max_depth, GraphTraverseCallback callback,
+                             void* user_data);
+
+/**
+ * @brief A*搜索路径结果
+ */
+typedef struct {
+    int* path;              /**< 路径节点ID数组（从起点到终点） */
+    size_t path_length;     /**< 路径长度（节点数） */
+    float total_cost;       /**< 路径总代价 */
+    int nodes_explored;     /**< 探索的节点数 */
+} AStarPathResult;
+
+/**
+ * @brief L-001: A*启发式搜索
+ *
+ * 使用A*算法在图中搜索从起点到终点的最短路径。
+ * 启发函数使用节点标签的FNV-1a哈希作为近似距离估计。
+ * 边权重使用1.0 - 置信度（低置信度=高代价）。
+ *
+ * @param al           邻接表图
+ * @param start_node_id 起始节点ID
+ * @param goal_node_id  目标节点ID
+ * @return AStarPathResult* 路径结果(调用者负责释放)，失败返回NULL
+ */
+AStarPathResult* graph_query_astar_search(AdjacencyList* al,
+                                          int start_node_id,
+                                          int goal_node_id);
+
+/**
+ * @brief 释放A*路径结果
+ * @param result 路径结果
+ */
+void graph_query_astar_result_free(AStarPathResult* result);
+
+/**
+ * @brief Dijkstra最短路径结果
+ */
+typedef struct {
+    float* distances;       /**< 从起点到每个节点的最短距离 */
+    int* predecessors;      /**< 每个节点的前驱节点ID（-1=无前驱） */
+    size_t node_count;      /**< 节点数 */
+    int start_node_id;      /**< 起始节点ID */
+} DijkstraResult;
+
+/**
+ * @brief L-001: Dijkstra最短路径
+ *
+ * 使用Dijkstra算法计算从起点到所有可达节点的最短路径。
+ * 边权重使用1.0 - 置信度（低置信度=高代价）。
+ *
+ * @param al           邻接表图
+ * @param start_node_id 起始节点ID
+ * @return DijkstraResult* 最短路径结果(调用者负责释放)，失败返回NULL
+ */
+DijkstraResult* graph_query_dijkstra_shortest_path(AdjacencyList* al,
+                                                    int start_node_id);
+
+/**
+ * @brief 从Dijkstra结果重建起点到目标节点的路径
+ * @param result Dijkstra结果
+ * @param target_node_id 目标节点ID
+ * @param path_length_out 输出路径长度
+ * @return int* 路径节点ID数组(调用者负责释放)，失败返回NULL
+ */
+int* graph_query_dijkstra_get_path(const DijkstraResult* result,
+                                   int target_node_id,
+                                   size_t* path_length_out);
+
+/**
+ * @brief 释放Dijkstra结果
+ * @param result Dijkstra结果
+ */
+void graph_query_dijkstra_result_free(DijkstraResult* result);
+
 #ifdef __cplusplus
 }
 #endif

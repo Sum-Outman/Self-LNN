@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file gpu_cuda.c
  * @brief NVIDIA CUDA GPU后端完整实现
  * 
@@ -24,6 +24,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <math.h>
 #include <time.h>
 
 /* 可配置GPU架构目标：默认sm_89(NVIDIA Ada Lovelace RTX 40系列)
@@ -2829,21 +2830,25 @@ static int get_cuda_device_properties(int device_id, cudaDevicePropCompat* prop)
 #pragma warning(push)
 #pragma warning(disable:4312)  /* CUdevice cast */
 #endif
+#if defined(__clang__) || defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wint-to-pointer-cast"
+#endif
     /* Driver API查询 (避免Runtime API的WDDM/CUDA13兼容问题) */
     if (!prop) return -1;
     memset(prop, 0, sizeof(*prop));
     
     if (cuDeviceGetName) {
-        cuDeviceGetName(prop->name, sizeof(prop->name), (CUdevice)device_id);
+        cuDeviceGetName(prop->name, sizeof(prop->name), (CUdevice)(intptr_t)device_id);
         if (!prop->name[0]) snprintf(prop->name, sizeof(prop->name), "NVIDIA GPU %d", device_id);
     }
     if (cuDeviceTotalMem) {
         size_t mem = 0;
-        cuDeviceTotalMem(&mem, (CUdevice)device_id);
+        cuDeviceTotalMem(&mem, (CUdevice)(intptr_t)device_id);
         prop->totalGlobalMem = mem;
     }
     if (cuDeviceComputeCapability) {
-        cuDeviceComputeCapability(&prop->major, &prop->minor, (CUdevice)device_id);
+        cuDeviceComputeCapability(&prop->major, &prop->minor, (CUdevice)(intptr_t)device_id);
     }
     if (cuDeviceGetAttribute) {
         int val;
@@ -2861,7 +2866,7 @@ static int get_cuda_device_properties(int device_id, cudaDevicePropCompat* prop)
         #define A_MP_COUNT 16
         #define A_CONST_MEM 14
         #define GET_ATTR(_attr, _field) \
-            if (cuDeviceGetAttribute(&val, _attr, (CUdevice)device_id) == 0) prop->_field = val
+            if (cuDeviceGetAttribute(&val, _attr, (CUdevice)(intptr_t)device_id) == 0) prop->_field = val
         GET_ATTR(A_MAX_THREADS, maxThreadsPerBlock);
         GET_ATTR(A_WARP, warpSize);
         GET_ATTR(A_BLOCK_X, maxThreadsDim[0]);
@@ -2880,6 +2885,9 @@ static int get_cuda_device_properties(int device_id, cudaDevicePropCompat* prop)
     return 0;
 #ifdef _MSC_VER
 #pragma warning(pop)
+#endif
+#if defined(__clang__) || defined(__GNUC__)
+#pragma GCC diagnostic pop
 #endif
 }
 
@@ -3536,8 +3544,8 @@ static GpuKernel* cuda_backend_kernel_create(GpuContext* context, const char* ke
         
         strncpy(kernel->kernel_name, actual_kernel_name, sizeof(kernel->kernel_name) - 1);
         kernel->kernel_name[sizeof(kernel->kernel_name) - 1] = '\0';
-        kernel->max_threads_per_block = 256;
-        kernel->shared_mem_size = 0;
+        kernel->max_threads_per_block = GPU_MAX_THREADS_PER_BLOCK_DEFAULT;
+        kernel->shared_mem_size = GPU_MAX_SHARED_MEMORY_DEFAULT;
         kernel->context = ctx;
         kernel->from_cache = 1;
         kernel->kernel_module = cached->module;
@@ -3632,8 +3640,8 @@ static GpuKernel* cuda_backend_kernel_create(GpuContext* context, const char* ke
     
     strncpy(kernel->kernel_name, actual_kernel_name, sizeof(kernel->kernel_name) - 1);
     kernel->kernel_name[sizeof(kernel->kernel_name) - 1] = '\0';
-    kernel->max_threads_per_block = 256;
-    kernel->shared_mem_size = 0;
+    kernel->max_threads_per_block = GPU_MAX_THREADS_PER_BLOCK_DEFAULT;
+    kernel->shared_mem_size = GPU_MAX_SHARED_MEMORY_DEFAULT;
     kernel->context = ctx;
     
     // 尝试使用CUDA驱动程序API加载PTX代码到模块
@@ -5781,9 +5789,9 @@ int gpu_benchmark_throughput(float* bandwidth_gbps, float* compute_tflops, int* 
     float *d_src = NULL, *d_dst = NULL;
     float *h_buf = NULL;
 
-    err = cudaMalloc(&d_src, test_size);
+    err = cudaMalloc((void**)&d_src, test_size);
     if (err != cudaSuccess) { *bandwidth_gbps = 0.0f; *compute_tflops = 0.0f; return -1; }
-    err = cudaMalloc(&d_dst, test_size);
+    err = cudaMalloc((void**)&d_dst, test_size);
     if (err != cudaSuccess) { cudaFree(d_src); *bandwidth_gbps = 0.0f; *compute_tflops = 0.0f; return -1; }
 
     h_buf = (float*)safe_malloc(test_size);

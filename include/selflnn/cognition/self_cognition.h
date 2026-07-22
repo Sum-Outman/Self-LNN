@@ -12,6 +12,7 @@
 #include <stddef.h>
 #include <time.h>
 #include "selflnn/cognition/metacognition.h"
+#include "selflnn/cognition/bdi_model.h"  /* L-009: BDI模型集成 */
 
 /* L-009: 认知模块依赖关系已验证 — 无循环依赖
  * self_cognition.h → metacognition.h (单向, metacognition.h使用前向声明避免反向引用)
@@ -1678,17 +1679,11 @@ float self_cognition_assess_model_accuracy(SelfCognitionSystem* system);
 /**
  * @brief 获取深度统计信息（供监控和调试使用）
  * @param system 自我认知系统句柄
- * @param total_reflections 输出总反思次数
- * @param total_corrections 输出总修正次数
- * @param avg_reflection_score 输出平均反思得分
- * @param avg_correction_depth 输出平均修正深度
+ * @param stats 输出深度自我认知统计信息
  * @return 0成功，-1失败
  */
 int self_cognition_get_deep_stats(SelfCognitionSystem* system,
-                                  int* total_reflections,
-                                  int* total_corrections,
-                                  float* avg_reflection_score,
-                                  float* avg_correction_depth);
+                                  DeepSelfCognitionStats* stats);
 
 /* ---- C-002修复: 适应决策回调机制（解耦cognition↔evolution循环依赖） ---- */
 
@@ -1725,6 +1720,59 @@ void self_cognition_set_adaptation_callback(SelfCognitionAdaptCallback callback,
  * @param progress 演化进展评分(0.0-1.0)
  */
 void self_cognition_set_evolution_progress(SelfCognitionSystem* system, float progress);
+
+/* ============================================================================
+ * L-009深度修复: BDI模型公共API
+ * ============================================================================ */
+
+/**
+ * @brief 获取BDI模型句柄
+ *
+ * 供AGI认知循环直接访问BDI模型进行目标-计划-意图推理。
+ *
+ * @param system 自我认知系统
+ * @return BDIModel* BDI模型句柄，未启用返回NULL
+ */
+BDIModel* self_cognition_get_bdi_model(SelfCognitionSystem* system);
+
+/**
+ * @brief 执行BDI认知步骤
+ *
+ * 在AGI认知循环中调用，执行完整的BDI推理循环：
+ *   感知→信念更新→意图重考虑→目标排序→手段-目的推理→意图承诺→计划执行
+ *
+ * @param system 自我认知系统
+ * @param observation 观测向量（NULL=跳过信念更新）
+ * @param certainty 观测确定性
+ * @return int 执行的动作数，失败返回-1，BDI未启用返回0
+ */
+int self_cognition_bdi_step(SelfCognitionSystem* system,
+                            const float* observation, float certainty);
+
+/**
+ * @brief 向BDI模型添加目标
+ *
+ * 供AGI规划模块将高层次目标注入BDI执行系统。
+ *
+ * @param system 自我认知系统
+ * @param name 目标名称
+ * @param description 目标描述
+ * @param priority 优先级
+ * @param deadline 截止时间
+ * @return int 目标ID，失败返回-1
+ */
+int self_cognition_bdi_add_goal(SelfCognitionSystem* system,
+                                const char* name, const char* description,
+                                float priority, long deadline);
+
+/**
+ * @brief 获取BDI运行统计
+ *
+ * @param system 自我认知系统
+ * @param stats 输出统计信息
+ * @return int 成功返回0
+ */
+int self_cognition_bdi_get_stats(SelfCognitionSystem* system, BDIStats* stats);
 
 #ifdef __cplusplus
 }

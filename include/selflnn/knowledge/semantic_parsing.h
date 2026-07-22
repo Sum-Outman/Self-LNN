@@ -511,6 +511,54 @@ int semantic_parsing_swrl_reason(int max_iterations, int* inferred_count);
 int semantic_parsing_swrl_get_stats(int* out_rule_count, int* out_triple_count,
     int* out_inference_count, int* out_conflict_count);
 
+/* =========================================================================
+ * M-005修复: 依存分析器在线学习 API
+ * ========================================================================= */
+
+/**
+ * @brief 在线学习：使用标注样例更新依存分析器权重
+ *
+ * 基于感知器更新规则，接收标注的依存关系样例，
+ * 更新转移分类器的特征权重。支持持续增量学习。
+ *
+ * @param words 词序列数组
+ * @param pos_tags 词性标注序列
+ * @param word_count 词数量
+ * @param gold_heads 标准依存父节点ID数组
+ * @param gold_rels 标准依存关系类型数组
+ * @param gold_count 标注数量（应等于word_count）
+ * @return int 成功返回0，失败返回-1
+ */
+int sp_online_learn(const char** words, const PartOfSpeech* pos_tags, int word_count,
+                     const int* gold_heads, const DepRelationType* gold_rels,
+                     int gold_count);
+
+/**
+ * @brief 用户反馈纠错：调整特定词位置的依存权重
+ *
+ * @param word_index 要纠正的词索引
+ * @param correct_head 正确的父节点ID
+ * @param correct_rel 正确的依存关系类型
+ * @return int 成功返回0，失败返回-1
+ */
+int sp_feedback(int word_index, int correct_head, DepRelationType correct_rel);
+
+/**
+ * @brief 保存学习后的权重到文件
+ *
+ * @param filepath 权重文件路径
+ * @return int 成功返回0，失败返回-1
+ */
+int sp_save_weights(const char* filepath);
+
+/**
+ * @brief 从文件加载学习后的权重
+ *
+ * @param filepath 权重文件路径
+ * @return int 成功返回0，失败返回-1
+ */
+int sp_load_weights(const char* filepath);
+
 #ifdef __cplusplus
 }
 #endif

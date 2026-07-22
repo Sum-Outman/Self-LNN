@@ -1518,6 +1518,496 @@ int knowledge_base_query_state_aware(KnowledgeBase* kb,
     return (int)out_count;
 }
 
+/* ============================================================================
+ * L-006修复：批量操作API实现
+ * 提供高效的批量增删查改操作，减少锁竞争和函数调用开销。
+ * 实现日期: 2026-07-22
+ * ============================================================================ */
+
+/**
+ * @brief 批量添加知识条目
+ *
+ * 在单次写锁内批量添加多个知识条目，减少锁获取/释放开销。
+ * 逐个调用内部添加逻辑，但所有操作在同一写锁内完成。
+ * 包含去重检查，跳过重复条目。
+ */
+int knowledge_base_add_batch(KnowledgeBase* kb, const KnowledgeEntry* entries,
+                             size_t entry_count, int* result_ids) {
+    if (kb == NULL || entries == NULL || entry_count == 0) {
+        return -1;
+    }
+
+    int success_count = 0;
+
+    /* 初始化结果数组 */
+    if (result_ids) {
+        for (size_t i = 0; i < entry_count; i++) {
+            result_ids[i] = -1;
+        }
+    }
+
+    /* 在单次写锁内完成所有添加操作 */
+    KB_WLOCK(kb);
+
+    for (size_t i = 0; i < entry_count; i++) {
+        const KnowledgeEntry* entry = &entries[i];
+        if (entry == NULL) {
+            if (result_ids) result_ids[i] = -1;
+            continue;
+        }
+
+        /* 检查容量限制 */
+        if (kb->max_entries > 0 && kb->size >= kb->max_entries) {
+            if (result_ids) result_ids[i] = -1;
+            continue;
+        }
+
+        /* 快速去重检查：仅在知识库已有足够数据时执行 */
+        int is_duplicate = 0;
+        if (kb->size > 50 && entry->subject && entry->predicate && entry->object) {
+            for (size_t j = 0; j < kb->size && !is_duplicate; j++) {
+                KnowledgeEntry* existing = &kb->entries[j].entry;
+                if (!existing->subject || !existing->predicate || !existing->object) continue;
+                float subj_sim = knowledge_string_similarity(entry->subject, existing->subject);
+                float pred_sim = knowledge_string_similarity(entry->predicate, existing->predicate);
+                float obj_sim = knowledge_string_similarity(entry->object, existing->object);
+                float total_sim = (subj_sim + pred_sim + obj_sim) / 3.0f;
+                if (total_sim > 0.95f) {
+                    is_duplicate = 1;
+                    /* 更新现有条目的权重和时间戳 */
+                    if (entry->weight > existing->weight) {
+                        existing->weight = entry->weight;
+                    }
+                    existing->timestamp = entry->timestamp > 0 ?
+                        entry->timestamp : (int64_t)time(NULL);
+                    if (result_ids) result_ids[i] = kb->entries[j].id;
+                    success_count++;
+                }
+            }
+        }
+
+        if (is_duplicate) continue;
+
+        /* 扩展容量 */
+        if (kb->size >= kb->capacity) {
+            size_t new_capacity = (kb->capacity == 0) ? 64 : kb->capacity * 2;
+            if (kb->max_entries > 0 && new_capacity > kb->max_entries) {
+                new_capacity = kb->max_entries;
+            }
+            InternalKnowledgeEntry* new_entries = (InternalKnowledgeEntry*)safe_realloc(
+                kb->entries, new_capacity * sizeof(InternalKnowledgeEntry));
+            if (new_entries == NULL) {
+                if (result_ids) result_ids[i] = -1;
+                continue;
+            }
+            kb->entries = new_entries;
+            kb->capacity = new_capacity;
+            memset(&kb->entries[kb->size], 0,
+                   (new_capacity - kb->size) * sizeof(InternalKnowledgeEntry));
+        }
+
+        /* 添加新条目 */
+        InternalKnowledgeEntry* internal_entry = &kb->entries[kb->size];
+        if (copy_knowledge_entry(&internal_entry->entry, entry) != 0) {
+            if (result_ids) result_ids[i] = -1;
+            continue;
+        }
+
+        internal_entry->id = kb->next_id++;
+        internal_entry->ref_count = 1;
+        if (internal_entry->entry.timestamp == 0) {
+            internal_entry->entry.timestamp = (long)time(NULL);
+        }
+
+        kb->size++;
+        kb->entry_count = kb->size;
+
+        /* 构建倒排索引 */
+        if (internal_entry->entry.subject) {
+            inverted_index_add_key(&kb->subject_index,
+                internal_entry->entry.subject, internal_entry->id);
+        }
+        if (internal_entry->entry.predicate) {
+            inverted_index_add_key(&kb->predicate_index,
+                internal_entry->entry.predicate, internal_entry->id);
+        }
+        if (internal_entry->entry.object) {
+            inverted_index_add_key(&kb->object_index,
+                internal_entry->entry.object, internal_entry->id);
+        }
+
+        if (result_ids) result_ids[i] = internal_entry->id;
+        success_count++;
+    }
+
+    /* 清除搜索结果缓存 */
+    if (kb->search_results_cache) {
+        safe_free((void**)&kb->search_results_cache);
+        kb->cache_size = 0;
+        kb->cache_capacity = 0;
+    }
+
+    /* 通知更新回调 */
+    if (g_kb_update_notify && success_count > 0) {
+        g_kb_update_notify(g_kb_notify_user_data);
+    }
+
+    KB_WUNLOCK(kb);
+    return success_count;
+}
+
+/**
+ * @brief 批量添加知识条目（带详细结果统计）
+ */
+int knowledge_base_add_batch_ex(KnowledgeBase* kb, const KnowledgeEntry* entries,
+                                size_t entry_count, int* result_ids,
+                                BatchOperationResult* batch_result) {
+    if (kb == NULL || entries == NULL || entry_count == 0) {
+        return -1;
+    }
+
+    long start_ms = (long)(time(NULL) * 1000);
+
+    /* 初始化batch_result */
+    if (batch_result) {
+        memset(batch_result, 0, sizeof(BatchOperationResult));
+        batch_result->total_operations = entry_count;
+    }
+
+    /* 初始化结果数组 */
+    if (result_ids) {
+        for (size_t i = 0; i < entry_count; i++) {
+            result_ids[i] = -1;
+        }
+    }
+
+    size_t success = 0, skipped = 0, failed = 0;
+
+    KB_WLOCK(kb);
+
+    for (size_t i = 0; i < entry_count; i++) {
+        const KnowledgeEntry* entry = &entries[i];
+        if (entry == NULL) {
+            failed++;
+            if (result_ids) result_ids[i] = -1;
+            continue;
+        }
+
+        /* 检查容量 */
+        if (kb->max_entries > 0 && kb->size >= kb->max_entries) {
+            failed++;
+            if (result_ids) result_ids[i] = -1;
+            continue;
+        }
+
+        /* 快速去重检查 */
+        int is_duplicate = 0;
+        if (kb->size > 50 && entry->subject && entry->predicate && entry->object) {
+            for (size_t j = 0; j < kb->size && !is_duplicate; j++) {
+                KnowledgeEntry* existing = &kb->entries[j].entry;
+                if (!existing->subject || !existing->predicate || !existing->object) continue;
+                float subj_sim = knowledge_string_similarity(entry->subject, existing->subject);
+                float pred_sim = knowledge_string_similarity(entry->predicate, existing->predicate);
+                float obj_sim = knowledge_string_similarity(entry->object, existing->object);
+                float total_sim = (subj_sim + pred_sim + obj_sim) / 3.0f;
+                if (total_sim > 0.95f) {
+                    is_duplicate = 1;
+                    if (entry->weight > existing->weight) {
+                        existing->weight = entry->weight;
+                    }
+                    existing->timestamp = entry->timestamp > 0 ?
+                        entry->timestamp : (int64_t)time(NULL);
+                    if (result_ids) result_ids[i] = kb->entries[j].id;
+                    skipped++;
+                }
+            }
+        }
+
+        if (is_duplicate) continue;
+
+        /* 扩展容量 */
+        if (kb->size >= kb->capacity) {
+            size_t new_capacity = (kb->capacity == 0) ? 64 : kb->capacity * 2;
+            if (kb->max_entries > 0 && new_capacity > kb->max_entries) {
+                new_capacity = kb->max_entries;
+            }
+            InternalKnowledgeEntry* new_entries = (InternalKnowledgeEntry*)safe_realloc(
+                kb->entries, new_capacity * sizeof(InternalKnowledgeEntry));
+            if (new_entries == NULL) {
+                failed++;
+                if (result_ids) result_ids[i] = -1;
+                continue;
+            }
+            kb->entries = new_entries;
+            kb->capacity = new_capacity;
+            memset(&kb->entries[kb->size], 0,
+                   (new_capacity - kb->size) * sizeof(InternalKnowledgeEntry));
+        }
+
+        /* 添加新条目 */
+        InternalKnowledgeEntry* internal_entry = &kb->entries[kb->size];
+        if (copy_knowledge_entry(&internal_entry->entry, entry) != 0) {
+            failed++;
+            if (result_ids) result_ids[i] = -1;
+            continue;
+        }
+
+        internal_entry->id = kb->next_id++;
+        internal_entry->ref_count = 1;
+        if (internal_entry->entry.timestamp == 0) {
+            internal_entry->entry.timestamp = (long)time(NULL);
+        }
+
+        kb->size++;
+        kb->entry_count = kb->size;
+
+        /* 倒排索引 */
+        if (internal_entry->entry.subject) {
+            inverted_index_add_key(&kb->subject_index,
+                internal_entry->entry.subject, internal_entry->id);
+        }
+        if (internal_entry->entry.predicate) {
+            inverted_index_add_key(&kb->predicate_index,
+                internal_entry->entry.predicate, internal_entry->id);
+        }
+        if (internal_entry->entry.object) {
+            inverted_index_add_key(&kb->object_index,
+                internal_entry->entry.object, internal_entry->id);
+        }
+
+        if (result_ids) result_ids[i] = internal_entry->id;
+        success++;
+    }
+
+    /* 清除缓存 */
+    if (kb->search_results_cache) {
+        safe_free((void**)&kb->search_results_cache);
+        kb->cache_size = 0;
+        kb->cache_capacity = 0;
+    }
+
+    if (g_kb_update_notify && success > 0) {
+        g_kb_update_notify(g_kb_notify_user_data);
+    }
+
+    KB_WUNLOCK(kb);
+
+    if (batch_result) {
+        batch_result->success_count = success;
+        batch_result->skipped_count = skipped;
+        batch_result->failed_count = failed;
+        batch_result->elapsed_ms = (long)(time(NULL) * 1000) - start_ms;
+    }
+
+    return (int)success;
+}
+
+/**
+ * @brief 批量删除知识条目
+ *
+ * 在单次写锁内批量删除多个知识条目，减少锁竞争。
+ * 使用swap-and-pop策略，索引越界或不存在则跳过。
+ */
+int knowledge_base_delete_batch(KnowledgeBase* kb, const int* entry_ids,
+                                size_t id_count) {
+    if (kb == NULL || entry_ids == NULL || id_count == 0) {
+        return -1;
+    }
+
+    int deleted_count = 0;
+
+    KB_WLOCK(kb);
+
+    for (size_t k = 0; k < id_count; k++) {
+        int entry_id = entry_ids[k];
+        if (entry_id <= 0) continue;
+
+        /* 查找并删除 */
+        for (size_t i = 0; i < kb->size; i++) {
+            if (kb->entries[i].id == entry_id) {
+                KnowledgeEntry* e = &kb->entries[i].entry;
+
+                /* 从倒排索引移除 */
+                if (e->subject && kb->subject_index.size > 0) {
+                    inverted_index_remove(&kb->subject_index, e->subject, entry_id);
+                }
+                if (e->predicate && kb->predicate_index.size > 0) {
+                    inverted_index_remove(&kb->predicate_index, e->predicate, entry_id);
+                }
+                if (e->object && kb->object_index.size > 0) {
+                    inverted_index_remove(&kb->object_index, e->object, entry_id);
+                }
+
+                /* 释放条目内存 */
+                free_knowledge_entry(&kb->entries[i].entry);
+
+                /* swap-and-pop */
+                if (i < kb->size - 1) {
+                    memcpy(&kb->entries[i], &kb->entries[kb->size - 1],
+                           sizeof(InternalKnowledgeEntry));
+                }
+                memset(&kb->entries[kb->size - 1], 0, sizeof(InternalKnowledgeEntry));
+
+                kb->size--;
+                deleted_count++;
+                break; /* 找到并删除，跳到下一个ID */
+            }
+        }
+    }
+
+    /* 清除缓存 */
+    if (kb->search_results_cache) {
+        safe_free((void**)&kb->search_results_cache);
+        kb->cache_size = 0;
+        kb->cache_capacity = 0;
+    }
+
+    KB_WUNLOCK(kb);
+    return deleted_count;
+}
+
+/**
+ * @brief 批量查询知识条目
+ *
+ * 在单次读锁内执行多个查询条件，合并去重结果。
+ * 使用位图标记已匹配的条目ID，避免重复。
+ */
+int knowledge_base_query_batch(KnowledgeBase* kb, const KnowledgeQuery* queries,
+                               size_t query_count, KnowledgeEntry* results,
+                               size_t max_results) {
+    if (kb == NULL || queries == NULL || query_count == 0 ||
+        results == NULL || max_results == 0) {
+        return -1;
+    }
+
+    KB_RLOCK(kb);
+
+    /* 使用位图去重：记录已匹配的条目索引 */
+    size_t bitmap_size = (kb->size + 7) / 8;
+    unsigned char* matched_bitmap = (unsigned char*)safe_calloc(bitmap_size, 1);
+    if (!matched_bitmap) {
+        KB_RUNLOCK(kb);
+        return -1;
+    }
+
+    size_t match_count = 0;
+
+    for (size_t q = 0; q < query_count && match_count < max_results; q++) {
+        const KnowledgeQuery* query = &queries[q];
+
+        for (size_t i = 0; i < kb->size && match_count < max_results; i++) {
+            /* 检查是否已匹配 */
+            size_t byte_idx = i / 8;
+            size_t bit_idx = i % 8;
+            if (matched_bitmap[byte_idx] & (1u << bit_idx)) {
+                continue; /* 已匹配，跳过 */
+            }
+
+            if (entry_matches_query(&kb->entries[i].entry, query)) {
+                if (copy_knowledge_entry(&results[match_count],
+                    &kb->entries[i].entry) == 0) {
+                    matched_bitmap[byte_idx] |= (1u << bit_idx);
+                    match_count++;
+                }
+            }
+        }
+    }
+
+    safe_free((void**)&matched_bitmap);
+    KB_RUNLOCK(kb);
+    return (int)match_count;
+}
+
+/**
+ * @brief 批量更新知识条目
+ *
+ * 在单次写锁内批量更新多个知识条目。
+ * 每个更新包含旧索引的移除和新数据的写入。
+ */
+int knowledge_base_update_batch(KnowledgeBase* kb, const int* entry_ids,
+                                const KnowledgeEntry* entries, size_t update_count) {
+    if (kb == NULL || entry_ids == NULL || entries == NULL || update_count == 0) {
+        return -1;
+    }
+
+    int updated_count = 0;
+
+    KB_WLOCK(kb);
+
+    for (size_t k = 0; k < update_count; k++) {
+        int entry_id = entry_ids[k];
+        const KnowledgeEntry* entry = &entries[k];
+        if (entry_id <= 0 || entry == NULL) continue;
+
+        /* 查找条目 */
+        for (size_t i = 0; i < kb->size; i++) {
+            if (kb->entries[i].id == entry_id) {
+                KnowledgeEntry* old_e = &kb->entries[i].entry;
+
+                /* 从倒排索引移除旧条目 */
+                if (old_e->subject && kb->subject_index.size > 0) {
+                    inverted_index_remove(&kb->subject_index, old_e->subject, entry_id);
+                }
+                if (old_e->predicate && kb->predicate_index.size > 0) {
+                    inverted_index_remove(&kb->predicate_index, old_e->predicate, entry_id);
+                }
+                if (old_e->object && kb->object_index.size > 0) {
+                    inverted_index_remove(&kb->object_index, old_e->object, entry_id);
+                }
+
+                /* 释放旧条目内存 */
+                free_knowledge_entry(&kb->entries[i].entry);
+
+                /* 复制新条目数据 */
+                if (copy_knowledge_entry(&kb->entries[i].entry, entry) != 0) {
+                    memset(&kb->entries[i], 0, sizeof(InternalKnowledgeEntry));
+                    continue;
+                }
+
+                if (kb->entries[i].entry.timestamp == 0) {
+                    kb->entries[i].entry.timestamp = (long)time(NULL);
+                }
+
+                /* 添加新条目到倒排索引 */
+                if (kb->entries[i].entry.subject) {
+                    inverted_index_add_key(&kb->subject_index,
+                        kb->entries[i].entry.subject, entry_id);
+                }
+                if (kb->entries[i].entry.predicate) {
+                    inverted_index_add_key(&kb->predicate_index,
+                        kb->entries[i].entry.predicate, entry_id);
+                }
+                if (kb->entries[i].entry.object) {
+                    inverted_index_add_key(&kb->object_index,
+                        kb->entries[i].entry.object, entry_id);
+                }
+
+                updated_count++;
+                break;
+            }
+        }
+    }
+
+    /* 清除缓存 */
+    if (kb->search_results_cache) {
+        safe_free((void**)&kb->search_results_cache);
+        kb->cache_size = 0;
+        kb->cache_capacity = 0;
+    }
+
+    KB_WUNLOCK(kb);
+    return updated_count;
+}
+
+/**
+ * @brief 释放批量操作结果
+ */
+void batch_operation_result_free(BatchOperationResult* result) {
+    if (!result) return;
+    safe_free((void**)&result->error_message);
+    memset(result, 0, sizeof(BatchOperationResult));
+}
+
 int knowledge_base_get_by_id(KnowledgeBase* kb, int entry_id, KnowledgeEntry* entry) {
     if (kb == NULL || entry_id <= 0 || entry == NULL) {
         return -1;

@@ -21,6 +21,7 @@
 #include "selflnn/core/lnn.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/math_utils.h"
+#include "selflnn/utils/math_utils_internal.h"  /* CLAMP宏定义 */
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/logging.h"
 #include "selflnn/utils/perf.h"

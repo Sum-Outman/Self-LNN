@@ -611,6 +611,10 @@ void loss_gradient_ex(const float* predictions, const float* targets, int n, flo
  * 其中 G_i = ||grad_i||_2, G_avg = mean(G_i)
  * ================================================================ */
 
+/* 前向声明：多模态段验证，定义在文件后续位置 */
+int validate_multimodal_segments(const MultimodalLossSegment* segments,
+                                 int num_segments, int total_length);
+
 float loss_compute_multimodal_adaptive(const float* predictions, const float* targets,
                                         int total_length,
                                         const MultimodalLossSegment* segments,

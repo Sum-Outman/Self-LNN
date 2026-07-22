@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file gpu_internal.h
  * @brief GPU内部类型定义 - 仅供GPU后端实现使用
  * 
@@ -205,6 +205,58 @@ typedef enum {
     GPU_BACKEND_INITIALIZED = 2,
     GPU_BACKEND_ERROR = 3
 } GpuBackendState;
+
+/* ============================================================================
+ * L-003: GPU架构无关常量统一
+ * 
+ * 统一定义各GPU后端共享的硬件架构常量，消除各后端文件中的重复定义。
+ * 运行时通过设备查询获取实际值，这些常量作为默认回退值。
+ * ============================================================================ */
+
+/** @brief 默认每块最大线程数（CUDA/OpenCL/Vulkan通用默认值） */
+#define GPU_MAX_THREADS_PER_BLOCK_DEFAULT  256
+
+/** @brief 最大块维度X */
+#define GPU_MAX_BLOCK_DIM_X  1024
+
+/** @brief 最大块维度Y */
+#define GPU_MAX_BLOCK_DIM_Y  1024
+
+/** @brief 最大块维度Z */
+#define GPU_MAX_BLOCK_DIM_Z  64
+
+/** @brief 最大网格维度X */
+#define GPU_MAX_GRID_DIM_X  2147483647
+
+/** @brief 最大网格维度Y */
+#define GPU_MAX_GRID_DIM_Y  65535
+
+/** @brief 最大网格维度Z */
+#define GPU_MAX_GRID_DIM_Z  65535
+
+/** @brief NVIDIA GPU Warp大小（32线程） */
+#define GPU_WARP_SIZE_NVIDIA  32
+
+/** @brief AMD GPU Wavefront大小（64线程） */
+#define GPU_WAVEFRONT_SIZE_AMD  64
+
+/** @brief 默认共享内存大小（字节） */
+#define GPU_MAX_SHARED_MEMORY_DEFAULT  49152
+
+/** @brief 默认每块最大寄存器数 */
+#define GPU_MAX_REGISTERS_PER_BLOCK_DEFAULT  65536
+
+/** @brief 默认最大工作组大小（OpenCL/Vulkan通用） */
+#define GPU_MAX_WORKGROUP_SIZE_DEFAULT  256
+
+/** @brief 默认工作组大小（1D内核） */
+#define GPU_DEFAULT_WORKGROUP_SIZE_1D  256
+
+/** @brief 默认工作组大小（2D内核） */
+#define GPU_DEFAULT_WORKGROUP_SIZE_2D  16
+
+/** @brief 默认工作组大小（3D内核） */
+#define GPU_DEFAULT_WORKGROUP_SIZE_3D  8
 
 #ifdef __cplusplus
 }

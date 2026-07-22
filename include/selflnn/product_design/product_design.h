@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file product_design.h
  * @brief 产品设计能力接口 — 【基础功能实现】
  *
@@ -30,7 +30,8 @@ typedef enum {
     PRODUCT_TYPE_HARDWARE = 0,   /**< 硬件产品 */
     PRODUCT_TYPE_SOFTWARE = 1,   /**< 软件产品 */
     PRODUCT_TYPE_SYSTEM = 2,     /**< 系统产品 */
-    PRODUCT_TYPE_CUSTOM = 3      /**< 自定义产品 */
+    PRODUCT_TYPE_CUSTOM = 3,     /**< 自定义产品 */
+    PRODUCT_TYPE_SERVICE = 4     /**< 服务产品（M-010: LNN生成式扩展） */
 } ProductType;
 
 /**
@@ -46,6 +47,11 @@ typedef struct {
     double development_time;     /**< 开发时间（月） */
     double complexity_score;     /**< 复杂度评分 */
     double feasibility_score;    /**< 可行性评分 */
+    /* M-010: LNN生成式扩展字段 */
+    double size_factor;          /**< 尺寸系数 (0.5-5.0) */
+    double weight_factor;        /**< 重量系数 (0.1-10.0) */
+    double cost_factor;          /**< 成本系数 (0.5-5.0) */
+    char* material_name;         /**< 材料名称 */
 } ProductSpec;
 
 /**
@@ -214,6 +220,45 @@ ProductSpec* generate_product_spec(ProductDesignEngine* engine,
  * @param spec 产品规格
  */
 void product_spec_destroy(ProductSpec* spec);
+
+/**
+ * @brief 释放产品规格（别名，同product_spec_destroy）
+ * 
+ * M-010: 供LNN生成式内部使用
+ * 
+ * @param spec 产品规格
+ */
+void free_product_spec(ProductSpec* spec);
+
+/* ============================================================================
+ * M-010: LNN生成式产品设计API
+ * ============================================================================ */
+
+/**
+ * @brief 使用LNN液态神经网络生成产品规格
+ * 
+ * 流程：需求文本→bigram哈希特征向量(128维)→LNN前向传播→输出解码→产品参数
+ * 贝叶斯融合：规则匹配作为先验(权重0.4)，LNN输出作为后验(权重0.6)
+ * LNN不可用时返回NULL，调用方应回退到generate_product_spec规则匹配。
+ * 
+ * @param engine 产品设计引擎句柄
+ * @param requirement 产品需求
+ * @return ProductSpec* 产品规格，失败或LNN不可用时返回NULL
+ */
+ProductSpec* generate_product_spec_lnn(ProductDesignEngine* engine,
+                                        const ProductRequirement* requirement);
+
+/**
+ * @brief 设置产品设计引擎的LNN实例
+ * 
+ * 允许外部注入LNN实例用于产品规格生成。
+ * 传入NULL则使用selflnn_get_lnn()获取全局实例。
+ * 
+ * @param engine 产品设计引擎句柄
+ * @param lnn LNN实例（可为NULL使用全局实例）
+ * @return int 成功返回0，失败返回-1
+ */
+int product_design_set_lnn(ProductDesignEngine* engine, void* lnn);
 
 /**
  * @brief 评估产品设计

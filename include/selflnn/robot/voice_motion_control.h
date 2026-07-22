@@ -78,6 +78,33 @@ int voice_motion_add_command(VoiceMotionControl* vmc, const char* keyword,
 int voice_motion_remove_command(VoiceMotionControl* vmc, const char* keyword);
 int voice_motion_list_commands(const VoiceMotionControl* vmc, char* buffer, size_t buf_size);
 
+/* M-007修复: 上下文感知与反馈增强接口 */
+typedef struct {
+    float position[3];
+    float orientation[3];
+    float velocity[3];
+    float joint_angles[6];
+    float battery_level;
+    float obstacle_distance;
+    int is_moving;
+    int gripper_state;
+    time_t last_update;
+} RobotContext;
+
+int voice_motion_process_with_context(VoiceMotionControl* vmc,
+                                       const char* text,
+                                       const RobotContext* context,
+                                       MotionCommand* cmd);
+int voice_motion_execute_with_feedback(VoiceMotionControl* vmc,
+                                        const MotionCommand* cmd,
+                                        const RobotContext* context);
+int voice_motion_get_execution_feedback(const VoiceMotionControl* vmc,
+                                         char* feedback, size_t feedback_size);
+int voice_motion_execute_chain(VoiceMotionControl* vmc,
+                                const MotionCommand* commands,
+                                size_t num_commands,
+                                const RobotContext* context);
+
 #ifdef __cplusplus
 }
 #endif

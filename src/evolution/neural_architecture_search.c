@@ -25,6 +25,8 @@
 #include "selflnn/utils/math_utils.h"
 #include "selflnn/utils/string_utils.h"
 #include "selflnn/utils/platform.h"
+#include "selflnn/utils/logging.h"
+#include "selflnn/utils/time_utils.h"
 #include "selflnn/core/architecture_controller.h" /* P1-002: NAS→LNN部署桥接 */
 #include <stdlib.h>
 #include <string.h>
@@ -137,6 +139,8 @@ static int load_architecture_from_stream(ArchitectureDescription* arch, FILE* fi
 NASSystem* nas_system_create(const NASConfig* config,
                             ArchitectureEvaluator evaluator,
                             void* user_data) {
+    size_t i;
+    size_t pop_size;
     
     if (!config || !evaluator) {
         selflnn_set_last_error(SELFLNN_ERROR_NULL_POINTER, __func__, __FILE__, __LINE__,
@@ -175,6 +179,10 @@ NASSystem* nas_system_create(const NASConfig* config,
     system->state.best_architecture = NULL;
     system->state.is_searching = 0;
     system->state.search_complete = 0;
+    /* M-007修复: 初始化早停机制 */
+    system->state.patience_counter = 0;
+    system->state.patience_limit = 20;   /* 默认20代无改善触发早停 */
+    system->state.early_stop_triggered = 0;
     
     // 初始化种群
     system->population = NULL;
@@ -227,7 +235,7 @@ NASSystem* nas_system_create(const NASConfig* config,
     }
     
     // 分配种群内存
-    size_t pop_size = (size_t)config->population_size;
+    pop_size = (size_t)config->population_size;
     system->population = (ArchitectureDescription**)safe_malloc(
         pop_size * sizeof(ArchitectureDescription*));
     system->evaluations = (ArchitectureEvaluation**)safe_malloc(
@@ -240,7 +248,7 @@ NASSystem* nas_system_create(const NASConfig* config,
         return NULL;
     }
     
-    for (size_t i = 0; i < pop_size; i++) {
+    for (i = 0; i < pop_size; i++) {
         system->population[i] = NULL;
         system->evaluations[i] = NULL;
     }
@@ -273,11 +281,12 @@ NASSystem* nas_system_create(const NASConfig* config,
  * @brief 释放NAS系统
  */
 void nas_system_free(NASSystem* system) {
+    int i;
     if (!system) return;
     
     // 释放种群
     if (system->population) {
-        for (size_t i = 0; i < system->population_capacity; i++) {
+        for (i = 0; i < system->population_capacity; i++) {
             if (system->population[i]) {
                 free_architecture_description(system->population[i]);
             }
@@ -336,6 +345,10 @@ int nas_initialize_search_space(NASSystem* system) {
  * @brief 执行一代搜索
  */
 int nas_search_generation(NASSystem* system) {
+    float prev_best_fitness;
+    int i;
+    int evaluated_count;
+    int log_len;
     
     if (!system) {
         selflnn_set_last_error(SELFLNN_ERROR_NULL_POINTER, __func__, __FILE__, __LINE__,
@@ -353,9 +366,12 @@ int nas_search_generation(NASSystem* system) {
     mutex_lock(system->lock);
     system->state.is_searching = 1;
 
+    /* M-007修复: 记录本代开始前的最佳适应度，用于早停判断 */
+    prev_best_fitness = system->state.best_fitness;
+
     // 如果是第一代，生成初始种群
     if (system->state.current_generation == 0) {
-        for (size_t i = 0; i < system->population_capacity; i++) {
+        for (i = 0; i < system->population_capacity; i++) {
             if (!system->population[i]) {
                 system->population[i] = create_architecture_description();
                 if (!system->population[i]) {
@@ -375,8 +391,8 @@ int nas_search_generation(NASSystem* system) {
     }
     
     // 评估种群
-    int evaluated_count = 0;
-    for (size_t i = 0; i < system->population_capacity; i++) {
+    evaluated_count = 0;
+    for (i = 0; i < system->population_capacity; i++) {
         if (system->population[i] && !system->population[i]->is_evaluated) {
             // 评估架构
             ArchitectureEvaluation* eval = system->evaluator(
@@ -393,6 +409,8 @@ int nas_search_generation(NASSystem* system) {
                 // 更新最佳架构
                 if (eval->overall_score > system->state.best_fitness) {
                     system->state.best_fitness = eval->overall_score;
+                    /* M-007修复: 适应度改善时重置早停计数器 */
+                    system->state.patience_counter = 0;
                     
                     // 复制最佳架构
                     if (system->best_architecture) {
@@ -464,7 +482,7 @@ int nas_search_generation(NASSystem* system) {
                         memcpy(system->best_evaluation, eval, sizeof(ArchitectureEvaluation));
                         system->best_evaluation->architecture = system->best_architecture;
                         if (eval->evaluation_log) {
-                            size_t log_len = strlen(eval->evaluation_log) + 1;
+                            log_len = strlen(eval->evaluation_log) + 1;
                             system->best_evaluation->evaluation_log = (char*)safe_malloc(log_len);
                             if (system->best_evaluation->evaluation_log)
                                 memcpy(system->best_evaluation->evaluation_log, eval->evaluation_log, log_len);
@@ -472,6 +490,26 @@ int nas_search_generation(NASSystem* system) {
                     }
                 }
             }
+        }
+    }
+    
+    /* M-007修复: DARTS早停机制 —— 每代结束时检查验证损失是否改善 */
+    if (system->state.patience_limit > 0 && !system->state.early_stop_triggered) {
+        if (system->state.best_fitness > prev_best_fitness) {
+            /* 本代有改善，重置计数器 */
+            system->state.patience_counter = 0;
+        } else {
+            /* 本代无改善，递增计数器 */
+            system->state.patience_counter++;
+        }
+        
+        /* 检查是否触发早停 */
+        if (system->state.patience_counter >= system->state.patience_limit) {
+            system->state.early_stop_triggered = 1;
+            system->state.search_complete = 1;
+            system->state.is_searching = 0;
+            log_info("NAS搜索: 早停触发! 连续%d代无改善 (最佳适应度=%.6f)",
+                           system->state.patience_counter, system->state.best_fitness);
         }
     }
     
@@ -510,6 +548,10 @@ int nas_search_generation(NASSystem* system) {
  */
 int nas_search_complete(NASSystem* system, int max_generations,
                         void* arch_ctrl, void** lnn) {
+    int actual_max_generations;
+    int total_evaluated;
+    int evaluated;
+    int deploy_ret;
     
     if (!system) {
         selflnn_set_last_error(SELFLNN_ERROR_NULL_POINTER, __func__, __FILE__, __LINE__,
@@ -517,14 +559,14 @@ int nas_search_complete(NASSystem* system, int max_generations,
         return -1;
     }
     
-    int actual_max_generations = max_generations > 0 ? max_generations : 
+    actual_max_generations = max_generations > 0 ? max_generations : 
                                 system->config.max_generations;
     
-    int total_evaluated = 0;
+    total_evaluated = 0;
     
     while (system->state.current_generation < actual_max_generations && 
            !system->state.search_complete) {
-        int evaluated = nas_search_generation(system);
+        evaluated = nas_search_generation(system);
         if (evaluated < 0) {
             return -1;
         }
@@ -535,7 +577,7 @@ int nas_search_complete(NASSystem* system, int max_generations,
      * 如果arch_ctrl和lnn都提供了，则将NAS搜索到的最优架构
      * 通过架构控制器真正部署到生产LNN实例 */
     if (arch_ctrl && lnn && *lnn && system->best_architecture) {
-        int deploy_ret = nas_deploy_best_architecture(
+        deploy_ret = nas_deploy_best_architecture(
             system, arch_ctrl, lnn, 0.05f, 0.7f);
         if (deploy_ret == 0) {
             log_info("[NAS] 搜索完成并已自动部署最优架构到LNN");
@@ -674,6 +716,7 @@ int nas_get_search_state(NASSystem* system, NASSearchState* state) {
  * @brief 重置NAS系统
  */
 int nas_reset(NASSystem* system) {
+    int i;
 
     if (!system) {
         selflnn_set_last_error(SELFLNN_ERROR_NULL_POINTER, __func__, __FILE__, __LINE__,
@@ -685,7 +728,7 @@ int nas_reset(NASSystem* system) {
     mutex_lock(system->lock);
     // 释放种群
     if (system->population) {
-        for (size_t i = 0; i < system->population_capacity; i++) {
+        for (i = 0; i < system->population_capacity; i++) {
             if (system->population[i]) {
                 free_architecture_description(system->population[i]);
                 system->population[i] = NULL;
@@ -733,6 +776,8 @@ int nas_reset(NASSystem* system) {
  * @brief 保存搜索状态
  */
 int nas_save_state(NASSystem* system, const char* filepath) {
+    int i;
+    FILE* file;
     
     if (!system || !filepath) {
         selflnn_set_last_error(SELFLNN_ERROR_NULL_POINTER, __func__, __FILE__, __LINE__,
@@ -741,7 +786,7 @@ int nas_save_state(NASSystem* system, const char* filepath) {
     }
     
     // 完整状态保存：种群、配置、历史、最佳架构
-    FILE* file = fopen(filepath, "w");
+    file = fopen(filepath, "w");
     if (!file) return -1;
     
     fprintf(file, "NAS_STATE_V1\n");
@@ -761,29 +806,29 @@ int nas_save_state(NASSystem* system, const char* filepath) {
     
     // 保存适应度历史
     fprintf(file, "适应度历史:");
-    for (size_t i = 0; i < system->history_size; i++) {
+    for (i = 0; i < system->history_size; i++) {
         fprintf(file, " %.6f", system->fitness_history[i]);
     }
     fprintf(file, "\n");
     
     // 保存多样性历史
     fprintf(file, "多样性历史:");
-    for (size_t i = 0; i < system->history_size; i++) {
+    for (i = 0; i < system->history_size; i++) {
         fprintf(file, " %.6f", system->diversity_history[i]);
     }
     fprintf(file, "\n");
     
     // 保存探索历史
     fprintf(file, "探索历史:");
-    for (size_t i = 0; i < system->history_size; i++) {
+    for (i = 0; i < system->history_size; i++) {
         fprintf(file, " %.6f", system->exploration_history[i]);
     }
     fprintf(file, "\n");
     
     // 保存种群架构
-    for (size_t i = 0; i < system->population_capacity; i++) {
+    for (i = 0; i < system->population_capacity; i++) {
         if (system->population[i]) {
-            fprintf(file, "架构 %zu:\n", i);
+            fprintf(file, "架构 %zu:\n", (size_t)i);
             save_architecture_to_stream(system->population[i], file);
         }
     }
@@ -807,6 +852,13 @@ int nas_save_state(NASSystem* system, const char* filepath) {
  * @brief 加载搜索状态
  */
 int nas_load_state(NASSystem* system, const char* filepath) {
+    int found_best;
+    char* nl;
+    char* tok;
+    int i;
+    FILE* file;
+    char line[512];
+    ArchitectureDescription* loaded_arch;
     
     if (!system || !filepath) {
         selflnn_set_last_error(SELFLNN_ERROR_NULL_POINTER, __func__, __FILE__, __LINE__,
@@ -815,15 +867,14 @@ int nas_load_state(NASSystem* system, const char* filepath) {
     }
     
     // 完整状态加载：从文件解析并恢复种群、状态和历史
-    FILE* file = fopen(filepath, "r");
+    file = fopen(filepath, "r");
     if (!file) return -1;
     
-    char line[512];
-    int found_best = 0;
-    ArchitectureDescription* loaded_arch = NULL;
+    found_best = 0;
+    loaded_arch = NULL;
     
     while (fgets(line, sizeof(line), file)) {
-        char* nl = strchr(line, '\n');
+        nl = strchr(line, '\n');
         if (nl) *nl = '\0';
         
         if (strncmp(line, "NAS_STATE_V1", 12) == 0) {
@@ -853,8 +904,8 @@ int nas_load_state(NASSystem* system, const char* filepath) {
         } else if (strncmp(line, "历史大小: ", 10) == 0) {
             system->history_size = (size_t)atoi(line + 10);
         } else if (strncmp(line, "适应度历史:", 12) == 0) {
-            char* tok = line + 12;
-            for (size_t i = 0; i < system->history_size && i < system->history_capacity; i++) {
+            tok = line + 12;
+            for (i = 0; i < system->history_size && i < system->history_capacity; i++) {
                 while (*tok == ' ') tok++;
                 if (*tok) {
                     system->fitness_history[i] = (float)atof(tok);
@@ -862,8 +913,8 @@ int nas_load_state(NASSystem* system, const char* filepath) {
                 }
             }
         } else if (strncmp(line, "多样性历史:", 12) == 0) {
-            char* tok = line + 12;
-            for (size_t i = 0; i < system->history_size && i < system->history_capacity; i++) {
+            tok = line + 12;
+            for (i = 0; i < system->history_size && i < system->history_capacity; i++) {
                 while (*tok == ' ') tok++;
                 if (*tok) {
                     system->diversity_history[i] = (float)atof(tok);
@@ -871,8 +922,8 @@ int nas_load_state(NASSystem* system, const char* filepath) {
                 }
             }
         } else if (strncmp(line, "探索历史:", 12) == 0) {
-            char* tok = line + 12;
-            for (size_t i = 0; i < system->history_size && i < system->history_capacity; i++) {
+            tok = line + 12;
+            for (i = 0; i < system->history_size && i < system->history_capacity; i++) {
                 while (*tok == ' ') tok++;
                 if (*tok) {
                     system->exploration_history[i] = (float)atof(tok);
@@ -944,6 +995,14 @@ int nas_deploy_best_architecture(NASSystem* system,
                                   void** lnn,
                                   float min_improvement,
                                   float confidence) {
+    float current_fitness;
+    float improvement;
+    int max_width;
+    int i;
+    int ret;
+    uint32_t arch_data[4];
+    ArchitectureChangeResult result;
+
     if (!system || !arch_ctrl || !lnn || !*lnn) {
         return -1;
     }
@@ -957,10 +1016,10 @@ int nas_deploy_best_architecture(NASSystem* system,
 
     /* 检查性能提升是否足够 */
     if (system->best_evaluation) {
-        float current_fitness = 0.0f;
+        current_fitness = 0.0f;
         /* 当前架构的适应度：如果没有记录则默认为0 */
         if (min_improvement > 0.0f) {
-            float improvement = best->fitness_score - current_fitness;
+            improvement = best->fitness_score - current_fitness;
             if (improvement < min_improvement) {
                 log_info("[NAS] 部署跳过: 性能提升不足 (%.3f < %.3f)",
                          improvement, min_improvement);
@@ -972,15 +1031,14 @@ int nas_deploy_best_architecture(NASSystem* system,
     /* 将架构描述序列化为架构控制器可理解的格式
      * 格式：uint32_t[4] = {input_size, hidden_size, output_size, num_layers}
      * 取layer_widths中最大宽度作为hidden_size */
-    uint32_t arch_data[4];
     memset(arch_data, 0, sizeof(arch_data));
 
     if (best->layer_widths && best->layer_count > 0) {
         /* input_size: 取第一层输入（或默认128） */
         arch_data[0] = 128;
         /* hidden_size: 取所有层最大宽度 */
-        int max_width = 0;
-        for (int i = 0; i < best->layer_count; i++) {
+        max_width = 0;
+        for (i = 0; i < best->layer_count; i++) {
             if (best->layer_widths[i] > max_width)
                 max_width = best->layer_widths[i];
         }
@@ -1001,8 +1059,7 @@ int nas_deploy_best_architecture(NASSystem* system,
              arch_data[0], arch_data[1], arch_data[2], arch_data[3],
              best->fitness_score);
 
-    ArchitectureChangeResult result;
-    int ret = arch_controller_deploy_architecture((ArchitectureController*)arch_ctrl, (LNN**)lnn,
+    ret = arch_controller_deploy_architecture((ArchitectureController*)arch_ctrl, (LNN**)lnn,
                                                    arch_data, sizeof(arch_data),
                                                    confidence, &result);
     if (ret == SELFLNN_SUCCESS) {
@@ -1019,6 +1076,13 @@ int nas_deploy_best_architecture(NASSystem* system,
  */
 int nas_get_statistics(NASSystem* system, int generation,
                       float* statistics, size_t max_statistics) {
+    float gen_factor;
+    float mutation_rate;
+    float elite_ratio;
+    float evolution_maturity;
+    int count;
+    int valid_count;
+    int i;
     /* P1-015修复：使用generation参数计算自适应进化指标
      * - 变异率衰减：随世代增大，变异率指数衰减 (mutation_rate = base_rate * 0.95^generation)
      * - 精英保留比例增长：随世代增大，精英比例逐渐升高
@@ -1035,14 +1099,14 @@ int nas_get_statistics(NASSystem* system, int generation,
     }
     
     // P1-015修复：计算世代自适应因子
-    float gen_factor = (float)generation / fmaxf((float)system->config.max_generations, 1.0f);
+    gen_factor = (float)generation / fmaxf((float)system->config.max_generations, 1.0f);
     if (gen_factor > 1.0f) gen_factor = 1.0f;
-    float mutation_rate = 0.3f * powf(0.95f, (float)generation);  /* 变异率指数衰减 */
-    float elite_ratio = 0.05f + gen_factor * 0.25f;               /* 精英比例线性增长 [0.05, 0.30] */
-    float evolution_maturity = gen_factor;                        /* 进化成熟度 */
+    mutation_rate = 0.3f * powf(0.95f, (float)generation);  /* 变异率指数衰减 */
+    elite_ratio = 0.05f + gen_factor * 0.25f;               /* 精英比例线性增长 [0.05, 0.30] */
+    evolution_maturity = gen_factor;                        /* 进化成熟度 */
     
     // 完整统计信息：包含搜索状态、种群统计、进化进度
-    size_t count = 0;
+    count = 0;
     
     if (count < max_statistics) statistics[count++] = system->state.best_fitness;
     if (count < max_statistics) statistics[count++] = system->state.average_fitness;
@@ -1057,8 +1121,8 @@ int nas_get_statistics(NASSystem* system, int generation,
     if (count < max_statistics) statistics[count++] = (float)system->population_capacity;
     
     // 种群有效架构比例
-    int valid_count = 0;
-    for (size_t i = 0; i < system->population_capacity; i++) {
+    valid_count = 0;
+    for (i = 0; i < system->population_capacity; i++) {
         if (system->population[i]) valid_count++;
     }
     if (count < max_statistics) statistics[count++] = (float)valid_count / system->population_capacity;
@@ -1072,6 +1136,48 @@ int nas_get_statistics(NASSystem* system, int generation,
 }
 
 /* ============================================================================
+ * M-007修复: DARTS早停机制 API实现
+ * ============================================================================ */
+
+/**
+ * @brief 设置早停参数
+ */
+int nas_set_early_stop(NASSystem* system, int patience_limit) {
+    if (!system) {
+        selflnn_set_last_error(SELFLNN_ERROR_NULL_POINTER, __func__, __FILE__, __LINE__,
+                              "系统句柄为空");
+        return -1;
+    }
+    
+    mutex_lock(system->lock);
+    system->state.patience_limit = patience_limit;
+    system->state.patience_counter = 0;  /* 重置计数器 */
+    system->state.early_stop_triggered = 0;
+    mutex_unlock(system->lock);
+    
+    log_info("NAS早停: patience_limit=%d (0=禁用)", patience_limit);
+    return 0;
+}
+
+/**
+ * @brief 获取早停状态
+ */
+int nas_get_early_stop_status(NASSystem* system, int* counter_out, int* triggered_out) {
+    if (!system) {
+        selflnn_set_last_error(SELFLNN_ERROR_NULL_POINTER, __func__, __FILE__, __LINE__,
+                              "系统句柄为空");
+        return -1;
+    }
+    
+    mutex_lock(system->lock);
+    if (counter_out) *counter_out = system->state.patience_counter;
+    if (triggered_out) *triggered_out = system->state.early_stop_triggered;
+    mutex_unlock(system->lock);
+    
+    return 0;
+}
+
+/* ============================================================================
  * 内部辅助函数实现
  * ============================================================================ */
 
@@ -1079,6 +1185,9 @@ int nas_get_statistics(NASSystem* system, int generation,
  * @brief 创建架构描述
  */
 static ArchitectureDescription* create_architecture_description(void) {
+    float memory_threshold_mb;
+    float excess_ratio;
+    float memory_penalty;
     
     ArchitectureDescription* arch = (ArchitectureDescription*)safe_malloc(
         sizeof(ArchitectureDescription));
@@ -1099,11 +1208,11 @@ static ArchitectureDescription* create_architecture_description(void) {
     arch->is_evaluated = 0;
     /* P1-016修复：当total_memory超出阈值时，对超大架构预置惩罚项以降低其fitness */
     {
-        float memory_threshold_mb = 2048.0f; /* 2GB内存阈值 */
+        memory_threshold_mb = 2048.0f; /* 2GB内存阈值 */
         if (arch->estimated_memory > memory_threshold_mb) {
             /* 超出阈值越多，惩罚越重：使用指数增长惩罚因子 */
-            float excess_ratio = arch->estimated_memory / memory_threshold_mb;
-            float memory_penalty = 1.0f - (1.0f / (1.0f + logf(excess_ratio)));
+            excess_ratio = arch->estimated_memory / memory_threshold_mb;
+            memory_penalty = 1.0f - (1.0f / (1.0f + logf(excess_ratio)));
             arch->fitness_score = -memory_penalty; /* 负fitness标记为受惩罚架构 */
         } else {
             arch->fitness_score = 0.0f;
@@ -1244,12 +1353,32 @@ static int initialize_search_space(NASSystem* system) {
  */
 static int generate_random_architecture_internal(NASSystem* system,
                                                 ArchitectureDescription* arch) {
+    int min_layers;
+    int max_layers;
+    int i;
+    int type_idx;
+    int width_idx;
+    int kernel_idx;
+    int op_idx;
+    float total_flops;
+    float total_latency;
+    float total_memory;
+    int input_spatial_size;
+    int width;
+    int prev_width;
+    int kernel;
+    int op;
+    int cell_params;
+    float cell_flops;
+    float memory_threshold_mb;
+    float excess_ratio;
+    float memory_penalty;
     
     if (!system || !arch) return -1;
     
     // 随机生成层数
-    int min_layers = system->config.min_layers;
-    int max_layers = system->config.max_layers;
+    min_layers = system->config.min_layers;
+    max_layers = system->config.max_layers;
     if (min_layers < 1) min_layers = 1;
     if (max_layers < min_layers) max_layers = min_layers + 5;
     /* P2修复14: 对max_layers设置硬上限128，防止配置错误导致超大架构内存耗尽 */
@@ -1270,21 +1399,21 @@ static int generate_random_architecture_internal(NASSystem* system,
     }
     
     // 随机生成每层属性
-    for (int i = 0; i < arch->layer_count; i++) {
+    for (i = 0; i < arch->layer_count; i++) {
         // 层类型
-        int type_idx = (int)(rng_next() % (uint64_t)(system)->layer_type_count);
+        type_idx = (int)(rng_next() % (uint64_t)(system)->layer_type_count);
         arch->layer_types[i] = system->layer_type_options[type_idx];
         
         // 宽度
-        int width_idx = (int)(rng_next() % (uint64_t)(system)->width_count);
+        width_idx = (int)(rng_next() % (uint64_t)(system)->width_count);
         arch->layer_widths[i] = system->width_options[width_idx];
         
         // 卷积核大小（仅对卷积层有效）
-        int kernel_idx = (int)(rng_next() % (uint64_t)(system)->kernel_count);
+        kernel_idx = (int)(rng_next() % (uint64_t)(system)->kernel_count);
         arch->kernel_sizes[i] = system->kernel_options[kernel_idx];
         
         // 操作
-        int op_idx = (int)(rng_next() % (uint64_t)(system)->operation_count);
+        op_idx = (int)(rng_next() % (uint64_t)(system)->operation_count);
         arch->operations[i] = system->operation_options[op_idx];
         
         // 激活函数
@@ -1293,58 +1422,58 @@ static int generate_random_architecture_internal(NASSystem* system,
     
     // 完整复杂度估计：逐层精确计算参数、FLOPs、延迟和内存
     arch->total_parameters = 0;
-    float total_flops = 0.0f;
-    float total_latency = 0.0f;
+    total_flops = 0.0f;
+    total_latency = 0.0f;
     /* P1-016修复：实现total_memory计算并使用 - 当内存超过阈值时添加架构惩罚项 */
-    float total_memory = 0.0f;
+    total_memory = 0.0f;
     
-    int input_spatial_size = 32; // 默认输入空间尺寸32x32（如CIFAR数据集）
+    input_spatial_size = 32; // 默认输入空间尺寸32x32（如CIFAR数据集）
     
-    for (int i = 0; i < arch->layer_count; i++) {
-        int width = arch->layer_widths[i];
-        int prev_width = (i > 0) ? arch->layer_widths[i-1] : width;
-        int kernel = arch->kernel_sizes[i];
-        int op = arch->operations[i];
+    for (i = 0; i < arch->layer_count; i++) {
+        width = arch->layer_widths[i];
+        prev_width = (i > 0) ? arch->layer_widths[i-1] : width;
+        kernel = arch->kernel_sizes[i];
+        op = arch->operations[i];
         
         if (arch->layer_types[i] == 1) { /* CfC标准细胞 */
-            int cell_params = (width + prev_width) * width + width; /* W_gx + W_ax + biases */
+            cell_params = (width + prev_width) * width + width; /* W_gx + W_ax + biases */
             arch->total_parameters += cell_params;
-            float cell_flops = (float)width * prev_width * 4.0f; /* 两次投影 + gating计算 */
+            cell_flops = (float)width * prev_width * 4.0f; /* 两次投影 + gating计算 */
             total_flops += cell_flops;
             total_latency += cell_flops / 1e9f * 1000.0f;
             total_memory += (float)cell_params * 4.0f + (float)width * 4.0f * 2.0f; /* P1-016: 参数内存 + 激活/梯度内存 */
         } else if (arch->layer_types[i] == 2) { /* CfC门控细胞（3个门） */
-            int cell_params = (width + prev_width) * width * 3 + width * 3; /* 3 gate W + biases */
+            cell_params = (width + prev_width) * width * 3 + width * 3; /* 3 gate W + biases */
             arch->total_parameters += cell_params;
-            float cell_flops = (float)width * prev_width * 6.0f; /* 3门投影 + 门控组合 */
+            cell_flops = (float)width * prev_width * 6.0f; /* 3门投影 + 门控组合 */
             total_flops += cell_flops;
             total_latency += cell_flops / 1e9f * 1000.0f;
             total_memory += (float)cell_params * 4.0f + (float)width * 4.0f * 4.0f; /* P1-016: 3门激活内存 */
         } else if (arch->layer_types[i] == 3) { /* CfC液态记忆门控细胞 */
-            int cell_params = (width + prev_width) * width * 2 + width * 2; /* gate+activation W */
+            cell_params = (width + prev_width) * width * 2 + width * 2; /* gate+activation W */
             arch->total_parameters += cell_params;
-            float cell_flops = (float)width * prev_width * 5.0f; /* gate + activation + modulation */
+            cell_flops = (float)width * prev_width * 5.0f; /* gate + activation + modulation */
             total_flops += cell_flops;
             total_latency += cell_flops / 1e9f * 1000.0f;
             total_memory += (float)cell_params * 4.0f + (float)width * 4.0f * 3.0f; /* P1-016: 记忆门控内存 */
         } else if (arch->layer_types[i] == 4) { /* CfC分层细胞 */
-            int cell_params = (width + prev_width) * width * 2 + width * 2; /* bottom-up + top-down */
+            cell_params = (width + prev_width) * width * 2 + width * 2; /* bottom-up + top-down */
             arch->total_parameters += cell_params;
-            float cell_flops = (float)width * prev_width * 5.0f; /* 双向信息流 */
+            cell_flops = (float)width * prev_width * 5.0f; /* 双向信息流 */
             total_flops += cell_flops;
             total_latency += cell_flops / 1e9f * 1000.0f;
             total_memory += (float)cell_params * 4.0f + (float)width * 4.0f * 3.0f; /* P1-016: 双向状态内存 */
         } else if (arch->layer_types[i] == 5) { /* CfC四元数细胞 */
-            int cell_params = (width/4 + prev_width/4) * (width/4) * 4 + width; /* 四元数Hamilton积 */
+            cell_params = (width/4 + prev_width/4) * (width/4) * 4 + width; /* 四元数Hamilton积 */
             arch->total_parameters += cell_params;
-            float cell_flops = (float)width * prev_width * 2.0f; /* 四元数乘法更高效 */
+            cell_flops = (float)width * prev_width * 2.0f; /* 四元数乘法更高效 */
             total_flops += cell_flops;
             total_latency += cell_flops / 1e9f * 1000.0f;
             total_memory += (float)cell_params * 4.0f + (float)width * 4.0f * 2.0f; /* P1-016: 四元数内存 */
         } else if (arch->layer_types[i] == 6) { /* CfC多时间尺度并行细胞 */
-            int cell_params = (width + prev_width) * width * 2 + width * 2; /* fast+slow W */
+            cell_params = (width + prev_width) * width * 2 + width * 2; /* fast+slow W */
             arch->total_parameters += cell_params;
-            float cell_flops = (float)width * prev_width * 5.0f; /* 双通道 + 混合 */
+            cell_flops = (float)width * prev_width * 5.0f; /* 双通道 + 混合 */
             total_flops += cell_flops;
             total_latency += cell_flops / 1e9f * 1000.0f;
             total_memory += (float)cell_params * 4.0f + (float)width * 4.0f * 4.0f; /* P1-016: 双通道内存 */
@@ -1361,17 +1490,17 @@ static int generate_random_architecture_internal(NASSystem* system,
     arch->genome = (float*)safe_malloc(arch->genome_size * sizeof(float));
     if (!arch->genome) return -1;
     
-    for (size_t i = 0; i < arch->genome_size; i++) {
+    for (i = 0; i < arch->genome_size; i++) {
         arch->genome[i] = rng_uniform(0.0f, 1.0f); // 0-1随机数
     }
     
     /* P1-016修复：当total_memory超出阈值时，对超大架构预置惩罚项以降低其fitness */
     {
-        float memory_threshold_mb = 2048.0f; /* 2GB内存阈值 */
+        memory_threshold_mb = 2048.0f; /* 2GB内存阈值 */
         if (arch->estimated_memory > memory_threshold_mb) {
             /* 超出阈值越多，惩罚越重：使用指数增长惩罚因子 */
-            float excess_ratio = arch->estimated_memory / memory_threshold_mb;
-            float memory_penalty = 1.0f - (1.0f / (1.0f + logf(excess_ratio)));
+            excess_ratio = arch->estimated_memory / memory_threshold_mb;
+            memory_penalty = 1.0f - (1.0f / (1.0f + logf(excess_ratio)));
             arch->fitness_score = -memory_penalty; /* 负fitness标记为受惩罚架构 */
         } else {
             arch->fitness_score = 0.0f;
@@ -1388,6 +1517,15 @@ static int generate_random_architecture_internal(NASSystem* system,
 static int mutate_architecture_internal(NASSystem* system,
                                        const ArchitectureDescription* parent,
                                        ArchitectureDescription* child) {
+    int i;
+    size_t j;
+    size_t conn_size;
+    float mutation_rate;
+    int type_idx;
+    int width_idx;
+    int width;
+    int prev_width;
+    int kernel;
     
     if (!system || !parent || !child) return -1;
     
@@ -1400,7 +1538,7 @@ static int mutate_architecture_internal(NASSystem* system,
     child->metrics = NULL;
 
     if (parent->connections && parent->layer_count > 0) {
-        size_t conn_size = (size_t)parent->layer_count * (size_t)parent->layer_count;
+        conn_size = (size_t)parent->layer_count * (size_t)parent->layer_count;
         child->connections = (int*)safe_malloc(conn_size * sizeof(int));
         if (child->connections) {
             memcpy(child->connections, parent->connections, conn_size * sizeof(int));
@@ -1444,19 +1582,19 @@ static int mutate_architecture_internal(NASSystem* system,
     memcpy(child->activations, parent->activations, parent->layer_count * sizeof(int));
     
     // 应用变异
-    float mutation_rate = system->config.mutation_rate;
+    mutation_rate = system->config.mutation_rate;
     if (mutation_rate <= 0.0f) mutation_rate = 0.1f;
     
-    for (int i = 0; i < child->layer_count; i++) {
+    for (i = 0; i < child->layer_count; i++) {
         if (rng_uniform(0.0f, 1.0f) < mutation_rate) {
             // 变异层类型
-            int type_idx = (int)(rng_next() % (uint64_t)(system)->layer_type_count);
+            type_idx = (int)(rng_next() % (uint64_t)(system)->layer_type_count);
             child->layer_types[i] = system->layer_type_options[type_idx];
         }
         
         if (rng_uniform(0.0f, 1.0f) < mutation_rate) {
             // 变异宽度
-            int width_idx = (int)(rng_next() % (uint64_t)(system)->width_count);
+            width_idx = (int)(rng_next() % (uint64_t)(system)->width_count);
             child->layer_widths[i] = system->width_options[width_idx];
         }
         
@@ -1468,12 +1606,12 @@ static int mutate_architecture_internal(NASSystem* system,
     
     // 重新计算复杂度
     child->total_parameters = 0;
-    for (int i = 0; i < child->layer_count; i++) {
-        int width = child->layer_widths[i];
-        int prev_width = (i > 0) ? child->layer_widths[i-1] : width;
+    for (i = 0; i < child->layer_count; i++) {
+        width = child->layer_widths[i];
+        prev_width = (i > 0) ? child->layer_widths[i-1] : width;
         
         if (child->layer_types[i] == 1) { // 卷积层
-            int kernel = child->kernel_sizes[i];
+            kernel = child->kernel_sizes[i];
             child->total_parameters += width * prev_width * kernel * kernel;
         } else if (child->layer_types[i] == 2) { // 全连接层
             child->total_parameters += width * prev_width;
@@ -1492,7 +1630,7 @@ static int mutate_architecture_internal(NASSystem* system,
         
         memcpy(child->genome, parent->genome, child->genome_size * sizeof(float));
         
-        for (size_t j = 0; j < child->genome_size; j++) {
+        for (j = 0; j < child->genome_size; j++) {
             if (rng_uniform(0.0f, 1.0f) < mutation_rate) {
                 // 添加随机扰动
                 child->genome[j] += rng_uniform(0.0f, 1.0f) * 0.2f - 0.1f;
@@ -1515,6 +1653,14 @@ static int crossover_architectures_internal(NASSystem* system,
                                            const ArchitectureDescription* parent1,
                                            const ArchitectureDescription* parent2,
                                            ArchitectureDescription* child) {
+    size_t j;
+    int child_layer_count;
+    int i;
+    int parent_idx;
+    int width;
+    int prev_width;
+    int kernel;
+    size_t min_genome_size;
     
     if (!system || !parent1 || !parent2 || !child) return -1;
 
@@ -1527,7 +1673,7 @@ static int crossover_architectures_internal(NASSystem* system,
     child->metrics_count = 0;
 
     // 确定子架构层数（取平均值）
-    int child_layer_count = (parent1->layer_count + parent2->layer_count) / 2;
+    child_layer_count = (parent1->layer_count + parent2->layer_count) / 2;
     if (child_layer_count < 1) child_layer_count = 1;
     
     child->layer_count = child_layer_count;
@@ -1545,13 +1691,13 @@ static int crossover_architectures_internal(NASSystem* system,
     }
     
     // 交叉操作：从两个父架构中随机选择特征
-    for (int i = 0; i < child_layer_count; i++) {
+    for (i = 0; i < child_layer_count; i++) {
         // 选择父架构
         const ArchitectureDescription* selected_parent = 
             (rng_next() % (uint64_t)(2) == 0) ? parent1 : parent2;
         
         // 确保索引在范围内
-        int parent_idx = i;
+        parent_idx = i;
         if (parent_idx >= selected_parent->layer_count) {
             parent_idx = selected_parent->layer_count - 1;
         }
@@ -1576,12 +1722,12 @@ static int crossover_architectures_internal(NASSystem* system,
     
     // 重新计算复杂度
     child->total_parameters = 0;
-    for (int i = 0; i < child->layer_count; i++) {
-        int width = child->layer_widths[i];
-        int prev_width = (i > 0) ? child->layer_widths[i-1] : width;
+    for (i = 0; i < child->layer_count; i++) {
+        width = child->layer_widths[i];
+        prev_width = (i > 0) ? child->layer_widths[i-1] : width;
         
         if (child->layer_types[i] == 1) { // 卷积层
-            int kernel = child->kernel_sizes[i];
+            kernel = child->kernel_sizes[i];
             child->total_parameters += width * prev_width * kernel * kernel;
         } else if (child->layer_types[i] == 2) { // 全连接层
             child->total_parameters += width * prev_width;
@@ -1596,14 +1742,14 @@ static int crossover_architectures_internal(NASSystem* system,
     if (parent1->genome && parent1->genome_size > 0 && 
         parent2->genome && parent2->genome_size > 0) {
         
-        size_t min_genome_size = parent1->genome_size < parent2->genome_size ? 
+        min_genome_size = parent1->genome_size < parent2->genome_size ? 
                                 parent1->genome_size : parent2->genome_size;
         child->genome_size = min_genome_size;
         child->genome = (float*)safe_malloc(child->genome_size * sizeof(float));
         
         if (child->genome) {
             // 均匀交叉
-            for (size_t j = 0; j < child->genome_size; j++) {
+            for (j = 0; j < child->genome_size; j++) {
                 if (rng_next() % (uint64_t)(2) == 0) {
                     child->genome[j] = parent1->genome[j];
                 } else {
@@ -1628,25 +1774,66 @@ static int crossover_architectures_internal(NASSystem* system,
  */
 static float evaluate_architecture_fitness(NASSystem* system,
                                           const ArchitectureDescription* arch) {
+    int o;
+    int total_params;
+    int max_width;
+    int input_dim;
+    int output_dim;
+    int hidden_dim;
+    int i;
+    int s;
+    float total_loss;
+    float total_grad_norm;
+    float inference_time_total;
+    int valid_passes;
+    int fwd_ret;
+    float sample_loss;
+    float max_output;
+    float softmax_sum;
+    float exp_val;
+    float prob;
+    float x_plus;
+    float x_minus;
+    int r1;
+    int r2;
+    float d_out;
+    float grad_norm;
+    int target_class;
+    float avg_loss;
+    float avg_grad_norm;
+    float avg_inference_us;
+    float param_count;
+    float complexity_penalty;
+    float grad_health;
+    float log_grad;
+    float loss_quality;
+    float inference_efficiency;
+    float fitness;
+    int width;
+    LNN* eval_lnn;
+    #define NAS_EVAL_SAMPLES 32
+    float eval_input[NAS_EVAL_SAMPLES][64];
+    float eval_target[NAS_EVAL_SAMPLES][10];
+    uint32_t seed;
+    LNNConfig lnn_cfg;
     
     if (!system || !arch || arch->layer_count <= 0) return 0.0f;
     
     /* 构建LNN配置 */
-    LNNConfig lnn_cfg;
     memset(&lnn_cfg, 0, sizeof(lnn_cfg));
     
     /* 根据架构计算输入/隐藏/输出维度 */
-    int total_params = 0;
-    int max_width = 0;
-    int input_dim = 64;   /* NAS评估统一使用64维输入 */
-    int output_dim = 10;  /* NAS评估统一使用10类输出 */
+    total_params = 0;
+    max_width = 0;
+    input_dim = 64;   /* NAS评估统一使用64维输入 */
+    output_dim = 10;  /* NAS评估统一使用10类输出 */
     /* R-P2-19修复: output[10]/out_plus[10]/out_minus[10]缓冲区固定为10，
        添加安全检查确保output_dim不超过10，防止lnn_forward写入越界 */
     if (output_dim > 10) output_dim = 10;
-    int hidden_dim = 64;
+    hidden_dim = 64;
     
-    for (int i = 0; i < arch->layer_count; i++) {
-        int width = arch->layer_widths ? arch->layer_widths[i] : 64;
+    for (i = 0; i < arch->layer_count; i++) {
+        width = arch->layer_widths ? arch->layer_widths[i] : 64;
         if (width > max_width) max_width = width;
         if (arch->layer_types && arch->layer_types[i] >= 0) {
             /* CfC层：width * width参数 */
@@ -1662,61 +1849,61 @@ static float evaluate_architecture_fitness(NASSystem* system,
     lnn_cfg.num_layers = arch->layer_count;
     
     /* 创建真实LNN实例 */
-    LNN* eval_lnn = lnn_create(&lnn_cfg);
+    eval_lnn = lnn_create(&lnn_cfg);
     if (!eval_lnn) {
         /* 架构无法实例化，适应度为0 */
         return 0.0f;
     }
     
     /* 生成确定性验证数据集（使用固定种子确保可复现） */
-    #define NAS_EVAL_SAMPLES 32
-    float eval_input[NAS_EVAL_SAMPLES][64];
-    float eval_target[NAS_EVAL_SAMPLES][10];
-    uint32_t seed = 12345;
-    for (int s = 0; s < NAS_EVAL_SAMPLES; s++) {
-        for (int i = 0; i < 64; i++) {
+    seed = 12345;
+    for (s = 0; s < NAS_EVAL_SAMPLES; s++) {
+        for (i = 0; i < 64; i++) {
             seed = seed * 1103515245 + 12345;
             eval_input[s][i] = ((float)(seed & 0xFFFF) / 65535.0f) * 2.0f - 1.0f;
         }
         /* 目标标签：多类one-hot编码 */
-        int target_class = s % 10;
-        for (int o = 0; o < 10; o++) {
+        target_class = s % 10;
+        for (o = 0; o < 10; o++) {
             eval_target[s][o] = (o == target_class) ? 1.0f : 0.0f;
         }
     }
     
     /* 真实前向传播评估 */
-    float total_loss = 0.0f;
-    float total_grad_norm = 0.0f;
-    float inference_time_total = 0.0f;
-    int valid_passes = 0;
+    total_loss = 0.0f;
+    total_grad_norm = 0.0f;
+    inference_time_total = 0.0f;
+    valid_passes = 0;
     
-    for (int s = 0; s < NAS_EVAL_SAMPLES; s++) {
+    for (s = 0; s < NAS_EVAL_SAMPLES; s++) {
         float output[10];
+        uint64_t t0;
+        uint64_t t1;
+        float grad_vec[64];
         lnn_cfg.input_size = input_dim;
         lnn_cfg.output_size = output_dim;
         
         /* 计时推理 */
-        uint64_t t0 = time_utils_get_time_us();
-        int fwd_ret = lnn_forward(eval_lnn, eval_input[s], output);
-        uint64_t t1 = time_utils_get_time_us();
+        t0 = time_utils_get_time_us();
+        fwd_ret = lnn_forward(eval_lnn, eval_input[s], output);
+        t1 = time_utils_get_time_us();
         inference_time_total += (float)(t1 - t0);
         
         if (fwd_ret != 0) continue;
         
         /* 计算交叉熵损失 */
-        float sample_loss = 0.0f;
-        float max_output = -1e30f;
-        for (int o = 0; o < 10; o++) {
+        sample_loss = 0.0f;
+        max_output = -1e30f;
+        for (o = 0; o < 10; o++) {
             if (output[o] > max_output) max_output = output[o];
         }
-        float softmax_sum = 0.0f;
-        for (int o = 0; o < 10; o++) {
-            float exp_val = expf(output[o] - max_output);
+        softmax_sum = 0.0f;
+        for (o = 0; o < 10; o++) {
+            exp_val = expf(output[o] - max_output);
             softmax_sum += exp_val;
         }
-        for (int o = 0; o < 10; o++) {
-            float prob = expf(output[o] - max_output) / (softmax_sum + 1e-10f);
+        for (o = 0; o < 10; o++) {
+            prob = expf(output[o] - max_output) / (softmax_sum + 1e-10f);
             if (eval_target[s][o] > 0.5f && prob > 0.0f) {
                 sample_loss -= logf(prob + 1e-10f);
             }
@@ -1724,21 +1911,20 @@ static float evaluate_architecture_fitness(NASSystem* system,
         total_loss += sample_loss;
         
         /* 反向传播评估梯度稳定性 */
-        float grad_vec[64];
-        for (int i = 0; i < 64; i++) {
-            float x_plus = eval_input[s][i] + 1e-4f;
-            float x_minus = eval_input[s][i] - 1e-4f;
+        for (i = 0; i < 64; i++) {
             float out_plus[10], out_minus[10];
             float input_plus[64], input_minus[64];
+            x_plus = eval_input[s][i] + 1e-4f;
+            x_minus = eval_input[s][i] - 1e-4f;
             memcpy(input_plus, eval_input[s], sizeof(float) * 64);
             memcpy(input_minus, eval_input[s], sizeof(float) * 64);
             input_plus[i] = x_plus;
             input_minus[i] = x_minus;
-            int r1 = lnn_forward(eval_lnn, input_plus, out_plus);
-            int r2 = lnn_forward(eval_lnn, input_minus, out_minus);
+            r1 = lnn_forward(eval_lnn, input_plus, out_plus);
+            r2 = lnn_forward(eval_lnn, input_minus, out_minus);
             if (r1 == 0 && r2 == 0) {
-                float d_out = 0.0f;
-                for (int o = 0; o < 10; o++) {
+                d_out = 0.0f;
+                for (o = 0; o < 10; o++) {
                     d_out += out_plus[o] - out_minus[o];
                 }
                 grad_vec[i] = d_out / (2.0f * 1e-4f);
@@ -1747,8 +1933,8 @@ static float evaluate_architecture_fitness(NASSystem* system,
             }
         }
         
-        float grad_norm = 0.0f;
-        for (int i = 0; i < 64; i++) {
+        grad_norm = 0.0f;
+        for (i = 0; i < 64; i++) {
             grad_norm += grad_vec[i] * grad_vec[i];
         }
         total_grad_norm += sqrtf(grad_norm + 1e-10f);
@@ -1761,32 +1947,32 @@ static float evaluate_architecture_fitness(NASSystem* system,
     if (valid_passes == 0) return 0.0f;
     
     /* 计算真实指标 */
-    float avg_loss = total_loss / (float)valid_passes;
-    float avg_grad_norm = total_grad_norm / (float)valid_passes;
-    float avg_inference_us = inference_time_total / (float)valid_passes;
+    avg_loss = total_loss / (float)valid_passes;
+    avg_grad_norm = total_grad_norm / (float)valid_passes;
+    avg_inference_us = inference_time_total / (float)valid_passes;
     
     /* 计算复杂度指标 */
-    float param_count = (float)total_params;
-    float complexity_penalty = logf(param_count + 1.0f) / 15.0f; /* 0~1，参数越多惩罚越大 */
+    param_count = (float)total_params;
+    complexity_penalty = logf(param_count + 1.0f) / 15.0f; /* 0~1，参数越多惩罚越大 */
     if (complexity_penalty > 1.0f) complexity_penalty = 1.0f;
     
     /* 梯度健康度：适中的梯度范数最佳，太大(爆炸)或太小(消失)均惩罚 */
-    float grad_health = 0.0f;
+    grad_health = 0.0f;
     if (avg_grad_norm > 1e-6f && avg_grad_norm < 1e4f) {
-        float log_grad = logf(avg_grad_norm + 1.0f);
+        log_grad = logf(avg_grad_norm + 1.0f);
         grad_health = 1.0f - fabsf(log_grad - 2.5f) / 8.0f;
         if (grad_health < 0.0f) grad_health = 0.0f;
         if (grad_health > 1.0f) grad_health = 1.0f;
     }
     
     /* 损失质量：较低损失更好（归一化到0-1） */
-    float loss_quality = 1.0f / (1.0f + avg_loss * 0.5f);
+    loss_quality = 1.0f / (1.0f + avg_loss * 0.5f);
     
     /* 推理效率：较低延迟更好 */
-    float inference_efficiency = 1.0f / (1.0f + avg_inference_us * 0.001f);
+    inference_efficiency = 1.0f / (1.0f + avg_inference_us * 0.001f);
     
     /* 综合适应度 = 损失质量*40 + 梯度健康*30 + 推理效率*15 + 复杂度惩罚*15 */
-    float fitness = loss_quality * 40.0f
+    fitness = loss_quality * 40.0f
                   + grad_health * 30.0f
                   + inference_efficiency * 15.0f
                   + (1.0f - complexity_penalty) * 15.0f;
@@ -1807,17 +1993,24 @@ static float evaluate_architecture_fitness(NASSystem* system,
  * @brief 更新种群统计信息
  */
 static int update_population_statistics(NASSystem* system) {
+    float total_fitness;
+    float best_fitness;
+    int evaluated_count;
+    int i;
+    float fitness;
+    float variance;
+    float diff;
     
     if (!system) return -1;
     
-    float total_fitness = 0.0f;
-    float best_fitness = -FLT_MAX;
-    int evaluated_count = 0;
+    total_fitness = 0.0f;
+    best_fitness = -FLT_MAX;
+    evaluated_count = 0;
     
     // 计算统计信息
-    for (size_t i = 0; i < system->population_capacity; i++) {
+    for (i = 0; i < system->population_capacity; i++) {
         if (system->population[i] && system->population[i]->is_evaluated) {
-            float fitness = system->population[i]->fitness_score;
+            fitness = system->population[i]->fitness_score;
             total_fitness += fitness;
             evaluated_count++;
             
@@ -1832,10 +2025,10 @@ static int update_population_statistics(NASSystem* system) {
         system->state.best_fitness = best_fitness;
         
         // 计算标准差
-        float variance = 0.0f;
-        for (size_t i = 0; i < system->population_capacity; i++) {
+        variance = 0.0f;
+        for (i = 0; i < system->population_capacity; i++) {
             if (system->population[i] && system->population[i]->is_evaluated) {
-                float diff = system->population[i]->fitness_score - system->state.average_fitness;
+                diff = system->population[i]->fitness_score - system->state.average_fitness;
                 variance += diff * diff;
             }
         }
@@ -1858,40 +2051,54 @@ static int update_population_statistics(NASSystem* system) {
 static int select_parents(NASSystem* system,
                          ArchitectureDescription** parent1,
                          ArchitectureDescription** parent2) {
+    float progress;
+    int tournament_size;
+    int i;
+    int idx;
+    float fitness;
+    float diversity_bonus;
+    float adjusted;
+    float best_fitness1;
+    float best_fitness2;
+    ArchitectureDescription* best1;
+    ArchitectureDescription* best2;
+    size_t min_g;
+    float diff;
+    int k;
     
     if (!system || !parent1 || !parent2) return -1;
     
     // 完整父代选择：自适应锦标赛选择 + 多样性感知
     // 早期（勘探阶段）使用较小锦标赛增加多样性
     // 后期（开发阶段）使用较大锦标赛增加选择压力
-    float progress = system->state.search_progress;
-    int tournament_size = (int)(2 + progress * 4); // 2~6
+    progress = system->state.search_progress;
+    tournament_size = (int)(2 + progress * 4); // 2~6
     if (tournament_size > (int)system->population_capacity) {
         tournament_size = (int)system->population_capacity;
     }
     if (tournament_size < 2) tournament_size = 2;
     
     // 选择第一个父代
-    ArchitectureDescription* best1 = NULL;
-    float best_fitness1 = -FLT_MAX;
+    best1 = NULL;
+    best_fitness1 = -FLT_MAX;
     
-    for (int i = 0; i < tournament_size; i++) {
-        int idx = (int)(rng_next() % (uint64_t)(system)->population_capacity);
+    for (i = 0; i < tournament_size; i++) {
+        idx = (int)(rng_next() % (uint64_t)(system)->population_capacity);
         if (system->population[idx] && system->population[idx]->is_evaluated) {
-            float fitness = system->population[idx]->fitness_score;
+            fitness = system->population[idx]->fitness_score;
             // 多样性奖励：与已选个体的差异越大奖励越多
-            float diversity_bonus = 0.0f;
+            diversity_bonus = 0.0f;
             if (best1 && system->population[idx]->genome && best1->genome &&
                 system->population[idx]->genome_size > 0 && best1->genome_size > 0) {
-                float diff = 0.0f;
-                size_t min_g = system->population[idx]->genome_size < best1->genome_size ?
+                diff = 0.0f;
+                min_g = system->population[idx]->genome_size < best1->genome_size ?
                                system->population[idx]->genome_size : best1->genome_size;
-                for (size_t k = 0; k < min_g; k++) {
+                for (k = 0; k < min_g; k++) {
                     diff += fabsf(system->population[idx]->genome[k] - best1->genome[k]);
                 }
                 diversity_bonus = (diff / min_g) * (1.0f - progress) * 5.0f;
             }
-            float adjusted = fitness + diversity_bonus;
+            adjusted = fitness + diversity_bonus;
             if (adjusted > best_fitness1) {
                 best_fitness1 = adjusted;
                 best1 = system->population[idx];
@@ -1900,26 +2107,26 @@ static int select_parents(NASSystem* system,
     }
     
     // 选择第二个父代（不同于第一个）
-    ArchitectureDescription* best2 = NULL;
-    float best_fitness2 = -FLT_MAX;
+    best2 = NULL;
+    best_fitness2 = -FLT_MAX;
     
-    for (int i = 0; i < tournament_size; i++) {
-        int idx = (int)(rng_next() % (uint64_t)(system)->population_capacity);
+    for (i = 0; i < tournament_size; i++) {
+        idx = (int)(rng_next() % (uint64_t)(system)->population_capacity);
         if (system->population[idx] && system->population[idx]->is_evaluated && 
             system->population[idx] != best1) {
-            float fitness = system->population[idx]->fitness_score;
-            float diversity_bonus = 0.0f;
+            fitness = system->population[idx]->fitness_score;
+            diversity_bonus = 0.0f;
             if (best2 && system->population[idx]->genome && best2->genome &&
                 system->population[idx]->genome_size > 0 && best2->genome_size > 0) {
-                float diff = 0.0f;
-                size_t min_g = system->population[idx]->genome_size < best2->genome_size ?
+                diff = 0.0f;
+                min_g = system->population[idx]->genome_size < best2->genome_size ?
                                system->population[idx]->genome_size : best2->genome_size;
-                for (size_t k = 0; k < min_g; k++) {
+                for (k = 0; k < min_g; k++) {
                     diff += fabsf(system->population[idx]->genome[k] - best2->genome[k]);
                 }
                 diversity_bonus = (diff / min_g) * (1.0f - progress) * 5.0f;
             }
-            float adjusted = fitness + diversity_bonus;
+            adjusted = fitness + diversity_bonus;
             if (adjusted > best_fitness2) {
                 best_fitness2 = adjusted;
                 best2 = system->population[idx];
@@ -1940,6 +2147,13 @@ static int select_parents(NASSystem* system,
  * @brief 进化种群
  */
 static int evolve_population(NASSystem* system) {
+    int elite_count;
+    int new_idx;
+    int i;
+    float best_fitness;
+    int best_idx;
+    size_t j;
+    int conn_size;
     
     if (!system) return -1;
     
@@ -1957,18 +2171,18 @@ static int evolve_population(NASSystem* system) {
     }
     
     // 保留最佳个体（精英策略）
-    int elite_count = (int)(system->population_capacity / 10); // 10%精英
+    elite_count = (int)(system->population_capacity / 10); // 10%精英
     if (elite_count < 1) elite_count = 1;
     
-    int new_idx = 0;
+    new_idx = 0;
     
     // 复制精英个体
-    for (int i = 0; i < elite_count && new_idx < (int)system->population_capacity; i++) {
+    for (i = 0; i < elite_count && new_idx < (int)system->population_capacity; i++) {
         // 找到最佳个体
-        float best_fitness = -FLT_MAX;
-        int best_idx = -1;
+        best_fitness = -FLT_MAX;
+        best_idx = -1;
         
-        for (size_t j = 0; j < system->population_capacity; j++) {
+        for (j = 0; j < system->population_capacity; j++) {
             if (system->population[j] && system->population[j]->is_evaluated) {
                 if (system->population[j]->fitness_score > best_fitness) {
                     best_fitness = system->population[j]->fitness_score;
@@ -2008,7 +2222,7 @@ static int evolve_population(NASSystem* system) {
                     dst->operations = (int*)safe_malloc(src->layer_count * sizeof(int));
                     if (dst->operations) memcpy(dst->operations, src->operations, src->layer_count * sizeof(int));
                 }
-                int conn_size = src->layer_count * src->layer_count;
+                conn_size = src->layer_count * src->layer_count;
                 if (src->connections && conn_size > 0) {
                     dst->connections = (int*)safe_malloc(conn_size * sizeof(int));
                     if (dst->connections) memcpy(dst->connections, src->connections, conn_size * sizeof(int));
@@ -2072,7 +2286,7 @@ static int evolve_population(NASSystem* system) {
     }
     
     // 释放旧种群
-    for (size_t i = 0; i < system->population_capacity; i++) {
+    for (i = 0; i < system->population_capacity; i++) {
         if (system->population[i]) {
             free_architecture_description(system->population[i]);
         }
@@ -2089,7 +2303,7 @@ static int evolve_population(NASSystem* system) {
     system->evaluations = new_evaluations;
     
     // 重置评估状态
-    for (size_t i = 0; i < system->population_capacity; i++) {
+    for (i = 0; i < system->population_capacity; i++) {
         if (system->population[i]) {
             system->population[i]->is_evaluated = 0;
             system->population[i]->fitness_score = 0.0f;
@@ -2104,31 +2318,47 @@ static int evolve_population(NASSystem* system) {
  * @brief 计算多样性
  */
 static float compute_diversity(NASSystem* system) {
+    float total_difference;
+    int pair_count;
+    size_t i;
+    size_t j;
+    float pair_diff;
+    int factors;
+    size_t min_g;
+    float genome_diff;
+    size_t k;
+    int lc_i;
+    int lc_j;
+    float layer_diff;
+    int max_lc;
+    float type_diff;
+    int t_i;
+    int t_j;
     
     if (!system || system->population_capacity == 0) return 0.0f;
     
     // 完整多样性计算：基因组差异 + 结构差异 + 层配置差异
     // 当基因组不可用时回退到结构比较
-    float total_difference = 0.0f;
-    int pair_count = 0;
+    total_difference = 0.0f;
+    pair_count = 0;
     
-    for (size_t i = 0; i < system->population_capacity; i++) {
-        for (size_t j = i + 1; j < system->population_capacity; j++) {
+    for (i = 0; i < system->population_capacity; i++) {
+        for (j = i + 1; j < system->population_capacity; j++) {
             if (!system->population[i] || !system->population[j]) continue;
             
-            float pair_diff = 0.0f;
-            int factors = 0;
+            pair_diff = 0.0f;
+            factors = 0;
             
             // 因子1：基因组差异（主要差异度量）
             if (system->population[i]->genome && system->population[j]->genome &&
                 system->population[i]->genome_size > 0 && 
                 system->population[j]->genome_size > 0) {
-                size_t min_g = system->population[i]->genome_size < 
+                min_g = system->population[i]->genome_size < 
                                system->population[j]->genome_size ?
                                system->population[i]->genome_size :
                                system->population[j]->genome_size;
-                float genome_diff = 0.0f;
-                for (size_t k = 0; k < min_g; k++) {
+                genome_diff = 0.0f;
+                for (k = 0; k < min_g; k++) {
                     genome_diff += fabsf(system->population[i]->genome[k] - system->population[j]->genome[k]);
                 }
                 pair_diff += (genome_diff / min_g);
@@ -2136,9 +2366,9 @@ static float compute_diversity(NASSystem* system) {
             }
             
             // 因子2：层数差异
-            int lc_i = system->population[i]->layer_count;
-            int lc_j = system->population[j]->layer_count;
-            float layer_diff = (float)(lc_i > lc_j ? lc_i - lc_j : lc_j - lc_i) / 
+            lc_i = system->population[i]->layer_count;
+            lc_j = system->population[j]->layer_count;
+            layer_diff = (float)(lc_i > lc_j ? lc_i - lc_j : lc_j - lc_i) / 
                               (float)(lc_i + lc_j + 1);
             pair_diff += layer_diff;
             factors++;
@@ -2146,11 +2376,11 @@ static float compute_diversity(NASSystem* system) {
             // 因子3：层类型配置差异
             if (system->population[i]->layer_types && system->population[j]->layer_types &&
                 lc_i > 0 && lc_j > 0) {
-                int max_lc = lc_i > lc_j ? lc_i : lc_j;
-                float type_diff = 0.0f;
-                for (int k = 0; k < max_lc; k++) {
-                    int t_i = (k < lc_i) ? system->population[i]->layer_types[k] : 0;
-                    int t_j = (k < lc_j) ? system->population[j]->layer_types[k] : 0;
+                max_lc = lc_i > lc_j ? lc_i : lc_j;
+                type_diff = 0.0f;
+                for (k = 0; k < max_lc; k++) {
+                    t_i = (k < lc_i) ? system->population[i]->layer_types[k] : 0;
+                    t_j = (k < lc_j) ? system->population[j]->layer_types[k] : 0;
                     type_diff += (float)(t_i != t_j ? 1 : 0);
                 }
                 pair_diff += (type_diff / max_lc);
@@ -2175,15 +2405,18 @@ static float compute_diversity(NASSystem* system) {
  * @brief 计算探索分数
  */
 static float compute_exploration_score(NASSystem* system) {
+    float progress_factor;
+    float diversity_factor;
+    float exploration;
     
     if (!system) return 0.5f;
     
     // 探索分数基于搜索进度和多样性
-    float progress_factor = system->state.search_progress;
-    float diversity_factor = system->state.diversity_score;
+    progress_factor = system->state.search_progress;
+    diversity_factor = system->state.diversity_score;
     
     // 早期更多探索，后期更多开发
-    float exploration = (1.0f - progress_factor) * 0.7f + diversity_factor * 0.3f;
+    exploration = (1.0f - progress_factor) * 0.7f + diversity_factor * 0.3f;
     
     if (exploration < 0.0f) exploration = 0.0f;
     if (exploration > 1.0f) exploration = 1.0f;
@@ -2195,39 +2428,50 @@ static float compute_exploration_score(NASSystem* system) {
  * @brief 计算架构复杂度
  */
 static float compute_architecture_complexity(const ArchitectureDescription* arch) {
+    float layer_complexity;
+    float param_complexity;
+    float flop_complexity;
+    float connection_complexity;
+    int conn_count;
+    int total_possible;
+    int i;
+    float activation_complexity;
+    int act_mask;
+    int unique_acts;
+    int b;
     
     if (!arch) return 0.0f;
     
     // 完整复杂度计算：层数复杂度 + 参数量复杂度 + 计算复杂度 + 连接复杂度 + 激活函数复杂度
-    float layer_complexity = (float)arch->layer_count / 50.0f;
+    layer_complexity = (float)arch->layer_count / 50.0f;
     if (layer_complexity > 1.0f) layer_complexity = 1.0f;
     
-    float param_complexity = (float)arch->total_parameters / 10000000.0f;
+    param_complexity = (float)arch->total_parameters / 10000000.0f;
     if (param_complexity > 1.0f) param_complexity = 1.0f;
     
-    float flop_complexity = arch->estimated_flops / 1e10f;
+    flop_complexity = arch->estimated_flops / 1e10f;
     if (flop_complexity > 1.0f) flop_complexity = 1.0f;
     
     // 连接复杂度（基于连接稀疏度）
-    float connection_complexity = 0.0f;
+    connection_complexity = 0.0f;
     if (arch->connections && arch->layer_count > 0) {
-        int conn_count = 0;
-        int total_possible = arch->layer_count * arch->layer_count;
-        for (int i = 0; i < total_possible; i++) {
+        conn_count = 0;
+        total_possible = arch->layer_count * arch->layer_count;
+        for (i = 0; i < total_possible; i++) {
             if (arch->connections[i]) conn_count++;
         }
         connection_complexity = (float)conn_count / total_possible;
     }
     
     // 激活函数多样性的复杂度
-    float activation_complexity = 0.0f;
+    activation_complexity = 0.0f;
     if (arch->activations && arch->layer_count > 0) {
-        int act_mask = 0;
-        for (int i = 0; i < arch->layer_count; i++) {
+        act_mask = 0;
+        for (i = 0; i < arch->layer_count; i++) {
             act_mask |= (1 << (arch->activations[i] % 32));
         }
-        int unique_acts = 0;
-        for (int b = 0; b < 32; b++) {
+        unique_acts = 0;
+        for (b = 0; b < 32; b++) {
             if (act_mask & (1 << b)) unique_acts++;
         }
         activation_complexity = (float)unique_acts / 8.0f;
@@ -2243,6 +2487,7 @@ static float compute_architecture_complexity(const ArchitectureDescription* arch
  * @brief 保存架构到流（可解析格式）
  */
 static int save_architecture_to_stream(const ArchitectureDescription* arch, FILE* file) {
+    int i;
     if (!arch || !file) return -1;
     
     fprintf(file, "ARCH_BEGIN\n");
@@ -2258,43 +2503,43 @@ static int save_architecture_to_stream(const ArchitectureDescription* arch, FILE
     
     if (arch->layer_types && arch->layer_count > 0) {
         fprintf(file, "层类型:");
-        for (int i = 0; i < arch->layer_count; i++) fprintf(file, " %d", arch->layer_types[i]);
+        for (i = 0; i < arch->layer_count; i++) fprintf(file, " %d", arch->layer_types[i]);
         fprintf(file, "\n");
     }
     if (arch->layer_widths && arch->layer_count > 0) {
         fprintf(file, "层宽度:");
-        for (int i = 0; i < arch->layer_count; i++) fprintf(file, " %d", arch->layer_widths[i]);
+        for (i = 0; i < arch->layer_count; i++) fprintf(file, " %d", arch->layer_widths[i]);
         fprintf(file, "\n");
     }
     if (arch->kernel_sizes && arch->layer_count > 0) {
         fprintf(file, "卷积核:");
-        for (int i = 0; i < arch->layer_count; i++) fprintf(file, " %d", arch->kernel_sizes[i]);
+        for (i = 0; i < arch->layer_count; i++) fprintf(file, " %d", arch->kernel_sizes[i]);
         fprintf(file, "\n");
     }
     if (arch->operations && arch->layer_count > 0) {
         fprintf(file, "操作:");
-        for (int i = 0; i < arch->layer_count; i++) fprintf(file, " %d", arch->operations[i]);
+        for (i = 0; i < arch->layer_count; i++) fprintf(file, " %d", arch->operations[i]);
         fprintf(file, "\n");
     }
     if (arch->activations && arch->layer_count > 0) {
         fprintf(file, "激活:");
-        for (int i = 0; i < arch->layer_count; i++) fprintf(file, " %d", arch->activations[i]);
+        for (i = 0; i < arch->layer_count; i++) fprintf(file, " %d", arch->activations[i]);
         fprintf(file, "\n");
     }
     if (arch->connections && arch->layer_count > 0) {
         fprintf(file, "连接:");
-        for (int i = 0; i < arch->layer_count * arch->layer_count; i++)
+        for (i = 0; i < arch->layer_count * arch->layer_count; i++)
             fprintf(file, " %d", arch->connections[i]);
         fprintf(file, "\n");
     }
     if (arch->genome && arch->genome_size > 0) {
         fprintf(file, "基因组:");
-        for (size_t i = 0; i < arch->genome_size; i++) fprintf(file, " %.6f", arch->genome[i]);
+        for (i = 0; i < arch->genome_size; i++) fprintf(file, " %.6f", arch->genome[i]);
         fprintf(file, "\n");
     }
     if (arch->metrics && arch->metrics_count > 0) {
         fprintf(file, "指标:");
-        for (size_t i = 0; i < arch->metrics_count; i++) fprintf(file, " %.6f", arch->metrics[i]);
+        for (i = 0; i < arch->metrics_count; i++) fprintf(file, " %.6f", arch->metrics[i]);
         fprintf(file, "\n");
     }
     fprintf(file, "ARCH_END\n");
@@ -2305,13 +2550,18 @@ static int save_architecture_to_stream(const ArchitectureDescription* arch, FILE
  * @brief 从流加载架构（解析可解析格式）
  */
 static int load_architecture_from_stream(ArchitectureDescription* arch, FILE* file) {
+    int in_arch;
+    char* nl;
+    char* tok;
+    int i;
+    int conn_count;
+    char line[1024];
     if (!arch || !file) return -1;
     
-    char line[1024];
-    int in_arch = 0;
+    in_arch = 0;
     
     while (fgets(line, sizeof(line), file)) {
-        char* nl = strchr(line, '\n');
+        nl = strchr(line, '\n');
         if (nl) *nl = '\0';
         
         if (strcmp(line, "ARCH_BEGIN") == 0) { in_arch = 1; continue; }
@@ -2339,8 +2589,8 @@ static int load_architecture_from_stream(ArchitectureDescription* arch, FILE* fi
         } else if (strncmp(line, "层类型:", 6) == 0 && arch->layer_count > 0) {
             arch->layer_types = (int*)safe_malloc(arch->layer_count * sizeof(int));
             if (arch->layer_types) {
-                char* tok = line + 6;
-                for (int i = 0; i < arch->layer_count; i++) {
+                tok = line + 6;
+                for (i = 0; i < arch->layer_count; i++) {
                     while (*tok == ' ') tok++;
                     if (*tok) { arch->layer_types[i] = atoi(tok); while (*tok && *tok != ' ') tok++; }
                 }
@@ -2348,8 +2598,8 @@ static int load_architecture_from_stream(ArchitectureDescription* arch, FILE* fi
         } else if (strncmp(line, "层宽度:", 6) == 0 && arch->layer_count > 0) {
             arch->layer_widths = (int*)safe_malloc(arch->layer_count * sizeof(int));
             if (arch->layer_widths) {
-                char* tok = line + 6;
-                for (int i = 0; i < arch->layer_count; i++) {
+                tok = line + 6;
+                for (i = 0; i < arch->layer_count; i++) {
                     while (*tok == ' ') tok++;
                     if (*tok) { arch->layer_widths[i] = atoi(tok); while (*tok && *tok != ' ') tok++; }
                 }
@@ -2357,8 +2607,8 @@ static int load_architecture_from_stream(ArchitectureDescription* arch, FILE* fi
         } else if (strncmp(line, "卷积核:", 6) == 0 && arch->layer_count > 0) {
             arch->kernel_sizes = (int*)safe_malloc(arch->layer_count * sizeof(int));
             if (arch->kernel_sizes) {
-                char* tok = line + 6;
-                for (int i = 0; i < arch->layer_count; i++) {
+                tok = line + 6;
+                for (i = 0; i < arch->layer_count; i++) {
                     while (*tok == ' ') tok++;
                     if (*tok) { arch->kernel_sizes[i] = atoi(tok); while (*tok && *tok != ' ') tok++; }
                 }
@@ -2366,8 +2616,8 @@ static int load_architecture_from_stream(ArchitectureDescription* arch, FILE* fi
         } else if (strncmp(line, "操作:", 5) == 0 && arch->layer_count > 0) {
             arch->operations = (int*)safe_malloc(arch->layer_count * sizeof(int));
             if (arch->operations) {
-                char* tok = line + 5;
-                for (int i = 0; i < arch->layer_count; i++) {
+                tok = line + 5;
+                for (i = 0; i < arch->layer_count; i++) {
                     while (*tok == ' ') tok++;
                     if (*tok) { arch->operations[i] = atoi(tok); while (*tok && *tok != ' ') tok++; }
                 }
@@ -2375,18 +2625,18 @@ static int load_architecture_from_stream(ArchitectureDescription* arch, FILE* fi
         } else if (strncmp(line, "激活:", 5) == 0 && arch->layer_count > 0) {
             arch->activations = (int*)safe_malloc(arch->layer_count * sizeof(int));
             if (arch->activations) {
-                char* tok = line + 5;
-                for (int i = 0; i < arch->layer_count; i++) {
+                tok = line + 5;
+                for (i = 0; i < arch->layer_count; i++) {
                     while (*tok == ' ') tok++;
                     if (*tok) { arch->activations[i] = atoi(tok); while (*tok && *tok != ' ') tok++; }
                 }
             }
         } else if (strncmp(line, "连接:", 5) == 0 && arch->layer_count > 0) {
-            int conn_count = arch->layer_count * arch->layer_count;
+            conn_count = arch->layer_count * arch->layer_count;
             arch->connections = (int*)safe_malloc(conn_count * sizeof(int));
             if (arch->connections) {
-                char* tok = line + 5;
-                for (int i = 0; i < conn_count; i++) {
+                tok = line + 5;
+                for (i = 0; i < conn_count; i++) {
                     while (*tok == ' ') tok++;
                     if (*tok) { arch->connections[i] = atoi(tok); while (*tok && *tok != ' ') tok++; }
                 }
@@ -2394,8 +2644,8 @@ static int load_architecture_from_stream(ArchitectureDescription* arch, FILE* fi
         } else if (strncmp(line, "基因组:", 6) == 0 && arch->genome_size > 0) {
             arch->genome = (float*)safe_malloc(arch->genome_size * sizeof(float));
             if (arch->genome) {
-                char* tok = line + 6;
-                for (size_t i = 0; i < arch->genome_size; i++) {
+                tok = line + 6;
+                for (i = 0; i < arch->genome_size; i++) {
                     while (*tok == ' ') tok++;
                     if (*tok) { arch->genome[i] = (float)atof(tok); while (*tok && *tok != ' ') tok++; }
                 }
@@ -2403,8 +2653,8 @@ static int load_architecture_from_stream(ArchitectureDescription* arch, FILE* fi
         } else if (strncmp(line, "指标:", 5) == 0 && arch->metrics_count > 0) {
             arch->metrics = (float*)safe_malloc(arch->metrics_count * sizeof(float));
             if (arch->metrics) {
-                char* tok = line + 5;
-                for (size_t i = 0; i < arch->metrics_count; i++) {
+                tok = line + 5;
+                for (i = 0; i < arch->metrics_count; i++) {
                     while (*tok == ' ') tok++;
                     if (*tok) { arch->metrics[i] = (float)atof(tok); while (*tok && *tok != ' ') tok++; }
                 }
@@ -2420,13 +2670,14 @@ static int load_architecture_from_stream(ArchitectureDescription* arch, FILE* fi
  */
 static int save_architecture_to_file(const ArchitectureDescription* arch,
                                     const char* filepath) {
+    int ret;
     
     if (!arch || !filepath) return -1;
     
     FILE* file = fopen(filepath, "w");
     if (!file) return -1;
     
-    int ret = save_architecture_to_stream(arch, file);
+    ret = save_architecture_to_stream(arch, file);
     fclose(file);
     return ret;
 }
@@ -2436,13 +2687,14 @@ static int save_architecture_to_file(const ArchitectureDescription* arch,
  */
 static int load_architecture_from_file(ArchitectureDescription* arch,
                                       const char* filepath) {
-    
+    int ret;
+    FILE* file;
     if (!arch || !filepath) return -1;
     
-    FILE* file = fopen(filepath, "r");
+    file = fopen(filepath, "r");
     if (!file) return -1;
     
-    int ret = load_architecture_from_stream(arch, file);
+    ret = load_architecture_from_stream(arch, file);
     fclose(file);
     return ret;
 }
@@ -2495,11 +2747,13 @@ void cfc_nas_default_config(CfcNASConfig* config) {
 }
 
 int nas_register_cfc_layers(NASSystem* system, const CfcNASConfig* cfc_config) {
+    size_t new_count;
+    int* new_options;
     if (!system || !cfc_config) return -1;
 
     /* 扩展层类型选项：添加CfC层类型 */
-    size_t new_count = system->layer_type_count + 2;
-    int* new_options = (int*)safe_realloc(system->layer_type_options,
+    new_count = system->layer_type_count + 2;
+    new_options = (int*)safe_realloc(system->layer_type_options,
         new_count * sizeof(int));
     if (!new_options) return -1;
 
@@ -2514,19 +2768,24 @@ int nas_register_cfc_layers(NASSystem* system, const CfcNASConfig* cfc_config) {
 int nas_generate_cfc_architecture(NASSystem* system,
                                  const CfcNASConfig* cfc_config,
                                  ArchitectureDescription* architecture) {
+    int ret;
+    int num_existing;
+    int num_cfc;
+    int i;
+    int idx;
     if (!system || !cfc_config || !architecture) return -1;
 
     /* 先生成一个基本NAS架构 */
-    int ret = generate_random_architecture_internal(system, architecture);
+    ret = generate_random_architecture_internal(system, architecture);
     if (ret != 0) return -1;
 
     /* 将部分层替换为CfC层 */
-    int num_existing = architecture->layer_count;
-    int num_cfc = cfc_nas_rand_int(1, cfc_config->num_cfc_layers);
+    num_existing = architecture->layer_count;
+    num_cfc = cfc_nas_rand_int(1, cfc_config->num_cfc_layers);
     if (num_cfc > num_existing) num_cfc = num_existing;
 
-    for (int i = 0; i < num_cfc; i++) {
-        int idx = (int)(rng_next() % (uint64_t)num_existing);
+    for (i = 0; i < num_cfc; i++) {
+        idx = (int)(rng_next() % (uint64_t)num_existing);
         if (architecture->layer_types[idx] != LAYER_TYPE_CFC &&
             architecture->layer_types[idx] != LAYER_TYPE_CFC_CELL) {
             architecture->layer_types[idx] = LAYER_TYPE_CFC;
@@ -2594,32 +2853,39 @@ static void enas_sample_free(ENASSample* sample) {
 static int enas_controller_sample_layer_type(CfcENASSearch* searcher,
                                             float* hidden_state,
                                             float* cell_state) {
+    float output[8];
+    int ret;
+    float max_val;
+    float sum_val;
+    float r;
+    int i;
+    float sum;
+    float probs[7];
+    float temp;
+    float cum;
     if (!searcher || !searcher->controller) return LAYER_TYPE_CFC;
 
     /* 使用完整隐藏状态向量作为控制器输入 */
     /* P0修复: 控制器LNN output_size=8, 缓冲区必须匹配, 否则栈溢出 */
-    float output[8]; /* 8种层类型：卷积、全连接、池化、归一化、注意力、CfC、CfC细胞、保留 */
-
-    int ret = lnn_forward(searcher->controller, hidden_state, output);
+    ret = lnn_forward(searcher->controller, hidden_state, output);
     if (ret != 0) return LAYER_TYPE_CFC;
 
     /* 用softmax采样 */
-    float max_val = -FLT_MAX;
-    for (int i = 0; i < 7; i++) {
+    max_val = -FLT_MAX;
+    for (i = 0; i < 7; i++) {
         if (output[i] > max_val) max_val = output[i];
     }
-    float sum = 0.0f;
-    float probs[7];
-    float temp = searcher->config.temperature;
-    for (int i = 0; i < 7; i++) {
+    sum = 0.0f;
+    temp = searcher->config.temperature;
+    for (i = 0; i < 7; i++) {
         probs[i] = expf((output[i] - max_val) / temp);
         sum += probs[i];
     }
     if (sum < 1e-10f) sum = 1e-10f;
 
-    float r = cfc_nas_rand_float();
-    float cum = 0.0f;
-    for (int i = 0; i < 7; i++) {
+    r = cfc_nas_rand_float();
+    cum = 0.0f;
+    for (i = 0; i < 7; i++) {
         cum += probs[i] / sum;
         if (r <= cum) return i + 1; /* 层类型从1开始 */
     }
@@ -2633,31 +2899,38 @@ static int enas_controller_sample_layer_type(CfcENASSearch* searcher,
 static int enas_controller_sample_hidden_size(CfcENASSearch* searcher,
                                              float* hidden_state,
                                              float* cell_state) {
+    float output[8];
+    int ret;
+    float max_val;
+    int i;
+    float sum;
+    float probs[8];
+    int widths[8];
+    float r;
+    float cum;
     if (!searcher || !searcher->controller) {
         return searcher->config.min_hidden_size;
     }
 
-    float output[8]; /* 8种宽度选项：16,32,64,128,256,512,1024,2048 */
-
-    int ret = lnn_forward(searcher->controller, hidden_state, output);
+    ret = lnn_forward(searcher->controller, hidden_state, output);
     if (ret != 0) return searcher->config.min_hidden_size;
 
-    float max_val = -FLT_MAX;
-    for (int i = 0; i < 8; i++) {
+    max_val = -FLT_MAX;
+    for (i = 0; i < 8; i++) {
         if (output[i] > max_val) max_val = output[i];
     }
-    float sum = 0.0f;
-    float probs[8];
-    for (int i = 0; i < 8; i++) {
+    sum = 0.0f;
+    for (i = 0; i < 8; i++) {
         probs[i] = expf(output[i] - max_val);
         sum += probs[i];
     }
     if (sum < 1e-10f) sum = 1e-10f;
 
-    int widths[8] = {16, 32, 64, 128, 256, 512, 1024, 2048};
-    float r = cfc_nas_rand_float();
-    float cum = 0.0f;
-    for (int i = 0; i < 8; i++) {
+    widths[0] = 16; widths[1] = 32; widths[2] = 64; widths[3] = 128;
+    widths[4] = 256; widths[5] = 512; widths[6] = 1024; widths[7] = 2048;
+    r = cfc_nas_rand_float();
+    cum = 0.0f;
+    for (i = 0; i < 8; i++) {
         cum += probs[i] / sum;
         if (r <= cum) return widths[i];
     }
@@ -2665,15 +2938,16 @@ static int enas_controller_sample_hidden_size(CfcENASSearch* searcher,
 }
 
 CfcENASSearch* cfc_enas_create(const CfcNASConfig* cfc_config) {
+    CfcENASSearch* searcher;
+    LNNConfig ctrl_cfg;
     if (!cfc_config) return NULL;
 
-    CfcENASSearch* searcher = (CfcENASSearch*)safe_malloc(sizeof(CfcENASSearch));
+    searcher = (CfcENASSearch*)safe_malloc(sizeof(CfcENASSearch));
     if (!searcher) return NULL;
     memset(searcher, 0, sizeof(CfcENASSearch));
     memcpy(&searcher->config, cfc_config, sizeof(CfcNASConfig));
 
     /* 创建控制器LNN网络 */
-    LNNConfig ctrl_cfg;
     memset(&ctrl_cfg, 0, sizeof(ctrl_cfg));
     ctrl_cfg.input_size = searcher->config.controller_hidden_size;
     ctrl_cfg.hidden_size = searcher->config.controller_hidden_size;
@@ -2718,13 +2992,14 @@ CfcENASSearch* cfc_enas_create(const CfcNASConfig* cfc_config) {
 }
 
 void cfc_enas_destroy(CfcENASSearch* searcher) {
+    size_t i;
     if (!searcher) return;
 
     if (searcher->controller) lnn_free(searcher->controller);
     if (searcher->shared_weights) lnn_free(searcher->shared_weights);
 
     if (searcher->sample_buffer) {
-        for (int i = 0; i < searcher->sample_count; i++) {
+        for (i = 0; i < searcher->sample_count; i++) {
             enas_sample_free(&searcher->sample_buffer[i]);
         }
         safe_free((void**)&searcher->sample_buffer);
@@ -2738,16 +3013,22 @@ void cfc_enas_destroy(CfcENASSearch* searcher) {
 int cfc_enas_step(CfcENASSearch* searcher,
                   ArchitectureDescription* architecture,
                   float reward) {
+    int hs;
+    int num_layers;
+    int i;
+    size_t j;
+    float hidden_state[64];
+    float cell_state[64];
     if (!searcher || !architecture) return -1;
 
     /* 采样新架构 */
-    float hidden_state[64] = {0};
-    float cell_state[64] = {0};
-    size_t hs = searcher->config.controller_hidden_size;
+    memset(hidden_state, 0, sizeof(hidden_state));
+    memset(cell_state, 0, sizeof(cell_state));
+    hs = searcher->config.controller_hidden_size;
     if (hs > 64) hs = 64;
 
     /* 生成架构：每层类型由控制器决定 */
-    int num_layers = cfc_nas_rand_int(3, searcher->config.num_cfc_layers + 3);
+    num_layers = cfc_nas_rand_int(3, searcher->config.num_cfc_layers + 3);
     architecture->layer_count = num_layers;
 
     /* 分配架构数组 */
@@ -2771,7 +3052,7 @@ int cfc_enas_step(CfcENASSearch* searcher,
         return -1;
     }
 
-    for (int i = 0; i < num_layers; i++) {
+    for (i = 0; i < num_layers; i++) {
         architecture->layer_types[i] = enas_controller_sample_layer_type(
             searcher, hidden_state, cell_state);
         architecture->layer_widths[i] = enas_controller_sample_hidden_size(
@@ -2782,7 +3063,7 @@ int cfc_enas_step(CfcENASSearch* searcher,
 
         /* 前几层连接（跳接） */
         if (searcher->config.enable_skip_connections && i > 1) {
-            for (int j = 0; j < i; j++) {
+            for (j = 0; j < i; j++) {
                 if (cfc_nas_rand_float() < 0.3f) {
                     architecture->connections[i * num_layers + j] = 1;
                 }
@@ -2824,14 +3105,20 @@ int cfc_enas_step(CfcENASSearch* searcher,
 int cfc_enas_sample_architectures(CfcENASSearch* searcher,
                                  ArchitectureDescription* architectures,
                                  int num_samples) {
+    int sampled;
+    int i, j, k;
+    int num_layers, total_complexity, skip_count;
+    float complexity_reward;
+    float avg_width;
+    float skip_ratio;
     if (!searcher || !architectures || num_samples <= 0) return -1;
 
-    int sampled = 0;
-    for (int i = 0; i < num_samples; i++) {
+    sampled = 0;
+    for (i = 0; i < num_samples; i++) {
         float hidden_state[64] = {0};
         float cell_state[64] = {0};
 
-        int num_layers = cfc_nas_rand_int(3, searcher->config.num_cfc_layers + 3);
+        num_layers = cfc_nas_rand_int(3, searcher->config.num_cfc_layers + 3);
         architectures[i].layer_count = num_layers;
 
         safe_free((void**)&architectures[i].layer_types);
@@ -2854,10 +3141,10 @@ int cfc_enas_sample_architectures(CfcENASSearch* searcher,
             continue;
         }
 
-        float total_complexity = 0.0f;
-        int skip_count = 0;
+        total_complexity = 0.0f;
+        skip_count = 0;
 
-        for (int j = 0; j < num_layers; j++) {
+        for (j = 0; j < num_layers; j++) {
             architectures[i].layer_types[j] = enas_controller_sample_layer_type(
                 searcher, hidden_state, cell_state);
             architectures[i].layer_widths[j] = enas_controller_sample_hidden_size(
@@ -2869,7 +3156,7 @@ int cfc_enas_sample_architectures(CfcENASSearch* searcher,
             total_complexity += (float)architectures[i].layer_widths[j];
 
             if (searcher->config.enable_skip_connections && j > 1) {
-                for (int k = 0; k < j; k++) {
+                for (k = 0; k < j; k++) {
                     if (cfc_nas_rand_float() < 0.3f) {
                         architectures[i].connections[j * num_layers + k] = 1;
                         skip_count++;
@@ -2879,12 +3166,12 @@ int cfc_enas_sample_architectures(CfcENASSearch* searcher,
         }
 
         /* 计算架构复杂度奖励 = 平均宽度 * (1 + 跳接率 * 0.5) / 最大归一化 */
-        float avg_width = total_complexity / (float)num_layers;
-        float skip_ratio = (float)skip_count / (float)(num_layers * num_layers);
+        avg_width = total_complexity / (float)num_layers;
+        skip_ratio = (float)skip_count / (float)(num_layers * num_layers);
         if (skip_ratio > 1.0f) skip_ratio = 1.0f;
 
         /* 复杂度奖励范围: [0.5, 2.0] 确保控制器能区分架构质量 */
-        float complexity_reward = (avg_width / 256.0f) * (1.0f + skip_ratio * 0.5f);
+        complexity_reward = (avg_width / 256.0f) * (1.0f + skip_ratio * 0.5f);
         if (complexity_reward < 0.5f) complexity_reward = 0.5f;
         if (complexity_reward > 2.0f) complexity_reward = 2.0f;
 
@@ -2921,20 +3208,29 @@ int cfc_enas_sample_architectures(CfcENASSearch* searcher,
 int cfc_enas_update_controller(CfcENASSearch* searcher,
                               const float* rewards,
                               int num_samples) {
+    float avg_reward;
+    int i;
+    size_t input_size;
+    float* input_seed;
+    float* target;
+    float norm_reward;
+    float loss;
+    float scaled_grad;
+    CfCNetwork* ctrl_cfc;
     if (!searcher || !searcher->controller || !rewards || num_samples <= 0) return -1;
 
     /* 通过LNN反向传播更新控制器：以奖励作为训练信号 */
-    float avg_reward = 0.0f;
-    for (int i = 0; i < num_samples; i++) {
+    avg_reward = 0.0f;
+    for (i = 0; i < num_samples; i++) {
         avg_reward += rewards[i];
     }
     avg_reward /= (float)(num_samples > 0 ? num_samples : 1);
 
     /* 使用平滑奖励信号微调LNN控制器
      * 奖励越高 → 更新幅度越大，奖励越低 → 更新方向反转 */
-    size_t input_size = searcher->config.controller_hidden_size;
-    float* input_seed = (float*)safe_calloc(input_size, sizeof(float));
-    float* target = (float*)safe_calloc(8, sizeof(float));
+    input_size = searcher->config.controller_hidden_size;
+    input_seed = (float*)safe_calloc(input_size, sizeof(float));
+    target = (float*)safe_calloc(8, sizeof(float));
     if (!input_seed || !target) {
         safe_free((void**)&input_seed);
         safe_free((void**)&target);
@@ -2942,26 +3238,29 @@ int cfc_enas_update_controller(CfcENASSearch* searcher,
     }
 
     /* 控制器的"目标"输出由奖励加权决定 */
-    for (int i = 0; i < num_samples && i < 8; i++) {
-        float norm_reward = (rewards[i] > 0.0f) ? rewards[i] : 0.0f;
+    for (i = 0; i < num_samples && i < 8; i++) {
+        norm_reward = (rewards[i] > 0.0f) ? rewards[i] : 0.0f;
         target[i] = norm_reward * 2.0f - 1.0f;
         if (target[i] > 1.0f) target[i] = 1.0f;
         if (target[i] < -1.0f) target[i] = -1.0f;
     }
 
     /* 获取内部CfC网络进行反向传播 */
-    CfCNetwork* ctrl_cfc = lnn_get_cfc_network(searcher->controller);
+    ctrl_cfc = lnn_get_cfc_network(searcher->controller);
     if (ctrl_cfc) {
-        float loss = 0.0f;
         float grad[8];
         float output[8];
-        float hs[256] = {0}, cs[256] = {0};
+        float hs[256];
+        float cs[256];
+        loss = 0.0f;
+        memset(hs, 0, sizeof(hs));
+        memset(cs, 0, sizeof(cs));
         cfc_forward(ctrl_cfc, input_seed, hs, cs, output);
-        for (int i = 0; i < 8; i++) {
+        for (i = 0; i < 8; i++) {
             grad[i] = output[i] - target[i];
             loss += grad[i] * grad[i];
         }
-        float scaled_grad = loss > 0.0f ? avg_reward / (loss + 1e-8f) : avg_reward;
+        scaled_grad = loss > 0.0f ? avg_reward / (loss + 1e-8f) : avg_reward;
         cfc_backward(ctrl_cfc, grad, hs, scaled_grad * 0.01f);
     }
 
@@ -2973,24 +3272,31 @@ int cfc_enas_update_controller(CfcENASSearch* searcher,
 int cfc_enas_share_weights(CfcENASSearch* searcher,
                           const ArchitectureDescription* architectures,
                           int num_archs) {
+    float* weight_buf;
+    size_t weight_count;
+    float* avg_weights;
+    int a;
+    float w_factor;
+    size_t i;
+    CfCNetwork* shared_cfc;
     if (!searcher || !architectures || num_archs <= 0) return -1;
     if (!searcher->shared_weights) return 0;
 
     /* 共享权重演化：将最佳架构的参数通过LNN拓扑演化子系统广播 */
-    CfCNetwork* shared_cfc = lnn_get_cfc_network(searcher->shared_weights);
+    shared_cfc = lnn_get_cfc_network(searcher->shared_weights);
     if (!shared_cfc) return 0;
 
     /* 多架构参数平均（联邦式权重融合） */
-    float* weight_buf = NULL;
-    size_t weight_count = 0;
+    weight_buf = NULL;
+    weight_count = 0;
     if (cfc_get_weight_matrix(shared_cfc, &weight_buf, &weight_count) != 0 || !weight_buf) return 0;
 
-    float* avg_weights = (float*)safe_calloc(weight_count, sizeof(float));
+    avg_weights = (float*)safe_calloc(weight_count, sizeof(float));
     if (!avg_weights) return -1;
 
-    for (int a = 0; a < num_archs; a++) {
-        float w_factor = 1.0f / (float)num_archs;
-        for (size_t i = 0; i < weight_count; i++) {
+    for (a = 0; a < num_archs; a++) {
+        w_factor = 1.0f / (float)num_archs;
+        for (i = 0; i < weight_count; i++) {
             avg_weights[i] += weight_buf[i] * w_factor;
         }
     }
@@ -3075,9 +3381,12 @@ struct CfcDARTSearch {
 };
 
 CfcDARTSearch* cfc_darts_create(const CfcNASConfig* cfc_config) {
+    int num_edges;
+    size_t i;
+    CfcDARTSearch* searcher;
     if (!cfc_config) return NULL;
 
-    CfcDARTSearch* searcher = (CfcDARTSearch*)safe_malloc(sizeof(CfcDARTSearch));
+    searcher = (CfcDARTSearch*)safe_malloc(sizeof(CfcDARTSearch));
     if (!searcher) return NULL;
     memset(searcher, 0, sizeof(CfcDARTSearch));
     memcpy(&searcher->config, cfc_config, sizeof(CfcNASConfig));
@@ -3085,7 +3394,7 @@ CfcDARTSearch* cfc_darts_create(const CfcNASConfig* cfc_config) {
     /* 设置DARTS搜索空间 */
     searcher->num_nodes = 4;  /* 4个中间节点 */
     searcher->num_ops = 7;    /* 7种操作 */
-    int num_edges = searcher->num_nodes * (searcher->num_nodes - 1) / 2;
+    num_edges = searcher->num_nodes * (searcher->num_nodes - 1) / 2;
 
     searcher->total_alpha_count = (size_t)(num_edges * searcher->num_ops);
     searcher->alphas = (float*)safe_calloc(searcher->total_alpha_count, sizeof(float));
@@ -3098,7 +3407,7 @@ CfcDARTSearch* cfc_darts_create(const CfcNASConfig* cfc_config) {
     }
 
     /* 初始化架构参数（小随机数） */
-    for (size_t i = 0; i < searcher->total_alpha_count; i++) {
+    for (i = 0; i < searcher->total_alpha_count; i++) {
         searcher->alphas[i] = (cfc_nas_rand_float() - 0.5f) * 0.01f;
     }
 
@@ -3116,7 +3425,7 @@ CfcDARTSearch* cfc_darts_create(const CfcNASConfig* cfc_config) {
     }
 
     /* 初始化权重 */
-    for (size_t i = 0; i < searcher->weight_count; i++) {
+    for (i = 0; i < searcher->weight_count; i++) {
         searcher->weights[i] = (cfc_nas_rand_float() - 0.5f) * 0.1f;
     }
 
@@ -3159,17 +3468,20 @@ void cfc_darts_destroy(CfcDARTSearch* searcher) {
 static void darts_softmax_alphas(CfcDARTSearch* searcher, float* output, int edge_idx) {
     int num_ops = searcher->num_ops;
     float max_val = -FLT_MAX;
-    for (int o = 0; o < num_ops; o++) {
-        float v = searcher->alphas[edge_idx * num_ops + o];
+    int o;
+    float v;
+    float sum;
+    for (o = 0; o < num_ops; o++) {
+        v = searcher->alphas[edge_idx * num_ops + o];
         if (v > max_val) max_val = v;
     }
-    float sum = 0.0f;
-    for (int o = 0; o < num_ops; o++) {
+    sum = 0.0f;
+    for (o = 0; o < num_ops; o++) {
         output[o] = expf(searcher->alphas[edge_idx * num_ops + o] - max_val);
         sum += output[o];
     }
     if (sum < 1e-10f) sum = 1e-10f;
-    for (int o = 0; o < num_ops; o++) {
+    for (o = 0; o < num_ops; o++) {
         output[o] /= sum;
     }
 }
@@ -3177,40 +3489,57 @@ static void darts_softmax_alphas(CfcDARTSearch* searcher, float* output, int edg
 int cfc_darts_forward(CfcDARTSearch* searcher,
                      const float* input, size_t input_size,
                      float* output, size_t output_size) {
+    int n;
+    int num_ops;
+    int feat_dim;
+    int edge_idx;
+    int i;
+    float* node_i;
+    int j;
+    float* node_j;
+    int o;
+    float w;
+    int d;
+    float scaled;
+    float gate;
+    float abs_val;
+    float sign_val;
+    size_t out_size;
+    float* last_node;
     if (!searcher || !input || !output) return -1;
 
-    int n = searcher->num_nodes;
-    int num_ops = searcher->num_ops;
-    int feat_dim = (int)input_size;
+    n = searcher->num_nodes;
+    num_ops = searcher->num_ops;
+    feat_dim = (int)input_size;
 
     memcpy(searcher->node_buffer, input, input_size * sizeof(float));
 
-    int edge_idx = 0;
-    for (int i = 0; i < n; i++) {
-        float* node_i = searcher->node_buffer + (size_t)(i + 1) * feat_dim;
+    edge_idx = 0;
+    for (i = 0; i < n; i++) {
+        node_i = searcher->node_buffer + (size_t)(i + 1) * feat_dim;
         memset(node_i, 0, (size_t)feat_dim * sizeof(float));
 
-        for (int j = 0; j < i; j++) {
-            float* node_j = searcher->node_buffer + (size_t)(j + 1) * feat_dim;
+        for (j = 0; j < i; j++) {
+            float op_weights[8];
+            node_j = searcher->node_buffer + (size_t)(j + 1) * feat_dim;
 
             /* 获取混合操作的权重 */
-            float op_weights[8];
             darts_softmax_alphas(searcher, op_weights, edge_idx);
 
             /* 应用混合操作（完整实现7种DARTS操作） */
-            for (int o = 0; o < num_ops; o++) {
-                float w = op_weights[o];
+            for (o = 0; o < num_ops; o++) {
+                w = op_weights[o];
                 if (w < 1e-8f) continue;
 
-                for (int d = 0; d < feat_dim; d++) {
-                    float scaled = 0.0f;
+                for (d = 0; d < feat_dim; d++) {
+                    scaled = 0.0f;
                     switch (o) {
                         case 0: scaled = node_j[d]; break;
                         case 1: scaled = node_j[d] * 0.5f; break;
                         case 2: scaled = node_j[d] * 2.0f; break;
                         case 3: scaled = 0.0f; break;
                         case 4: {
-                            float gate = 1.0f / (1.0f + expf(-node_j[d]));
+                            gate = 1.0f / (1.0f + expf(-node_j[d]));
                             scaled = gate * node_j[d];
                             break;
                         }
@@ -3219,9 +3548,9 @@ int cfc_darts_forward(CfcDARTSearch* searcher,
                             break;
                         }
                         case 6: {
-                            float abs_val = node_j[d] > 0 ? node_j[d] : -node_j[d];
-                            float sign_val = node_j[d] > 0 ? 1.0f : -1.0f;
-                            float gate = 1.0f / (1.0f + expf(-abs_val));
+                            abs_val = node_j[d] > 0 ? node_j[d] : -node_j[d];
+                            sign_val = node_j[d] > 0 ? 1.0f : -1.0f;
+                            gate = 1.0f / (1.0f + expf(-abs_val));
                             scaled = sign_val * gate * abs_val;
                             break;
                         }
@@ -3234,8 +3563,8 @@ int cfc_darts_forward(CfcDARTSearch* searcher,
     }
 
     /* 输出使用最后一个节点 */
-    size_t out_size = (output_size < (size_t)feat_dim) ? output_size : (size_t)feat_dim;
-    float* last_node = searcher->node_buffer + (size_t)n * feat_dim;
+    out_size = (output_size < (size_t)feat_dim) ? output_size : (size_t)feat_dim;
+    last_node = searcher->node_buffer + (size_t)n * feat_dim;
     memcpy(output, last_node, out_size * sizeof(float));
 
     return 0;
@@ -3263,19 +3592,25 @@ static void darts_compute_alpha_gradient_vector(CfcDARTSearch* searcher,
     size_t total_alphas = searcher->total_alpha_count;
     /* 使用有限差分法逐alpha参数计算梯度 */
     float delta = epsilon > 0.0f ? epsilon : 1e-4f;
+    size_t ai;
+    float alpha_orig;
+    float loss_plus;
+    size_t d;
+    float diff;
+    float loss_minus;
 
-    for (size_t ai = 0; ai < total_alphas; ai++) {
+    for (ai = 0; ai < total_alphas; ai++) {
         /* 保存原始alpha值 */
-        float alpha_orig = searcher->alphas[ai];
+        alpha_orig = searcher->alphas[ai];
 
         /* α + δ: 前向传播获取损失 */
         searcher->alphas[ai] = alpha_orig + delta;
         memset(searcher->output_buffer, 0, feat_dim * sizeof(float));
         cfc_darts_forward(searcher, input, feat_dim,
                          searcher->output_buffer, feat_dim);
-        float loss_plus = 0.0f;
-        for (size_t d = 0; d < feat_dim; d++) {
-            float diff = searcher->output_buffer[d] - target[d];
+        loss_plus = 0.0f;
+        for (d = 0; d < feat_dim; d++) {
+            diff = searcher->output_buffer[d] - target[d];
             loss_plus += diff * diff;
         }
 
@@ -3284,9 +3619,9 @@ static void darts_compute_alpha_gradient_vector(CfcDARTSearch* searcher,
         memset(searcher->output_buffer, 0, feat_dim * sizeof(float));
         cfc_darts_forward(searcher, input, feat_dim,
                          searcher->output_buffer, feat_dim);
-        float loss_minus = 0.0f;
-        for (size_t d = 0; d < feat_dim; d++) {
-            float diff = searcher->output_buffer[d] - target[d];
+        loss_minus = 0.0f;
+        for (d = 0; d < feat_dim; d++) {
+            diff = searcher->output_buffer[d] - target[d];
             loss_minus += diff * diff;
         }
 
@@ -3324,34 +3659,61 @@ int cfc_darts_backward_with_data(CfcDARTSearch* searcher,
                                   const float* input, size_t input_size,
                                   const float* target, size_t target_size,
                                   const float* gradient, size_t gradient_size) {
+    size_t e;
+    size_t o;
+    float lr;
+    float wd;
+    size_t feat_dim;
+    float* weight_train_grad;
+    size_t i;
+    float grad;
+    float* alpha_grad_direct;
+    float delta_fd;
+    float hvp_epsilon;
+    float norm_w;
+    float scale;
+    float* weights_backup;
+    float* alpha_grad_plus;
+    float* alpha_grad_minus;
+    float darts_xi;
+    float* hvp;
+    float alpha_lr;
+    size_t num_edges;
+    size_t num_ops;
+    float max_val;
+    float v;
+    float sum_exp;
+    size_t idx;
+    float entropy_grad;
+    float darts_combined;
     if (!searcher || !input || !target || !gradient) return -1;
 
-    float lr = searcher->config.controller_lr;
-    float wd = 0.0001f;
-    size_t feat_dim = (input_size > 0) ? input_size : 1;
+    lr = searcher->config.controller_lr;
+    wd = 0.0001f;
+    feat_dim = (input_size > 0) ? input_size : 1;
 
     /* ==================================================================
      * 第一步: 计算训练集上权重的梯度 ∇_w L_train(w, α)
      * 使用当前输出作为训练信号，L2正则化
      * ================================================================== */
-    float* weight_train_grad = (float*)safe_calloc(searcher->weight_count, sizeof(float));
+    weight_train_grad = (float*)safe_calloc(searcher->weight_count, sizeof(float));
     if (!weight_train_grad) return -1;
 
-    for (size_t i = 0; i < searcher->weight_count; i++) {
-        float grad = (i < gradient_size) ? gradient[i] : 0.0f;
+    for (i = 0; i < searcher->weight_count; i++) {
+        grad = (i < gradient_size) ? gradient[i] : 0.0f;
         weight_train_grad[i] = grad + wd * searcher->weights[i];
     }
 
     /* ==================================================================
      * 第二步: 计算当前权重下直接的alpha梯度 ∇_α L_val(w, α)
      * ================================================================== */
-    float* alpha_grad_direct = (float*)safe_calloc(searcher->total_alpha_count, sizeof(float));
+    alpha_grad_direct = (float*)safe_calloc(searcher->total_alpha_count, sizeof(float));
     if (!alpha_grad_direct) {
         safe_free((void**)&weight_train_grad);
         return -1;
     }
 
-    float delta_fd = 1e-4f;
+    delta_fd = 1e-4f;
     darts_compute_alpha_gradient_vector(searcher, input, target, feat_dim,
                                          alpha_grad_direct, delta_fd);
 
@@ -3360,16 +3722,16 @@ int cfc_darts_backward_with_data(CfcDARTSearch* searcher,
      * w± = w ± ε·∇_w L_train
      * hvp ≈ (∇_α L_val(w+) - ∇_α L_val(w-)) / (2ε)
      * ================================================================== */
-    float hvp_epsilon = 0.01f / (sqrtf((float)searcher->weight_count) + 1e-8f);
-    float norm_w = 0.0f;
-    for (size_t i = 0; i < searcher->weight_count; i++) {
+    hvp_epsilon = 0.01f / (sqrtf((float)searcher->weight_count) + 1e-8f);
+    norm_w = 0.0f;
+    for (i = 0; i < searcher->weight_count; i++) {
         norm_w += weight_train_grad[i] * weight_train_grad[i];
     }
     if (norm_w < 1e-12f) norm_w = 1e-12f;
-    float scale = hvp_epsilon / (sqrtf(norm_w) + 1e-8f);
+    scale = hvp_epsilon / (sqrtf(norm_w) + 1e-8f);
 
     /* 保存原始权重 */
-    float* weights_backup = (float*)safe_calloc(searcher->weight_count, sizeof(float));
+    weights_backup = (float*)safe_calloc(searcher->weight_count, sizeof(float));
     if (!weights_backup) {
         safe_free((void**)&alpha_grad_direct);
         safe_free((void**)&weight_train_grad);
@@ -3378,12 +3740,12 @@ int cfc_darts_backward_with_data(CfcDARTSearch* searcher,
     memcpy(weights_backup, searcher->weights, searcher->weight_count * sizeof(float));
 
     /* 计算 w+ = w + ε·∇_w L_train */
-    for (size_t i = 0; i < searcher->weight_count; i++) {
+    for (i = 0; i < searcher->weight_count; i++) {
         searcher->weights[i] = weights_backup[i] + scale * weight_train_grad[i];
     }
 
     /* 在w+处计算alpha梯度 ∇_α L_val(w+, α) */
-    float* alpha_grad_plus = (float*)safe_calloc(searcher->total_alpha_count, sizeof(float));
+    alpha_grad_plus = (float*)safe_calloc(searcher->total_alpha_count, sizeof(float));
     if (!alpha_grad_plus) {
         memcpy(searcher->weights, weights_backup, searcher->weight_count * sizeof(float));
         safe_free((void**)&weights_backup);
@@ -3395,12 +3757,12 @@ int cfc_darts_backward_with_data(CfcDARTSearch* searcher,
                                          alpha_grad_plus, delta_fd);
 
     /* 计算 w- = w - ε·∇_w L_train */
-    for (size_t i = 0; i < searcher->weight_count; i++) {
+    for (i = 0; i < searcher->weight_count; i++) {
         searcher->weights[i] = weights_backup[i] - scale * weight_train_grad[i];
     }
 
     /* 在w-处计算alpha梯度 ∇_α L_val(w-, α) */
-    float* alpha_grad_minus = (float*)safe_calloc(searcher->total_alpha_count, sizeof(float));
+    alpha_grad_minus = (float*)safe_calloc(searcher->total_alpha_count, sizeof(float));
     if (!alpha_grad_minus) {
         memcpy(searcher->weights, weights_backup, searcher->weight_count * sizeof(float));
         safe_free((void**)&alpha_grad_plus);
@@ -3420,10 +3782,10 @@ int cfc_darts_backward_with_data(CfcDARTSearch* searcher,
      * hvp = (∇_α L_val(w+) - ∇_α L_val(w-)) / (2ε)
      * α_grad = ∇_α L_val(w, α) - ξ · hvp
      * ================================================================== */
-    float darts_xi = 0.1f;
-    float* hvp = (float*)safe_calloc(searcher->total_alpha_count, sizeof(float));
+    darts_xi = 0.1f;
+    hvp = (float*)safe_calloc(searcher->total_alpha_count, sizeof(float));
     if (hvp) {
-        for (size_t i = 0; i < searcher->total_alpha_count; i++) {
+        for (i = 0; i < searcher->total_alpha_count; i++) {
             hvp[i] = (alpha_grad_plus[i] - alpha_grad_minus[i]) / (2.0f * scale + 1e-10f);
         }
     }
@@ -3434,38 +3796,38 @@ int cfc_darts_backward_with_data(CfcDARTSearch* searcher,
      * α_grad_accum += α_grad_direct - ξ · hvp  (累积动量)
      * α = α - alpha_lr · α_grad_accum
      * ================================================================== */
-    for (size_t i = 0; i < searcher->weight_count; i++) {
+    for (i = 0; i < searcher->weight_count; i++) {
         searcher->weights[i] -= lr * weight_train_grad[i];
     }
 
-    float alpha_lr = lr * 0.1f;
-    size_t num_edges = (size_t)(searcher->num_nodes * (searcher->num_nodes - 1) / 2);
-    size_t num_ops = (size_t)searcher->num_ops;
+    alpha_lr = lr * 0.1f;
+    num_edges = (size_t)(searcher->num_nodes * (searcher->num_nodes - 1) / 2);
+    num_ops = (size_t)searcher->num_ops;
 
-    for (size_t e = 0; e < num_edges; e++) {
-        float max_val = -FLT_MAX;
-        for (size_t o = 0; o < num_ops; o++) {
-            float v = searcher->alphas[e * num_ops + o];
+    for (e = 0; e < num_edges; e++) {
+        float probs[8];
+        max_val = -FLT_MAX;
+        for (o = 0; o < num_ops; o++) {
+            v = searcher->alphas[e * num_ops + o];
             if (v > max_val) max_val = v;
         }
 
-        float probs[8];
-        float sum_exp = 0.0f;
-        for (size_t o = 0; o < num_ops; o++) {
+        sum_exp = 0.0f;
+        for (o = 0; o < num_ops; o++) {
             probs[o] = expf(searcher->alphas[e * num_ops + o] - max_val);
             sum_exp += probs[o];
         }
         if (sum_exp < 1e-10f) sum_exp = 1e-10f;
-        for (size_t o = 0; o < num_ops; o++) {
+        for (o = 0; o < num_ops; o++) {
             probs[o] /= sum_exp;
         }
 
-        for (size_t o = 0; o < num_ops; o++) {
-            size_t idx = e * num_ops + o;
-            float entropy_grad = (1.0f + logf(probs[o] + 1e-10f));
+        for (o = 0; o < num_ops; o++) {
+            idx = e * num_ops + o;
+            entropy_grad = (1.0f + logf(probs[o] + 1e-10f));
 
             /* 组合DARTS双层梯度: 直接梯度 - ξ·HVP + 熵正则化 */
-            float darts_combined = alpha_grad_direct[idx]
+            darts_combined = alpha_grad_direct[idx]
                                  - darts_xi * (hvp ? hvp[idx] : 0.0f)
                                  - 0.01f * entropy_grad;
 
@@ -3493,44 +3855,61 @@ int cfc_darts_backward_with_data(CfcDARTSearch* searcher,
  */
 int cfc_darts_backward(CfcDARTSearch* searcher,
                       const float* gradient, size_t gradient_size) {
+    float lr;
+    float wd;
+    size_t i;
+    float grad;
+    float reg;
+    float alpha_lr;
+    size_t num_edges;
+    size_t num_ops;
+    size_t e;
+    float max_val;
+    size_t o;
+    float v;
+    float sum_exp;
+    size_t idx;
+    float entropy_grad;
+    float policy_grad;
+    float architecture_grad;
     if (!searcher || !gradient) return -1;
 
-    float lr = searcher->config.controller_lr;
-    float wd = 0.0001f;
+    lr = searcher->config.controller_lr;
+    wd = 0.0001f;
 
-    for (size_t i = 0; i < searcher->weight_count; i++) {
-        float grad = (i < gradient_size) ? gradient[i] : 0.0f;
-        float reg = wd * searcher->weights[i];
+    for (i = 0; i < searcher->weight_count; i++) {
+        grad = (i < gradient_size) ? gradient[i] : 0.0f;
+        reg = wd * searcher->weights[i];
         searcher->weights[i] -= lr * (grad + reg);
     }
 
-    float alpha_lr = lr * 0.1f;
-    size_t num_edges = (size_t)(searcher->num_nodes * (searcher->num_nodes - 1) / 2);
-    size_t num_ops = (size_t)searcher->num_ops;
+    alpha_lr = lr * 0.1f;
+    num_edges = (size_t)(searcher->num_nodes * (searcher->num_nodes - 1) / 2);
+    num_ops = (size_t)searcher->num_ops;
 
-    for (size_t e = 0; e < num_edges; e++) {
-        float max_val = -FLT_MAX;
-        for (size_t o = 0; o < num_ops; o++) {
-            float v = searcher->alphas[e * num_ops + o];
+    for (e = 0; e < num_edges; e++) {
+        float probs[8];
+        max_val = -FLT_MAX;
+        for (o = 0; o < num_ops; o++) {
+            v = searcher->alphas[e * num_ops + o];
             if (v > max_val) max_val = v;
         }
 
-        float probs[8];
-        float sum_exp = 0.0f;
-        for (size_t o = 0; o < num_ops; o++) {
+        sum_exp = 0.0f;
+        for (o = 0; o < num_ops; o++) {
             probs[o] = expf(searcher->alphas[e * num_ops + o] - max_val);
             sum_exp += probs[o];
         }
         if (sum_exp < 1e-10f) sum_exp = 1e-10f;
-        for (size_t o = 0; o < num_ops; o++) {
+        for (o = 0; o < num_ops; o++) {
             probs[o] /= sum_exp;
         }
 
-        for (size_t o = 0; o < num_ops; o++) {
-            size_t idx = e * num_ops + o;
-            float entropy_grad = (1.0f + logf(probs[o] + 1e-10f));
-            float policy_grad = (gradient_size > 0 && (size_t)gradient_size > o) ? gradient[o] : 0.0f;
-            float architecture_grad = policy_grad - 0.01f * entropy_grad;
+        for (o = 0; o < num_ops; o++) {
+            idx = e * num_ops + o;
+            entropy_grad = (1.0f + logf(probs[o] + 1e-10f));
+            policy_grad = (gradient_size > 0 && (size_t)gradient_size > o) ? gradient[o] : 0.0f;
+            architecture_grad = policy_grad - 0.01f * entropy_grad;
             searcher->alphas_grad[idx] = searcher->alphas_grad[idx] * 0.9f + architecture_grad * 0.1f;
             searcher->alphas[idx] -= alpha_lr * searcher->alphas_grad[idx];
         }
@@ -3543,6 +3922,10 @@ int cfc_darts_step(CfcDARTSearch* searcher,
                   const float* input, size_t input_size,
                   const float* target, size_t target_size,
                   float* loss) {
+    int ret;
+    float l;
+    size_t i;
+    float diff;
     if (!searcher || !input || !target || !loss) return -1;
 
     /* 将输入保存到内部缓冲区（供有限差分HVP使用） */
@@ -3550,14 +3933,14 @@ int cfc_darts_step(CfcDARTSearch* searcher,
            (input_size < target_size ? input_size : target_size) * sizeof(float));
 
     /* 前向传播 */
-    int ret = cfc_darts_forward(searcher, input, input_size,
+    ret = cfc_darts_forward(searcher, input, input_size,
                                searcher->output_buffer, target_size);
     if (ret != 0) return -1;
 
     /* 计算MSE损失 */
-    float l = 0.0f;
-    for (size_t i = 0; i < target_size; i++) {
-        float diff = searcher->output_buffer[i] - target[i];
+    l = 0.0f;
+    for (i = 0; i < target_size; i++) {
+        diff = searcher->output_buffer[i] - target[i];
         l += diff * diff;
     }
     l /= (float)target_size;
@@ -3585,15 +3968,25 @@ int cfc_darts_step(CfcDARTSearch* searcher,
 
 int cfc_darts_discretize(CfcDARTSearch* searcher,
                         ArchitectureDescription* architecture) {
+    int n;
+    int num_ops;
+    int edge_idx;
+    int num_edges;
+    int num_layers;
+    int i;
+    int best_op;
+    float best_w;
+    int o;
+    float w;
     if (!searcher || !architecture) return -1;
 
-    int n = searcher->num_nodes;
-    int num_ops = searcher->num_ops;
-    int edge_idx = 0;
+    n = searcher->num_nodes;
+    num_ops = searcher->num_ops;
+    edge_idx = 0;
 
     /* 计算总层数 */
-    int num_edges = n * (n - 1) / 2;
-    int num_layers = num_edges + 2; /* 2个额外层（输入/输出投影） */
+    num_edges = n * (n - 1) / 2;
+    num_layers = num_edges + 2; /* 2个额外层（输入/输出投影） */
 
     safe_free((void**)&architecture->layer_types);
     safe_free((void**)&architecture->layer_widths);
@@ -3617,9 +4010,9 @@ int cfc_darts_discretize(CfcDARTSearch* searcher,
         return -1;
     }
 
-    for (int i = 0; i < num_layers; i++) {
-        int best_op = 0;
-        float best_w = -FLT_MAX;
+    for (i = 0; i < num_layers; i++) {
+        best_op = 0;
+        best_w = -FLT_MAX;
 
         if (i < 2) {
             /* 前2层使用CfC层 */
@@ -3632,8 +4025,8 @@ int cfc_darts_discretize(CfcDARTSearch* searcher,
             /* 对DARTS边进行离散化 */
             edge_idx = i - 2;
             if (edge_idx * num_ops + 0 < (int)searcher->total_alpha_count) {
-                for (int o = 0; o < num_ops; o++) {
-                    float w = searcher->alphas[edge_idx * num_ops + o];
+                for (o = 0; o < num_ops; o++) {
+                    w = searcher->alphas[edge_idx * num_ops + o];
                     if (w > best_w) {
                         best_w = w;
                         best_op = o;
@@ -3654,8 +4047,9 @@ int cfc_darts_discretize(CfcDARTSearch* searcher,
 
 int cfc_darts_get_alphas(CfcDARTSearch* searcher,
                         float* alpha, size_t alpha_size) {
+    size_t copy_size;
     if (!searcher || !alpha) return -1;
-    size_t copy_size = (alpha_size < searcher->total_alpha_count) ?
+    copy_size = (alpha_size < searcher->total_alpha_count) ?
         alpha_size : searcher->total_alpha_count;
     memcpy(alpha, searcher->alphas, copy_size * sizeof(float));
     return (int)searcher->total_alpha_count;
@@ -3732,16 +4126,19 @@ void liquid_cfc_search_default_config(LiquidCfcSearchConfig* config) {
  */
 static CfcGenome cfc_genome_random(const LiquidCfcSearchConfig* config) {
     CfcGenome g;
+    int p;
+    float t;
+    const CfcNASConfig* cfc;
     memset(&g, 0, sizeof(CfcGenome));
-    const CfcNASConfig* cfc = &config->cfc_config;
+    cfc = &config->cfc_config;
 
     g.hidden_size = cfc_nas_rand_int(cfc->min_hidden_size, cfc->max_hidden_size);
     /* 确保是2的幂 */
-    int p = 1;
+    p = 1;
     while (p * 2 <= g.hidden_size) p *= 2;
     g.hidden_size = p;
 
-    float t = cfc_nas_rand_float();
+    t = cfc_nas_rand_float();
     g.time_constant = cfc->min_time_constant +
         t * (cfc->max_time_constant - cfc->min_time_constant);
 
@@ -3763,11 +4160,12 @@ static CfcGenome cfc_genome_random(const LiquidCfcSearchConfig* config) {
  * @brief 变异CfC基因组
  */
 static void cfc_genome_mutate(CfcGenome* genome, float mutation_strength) {
+    int delta;
     if (!genome) return;
 
     /* 每个参数以一定概率变异 */
     if (cfc_nas_rand_float() < 0.3f) {
-        int delta = (int)(mutation_strength * 32.0f);
+        delta = (int)(mutation_strength * 32.0f);
         delta = cfc_nas_rand_int(-delta, delta);
         genome->hidden_size += delta;
         if (genome->hidden_size < 4) genome->hidden_size = 4;
@@ -3838,14 +4236,15 @@ static CfcGenome cfc_genome_crossover(const CfcGenome* parent1, const CfcGenome*
  */
 static float cfc_genome_distance(const CfcGenome* a, const CfcGenome* b) {
     float d = 0.0f;
+    float hd, td, nd;
 
-    float hd = (float)(a->hidden_size - b->hidden_size);
+    hd = (float)(a->hidden_size - b->hidden_size);
     d += hd * hd * 0.0001f;
 
-    float td = a->time_constant - b->time_constant;
+    td = a->time_constant - b->time_constant;
     d += td * td;
 
-    float nd = (float)(a->num_layers - b->num_layers);
+    nd = (float)(a->num_layers - b->num_layers);
     d += nd * nd * 0.1f;
 
     d += (float)((a->ode_solver_type != b->ode_solver_type) ? 1 : 0) * 0.5f;
@@ -3856,9 +4255,11 @@ static float cfc_genome_distance(const CfcGenome* a, const CfcGenome* b) {
 }
 
 LiquidCfcSearch* liquid_cfc_search_create(const LiquidCfcSearchConfig* config) {
+    size_t i;
+    LiquidCfcSearch* search;
     if (!config) return NULL;
 
-    LiquidCfcSearch* search = (LiquidCfcSearch*)safe_malloc(sizeof(LiquidCfcSearch));
+    search = (LiquidCfcSearch*)safe_malloc(sizeof(LiquidCfcSearch));
     if (!search) return NULL;
     memset(search, 0, sizeof(LiquidCfcSearch));
     memcpy(&search->config, config, sizeof(LiquidCfcSearchConfig));
@@ -3878,7 +4279,7 @@ LiquidCfcSearch* liquid_cfc_search_create(const LiquidCfcSearchConfig* config) {
     }
 
     /* 初始化种群 */
-    for (int i = 0; i < search->population_size; i++) {
+    for (i = 0; i < search->population_size; i++) {
         search->population[i] = cfc_genome_random(config);
     }
 
@@ -3911,6 +4312,8 @@ void liquid_cfc_search_destroy(LiquidCfcSearch* search) {
  */
 static void cfc_genome_to_architecture(const CfcGenome* genome,
                                       ArchitectureDescription* arch) {
+    int num_layers;
+    int i;
     if (!genome || !arch) return;
 
     safe_free((void**)&arch->layer_types);
@@ -3920,7 +4323,7 @@ static void cfc_genome_to_architecture(const CfcGenome* genome,
     safe_free((void**)&arch->connections);
     safe_free((void**)&arch->activations);
 
-    int num_layers = genome->num_layers + 1; /* +1 输出层 */
+    num_layers = genome->num_layers + 1; /* +1 输出层 */
     arch->layer_count = num_layers;
 
     arch->layer_types = (int*)safe_calloc(num_layers, sizeof(int));
@@ -3930,7 +4333,7 @@ static void cfc_genome_to_architecture(const CfcGenome* genome,
     arch->activations = (int*)safe_calloc(num_layers, sizeof(int));
     arch->connections = (int*)safe_calloc((size_t)num_layers * num_layers, sizeof(int));
 
-    for (int i = 0; i < num_layers; i++) {
+    for (i = 0; i < num_layers; i++) {
         arch->layer_types[i] = LAYER_TYPE_CFC;
         arch->layer_widths[i] = genome->hidden_size;
         arch->kernel_sizes[i] = 3;
@@ -3974,12 +4377,27 @@ static void cfc_genome_from_architecture(CfcGenome* genome,
 int liquid_cfc_search_generation(LiquidCfcSearch* search,
                                 ArchitectureEvaluator evaluator,
                                 void* user_data) {
+    int evaluated;
+    int i;
+    float complexity_penalty;
+    float combined_fitness;
+    float total_fitness;
+    float avg_fitness;
+    int new_count;
+    int elite_count;
+    int* indices;
+    size_t j;
+    int tmp;
+    int p1_idx;
+    int p2_idx;
+    float min_dist;
+    float d;
     if (!search || !evaluator) return -1;
 
-    int evaluated = 0;
+    evaluated = 0;
 
     /* 评估所有未评估个体 */
-    for (int i = 0; i < search->population_size; i++) {
+    for (i = 0; i < search->population_size; i++) {
         if (!search->population[i].is_evaluated) {
             ArchitectureDescription arch;
             memset(&arch, 0, sizeof(ArchitectureDescription));
@@ -3992,7 +4410,7 @@ int liquid_cfc_search_generation(LiquidCfcSearch* search,
 
                 /* 多目标调整 */
                 if (search->config.enable_multi_objective) {
-                    float complexity_penalty = search->config.complexity_weight *
+                    complexity_penalty = search->config.complexity_weight *
                         (float)search->population[i].hidden_size / 256.0f;
                     search->population[i].fitness -= complexity_penalty;
                 }
@@ -4002,9 +4420,9 @@ int liquid_cfc_search_generation(LiquidCfcSearch* search,
 
             /* 计算新颖性 */
             if (search->config.enable_novelty_search) {
-                float min_dist = FLT_MAX;
-                for (int j = 0; j < search->archive_size; j++) {
-                    float d = cfc_genome_distance(
+                min_dist = FLT_MAX;
+                for (j = 0; j < search->archive_size; j++) {
+                    d = cfc_genome_distance(
                         &search->population[i], &search->archive[j]);
                     if (d < min_dist) min_dist = d;
                 }
@@ -4017,7 +4435,7 @@ int liquid_cfc_search_generation(LiquidCfcSearch* search,
             }
 
             /* 更新最佳 */
-            float combined_fitness = search->population[i].fitness;
+            combined_fitness = search->population[i].fitness;
             if (search->config.enable_novelty_search) {
                 combined_fitness += search->config.novelty_weight *
                     search->population[i].novelty;
@@ -4034,9 +4452,9 @@ int liquid_cfc_search_generation(LiquidCfcSearch* search,
     }
 
     /* 计算平均适应度 */
-    float total_fitness = 0.0f;
-    float avg_fitness = 0.0f;
-    for (int i = 0; i < search->population_size; i++) {
+    total_fitness = 0.0f;
+    avg_fitness = 0.0f;
+    for (i = 0; i < search->population_size; i++) {
         total_fitness += search->population[i].fitness;
     }
     search->average_fitness = total_fitness / (float)search->population_size;
@@ -4048,29 +4466,29 @@ int liquid_cfc_search_generation(LiquidCfcSearch* search,
             (size_t)search->population_size, sizeof(CfcGenome));
         if (!new_population) return evaluated;
 
-        int new_count = 0;
+        new_count = 0;
 
         /* 精英保留 */
-        int elite_count = (int)(search->config.elite_ratio * search->population_size);
+        elite_count = (int)(search->config.elite_ratio * search->population_size);
         if (elite_count > 0) {
             /* 按适应度排序 */
-            int* indices = (int*)safe_malloc(
+            indices = (int*)safe_malloc(
                 (size_t)search->population_size * sizeof(int));
             if (indices) {
-                for (int i = 0; i < search->population_size; i++) {
+                for (i = 0; i < search->population_size; i++) {
                     indices[i] = i;
                 }
-                for (int i = 0; i < search->population_size - 1; i++) {
-                    for (int j = 0; j < search->population_size - 1 - i; j++) {
+                for (i = 0; i < search->population_size - 1; i++) {
+                    for (j = 0; j < search->population_size - 1 - i; j++) {
                         if (search->population[indices[j]].fitness <
                             search->population[indices[j + 1]].fitness) {
-                            int tmp = indices[j];
+                            tmp = indices[j];
                             indices[j] = indices[j + 1];
                             indices[j + 1] = tmp;
                         }
                     }
                 }
-                for (int i = 0; i < elite_count && new_count < search->population_size; i++) {
+                for (i = 0; i < elite_count && new_count < search->population_size; i++) {
                     new_population[new_count++] = search->population[indices[i]];
                 }
                 safe_free((void**)&indices);
@@ -4079,10 +4497,9 @@ int liquid_cfc_search_generation(LiquidCfcSearch* search,
 
         /* 交叉/变异填充 */
         while (new_count < search->population_size) {
-            int p1_idx = (int)(rng_next() % (uint64_t)search->population_size);
-            int p2_idx = (int)(rng_next() % (uint64_t)search->population_size);
-
             CfcGenome child;
+            p1_idx = (int)(rng_next() % (uint64_t)search->population_size);
+            p2_idx = (int)(rng_next() % (uint64_t)search->population_size);
             if (cfc_nas_rand_float() < search->config.crossover_rate) {
                 child = cfc_genome_crossover(
                     &search->population[p1_idx],
@@ -4111,12 +4528,15 @@ int liquid_cfc_search_complete(LiquidCfcSearch* search,
                               ArchitectureEvaluator evaluator,
                               void* user_data,
                               int max_generations) {
+    int gens;
+    int g;
+    int evaluated;
     if (!search || !evaluator) return -1;
 
-    int gens = (max_generations > 0) ? max_generations : search->max_generations;
+    gens = (max_generations > 0) ? max_generations : search->max_generations;
 
-    for (int g = 0; g < gens; g++) {
-        int evaluated = liquid_cfc_search_generation(search, evaluator, user_data);
+    for (g = 0; g < gens; g++) {
+        evaluated = liquid_cfc_search_generation(search, evaluator, user_data);
         if (evaluated <= 0) break;
     }
 
@@ -4134,12 +4554,14 @@ int liquid_cfc_get_best_architecture(LiquidCfcSearch* search,
 int liquid_cfc_get_population(LiquidCfcSearch* search,
                             ArchitectureDescription* architectures,
                             int max_count) {
+    int count;
+    int i;
     if (!search || !architectures || max_count <= 0) return -1;
 
-    int count = (max_count < search->population_size) ?
+    count = (max_count < search->population_size) ?
         max_count : search->population_size;
 
-    for (int i = 0; i < count; i++) {
+    for (i = 0; i < count; i++) {
         memset(&architectures[i], 0, sizeof(ArchitectureDescription));
         cfc_genome_to_architecture(&search->population[i], &architectures[i]);
     }
@@ -4180,9 +4602,10 @@ int liquid_cfc_get_search_state(LiquidCfcSearch* search,
  */
 static LNN* nas_instantiate_lnn_from_architecture(const ArchitectureDescription* arch,
                                                     size_t input_size, size_t output_size) {
+    LNNConfig cfg;
+    LNN* lnn;
     if (!arch || arch->layer_count == 0) return NULL;
 
-    LNNConfig cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.input_size = input_size;
     cfg.output_size = output_size;
@@ -4193,7 +4616,7 @@ static LNN* nas_instantiate_lnn_from_architecture(const ArchitectureDescription*
     cfg.enable_adaptation = 1;
     cfg.enable_training = 1;
 
-    LNN* lnn = lnn_create(&cfg);
+    lnn = lnn_create(&cfg);
     return lnn;
 }
 
@@ -4223,22 +4646,39 @@ static float nas_benchmark_architecture(const ArchitectureDescription* arch,
                                          size_t num_samples,
                                          size_t input_dim, size_t output_dim,
                                          int epochs) {
+    float fitness;
+    float total_loss;
+    int trained;
+    size_t net_output_size;
+    float* output;
+    size_t i;
+    const float* input;
+    const float* label;
+    float loss;
+    size_t j;
+    float diff;
+    float avg_loss;
+    float accuracy_score;
+    float params;
+    float efficiency_score;
+    float complexity_score;
+    LNN* net;
     if (!arch || num_samples == 0 || input_dim == 0 || output_dim == 0)
         return -1.0f;
     (void)test_data; (void)test_labels;
     (void)epochs; /* 未来：扩展多轮评估 */
 
     /* 实例化网络 */
-    LNN* net = nas_instantiate_lnn_from_architecture(arch, input_dim, output_dim);
+    net = nas_instantiate_lnn_from_architecture(arch, input_dim, output_dim);
     if (!net) return -1.0f;
 
-    float fitness = 0.0f;
-    float total_loss = 0.0f;
-    int trained = 0;
+    fitness = 0.0f;
+    total_loss = 0.0f;
+    trained = 0;
 
     /* P0修复: 动态获取LNN输出大小，避免output_dim > 32时栈溢出 */
-    size_t net_output_size = lnn_get_output_size(net);
-    float* output = (float*)safe_malloc(net_output_size * sizeof(float));
+    net_output_size = lnn_get_output_size(net);
+    output = (float*)safe_malloc(net_output_size * sizeof(float));
     if (!output) {
         lnn_free(net);
         return -1.0f;
@@ -4246,14 +4686,14 @@ static float nas_benchmark_architecture(const ArchitectureDescription* arch,
 
     if (training_data && training_labels) {
         /* 训练评估 */
-        for (size_t i = 0; i < num_samples && i < 64; i++) {
-            const float* input = training_data + i * input_dim;
+        for (i = 0; i < num_samples && i < 64; i++) {
+            input = training_data + i * input_dim;
             lnn_forward(net, input, output);
 
-            const float* label = training_labels + i * output_dim;
-            float loss = 0.0f;
-            for (size_t j = 0; j < output_dim && j < net_output_size; j++) {
-                float diff = output[j] - label[j];
+            label = training_labels + i * output_dim;
+            loss = 0.0f;
+            for (j = 0; j < output_dim && j < net_output_size; j++) {
+                diff = output[j] - label[j];
                 loss += diff * diff;
             }
             total_loss += loss / (float)output_dim;
@@ -4266,16 +4706,16 @@ static float nas_benchmark_architecture(const ArchitectureDescription* arch,
     }
 
     /* 准确率评分：较低的损失 → 较高分数 */
-    float avg_loss = trained > 0 ? total_loss / (float)trained : 0.5f;
-    float accuracy_score = 100.0f * (1.0f - avg_loss);
+    avg_loss = trained > 0 ? total_loss / (float)trained : 0.5f;
+    accuracy_score = 100.0f * (1.0f - avg_loss);
 
     /* 效率评分：参数量惩罚 */
-    float params = (float)(arch->total_parameters > 0 ? arch->total_parameters :
+    params = (float)(arch->total_parameters > 0 ? arch->total_parameters :
                     (int)arch->layer_count * 64 * 64);
-    float efficiency_score = 100.0f / (1.0f + params / 10000.0f);
+    efficiency_score = 100.0f / (1.0f + params / 10000.0f);
 
     /* 复杂度评分：层数惩罚 */
-    float complexity_score = 100.0f / (1.0f + (float)arch->layer_count * 0.2f);
+    complexity_score = 100.0f / (1.0f + (float)arch->layer_count * 0.2f);
 
     /* 综合适应度 */
     fitness = accuracy_score * 0.5f + efficiency_score * 0.3f + complexity_score * 0.2f;
@@ -4305,17 +4745,20 @@ int nas_evolve_and_benchmark(NASSystem* system,
                               const float* training_labels,
                               size_t num_samples,
                               size_t input_dim, size_t output_dim) {
+    int evaluated;
+    int i;
+    float fitness;
     if (!system || !training_data || !training_labels || num_samples == 0)
         return -1;
 
-    int evaluated = 0;
+    evaluated = 0;
 
     /* 对未评估的个体执行基准测试 */
-    for (size_t i = 0; i < system->population_capacity && i < 32; i++) {
+    for (i = 0; i < system->population_capacity && i < 32; i++) {
         ArchitectureDescription* arch = system->population[i];
         if (!arch || arch->is_evaluated) continue;
 
-        float fitness = nas_benchmark_architecture(arch,
+        fitness = nas_benchmark_architecture(arch,
             training_data, training_labels,
             NULL, NULL,
             num_samples, input_dim, output_dim, 5);

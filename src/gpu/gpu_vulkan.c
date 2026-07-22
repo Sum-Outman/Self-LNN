@@ -1689,8 +1689,8 @@ static GpuContext* vulkan_backend_context_create(int device_id) {
         vulkan_context->max_workgroup_size[2] = device_properties.limits.maxComputeWorkGroupSize[2];
     } else {
         // 使用保守默认值
-        vulkan_context->max_workgroup_size[0] = 256;
-        vulkan_context->max_workgroup_size[1] = 256;
+        vulkan_context->max_workgroup_size[0] = GPU_DEFAULT_WORKGROUP_SIZE_1D;
+        vulkan_context->max_workgroup_size[1] = GPU_DEFAULT_WORKGROUP_SIZE_1D;
         vulkan_context->max_workgroup_size[2] = 64;
     }
     
@@ -4072,7 +4072,7 @@ static GpuKernel* vulkan_backend_kernel_create(GpuContext* context, const char* 
     }
     
     // 设置默认工作组大小
-    vulkan_kernel->workgroup_size[0] = 256;
+    vulkan_kernel->workgroup_size[0] = GPU_DEFAULT_WORKGROUP_SIZE_1D;
     vulkan_kernel->workgroup_size[1] = 1;
     vulkan_kernel->workgroup_size[2] = 1;
     

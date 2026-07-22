@@ -1,6 +1,7 @@
 #include "selflnn/core/graph_optimization_ext.h"
 #include "selflnn/core/common.h"
 #include "selflnn/utils/memory_utils.h"
+#include "selflnn/utils/logging.h"          /* log_warning等日志宏 */
 #include "selflnn/utils/secure_random.h"
 #include <stdlib.h>
 #include <string.h>

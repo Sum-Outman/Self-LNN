@@ -272,6 +272,94 @@ int gradient(const MathExpressionNode* node,
              size_t num_variables,
              double* gradient);
 
+/* =========================================================================
+ * M-009修复: 高阶偏微分、混合偏导、海森矩阵、雅可比矩阵 API
+ * ========================================================================= */
+
+/**
+ * @brief 高阶导数：对同一变量求n阶导数
+ *
+ * 使用高阶中心差分公式计算:
+ *   二阶: f''(x) ≈ (f(x+h) - 2f(x) + f(x-h)) / h²
+ *   三阶: f'''(x) ≈ (f(x+2h) - 2f(x+h) + 2f(x-h) - f(x-2h)) / (2h³)
+ *   四阶: f''''(x) ≈ (f(x+2h) - 4f(x+h) + 6f(x) - 4f(x-h) + f(x-2h)) / h⁴
+ *
+ * @param node 表达式树根节点
+ * @param variable_names 所有变量名数组
+ * @param variable_values 所有变量值数组
+ * @param num_variables 变量数量
+ * @param diff_var_name 求导变量名
+ * @param order 导数阶数（1=一阶, 2=二阶, ... 最大4阶）
+ * @return double 高阶导数值，失败返回NaN
+ */
+double higher_order_derivative(const MathExpressionNode* node,
+                               const char** variable_names,
+                               const double* variable_values,
+                               size_t num_variables,
+                               const char* diff_var_name,
+                               int order);
+
+/**
+ * @brief 混合偏导数：对不同变量求混合偏导
+ *
+ * 例如 ∂²f/∂x∂y 先对x求导再对y求导。
+ * 使用中心差分递归计算: 先对var1求偏导，再对var2求偏导。
+ *
+ * @param node 表达式树根节点
+ * @param variable_names 所有变量名数组
+ * @param variable_values 所有变量值数组
+ * @param num_variables 变量数量
+ * @param diff_vars 求导变量名序列（按求导顺序）
+ * @param var_count 求导变量数量
+ * @return double 混合偏导数值，失败返回NaN
+ */
+double mixed_partial_derivative(const MathExpressionNode* node,
+                                const char** variable_names,
+                                const double* variable_values,
+                                size_t num_variables,
+                                const char** diff_vars,
+                                int var_count);
+
+/**
+ * @brief 海森矩阵：计算n×n二阶偏导数矩阵
+ *
+ * H[i][j] = ∂²f/∂x_i∂x_j
+ * 矩阵按行优先存储: hessian[i*n + j]
+ *
+ * @param node 表达式树根节点
+ * @param variable_names 所有变量名数组
+ * @param variable_values 所有变量值数组
+ * @param num_variables 变量数量
+ * @param hessian_out 输出海森矩阵（n×n，调用者分配）
+ * @return int 成功返回0，失败返回-1
+ */
+int compute_hessian(const MathExpressionNode* node,
+                    const char** variable_names,
+                    const double* variable_values,
+                    size_t num_variables,
+                    double* hessian_out);
+
+/**
+ * @brief 雅可比矩阵：计算m×n一阶偏导数矩阵（向量值函数）
+ *
+ * 对于向量值函数 F: Rⁿ→Rᵐ，J[i][j] = ∂F_i/∂x_j
+ * 矩阵按行优先存储: jacobian[i*n + j]
+ *
+ * @param functions 表达式树数组（m个分量函数）
+ * @param function_count 分量函数数量(m)
+ * @param variable_names 所有变量名数组
+ * @param variable_values 所有变量值数组
+ * @param num_variables 变量数量(n)
+ * @param jacobian_out 输出雅可比矩阵（m×n，调用者分配）
+ * @return int 成功返回0，失败返回-1
+ */
+int mp_compute_jacobian(MathExpressionNode** functions,
+                     size_t function_count,
+                     const char** variable_names,
+                     const double* variable_values,
+                     size_t num_variables,
+                     double* jacobian_out);
+
 /**
  * @brief 表达式替换：将表达式中的指定变量替换为另一个表达式
  *

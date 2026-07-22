@@ -88,6 +88,49 @@ int ws_push_get_client_count(const WSPushServer* server);
 
 int ws_push_server_poll(WSPushServer* server, int timeout_ms);
 
+/* ============================================================================
+ * L-004: WebSocket压缩支持API
+ * ============================================================================ */
+
+/** @brief 压缩统计信息 */
+typedef struct {
+    size_t total_bytes_in;       /**< 压缩前总字节数 */
+    size_t total_bytes_out;      /**< 压缩后总字节数 */
+    size_t total_frames_in;      /**< 压缩前总帧数 */
+    size_t total_frames_out;     /**< 压缩后总帧数 */
+    size_t frames_compressed;    /**< 实际压缩的帧数 */
+    size_t frames_skipped;       /**< 跳过的帧数（太小，不值得压缩） */
+    double avg_compression_ratio; /**< 平均压缩率 */
+} WSCompressionStats;
+
+/**
+ * @brief 设置WebSocket压缩阈值
+ *
+ * 仅对超过此大小的文本帧进行压缩（默认512字节）。
+ * 设置为0则禁用压缩。
+ *
+ * @param server WebSocket推送服务器
+ * @param threshold 压缩阈值（字节），0=禁用压缩
+ */
+void ws_set_compression_threshold(WSPushServer* server, int threshold);
+
+/**
+ * @brief 获取WebSocket压缩统计信息
+ *
+ * @param server WebSocket推送服务器
+ * @param stats 输出：压缩统计信息
+ * @return int 成功返回0，失败返回-1
+ */
+int ws_get_compression_stats(const WSPushServer* server, WSCompressionStats* stats);
+
+/**
+ * @brief 启用或禁用WebSocket压缩
+ *
+ * @param server WebSocket推送服务器
+ * @param enabled 1=启用，0=禁用
+ */
+void ws_set_compression_enabled(WSPushServer* server, int enabled);
+
 #ifdef __cplusplus
 }
 #endif

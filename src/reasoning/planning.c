@@ -1780,6 +1780,114 @@ int planning_system_set_config(PlanningSystem* system, const PlanningConfig* con
     return 0;
 }
 
+/* ============================================================================
+ * M-008修复: LNN引导Rollout —— 用LNN输出替代随机线性插值
+ *
+ * 将当前状态和目标编码为LNN输入，前向传播得到动作概率分布，
+ * 使用ε-greedy采样选择动作。LNN不可用时自动回退到原策略。
+ * ============================================================================ */
+
+/**
+ * @brief LNN引导的rollout策略
+ *
+ * @param current_state 当前状态向量 [state_size]
+ * @param goal 目标状态向量 [state_size]
+ * @param state_size 状态维度
+ * @param rollout_state 输出rollout后的状态 [state_size]
+ * @param rollout_depth 最大rollout深度
+ * @param action_noise 动作噪声强度
+ * @return rollout累计奖励
+ */
+static float lnn_guided_rollout(const float* current_state, const float* goal,
+                                 size_t state_size, float* rollout_state,
+                                 int rollout_depth, float action_noise) {
+    /* 初始化rollout状态 */
+    memcpy(rollout_state, current_state, state_size * sizeof(float));
+    float total_reward = 0.0f;
+    
+    /* 获取LNN实例 */
+    void* lnn_raw = selflnn_get_lnn();
+    if (!lnn_raw) {
+        /* LNN不可用，返回0表示调用方应使用原线性插值策略 */
+        return 0.0f;
+    }
+    LNN* lnn = (LNN*)lnn_raw;
+    
+    /* 检查LNN输入/输出维度是否足够（使用访问器而非直接访问不透明结构体） */
+    size_t lnn_input_size = lnn_get_input_size(lnn);
+    size_t lnn_output_size = lnn_get_output_size(lnn);
+    if (lnn_input_size < state_size * 2 || lnn_output_size < state_size) {
+        /* LNN维度不足，回退到原策略 */
+        return 0.0f;
+    }
+    
+    /* 分配LNN输入/输出缓冲区 */
+    float* lnn_input = (float*)safe_malloc(lnn_input_size * sizeof(float));
+    float* lnn_output = (float*)safe_malloc(lnn_output_size * sizeof(float));
+    if (!lnn_input || !lnn_output) {
+        safe_free((void**)&lnn_input);
+        safe_free((void**)&lnn_output);
+        return 0.0f;
+    }
+    
+    /* ε-greedy参数: ε=0.1探索，0.9利用LNN输出 */
+    const float epsilon = 0.1f;
+    const float goal_tolerance = 0.1f;
+    
+    for (int step = 0; step < rollout_depth; step++) {
+        /* 构建LNN输入: [当前状态 | 目标状态] 拼接 */
+        memset(lnn_input, 0, lnn_input_size * sizeof(float));
+        for (size_t d = 0; d < state_size && d < lnn_input_size / 2; d++) {
+            lnn_input[d] = rollout_state[d];
+            lnn_input[state_size + d] = goal[d];
+        }
+        
+        /* LNN前向传播获取动作建议 */
+        int fwd_ret = lnn_forward_with_memory_context(lnn, lnn_input, lnn_output);
+        if (fwd_ret != 0) {
+            /* LNN前向失败，回退到线性插值 */
+            safe_free((void**)&lnn_input);
+            safe_free((void**)&lnn_output);
+            return 0.0f;
+        }
+        
+        /* ε-greedy动作选择 */
+        for (size_t d = 0; d < state_size; d++) {
+            float action;
+            if (plan_rng_uniform(0.0f, 1.0f) < epsilon) {
+                /* 探索: 随机动作 */
+                action = plan_rng_uniform(-action_noise, action_noise);
+            } else {
+                /* 利用: 使用LNN输出作为动作方向（softmax已隐含在输出中） */
+                float lnn_action = lnn_output[d];
+                /* 将LNN输出裁剪到合理范围 */
+                action = CLAMP(lnn_action, -action_noise, action_noise);
+            }
+            rollout_state[d] += action;
+            rollout_state[d] = CLAMP(rollout_state[d], -3.0f, 3.0f);
+            
+            /* 累计奖励: 距离目标越近奖励越高 */
+            float dist = goal[d] - rollout_state[d];
+            total_reward -= fabsf(dist) * 0.05f;
+        }
+        
+        /* 检查是否到达目标 */
+        float remaining_dist = 0.0f;
+        for (size_t d = 0; d < state_size; d++) {
+            float diff = goal[d] - rollout_state[d];
+            remaining_dist += diff * diff;
+        }
+        if (sqrtf(remaining_dist) < goal_tolerance) {
+            total_reward += 5.0f;
+            break;
+        }
+    }
+    
+    safe_free((void**)&lnn_input);
+    safe_free((void**)&lnn_output);
+    return total_reward;
+}
+
 int planning_generate(PlanningSystem* system,
                      const float* goal, size_t goal_size,
                      const float* current_state, size_t state_size,
@@ -1934,29 +2042,40 @@ int planning_generate(PlanningSystem* system,
                 }
                 
                 /* 3. 模拟（Simulation）: 快速rollout到终点 */
+                /* M-008修复: 优先使用LNN引导rollout，回退到线性插值 */
                 float rollout_state[MAX_STATE_DIMENSION];
-                memcpy(rollout_state, nodes[current].state, state_size * sizeof(float));
                 float rollout_reward = 0.0f;
                 int rollout_depth = (int)max_steps - nodes[current].depth;
                 if (rollout_depth > 30) rollout_depth = 30;
                 
-                for (int rd = 0; rd < rollout_depth; rd++) {
-                    for (size_t d = 0; d < state_size; d++) {
-                        float diff = goal[d] - rollout_state[d];
-                        float step = diff * 0.08f + plan_rng_uniform(-0.02f, 0.02f);
-                        rollout_state[d] += step;
-                        rollout_state[d] = CLAMP(rollout_state[d], -3.0f, 3.0f);
-                        rollout_reward -= fabsf(goal[d] - rollout_state[d]) * 0.05f;
-                    }
-                    
-                    float rdist = 0.0f;
-                    for (size_t d = 0; d < state_size; d++) {
-                        float diff = goal[d] - rollout_state[d];
-                        rdist += diff * diff;
-                    }
-                    if (sqrtf(rdist) < system->config.goal_tolerance) {
-                        rollout_reward += 5.0f;
-                        break;
+                /* 尝试LNN引导rollout */
+                float lnn_reward = lnn_guided_rollout(nodes[current].state, goal,
+                                                       state_size, rollout_state,
+                                                       rollout_depth, 0.08f);
+                if (lnn_reward != 0.0f) {
+                    /* LNN rollout成功，使用LNN的奖励 */
+                    rollout_reward = lnn_reward;
+                } else {
+                    /* LNN不可用，使用原线性插值策略 */
+                    memcpy(rollout_state, nodes[current].state, state_size * sizeof(float));
+                    for (int rd = 0; rd < rollout_depth; rd++) {
+                        for (size_t d = 0; d < state_size; d++) {
+                            float diff = goal[d] - rollout_state[d];
+                            float step = diff * 0.08f + plan_rng_uniform(-0.02f, 0.02f);
+                            rollout_state[d] += step;
+                            rollout_state[d] = CLAMP(rollout_state[d], -3.0f, 3.0f);
+                            rollout_reward -= fabsf(goal[d] - rollout_state[d]) * 0.05f;
+                        }
+                        
+                        float rdist = 0.0f;
+                        for (size_t d = 0; d < state_size; d++) {
+                            float diff = goal[d] - rollout_state[d];
+                            rdist += diff * diff;
+                        }
+                        if (sqrtf(rdist) < system->config.goal_tolerance) {
+                            rollout_reward += 5.0f;
+                            break;
+                        }
                     }
                 }
                 

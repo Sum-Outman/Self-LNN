@@ -263,6 +263,7 @@ static void audio_semantic_compute_power_spectrum(float* real, float* imag, int 
 
 /* 内部数据结构定义 */
 
+#ifndef SELFLNN_NO_EMOTION
 /**
  * @brief 情感分析模型（完整实现）
  */
@@ -276,6 +277,7 @@ typedef struct {
     int output_dim;              /**< 输出类别维度 */
     int trained;                 /**< 是否已训练 */
 } EmotionModel;
+#endif
 
 /**
  * @brief 意图识别模型（完整实现）
@@ -388,7 +390,9 @@ struct AudioSemanticProcessor {
     int semantic_memory_owned;            /**< 语义记忆是否为内部创建 */
     
     /* 内部模型 */
+    #ifndef SELFLNN_NO_EMOTION
     EmotionModel emotion_model;           /**< 情感分析模型 */
+#endif
     IntentModel intent_model;             /**< 意图识别模型 */
     KeywordModel keyword_model;           /**< 关键词提取模型 */
     SpeakerRecognitionModel speaker_model; /**< 说话人识别模型 */
@@ -408,7 +412,9 @@ struct AudioSemanticProcessor {
     /* 统计信息 */
     int total_processed;                  /**< 总处理音频数 */
     float total_processing_time;          /**< 总处理时间 */
+    #ifndef SELFLNN_NO_EMOTION
     int emotion_correct;                  /**< 情感分析正确次数 */
+#endif
     int intent_correct;                   /**< 意图识别正确次数 */
     int total_evaluations;                /**< 总评估次数 */
     
@@ -428,6 +434,7 @@ static int audio_semantic_extract_features(AudioSemanticProcessor* processor,
                                           int* feature_dim_out);
 
 /* 前向声明 */
+#ifndef SELFLNN_NO_EMOTION
 static int audio_semantic_analyze_emotion_with_features(AudioSemanticProcessor* processor,
                                                        const float* features,
                                                        int feature_dim,
@@ -438,6 +445,7 @@ static int audio_semantic_analyze_emotion(AudioSemanticProcessor* processor,
                                          int num_features,
                                          int feature_dim,
                                          EmotionAnalysis* emotion_out);
+#endif
 static int audio_semantic_recognize_intent(AudioSemanticProcessor* processor,
                                           const float* features,
                                           int num_features,
@@ -513,6 +521,7 @@ static inline char* audio_semanticstring_duplicate(const char* str) {
 }
 
 /* 模型初始化函数 */
+#ifndef SELFLNN_NO_EMOTION
 static void emotion_model_init(EmotionModel* model, int input_size) {
     memset(model, 0, sizeof(EmotionModel));
     model->input_dim = input_size;
@@ -573,6 +582,7 @@ static void emotion_model_init(EmotionModel* model, int input_size) {
         model->trained = 0;
     }
 }
+#endif /* SELFLNN_NO_EMOTION - emotion_model_init */
 
 static void intent_model_init(IntentModel* model, int input_size) {
     memset(model, 0, sizeof(IntentModel));
@@ -842,6 +852,7 @@ static void sound_event_model_init(SoundEventModel* model, int input_dim) {
     model->initialized = 1;
 }
 
+#ifndef SELFLNN_NO_EMOTION
 static void emotion_model_free(EmotionModel* model) {
     if (model->weights_input_hidden) audio_semantic_free(model->weights_input_hidden);
     if (model->bias_hidden) audio_semantic_free(model->bias_hidden);
@@ -849,6 +860,7 @@ static void emotion_model_free(EmotionModel* model) {
     if (model->bias_output) audio_semantic_free(model->bias_output);
     memset(model, 0, sizeof(EmotionModel));
 }
+#endif /* SELFLNN_NO_EMOTION */
 
 static void intent_model_free(IntentModel* model) {
     if (model->weights_input_hidden) audio_semantic_free(model->weights_input_hidden);
@@ -892,7 +904,11 @@ AudioSemanticConfig audio_semantic_get_default_config(void) {
     cfg.use_prosodic = 1;
     cfg.mfcc_coefficients = 13;
     cfg.spectral_bands = 64;
+    #ifndef SELFLNN_NO_EMOTION
     cfg.enable_emotion_analysis = 0; /* 需求明确禁止情感功能,默认禁用 */
+#else
+    cfg.enable_emotion_analysis = 0; /* SELFLNN_NO_EMOTION 已定义，情感功能编译期禁用 */
+#endif
     cfg.enable_speaker_recognition = 0;
     cfg.enable_intent_recognition = 1;
     cfg.enable_keyword_extraction = 1;
@@ -904,7 +920,9 @@ AudioSemanticConfig audio_semantic_get_default_config(void) {
     cfg.max_parallel_requests = 4;
     cfg.cache_enabled = 1;
     cfg.confidence_threshold = 0.7f;
+    #ifndef SELFLNN_NO_EMOTION
     cfg.emotion_intensity_threshold = 0.3f;
+#endif
     cfg.keyword_relevance_threshold = 0.5f;
     return cfg;
 }
@@ -1076,7 +1094,9 @@ AudioSemanticProcessor* audio_semantic_processor_create(
     /* 初始化统计信息 */
     processor->total_processed = 0;
     processor->total_processing_time = 0.0f;
+#ifndef SELFLNN_NO_EMOTION
     processor->emotion_correct = 0;
+#endif
     processor->intent_correct = 0;
     processor->total_evaluations = 0;
     
@@ -1117,7 +1137,9 @@ void audio_semantic_processor_free(AudioSemanticProcessor* processor) {
     }
     
     /* 释放内部模型 */
+    #ifndef SELFLNN_NO_EMOTION
     emotion_model_free(&processor->emotion_model);
+#endif
     intent_model_free(&processor->intent_model);
     keyword_model_free(&processor->keyword_model);
     sound_event_model_free(&processor->sound_event_model);  /* 释放声音事件分类MLP+CfC模型 */
@@ -1245,6 +1267,7 @@ int audio_semantic_process_features(AudioSemanticProcessor* processor,
         float semantic_representation[256];
         lnn_forward(processor->semantic_cfc, lnn_output, semantic_representation);
         
+        #ifndef SELFLNN_NO_EMOTION
         /* 使用语义表示进行分析 - 深度实现：基于LNN/CFC输出的多维度情感特征提取 */
         /* 情感特征提取：使用semantic_representation的统计特征和模式特征 */
         float emotion_features[8] = {0};
@@ -1304,8 +1327,10 @@ int audio_semantic_process_features(AudioSemanticProcessor* processor,
             // 这里可以传递情感特征给情感分析函数
             // 实际实现中应整合到情感分析流程中
         }
+#endif
     }
     
+    #ifndef SELFLNN_NO_EMOTION
     /* 情感分析 */
     EmotionAnalysis emotion;
     memset(&emotion, 0, sizeof(EmotionAnalysis));
@@ -1320,6 +1345,7 @@ int audio_semantic_process_features(AudioSemanticProcessor* processor,
             memcpy(&result->emotion, &emotion, sizeof(EmotionAnalysis));
         }
     }
+#endif
     
     /* 说话人识别 */
     if (processor->config.enable_speaker_recognition) {
@@ -1464,10 +1490,12 @@ int audio_semantic_process_features(AudioSemanticProcessor* processor,
     float confidence_sum = 0.0f;
     int confidence_count = 0;
     
+    #ifndef SELFLNN_NO_EMOTION
     if (processor->config.enable_emotion_analysis) {
         confidence_sum += result->emotion.intensity;
         confidence_count++;
     }
+#endif
     
     if (processor->config.enable_intent_recognition) {
         confidence_sum += result->intent.confidence;
@@ -1512,6 +1540,7 @@ int audio_semantic_process_text(AudioSemanticProcessor* processor,
         return -1;
     }
     
+    #ifndef SELFLNN_NO_EMOTION
     /* 完整实现：基于文本的情感分析（ ） */
     if (processor->config.enable_emotion_analysis) {
         // 检查情感模型是否已训练
@@ -1894,6 +1923,7 @@ int audio_semantic_process_text(AudioSemanticProcessor* processor,
             }
         }
     }
+#endif /* SELFLNN_NO_EMOTION */
     
     /* 完整实现：意图识别（ ） */
     if (processor->config.enable_intent_recognition) {
@@ -1928,10 +1958,12 @@ int audio_semantic_process_text(AudioSemanticProcessor* processor,
                           strstr(text, "早上好") != NULL || strstr(text, "晚上好") != NULL) ? 1.0f : 0.0f;
             
             // 特征7：情感特征（如果可用）
+#ifndef SELFLNN_NO_EMOTION
             if (processor->config.enable_emotion_analysis) {
                 features[6] = result->emotion.valence;
                 features[7] = result->emotion.arousal;
             }
+#endif
             
             // 2. 使用意图模型前向传播
             int num_classes = processor->intent_model.output_dim;
@@ -2402,11 +2434,15 @@ int audio_semantic_processor_get_stats(const AudioSemanticProcessor* processor,
     }
     
     if (accuracy_emotion) {
+#ifndef SELFLNN_NO_EMOTION
         if (processor->total_evaluations > 0) {
             *accuracy_emotion = (float)processor->emotion_correct / processor->total_evaluations;
         } else {
             *accuracy_emotion = 0.0f;
         }
+#else
+        *accuracy_emotion = 0.0f;
+#endif
     }
     
     if (accuracy_intent) {
@@ -2428,7 +2464,9 @@ void audio_semantic_processor_reset(AudioSemanticProcessor* processor) {
     /* 重置统计信息 */
     processor->total_processed = 0;
     processor->total_processing_time = 0.0f;
+#ifndef SELFLNN_NO_EMOTION
     processor->emotion_correct = 0;
+#endif
     processor->intent_correct = 0;
     processor->total_evaluations = 0;
     
@@ -2463,6 +2501,7 @@ int audio_semantic_load_model(AudioSemanticProcessor* processor,
     
     // 根据模型类型加载不同的参数
     switch (model_type) {
+        #ifndef SELFLNN_NO_EMOTION
         case AUDIO_SEMANTIC_MODEL_EMOTION: {
             // 读取模型版本
             int version;
@@ -2593,6 +2632,7 @@ int audio_semantic_load_model(AudioSemanticProcessor* processor,
             model->trained = 1;
             break;
         }
+#endif /* SELFLNN_NO_EMOTION */
             
         case AUDIO_SEMANTIC_MODEL_INTENT: {
             // 读取模型版本
@@ -2813,6 +2853,7 @@ int audio_semantic_save_model(AudioSemanticProcessor* processor,
     // 根据模型类型保存不同的参数
     switch (model_type) {
         case AUDIO_SEMANTIC_MODEL_EMOTION:
+#ifndef SELFLNN_NO_EMOTION
             if (processor->emotion_model.trained) {
                 EmotionModel* model = &processor->emotion_model;
                 // 写入模型版本
@@ -2856,6 +2897,7 @@ int audio_semantic_save_model(AudioSemanticProcessor* processor,
                 }
             }
             break;
+#endif /* SELFLNN_NO_EMOTION */
             
         case AUDIO_SEMANTIC_MODEL_INTENT:
             if (processor->intent_model.trained) {
@@ -2947,7 +2989,9 @@ int audio_semantic_train_model(AudioSemanticProcessor* processor,
     /* 完整实现：使用反向传播训练模型 */
     
     // 根据模型类型选择模型和维度
+#ifndef SELFLNN_NO_EMOTION
     EmotionModel* emotion_model = NULL;
+#endif
     IntentModel* intent_model = NULL;
     KeywordModel* keyword_model = NULL;
     
@@ -2960,6 +3004,7 @@ int audio_semantic_train_model(AudioSemanticProcessor* processor,
     int hidden_dim = 0;
     
     switch (model_type) {
+#ifndef SELFLNN_NO_EMOTION
         case AUDIO_SEMANTIC_MODEL_EMOTION:
             emotion_model = &processor->emotion_model;
             if (!emotion_model) {
@@ -2973,6 +3018,7 @@ int audio_semantic_train_model(AudioSemanticProcessor* processor,
             weights_hidden_output = emotion_model->weights_hidden_output;
             bias_output = emotion_model->bias_output;
             break;
+#endif
             
         case AUDIO_SEMANTIC_MODEL_INTENT:
             intent_model = &processor->intent_model;
@@ -3250,9 +3296,11 @@ int audio_semantic_train_model(AudioSemanticProcessor* processor,
     
     // 标记模型为已训练
     switch (model_type) {
+#ifndef SELFLNN_NO_EMOTION
         case AUDIO_SEMANTIC_MODEL_EMOTION:
             emotion_model->trained = 1;
             break;
+#endif
         case AUDIO_SEMANTIC_MODEL_INTENT:
             intent_model->trained = 1;
             break;
@@ -3405,7 +3453,9 @@ int audio_semantic_result_copy(const AudioSemanticResult* src,
     }
     
     /* 复制情感分析结果 */
+#ifndef SELFLNN_NO_EMOTION
     memcpy(&dst->emotion, &src->emotion, sizeof(EmotionAnalysis));
+#endif
     
     /* 复制意图识别结果 */
     memcpy(&dst->intent, &src->intent, sizeof(IntentAnalysis));
@@ -3511,6 +3561,7 @@ char* audio_semantic_result_to_json(const AudioSemanticResult* result) {
     }
     
     // 添加情感分析结果
+#ifndef SELFLNN_NO_EMOTION
     const char* emotion_names[] = {"中性", "快乐", "悲伤", "愤怒", "恐惧", 
                                   "惊讶", "厌恶", "兴奋", "平静", "沮丧"};
     const char* emotion_name = (result->emotion.category >= 0 && 
@@ -3525,6 +3576,7 @@ char* audio_semantic_result_to_json(const AudioSemanticResult* result) {
         return NULL;
     }
     ptr += written;
+#endif
     
     // 添加意图识别结果
     const char* intent_names[] = {"未知", "提问", "命令", "陈述", "问候", "告别", 
@@ -3677,6 +3729,7 @@ int audio_semantic_result_from_json(const char* json_str,
     }
     
     // 解析情感字段
+#ifndef SELFLNN_NO_EMOTION
     const char* emotion_ptr = strstr(json_str, "\"emotion\":");
     if (emotion_ptr) {
         emotion_ptr += 10;  // 跳过 "\"emotion\":"
@@ -3728,6 +3781,7 @@ int audio_semantic_result_from_json(const char* json_str,
             result->emotion.intensity = (float)atof(intensity_ptr);
         }
     }
+#endif
     
     // 解析意图字段
     const char* intent_ptr = strstr(json_str, "\"intent\":");
@@ -3844,7 +3898,9 @@ void audio_semantic_result_print(const AudioSemanticResult* result) {
         log_info("识别置信度: %.2f", result->recognition_confidence);
     }
     
+    #ifndef SELFLNN_NO_EMOTION
     log_info("情感分析: %d (强度: %.2f)", result->emotion.category, result->emotion.intensity);
+#endif
     log_info("意图识别: %d (置信度: %.2f)", result->intent.category, result->intent.confidence);
     
     if (result->intent.intent_name) {
@@ -3893,7 +3949,9 @@ static int audio_semantic_init_models(AudioSemanticProcessor* processor) {
     }
     
     /* 初始化情感模型 */
+#ifndef SELFLNN_NO_EMOTION
     emotion_model_init(&processor->emotion_model, input_dim);
+#endif
     
     /* 初始化意图模型 */
     intent_model_init(&processor->intent_model, input_dim);
@@ -4281,6 +4339,7 @@ static int audio_semantic_extract_features(AudioSemanticProcessor* processor,
     return 0;
 }
 
+#ifndef SELFLNN_NO_EMOTION
 static int audio_semantic_analyze_emotion(AudioSemanticProcessor* processor,
                                          const float* features,
                                          int num_features,
@@ -4646,6 +4705,7 @@ static int audio_semantic_analyze_emotion_simplified(AudioSemanticProcessor* pro
     
     return 0;
 }
+#endif /* SELFLNN_NO_EMOTION */
 
 static int audio_semantic_recognize_intent_with_features(AudioSemanticProcessor* processor,
                                                          const float* features,
@@ -5621,6 +5681,7 @@ static float audio_semantic_calculate_coherence(const AudioSemanticResult* resul
     int valid_factors = 0;
     
     // 1. 情感与意图一致性得分 (权重: 0.3)
+#ifndef SELFLNN_NO_EMOTION
     float emotion_intent_score = 0.5f; // 默认中等一致性
     
     // 定义情感-意图一致性规则
@@ -5687,6 +5748,11 @@ static float audio_semantic_calculate_coherence(const AudioSemanticResult* resul
     scores[0] = emotion_intent_score;
     weights[0] = 0.3f;
     valid_factors++;
+#else
+    scores[0] = 0.5f;
+    weights[0] = 0.3f;
+    valid_factors++;
+#endif
     
     // 2. 关键词与意图相关性得分 (权重: 0.2)
     float keyword_intent_score = 0.5f;
@@ -5905,6 +5971,7 @@ static float audio_semantic_calculate_coherence(const AudioSemanticResult* resul
     valid_factors++;
     
     // 4. 情感内部一致性得分 (权重: 0.15)
+#ifndef SELFLNN_NO_EMOTION
     float emotion_internal_score = 0.5f;
     
     // 检查情感类别与强度的匹配
@@ -5931,6 +5998,11 @@ static float audio_semantic_calculate_coherence(const AudioSemanticResult* resul
     scores[3] = emotion_internal_score;
     weights[3] = 0.15f;
     valid_factors++;
+#else
+    scores[3] = 0.5f;
+    weights[3] = 0.15f;
+    valid_factors++;
+#endif
     
     // 5. 意图置信度得分 (权重: 0.15)
     float intent_confidence_score = result->intent.confidence;
@@ -5986,6 +6058,7 @@ static float audio_semantic_calculate_contextual_fit(const AudioSemanticResult* 
     int valid_factors = 0;
     
     // 1. 情感变化平滑性得分 (权重: 0.35)
+#ifndef SELFLNN_NO_EMOTION
     float emotion_change_score = 0.5f;
     
     // 计算情感类别变化
@@ -6036,6 +6109,11 @@ static float audio_semantic_calculate_contextual_fit(const AudioSemanticResult* 
     scores[0] = emotion_change_score;
     weights[0] = 0.35f;
     valid_factors++;
+#else
+    scores[0] = 0.5f;
+    weights[0] = 0.35f;
+    valid_factors++;
+#endif
     
     // 2. 意图转换模式得分 (权重: 0.3)
     float intent_transition_score = 0.5f;

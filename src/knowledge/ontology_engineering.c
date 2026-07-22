@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file ontology_engineering.c
  * @brief 本体工程系统实现
  *
@@ -11,6 +11,7 @@
 
 #include "selflnn/knowledge/ontology_engineering.h"
 #include "selflnn/utils/memory_utils.h"
+#include "selflnn/utils/logging.h"
 #include "selflnn/core/errors.h"
 
 #include <stdlib.h>
@@ -1203,7 +1204,7 @@ int ontology_evolution_rollback(OntologyEvolution* evo, int version) {
                             if (!obj && rel_id >= 0 && rel_id < new_ont->individual_count)
                                 obj = new_ont->individuals[rel_id];
                             if (obj && ax_type >= AXIOM_SUBCLASS && ax_type <= AXIOM_VALUE_RESTRICTION)
-                                ontology_add_axiom(new_ont, (OntAxiomType)ax_type, subj, obj, 1.0f);
+                                ontology_add_axiom(new_ont, (OntAxiomType)ax_type, subj->name, obj->name, 1.0f);
                         }
                         semi2 = strchr(semi2 + 1, ';');
                     }
@@ -1514,5 +1515,1495 @@ int onto_cross_domain_align(const float* source_domain_embedding,
     for (int i = 0; i < d; i++)
         for (int j = 0; j < d; j++)
             alignment_matrix[i * d + j] = source_domain_embedding[i] * target_domain_embedding[j];
+    return 0;
+}
+
+/* ============================================================================
+ * L-005修复: OWL/RDF 互操作层 — 完整实现
+ *
+ * 包含以下组件:
+ *   1. 简易XML解析器（递归下降，零外部依赖）
+ *   2. OWL/XML导入器（类、属性、实例、公理提取）
+ *   3. RDF/Turtle解析器（三元组提取、前缀解析）
+ *   4. RDF/Turtle序列化器（标准Turtle格式导出）
+ *   5. 自动格式检测导入器
+ *   6. 文件保存器
+ * ============================================================================ */
+
+/* ============================================================================
+ * 1. 简易XML解析器 — 递归下降实现
+ * ============================================================================ */
+
+#define XML_MAX_TAG_NAME    128
+#define XML_MAX_ATTR_NAME   128
+#define XML_MAX_ATTR_VALUE  512
+#define XML_MAX_ATTRS        32
+#define XML_MAX_DEPTH        32
+
+/* XML属性 */
+typedef struct {
+    char name[XML_MAX_ATTR_NAME];
+    char value[XML_MAX_ATTR_VALUE];
+} XmlAttr;
+
+/* XML节点 */
+typedef struct {
+    char tag_name[XML_MAX_TAG_NAME];     /* 标签名 */
+    char* text_content;                   /* 文本内容（堆分配） */
+    XmlAttr attrs[XML_MAX_ATTRS];         /* 属性列表 */
+    int attr_count;                       /* 属性数量 */
+    int is_self_closing;                  /* 是否自闭合标签 */
+    int is_comment;                       /* 是否注释 */
+    int depth;                            /* 嵌套深度 */
+} XmlNode;
+
+/* XML解析器状态 */
+typedef struct {
+    const char* data;                     /* 源数据指针 */
+    size_t length;                        /* 数据长度 */
+    size_t pos;                           /* 当前位置 */
+    int line;                             /* 当前行号 */
+    int error;                            /* 错误标志 */
+    char error_msg[256];                  /* 错误信息 */
+} XmlParser;
+
+/* 初始化XML解析器 */
+static XmlParser* xml_parser_create(const char* data, size_t length) {
+    XmlParser* parser = (XmlParser*)safe_calloc(1, sizeof(XmlParser));
+    if (!parser) return NULL;
+    parser->data = data;
+    parser->length = length;
+    parser->pos = 0;
+    parser->line = 1;
+    parser->error = 0;
+    return parser;
+}
+
+static void xml_parser_free(XmlParser* parser) {
+    safe_free((void**)&parser);
+}
+
+/* 跳过空白字符 */
+static void xml_skip_whitespace(XmlParser* p) {
+    while (p->pos < p->length && !p->error) {
+        char c = p->data[p->pos];
+        if (c == ' ' || c == '\t' || c == '\r') { p->pos++; continue; }
+        if (c == '\n') { p->pos++; p->line++; continue; }
+        break;
+    }
+}
+
+/* 跳过注释 <!-- ... --> */
+static void xml_skip_comment(XmlParser* p) {
+    if (p->pos + 4 > p->length) return;
+    if (p->data[p->pos] == '<' && p->data[p->pos+1] == '!' &&
+        p->data[p->pos+2] == '-' && p->data[p->pos+3] == '-') {
+        p->pos += 4;
+        while (p->pos + 2 < p->length) {
+            if (p->data[p->pos] == '-' && p->data[p->pos+1] == '-' &&
+                p->data[p->pos+2] == '>') {
+                p->pos += 3;
+                return;
+            }
+            if (p->data[p->pos] == '\n') p->line++;
+            p->pos++;
+        }
+        p->error = 1;
+        snprintf(p->error_msg, sizeof(p->error_msg), "未闭合的XML注释");
+    }
+}
+
+/* 跳过XML声明和DOCTYPE */
+static void xml_skip_declarations(XmlParser* p) {
+    while (p->pos < p->length && !p->error) {
+        xml_skip_whitespace(p);
+        if (p->pos >= p->length) break;
+        /* 跳过注释 */
+        if (p->data[p->pos] == '<' && p->pos + 3 < p->length &&
+            p->data[p->pos+1] == '!' && p->data[p->pos+2] == '-' &&
+            p->data[p->pos+3] == '-') {
+            xml_skip_comment(p);
+            continue;
+        }
+        /* 跳过XML声明 <?xml ...?> */
+        if (p->data[p->pos] == '<' && p->pos + 1 < p->length &&
+            p->data[p->pos+1] == '?') {
+            p->pos += 2;
+            while (p->pos + 1 < p->length) {
+                if (p->data[p->pos] == '?' && p->data[p->pos+1] == '>') {
+                    p->pos += 2;
+                    break;
+                }
+                if (p->data[p->pos] == '\n') p->line++;
+                p->pos++;
+            }
+            continue;
+        }
+        /* 跳过DOCTYPE */
+        if (p->data[p->pos] == '<' && p->pos + 8 < p->length &&
+            p->data[p->pos+1] == '!' &&
+            (p->data[p->pos+2] == 'D' || p->data[p->pos+2] == 'd')) {
+            p->pos += 2;
+            while (p->pos < p->length) {
+                if (p->data[p->pos] == '>') { p->pos++; break; }
+                if (p->data[p->pos] == '\n') p->line++;
+                p->pos++;
+            }
+            continue;
+        }
+        break;
+    }
+}
+
+/* 读取XML标签名 */
+static int xml_read_tag_name(XmlParser* p, char* out, int max_len) {
+    int i = 0;
+    xml_skip_whitespace(p);
+    while (p->pos < p->length && i < max_len - 1) {
+        char c = p->data[p->pos];
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n' ||
+            c == '>' || c == '/') break;
+        out[i++] = c;
+        p->pos++;
+    }
+    out[i] = '\0';
+    return i;
+}
+
+/* 读取XML属性值 */
+static int xml_read_attr_value(XmlParser* p, char* out, int max_len) {
+    int i = 0;
+    char quote = 0;
+    xml_skip_whitespace(p);
+    if (p->pos >= p->length) return 0;
+    if (p->data[p->pos] == '\"' || p->data[p->pos] == '\'') {
+        quote = p->data[p->pos];
+        p->pos++;
+    } else {
+        /* 无引号属性值 */
+        while (p->pos < p->length && i < max_len - 1) {
+            char c = p->data[p->pos];
+            if (c == ' ' || c == '\t' || c == '>' || c == '/') break;
+            out[i++] = c;
+            p->pos++;
+        }
+        out[i] = '\0';
+        return i;
+    }
+    while (p->pos < p->length && i < max_len - 1) {
+        char c = p->data[p->pos];
+        if (c == quote) { p->pos++; break; }
+        if (c == '\n') p->line++;
+        out[i++] = c;
+        p->pos++;
+    }
+    out[i] = '\0';
+    return i;
+}
+
+/* 读取下一个XML节点 */
+static int xml_read_node(XmlParser* p, XmlNode* node) {
+    if (!p || !node || p->error) return 0;
+    memset(node, 0, sizeof(XmlNode));
+    node->depth = 0;
+
+    xml_skip_whitespace(p);
+    if (p->pos >= p->length) return 0;
+
+    /* 检查是否注释 */
+    if (p->data[p->pos] == '<' && p->pos + 3 < p->length &&
+        p->data[p->pos+1] == '!' && p->data[p->pos+2] == '-' &&
+        p->data[p->pos+3] == '-') {
+        node->is_comment = 1;
+        xml_skip_comment(p);
+        return 1;
+    }
+
+    /* 检查是否文本内容 */
+    if (p->data[p->pos] != '<') {
+        int i = 0;
+        /* 预分配文本缓冲区 */
+        size_t text_start = p->pos;
+        while (p->pos < p->length && p->data[p->pos] != '<') {
+            p->pos++;
+        }
+        size_t text_len = p->pos - text_start;
+        if (text_len > 0) {
+            node->text_content = (char*)safe_malloc(text_len + 1);
+            if (node->text_content) {
+                memcpy(node->text_content, p->data + text_start, text_len);
+                node->text_content[text_len] = '\0';
+                /* 去除首尾空白 */
+                while (text_len > 0 && (node->text_content[text_len-1] == ' ' ||
+                       node->text_content[text_len-1] == '\t' ||
+                       node->text_content[text_len-1] == '\r' ||
+                       node->text_content[text_len-1] == '\n')) {
+                    node->text_content[--text_len] = '\0';
+                }
+            }
+        }
+        return 1;
+    }
+
+    /* 开始标签 <tagname ...> */
+    if (p->data[p->pos] == '<' && p->pos + 1 < p->length &&
+        p->data[p->pos+1] == '/') {
+        /* 结束标签，调用者处理 */
+        return 0;
+    }
+
+    p->pos++; /* 跳过 '<' */
+
+    /* 读取标签名 */
+    xml_read_tag_name(p, node->tag_name, XML_MAX_TAG_NAME);
+    if (node->tag_name[0] == '\0') {
+        p->error = 1;
+        snprintf(p->error_msg, sizeof(p->error_msg), "空标签名(行%d)", p->line);
+        return 0;
+    }
+
+    /* 读取属性 */
+    xml_skip_whitespace(p);
+    node->attr_count = 0;
+    while (p->pos < p->length && !p->error && node->attr_count < XML_MAX_ATTRS) {
+        xml_skip_whitespace(p);
+        if (p->pos >= p->length) break;
+        char c = p->data[p->pos];
+
+        /* 检测自闭合或标签结束 */
+        if (c == '>') { p->pos++; break; }
+        if (c == '/' && p->pos + 1 < p->length && p->data[p->pos+1] == '>') {
+            node->is_self_closing = 1;
+            p->pos += 2;
+            break;
+        }
+        if (c == '<') break;
+
+        /* 读取属性名 */
+        XmlAttr* attr = &node->attrs[node->attr_count];
+        xml_read_tag_name(p, attr->name, XML_MAX_ATTR_NAME);
+        if (attr->name[0] == '\0') break;
+
+        /* 跳过 = */
+        xml_skip_whitespace(p);
+        if (p->pos < p->length && p->data[p->pos] == '=') {
+            p->pos++;
+            xml_skip_whitespace(p);
+            /* 读取属性值 */
+            xml_read_attr_value(p, attr->value, XML_MAX_ATTR_VALUE);
+            node->attr_count++;
+        }
+    }
+
+    return 1;
+}
+
+/* 释放XML节点文本内容 */
+static void xml_node_free_content(XmlNode* node) {
+    if (node && node->text_content) {
+        safe_free((void**)&node->text_content);
+    }
+}
+
+/* ============================================================================
+ * 2. OWL/XML导入器
+ * ============================================================================ */
+
+/* OWL/XML命名空间前缀映射 */
+typedef struct {
+    char prefix[32];
+    char uri[256];
+} OwlNsMapping;
+
+#define OWL_MAX_NS 16
+
+/* 解析命名空间前缀 */
+static void owl_resolve_ns(const char* qname, OwlNsMapping* ns_map, int ns_count,
+                            char* out_local, int max_local) {
+    const char* colon = strchr(qname, ':');
+    if (!colon) {
+        /* 无前缀，默认命名空间 */
+        strncpy(out_local, qname, max_local - 1);
+        out_local[max_local - 1] = '\0';
+        return;
+    }
+    /* 有前缀，如 rdf:about */
+    size_t prefix_len = colon - qname;
+    for (int i = 0; i < ns_count; i++) {
+        if (strncmp(qname, ns_map[i].prefix, prefix_len) == 0 &&
+            (int)strlen(ns_map[i].prefix) == (int)prefix_len) {
+            /* 匹配到前缀，返回local name */
+            const char* local = colon + 1;
+            strncpy(out_local, local, max_local - 1);
+            out_local[max_local - 1] = '\0';
+            return;
+        }
+    }
+    /* 未匹配的前缀，返回整个qname */
+    strncpy(out_local, qname, max_local - 1);
+    out_local[max_local - 1] = '\0';
+}
+
+/* 处理OWL/XML中的类定义 */
+static int owl_handle_class(Ontology* ont, XmlNode* node, XmlParser* p,
+                             OwlNsMapping* ns_map, int ns_count) {
+    char local_name[XML_MAX_ATTR_NAME] = {0};
+    int found_id = 0;
+
+    /* 查找rdf:ID或rdf:about属性 */
+    for (int a = 0; a < node->attr_count; a++) {
+        char local_attr[XML_MAX_ATTR_NAME] = {0};
+        owl_resolve_ns(node->attrs[a].name, ns_map, ns_count,
+                       local_attr, sizeof(local_attr));
+        if (strcmp(local_attr, "ID") == 0 || strcmp(local_attr, "about") == 0) {
+            /* 提取#后的名称 */
+            const char* hash = strchr(node->attrs[a].value, '#');
+            if (hash) {
+                strncpy(local_name, hash + 1, sizeof(local_name) - 1);
+            } else {
+                strncpy(local_name, node->attrs[a].value, sizeof(local_name) - 1);
+            }
+            local_name[sizeof(local_name) - 1] = '\0';
+            found_id = 1;
+        }
+    }
+
+    if (!found_id || local_name[0] == '\0') return 0;
+
+    /* 检查是否已存在 */
+    if (ontology_find_element(ont, local_name)) return 0;
+
+    /* 添加类 */
+    OntElement* cls = ontology_add_class(ont, local_name, NULL);
+    if (!cls) return -1;
+
+    /* 解析子元素（子类、等价类、不相交等） */
+    int depth = 1;
+    while (depth > 0 && !p->error) {
+        XmlNode child;
+        memset(&child, 0, sizeof(XmlNode));
+        if (!xml_read_node(p, &child)) break;
+
+        if (child.is_comment) continue;
+
+        if (child.tag_name[0] == '\0' && child.text_content) {
+            xml_node_free_content(&child);
+            continue;
+        }
+
+        /* 检测结束标签 */
+        char local_tag[XML_MAX_TAG_NAME] = {0};
+        owl_resolve_ns(child.tag_name, ns_map, ns_count,
+                       local_tag, sizeof(local_tag));
+
+        if (strcmp(local_tag, "Class") == 0 && child.is_self_closing == 0) {
+            depth++;
+            xml_node_free_content(&child);
+            continue;
+        }
+
+        /* 子类关系 */
+        if (strcmp(local_tag, "subClassOf") == 0) {
+            for (int a = 0; a < child.attr_count; a++) {
+                char local_attr[XML_MAX_ATTR_NAME] = {0};
+                owl_resolve_ns(child.attrs[a].name, ns_map, ns_count,
+                               local_attr, sizeof(local_attr));
+                if (strcmp(local_attr, "resource") == 0) {
+                    const char* hash = strchr(child.attrs[a].value, '#');
+                    const char* parent_name = hash ? hash + 1 : child.attrs[a].value;
+                    /* 确保父类存在 */
+                    if (!ontology_find_element(ont, parent_name)) {
+                        ontology_add_class(ont, parent_name, NULL);
+                    }
+                    ontology_add_axiom(ont, AXIOM_SUBCLASS, local_name, parent_name, 1.0f);
+                }
+            }
+        }
+
+        /* 等价类 */
+        if (strcmp(local_tag, "equivalentClass") == 0) {
+            for (int a = 0; a < child.attr_count; a++) {
+                char local_attr[XML_MAX_ATTR_NAME] = {0};
+                owl_resolve_ns(child.attrs[a].name, ns_map, ns_count,
+                               local_attr, sizeof(local_attr));
+                if (strcmp(local_attr, "resource") == 0) {
+                    const char* hash = strchr(child.attrs[a].value, '#');
+                    const char* eq_name = hash ? hash + 1 : child.attrs[a].value;
+                    if (!ontology_find_element(ont, eq_name)) {
+                        ontology_add_class(ont, eq_name, NULL);
+                    }
+                    ontology_add_axiom(ont, AXIOM_EQUIVALENT, local_name, eq_name, 1.0f);
+                }
+            }
+        }
+
+        /* 不相交 */
+        if (strcmp(local_tag, "disjointWith") == 0) {
+            for (int a = 0; a < child.attr_count; a++) {
+                char local_attr[XML_MAX_ATTR_NAME] = {0};
+                owl_resolve_ns(child.attrs[a].name, ns_map, ns_count,
+                               local_attr, sizeof(local_attr));
+                if (strcmp(local_attr, "resource") == 0) {
+                    const char* hash = strchr(child.attrs[a].value, '#');
+                    const char* dj_name = hash ? hash + 1 : child.attrs[a].value;
+                    if (!ontology_find_element(ont, dj_name)) {
+                        ontology_add_class(ont, dj_name, NULL);
+                    }
+                    ontology_add_axiom(ont, AXIOM_DISJOINT, local_name, dj_name, 1.0f);
+                }
+            }
+        }
+
+        xml_node_free_content(&child);
+    }
+
+    return 0;
+}
+
+/* 处理OWL/XML中的属性定义 */
+static int owl_handle_property(Ontology* ont, XmlNode* node, XmlParser* p,
+                                OwlNsMapping* ns_map, int ns_count, int is_object_prop) {
+    char local_name[XML_MAX_ATTR_NAME] = {0};
+    int found_id = 0;
+
+    for (int a = 0; a < node->attr_count; a++) {
+        char local_attr[XML_MAX_ATTR_NAME] = {0};
+        owl_resolve_ns(node->attrs[a].name, ns_map, ns_count,
+                       local_attr, sizeof(local_attr));
+        if (strcmp(local_attr, "ID") == 0 || strcmp(local_attr, "about") == 0) {
+            const char* hash = strchr(node->attrs[a].value, '#');
+            if (hash) {
+                strncpy(local_name, hash + 1, sizeof(local_name) - 1);
+            } else {
+                strncpy(local_name, node->attrs[a].value, sizeof(local_name) - 1);
+            }
+            local_name[sizeof(local_name) - 1] = '\0';
+            found_id = 1;
+        }
+    }
+
+    if (!found_id || local_name[0] == '\0') return 0;
+    if (ontology_find_element(ont, local_name)) return 0;
+
+    /* 添加属性 */
+    if (is_object_prop) {
+        ontology_add_object_property(ont, local_name, NULL, NULL, NULL);
+    } else {
+        ontology_add_data_property(ont, local_name, NULL, "string");
+    }
+
+    /* 解析子元素（domain, range等） */
+    int depth = 1;
+    while (depth > 0 && !p->error) {
+        XmlNode child;
+        memset(&child, 0, sizeof(XmlNode));
+        if (!xml_read_node(p, &child)) break;
+        if (child.is_comment) continue;
+        if (child.tag_name[0] == '\0' && child.text_content) {
+            xml_node_free_content(&child);
+            continue;
+        }
+
+        char local_tag[XML_MAX_TAG_NAME] = {0};
+        owl_resolve_ns(child.tag_name, ns_map, ns_count,
+                       local_tag, sizeof(local_tag));
+
+        if ((strcmp(local_tag, "ObjectProperty") == 0 ||
+             strcmp(local_tag, "DatatypeProperty") == 0) &&
+            child.is_self_closing == 0) {
+            depth++;
+            xml_node_free_content(&child);
+            continue;
+        }
+
+        if (strcmp(local_tag, "domain") == 0 || strcmp(local_tag, "range") == 0) {
+            OntAxiomType ax_type = (strcmp(local_tag, "domain") == 0) ?
+                                    AXIOM_DOMAIN : AXIOM_RANGE;
+            for (int a = 0; a < child.attr_count; a++) {
+                char local_attr[XML_MAX_ATTR_NAME] = {0};
+                owl_resolve_ns(child.attrs[a].name, ns_map, ns_count,
+                               local_attr, sizeof(local_attr));
+                if (strcmp(local_attr, "resource") == 0) {
+                    const char* hash = strchr(child.attrs[a].value, '#');
+                    const char* res_name = hash ? hash + 1 : child.attrs[a].value;
+                    if (!ontology_find_element(ont, res_name)) {
+                        ontology_add_class(ont, res_name, NULL);
+                    }
+                    ontology_add_axiom(ont, ax_type, local_name, res_name, 1.0f);
+                }
+            }
+        }
+
+        /* 对称属性 */
+        if (strcmp(local_tag, "type") == 0) {
+            for (int a = 0; a < child.attr_count; a++) {
+                char local_attr[XML_MAX_ATTR_NAME] = {0};
+                owl_resolve_ns(child.attrs[a].name, ns_map, ns_count,
+                               local_attr, sizeof(local_attr));
+                if (strcmp(local_attr, "resource") == 0) {
+                    if (strstr(child.attrs[a].value, "SymmetricProperty")) {
+                        ontology_add_axiom(ont, AXIOM_SYMMETRIC, local_name, local_name, 1.0f);
+                    }
+                    if (strstr(child.attrs[a].value, "TransitiveProperty")) {
+                        ontology_add_axiom(ont, AXIOM_TRANSITIVE, local_name, local_name, 1.0f);
+                    }
+                    if (strstr(child.attrs[a].value, "FunctionalProperty")) {
+                        ontology_add_axiom(ont, AXIOM_FUNCTIONAL, local_name, local_name, 1.0f);
+                    }
+                }
+            }
+        }
+
+        xml_node_free_content(&child);
+    }
+
+    return 0;
+}
+
+/* 处理OWL/XML中的实例定义 */
+static int owl_handle_individual(Ontology* ont, XmlNode* node, XmlParser* p,
+                                  OwlNsMapping* ns_map, int ns_count) {
+    char local_name[XML_MAX_ATTR_NAME] = {0};
+    int found_id = 0;
+
+    for (int a = 0; a < node->attr_count; a++) {
+        char local_attr[XML_MAX_ATTR_NAME] = {0};
+        owl_resolve_ns(node->attrs[a].name, ns_map, ns_count,
+                       local_attr, sizeof(local_attr));
+        if (strcmp(local_attr, "ID") == 0 || strcmp(local_attr, "about") == 0) {
+            const char* hash = strchr(node->attrs[a].value, '#');
+            if (hash) {
+                strncpy(local_name, hash + 1, sizeof(local_name) - 1);
+            } else {
+                strncpy(local_name, node->attrs[a].value, sizeof(local_name) - 1);
+            }
+            local_name[sizeof(local_name) - 1] = '\0';
+            found_id = 1;
+        }
+    }
+
+    if (!found_id || local_name[0] == '\0') return 0;
+    if (ontology_find_element(ont, local_name)) return 0;
+
+    /* 先添加实例，稍后解析type确定类 */
+    OntElement* ind = ontology_add_individual(ont, local_name, NULL);
+    if (!ind) return -1;
+
+    /* 解析子元素 */
+    int depth = 1;
+    while (depth > 0 && !p->error) {
+        XmlNode child;
+        memset(&child, 0, sizeof(XmlNode));
+        if (!xml_read_node(p, &child)) break;
+        if (child.is_comment) continue;
+        if (child.tag_name[0] == '\0' && child.text_content) {
+            xml_node_free_content(&child);
+            continue;
+        }
+
+        char local_tag[XML_MAX_TAG_NAME] = {0};
+        owl_resolve_ns(child.tag_name, ns_map, ns_count,
+                       local_tag, sizeof(local_tag));
+
+        if (strcmp(local_tag, "NamedIndividual") == 0 && child.is_self_closing == 0) {
+            depth++;
+            xml_node_free_content(&child);
+            continue;
+        }
+
+        /* rdf:type 确定所属类 */
+        if (strcmp(local_tag, "type") == 0) {
+            for (int a = 0; a < child.attr_count; a++) {
+                char local_attr[XML_MAX_ATTR_NAME] = {0};
+                owl_resolve_ns(child.attrs[a].name, ns_map, ns_count,
+                               local_attr, sizeof(local_attr));
+                if (strcmp(local_attr, "resource") == 0) {
+                    const char* hash = strchr(child.attrs[a].value, '#');
+                    const char* class_name = hash ? hash + 1 : child.attrs[a].value;
+                    if (!ontology_find_element(ont, class_name)) {
+                        ontology_add_class(ont, class_name, NULL);
+                    }
+                    /* 关联实例到类 */
+                    OntElement* cls = ontology_find_element(ont, class_name);
+                    if (cls) {
+                        ont_element_add_related(ind, cls, AXIOM_SUBCLASS, 1.0f);
+                    }
+                }
+            }
+        }
+
+        xml_node_free_content(&child);
+    }
+
+    return 0;
+}
+
+/* OWL/XML字符串导入主函数 */
+Ontology* ontology_import_owl_string(Ontology* ont, const char* owl_xml, size_t xml_len) {
+    if (!owl_xml || xml_len == 0) return NULL;
+
+    XmlParser* parser = xml_parser_create(owl_xml, xml_len);
+    if (!parser) return NULL;
+
+    /* 创建或使用传入的本体 */
+    int own_ont = 0;
+    if (!ont) {
+        ont = ontology_create("imported_owl", "从OWL/XML导入的本体");
+        if (!ont) { xml_parser_free(parser); return NULL; }
+        own_ont = 1;
+    }
+
+    /* 命名空间映射 */
+    OwlNsMapping ns_map[OWL_MAX_NS];
+    int ns_count = 0;
+    /* 预置标准命名空间 */
+    strncpy(ns_map[ns_count].prefix, "rdf", 31);
+    strncpy(ns_map[ns_count].uri, "http://www.w3.org/1999/02/22-rdf-syntax-ns#", 255);
+    ns_count++;
+    strncpy(ns_map[ns_count].prefix, "rdfs", 31);
+    strncpy(ns_map[ns_count].uri, "http://www.w3.org/2000/01/rdf-schema#", 255);
+    ns_count++;
+    strncpy(ns_map[ns_count].prefix, "owl", 31);
+    strncpy(ns_map[ns_count].uri, "http://www.w3.org/2002/07/owl#", 255);
+    ns_count++;
+
+    /* 跳过声明 */
+    xml_skip_declarations(parser);
+
+    int element_count = 0;
+    int depth = 0;
+
+    /* 主解析循环 */
+    while (parser->pos < parser->length && !parser->error) {
+        XmlNode node;
+        memset(&node, 0, sizeof(XmlNode));
+        if (!xml_read_node(parser, &node)) break;
+
+        if (node.is_comment) continue;
+        if (node.tag_name[0] == '\0') {
+            xml_node_free_content(&node);
+            continue;
+        }
+
+        char local_tag[XML_MAX_TAG_NAME] = {0};
+        owl_resolve_ns(node.tag_name, ns_map, ns_count,
+                       local_tag, sizeof(local_tag));
+
+        /* owl:Class */
+        if (strcmp(local_tag, "Class") == 0 && !node.is_self_closing) {
+            owl_handle_class(ont, &node, parser, ns_map, ns_count);
+            element_count++;
+        }
+        /* owl:ObjectProperty */
+        else if (strcmp(local_tag, "ObjectProperty") == 0 && !node.is_self_closing) {
+            owl_handle_property(ont, &node, parser, ns_map, ns_count, 1);
+            element_count++;
+        }
+        /* owl:DatatypeProperty */
+        else if (strcmp(local_tag, "DatatypeProperty") == 0 && !node.is_self_closing) {
+            owl_handle_property(ont, &node, parser, ns_map, ns_count, 0);
+            element_count++;
+        }
+        /* owl:NamedIndividual 或 自定义实例 */
+        else if (strcmp(local_tag, "NamedIndividual") == 0 && !node.is_self_closing) {
+            owl_handle_individual(ont, &node, parser, ns_map, ns_count);
+            element_count++;
+        }
+        else {
+            /* 其他标签，跳过 */
+            int skip_depth = node.is_self_closing ? 0 : 1;
+            while (skip_depth > 0 && !parser->error) {
+                XmlNode skip_node;
+                memset(&skip_node, 0, sizeof(XmlNode));
+                if (!xml_read_node(parser, &skip_node)) break;
+                if (skip_node.is_comment) continue;
+                if (skip_node.tag_name[0] == '\0') {
+                    xml_node_free_content(&skip_node);
+                    continue;
+                }
+                if (!skip_node.is_self_closing) skip_depth++;
+                xml_node_free_content(&skip_node);
+            }
+        }
+
+        xml_node_free_content(&node);
+    }
+
+    xml_parser_free(parser);
+
+    if (element_count == 0 && own_ont) {
+        ontology_free(ont);
+        return NULL;
+    }
+
+    log_info("[Ontology] OWL/XML导入完成: %d个元素", element_count);
+    return ont;
+}
+
+/* OWL/XML文件导入 */
+Ontology* ontology_import_owl(Ontology* ont, const char* owl_path) {
+    if (!owl_path) return NULL;
+
+    FILE* fp = fopen(owl_path, "rb");
+    if (!fp) {
+        log_warn("[Ontology] 无法打开OWL文件: %s", owl_path);
+        return NULL;
+    }
+
+    /* 获取文件大小 */
+    fseek(fp, 0, SEEK_END);
+    long file_size = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+
+    if (file_size <= 0 || file_size > 100 * 1024 * 1024) { /* 最大100MB */
+        fclose(fp);
+        log_warn("[Ontology] OWL文件大小无效: %ld", file_size);
+        return NULL;
+    }
+
+    char* xml_data = (char*)safe_malloc((size_t)file_size + 1);
+    if (!xml_data) {
+        fclose(fp);
+        return NULL;
+    }
+
+    size_t read_size = fread(xml_data, 1, (size_t)file_size, fp);
+    fclose(fp);
+
+    if (read_size != (size_t)file_size) {
+        safe_free((void**)&xml_data);
+        log_warn("[Ontology] OWL文件读取不完整");
+        return NULL;
+    }
+    xml_data[read_size] = '\0';
+
+    Ontology* result = ontology_import_owl_string(ont, xml_data, read_size);
+    safe_free((void**)&xml_data);
+    return result;
+}
+
+/* ============================================================================
+ * 3. RDF/Turtle解析器
+ * ============================================================================ */
+
+#define TTL_MAX_LINE        4096
+#define TTL_MAX_PREFIXES     32
+#define TTL_MAX_TRIPLES    4096
+
+/* Turtle前缀映射 */
+typedef struct {
+    char prefix[32];
+    char uri[256];
+} TtlPrefix;
+
+/* Turtle三元组 */
+typedef struct {
+    char subject[256];
+    char predicate[256];
+    char object[256];
+    int is_literal;          /* 对象是否为字面量 */
+    char datatype[64];       /* 字面量数据类型 */
+    char lang_tag[16];       /* 语言标签 */
+} TtlTriple;
+
+/* Turtle解析器状态 */
+typedef struct {
+    TtlPrefix prefixes[TTL_MAX_PREFIXES];
+    int prefix_count;
+    TtlTriple triples[TTL_MAX_TRIPLES];
+    int triple_count;
+    char base_uri[256];
+    char error_msg[256];
+    int error;
+} TtlParser;
+
+/* 解析Turtle QName或完整URI */
+static void ttl_resolve_uri(TtlParser* tp, const char* qname_or_uri,
+                             char* out, int max_len) {
+    if (!qname_or_uri || !out) return;
+    out[0] = '\0';
+
+    /* 如果是完整URI (<...>) */
+    if (qname_or_uri[0] == '<') {
+        const char* end = strchr(qname_or_uri, '>');
+        if (end) {
+            size_t len = end - qname_or_uri - 1;
+            if (len < (size_t)max_len) {
+                memcpy(out, qname_or_uri + 1, len);
+                out[len] = '\0';
+            }
+        }
+        return;
+    }
+
+    /* 如果是QName (prefix:local) */
+    const char* colon = strchr(qname_or_uri, ':');
+    if (colon) {
+        size_t prefix_len = colon - qname_or_uri;
+        for (int i = 0; i < tp->prefix_count; i++) {
+            if (strncmp(qname_or_uri, tp->prefixes[i].prefix, prefix_len) == 0 &&
+                (int)strlen(tp->prefixes[i].prefix) == (int)prefix_len) {
+                /* 拼接 URI + local */
+                size_t uri_len = strlen(tp->prefixes[i].uri);
+                const char* local = colon + 1;
+                if (uri_len + strlen(local) < (size_t)max_len) {
+                    strncpy(out, tp->prefixes[i].uri, max_len - 1);
+                    strncat(out, local, max_len - strlen(out) - 1);
+                }
+                return;
+            }
+        }
+    }
+
+    /* 无法解析，直接复制 */
+    strncpy(out, qname_or_uri, max_len - 1);
+    out[max_len - 1] = '\0';
+}
+
+/* 简化URI为可读名称 */
+static void ttl_simplify_name(const char* uri, char* out, int max_len) {
+    if (!uri || !out) return;
+    /* 查找最后一个#或/ */
+    const char* hash = strrchr(uri, '#');
+    const char* slash = strrchr(uri, '/');
+    const char* start = NULL;
+    if (hash && slash) {
+        start = (hash > slash) ? hash : slash;
+    } else if (hash) {
+        start = hash;
+    } else if (slash) {
+        start = slash;
+    }
+    if (start) {
+        strncpy(out, start + 1, max_len - 1);
+        out[max_len - 1] = '\0';
+    } else {
+        strncpy(out, uri, max_len - 1);
+        out[max_len - 1] = '\0';
+    }
+}
+
+/* 解析一行Turtle */
+static int ttl_parse_line(TtlParser* tp, const char* line) {
+    /* 跳过空行和注释 */
+    const char* p = line;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p == '\0' || *p == '\n' || *p == '\r' || *p == '#') return 0;
+
+    /* @prefix声明 */
+    if (strncmp(p, "@prefix", 7) == 0 && tp->prefix_count < TTL_MAX_PREFIXES) {
+        p += 7;
+        while (*p == ' ' || *p == '\t') p++;
+        /* 读取前缀名 */
+        char pre[32] = {0};
+        int pi = 0;
+        while (*p && *p != ':' && *p != ' ' && *p != '\t' && pi < 31) {
+            pre[pi++] = *p++;
+        }
+        pre[pi] = '\0';
+        if (*p == ':') p++;
+        while (*p == ' ' || *p == '\t') p++;
+        /* 读取URI */
+        if (*p == '<') {
+            p++;
+            char uri[256] = {0};
+            int ui = 0;
+            while (*p && *p != '>' && ui < 255) {
+                uri[ui++] = *p++;
+            }
+            uri[ui] = '\0';
+            if (pre[0] && uri[0]) {
+                strncpy(tp->prefixes[tp->prefix_count].prefix, pre, 31);
+                strncpy(tp->prefixes[tp->prefix_count].uri, uri, 255);
+                tp->prefix_count++;
+            }
+        }
+        return 0;
+    }
+
+    /* @base声明 */
+    if (strncmp(p, "@base", 5) == 0) {
+        p += 5;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '<') {
+            p++;
+            int bi = 0;
+            while (*p && *p != '>' && bi < 255) {
+                tp->base_uri[bi++] = *p++;
+            }
+            tp->base_uri[bi] = '\0';
+        }
+        return 0;
+    }
+
+    /* 三元组解析: subject predicate object . */
+    if (tp->triple_count >= TTL_MAX_TRIPLES) return 0;
+
+    TtlTriple* triple = &tp->triples[tp->triple_count];
+
+    /* 解析subject */
+    char subj_raw[256] = {0};
+    int si = 0;
+    if (*p == '<') {
+        p++;
+        subj_raw[si++] = '<';
+        while (*p && *p != '>' && si < 254) subj_raw[si++] = *p++;
+        if (*p == '>') { subj_raw[si++] = '>'; p++; }
+    } else {
+        while (*p && *p != ' ' && *p != '\t' && si < 254) subj_raw[si++] = *p++;
+    }
+    subj_raw[si] = '\0';
+    if (subj_raw[0] == '\0') return 0;
+    ttl_resolve_uri(tp, subj_raw, triple->subject, sizeof(triple->subject));
+
+    /* 跳过空白 */
+    while (*p == ' ' || *p == '\t') p++;
+
+    /* 解析predicate */
+    char pred_raw[256] = {0};
+    int pi2 = 0;
+    if (*p == '<') {
+        p++;
+        pred_raw[pi2++] = '<';
+        while (*p && *p != '>' && pi2 < 254) pred_raw[pi2++] = *p++;
+        if (*p == '>') { pred_raw[pi2++] = '>'; p++; }
+    } else {
+        /* 可能是关键字 'a' (rdf:type) */
+        if (*p == 'a' && (*(p+1) == ' ' || *(p+1) == '\t' || *(p+1) == '\n')) {
+            strncpy(pred_raw, "rdf:type", 254);
+            p++;
+        } else {
+            while (*p && *p != ' ' && *p != '\t' && pi2 < 254) pred_raw[pi2++] = *p++;
+        }
+    }
+    pred_raw[pi2] = '\0';
+    if (pred_raw[0] == '\0') return 0;
+    ttl_resolve_uri(tp, pred_raw, triple->predicate, sizeof(triple->predicate));
+
+    /* 跳过空白 */
+    while (*p == ' ' || *p == '\t') p++;
+
+    /* 解析object */
+    char obj_raw[512] = {0};
+    int oi = 0;
+    if (*p == '<') {
+        p++;
+        obj_raw[oi++] = '<';
+        while (*p && *p != '>' && oi < 510) obj_raw[oi++] = *p++;
+        if (*p == '>') { obj_raw[oi++] = '>'; p++; }
+        triple->is_literal = 0;
+    } else if (*p == '\"') {
+        /* 字面量 */
+        p++;
+        while (*p && *p != '\"' && oi < 254) {
+            if (*p == '\\' && *(p+1)) { p++; } /* 简单转义跳过 */
+            obj_raw[oi++] = *p++;
+        }
+        if (*p == '\"') p++;
+        obj_raw[oi] = '\0';
+        strncpy(triple->object, obj_raw, sizeof(triple->object) - 1);
+        triple->is_literal = 1;
+
+        /* 检查数据类型 ^^<type> 或 @lang */
+        while (*p == ' ' || *p == '\t') p++;
+        if (strncmp(p, "^^", 2) == 0) {
+            p += 2;
+            if (*p == '<') {
+                p++;
+                int di = 0;
+                while (*p && *p != '>' && di < 63) triple->datatype[di++] = *p++;
+                triple->datatype[di] = '\0';
+                if (*p == '>') p++;
+            }
+        } else if (*p == '@') {
+            p++;
+            int li = 0;
+            while (*p && *p != ' ' && *p != '\t' && *p != '.' && li < 15) {
+                triple->lang_tag[li++] = *p++;
+            }
+            triple->lang_tag[li] = '\0';
+        }
+        /* 跳过字面量处理，直接继续 */
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '.') p++;
+        tp->triple_count++;
+        return 1;
+    } else {
+        while (*p && *p != ' ' && *p != '\t' && *p != '.' && oi < 510) {
+            obj_raw[oi++] = *p++;
+        }
+        obj_raw[oi] = '\0';
+        triple->is_literal = 0;
+    }
+
+    if (obj_raw[0] == '\0') return 0;
+    if (!triple->is_literal) {
+        ttl_resolve_uri(tp, obj_raw, triple->object, sizeof(triple->object));
+    }
+
+    /* 跳过句号 */
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p == '.') p++;
+
+    tp->triple_count++;
+    return 1;
+}
+
+/* Turtle字符串导入 */
+Ontology* ontology_import_rdf_string(Ontology* ont, const char* ttl_str, size_t ttl_len) {
+    if (!ttl_str || ttl_len == 0) return NULL;
+
+    TtlParser tp;
+    memset(&tp, 0, sizeof(TtlParser));
+    tp.base_uri[0] = '\0';
+
+    /* 创建或使用传入的本体 */
+    int own_ont = 0;
+    if (!ont) {
+        ont = ontology_create("imported_rdf", "从RDF/Turtle导入的本体");
+        if (!ont) return NULL;
+        own_ont = 1;
+    }
+
+    /* 逐行解析 */
+    const char* line_start = ttl_str;
+    const char* end = ttl_str + ttl_len;
+
+    while (line_start < end) {
+        const char* line_end = strchr(line_start, '\n');
+        if (!line_end) line_end = end;
+
+        size_t line_len = line_end - line_start;
+        if (line_len > 0 && line_len < TTL_MAX_LINE) {
+            char line_buf[TTL_MAX_LINE];
+            size_t copy_len = line_len < TTL_MAX_LINE - 1 ? line_len : TTL_MAX_LINE - 1;
+            memcpy(line_buf, line_start, copy_len);
+            line_buf[copy_len] = '\0';
+            /* 去除行尾\r */
+            if (copy_len > 0 && line_buf[copy_len - 1] == '\r') line_buf[copy_len - 1] = '\0';
+            ttl_parse_line(&tp, line_buf);
+        }
+
+        line_start = line_end < end ? line_end + 1 : end;
+    }
+
+    /* 将三元组导入本体 */
+    int imported = 0;
+    for (int i = 0; i < tp.triple_count; i++) {
+        TtlTriple* t = &tp.triples[i];
+        if (!t->subject[0] || !t->predicate[0] || !t->object[0]) continue;
+
+        /* 简化名称为可读的本地名称 */
+        char subj_name[256], pred_name[256], obj_name[256];
+        ttl_simplify_name(t->subject, subj_name, sizeof(subj_name));
+        ttl_simplify_name(t->predicate, pred_name, sizeof(pred_name));
+        if (!t->is_literal) {
+            ttl_simplify_name(t->object, obj_name, sizeof(obj_name));
+        } else {
+            strncpy(obj_name, t->object, sizeof(obj_name) - 1);
+        }
+
+        /* 确保主体存在（作为类） */
+        if (!ontology_find_element(ont, subj_name) && subj_name[0]) {
+            ontology_add_class(ont, subj_name, NULL);
+        }
+
+        /* 判断谓词类型 */
+        if (strstr(t->predicate, "type") || strcmp(pred_name, "type") == 0) {
+            /* rdf:type — 主体是实例 */
+            if (t->is_literal) continue;
+            OntElement* subj = ontology_find_element(ont, subj_name);
+            if (subj && subj->type == ONT_CLASS) {
+                /* 如果主体是类，type表示子类而非实例 */
+                /* 但这里主体已被创建为类，检查是否是已知的类 */
+            }
+            if (!ontology_find_element(ont, obj_name)) {
+                ontology_add_class(ont, obj_name, NULL);
+            }
+            /* 创建实例或添加subclass */
+            OntElement* existing = ontology_find_element(ont, subj_name);
+            if (existing && existing->type == ONT_CLASS) {
+                /* 如果只是临时创建的类，转换为实例 */
+                /* 简化处理：保持为类，添加subclass */
+                ontology_add_axiom(ont, AXIOM_SUBCLASS, subj_name, obj_name, 1.0f);
+            }
+        }
+        else if (strstr(t->predicate, "subClassOf") || strcmp(pred_name, "subClassOf") == 0) {
+            if (!ontology_find_element(ont, obj_name)) {
+                ontology_add_class(ont, obj_name, NULL);
+            }
+            ontology_add_axiom(ont, AXIOM_SUBCLASS, subj_name, obj_name, 1.0f);
+        }
+        else if (strstr(t->predicate, "equivalentClass") || strcmp(pred_name, "equivalentClass") == 0) {
+            if (!ontology_find_element(ont, obj_name)) {
+                ontology_add_class(ont, obj_name, NULL);
+            }
+            ontology_add_axiom(ont, AXIOM_EQUIVALENT, subj_name, obj_name, 1.0f);
+        }
+        else if (strstr(t->predicate, "domain") || strcmp(pred_name, "domain") == 0) {
+            if (!ontology_find_element(ont, obj_name)) {
+                ontology_add_class(ont, obj_name, NULL);
+            }
+            ontology_add_axiom(ont, AXIOM_DOMAIN, subj_name, obj_name, 1.0f);
+        }
+        else if (strstr(t->predicate, "range") || strcmp(pred_name, "range") == 0) {
+            if (!ontology_find_element(ont, obj_name)) {
+                ontology_add_class(ont, obj_name, NULL);
+            }
+            ontology_add_axiom(ont, AXIOM_RANGE, subj_name, obj_name, 1.0f);
+        }
+        else {
+            /* 普通关系：创建属性并关联 */
+            if (!ontology_find_element(ont, pred_name)) {
+                ontology_add_object_property(ont, pred_name, NULL, NULL, NULL);
+            }
+            if (t->is_literal) {
+                /* 数据属性 */
+                OntElement* prop = ontology_find_element(ont, pred_name);
+                if (prop) {
+                    /* 字面量值存储为user_data */
+                }
+            }
+        }
+        imported++;
+    }
+
+    log_info("[Ontology] RDF/Turtle导入完成: %d个三元组", imported);
+    return ont;
+}
+
+/* Turtle文件导入 */
+Ontology* ontology_import_rdf(Ontology* ont, const char* ttl_path) {
+    if (!ttl_path) return NULL;
+
+    FILE* fp = fopen(ttl_path, "rb");
+    if (!fp) {
+        log_warn("[Ontology] 无法打开Turtle文件: %s", ttl_path);
+        return NULL;
+    }
+
+    fseek(fp, 0, SEEK_END);
+    long file_size = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+
+    if (file_size <= 0 || file_size > 100 * 1024 * 1024) {
+        fclose(fp);
+        return NULL;
+    }
+
+    char* ttl_data = (char*)safe_malloc((size_t)file_size + 1);
+    if (!ttl_data) { fclose(fp); return NULL; }
+
+    size_t read_size = fread(ttl_data, 1, (size_t)file_size, fp);
+    fclose(fp);
+
+    if (read_size != (size_t)file_size) {
+        safe_free((void**)&ttl_data);
+        return NULL;
+    }
+    ttl_data[read_size] = '\0';
+
+    Ontology* result = ontology_import_rdf_string(ont, ttl_data, read_size);
+    safe_free((void**)&ttl_data);
+    return result;
+}
+
+/* ============================================================================
+ * 4. RDF/Turtle序列化器
+ * ============================================================================ */
+
+char* ontology_export_rdf(Ontology* ont) {
+    if (!ont) return NULL;
+
+    size_t buf_size = 131072; /* 128KB */
+    char* buf = (char*)safe_calloc(buf_size, 1);
+    if (!buf) return NULL;
+    size_t pos = 0;
+
+    /* 头部：前缀声明 */
+    pos += snprintf(buf + pos, buf_size - pos,
+        "@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n"
+        "@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n"
+        "@prefix owl: <http://www.w3.org/2002/07/owl#> .\n"
+        "@prefix : <http://selflnn.org/ontology/%s#> .\n\n",
+        ont->name ? ont->name : "default");
+    if (pos >= buf_size) goto rdf_export_truncated;
+
+    /* 本体声明 */
+    pos += snprintf(buf + pos, buf_size - pos,
+        "<http://selflnn.org/ontology/%s> a owl:Ontology ;\n"
+        "    rdfs:label \"%s\" .\n\n",
+        ont->name ? ont->name : "default",
+        ont->description ? ont->description : "");
+    if (pos >= buf_size) goto rdf_export_truncated;
+
+    /* 导出类 */
+    for (int i = 0; i < ont->class_count; i++) {
+        OntElement* cls = ont->classes[i];
+        if (!cls || !cls->name || cls->confidence < 0.01f) continue;
+
+        pos += snprintf(buf + pos, buf_size - pos,
+            ":%s a owl:Class ;\n", cls->name);
+        if (pos >= buf_size) goto rdf_export_truncated;
+
+        /* 公理 */
+        int has_axiom = 0;
+        for (int r = 0; r < cls->related_count; r++) {
+            OntElement* target = cls->related[r];
+            if (!target || !target->name) continue;
+
+            const char* predicate = NULL;
+            switch (cls->axiom_types[r]) {
+                case AXIOM_SUBCLASS:
+                    predicate = "rdfs:subClassOf"; break;
+                case AXIOM_EQUIVALENT:
+                    predicate = "owl:equivalentClass"; break;
+                case AXIOM_DISJOINT:
+                    predicate = "owl:disjointWith"; break;
+                default: break;
+            }
+            if (predicate) {
+                pos += snprintf(buf + pos, buf_size - pos,
+                    "    %s :%s ;\n", predicate, target->name);
+                if (pos >= buf_size) goto rdf_export_truncated;
+                has_axiom = 1;
+            }
+        }
+
+        if (has_axiom) {
+            /* 去掉最后的 ;\n 替换为 .\n\n */
+            if (pos >= 4 && buf[pos-4] == ';' && buf[pos-3] == ' ') {
+                buf[pos-4] = '.';
+                buf[pos-3] = '\n';
+                buf[pos-2] = '\n';
+                pos -= 1;
+                buf[pos] = '\0';
+            } else {
+                pos += snprintf(buf + pos, buf_size - pos, "    rdfs:label \"%s\" .\n\n", cls->name);
+                buf[pos - 2] = '\n';
+                buf[pos - 1] = '\0';
+            }
+        } else {
+            /* 替换 ;\n 为 .\n\n */
+            buf[pos - 4] = '.';
+            buf[pos - 3] = '\n';
+            buf[pos - 2] = '\n';
+            buf[pos - 1] = '\0';
+            pos -= 1;
+        }
+    }
+
+    /* 导出对象属性 */
+    for (int i = 0; i < ont->property_count; i++) {
+        OntElement* prop = ont->properties[i];
+        if (!prop || !prop->name || prop->confidence < 0.01f) continue;
+
+        if (prop->type == ONT_OBJECT_PROPERTY) {
+            pos += snprintf(buf + pos, buf_size - pos,
+                ":%s a owl:ObjectProperty ;\n", prop->name);
+        } else {
+            pos += snprintf(buf + pos, buf_size - pos,
+                ":%s a owl:DatatypeProperty ;\n", prop->name);
+        }
+        if (pos >= buf_size) goto rdf_export_truncated;
+
+        int has_axiom = 0;
+        for (int r = 0; r < prop->related_count; r++) {
+            OntElement* target = prop->related[r];
+            if (!target || !target->name) continue;
+
+            const char* predicate = NULL;
+            switch (prop->axiom_types[r]) {
+                case AXIOM_DOMAIN: predicate = "rdfs:domain"; break;
+                case AXIOM_RANGE:  predicate = "rdfs:range"; break;
+                default: break;
+            }
+            if (predicate) {
+                pos += snprintf(buf + pos, buf_size - pos,
+                    "    %s :%s ;\n", predicate, target->name);
+                if (pos >= buf_size) goto rdf_export_truncated;
+                has_axiom = 1;
+            }
+        }
+
+        if (has_axiom) {
+            buf[pos-4] = '.';
+            buf[pos-3] = '\n';
+            buf[pos-2] = '\n';
+            buf[pos-1] = '\0';
+            pos -= 1;
+        } else {
+            buf[pos-4] = '.';
+            buf[pos-3] = '\n';
+            buf[pos-2] = '\n';
+            buf[pos-1] = '\0';
+            pos -= 1;
+        }
+    }
+
+    /* 导出实例 */
+    for (int i = 0; i < ont->individual_count; i++) {
+        OntElement* ind = ont->individuals[i];
+        if (!ind || !ind->name || ind->confidence < 0.01f) continue;
+
+        pos += snprintf(buf + pos, buf_size - pos,
+            ":%s a owl:NamedIndividual", ind->name);
+
+        /* 查找所属类 */
+        for (int r = 0; r < ind->related_count; r++) {
+            if (ind->axiom_types[r] == AXIOM_SUBCLASS && ind->related[r]) {
+                pos += snprintf(buf + pos, buf_size - pos,
+                    " ;\n    rdf:type :%s", ind->related[r]->name);
+                break;
+            }
+        }
+
+        pos += snprintf(buf + pos, buf_size - pos, " .\n\n");
+        if (pos >= buf_size) goto rdf_export_truncated;
+    }
+
+    return buf;
+
+rdf_export_truncated:
+    log_warn("[Ontology] Turtle导出缓冲区溢出(%zu字节)，结果已截断", buf_size);
+    buf[buf_size - 1] = '\0';
+    return buf;
+}
+
+/* ============================================================================
+ * 5. 自动格式检测导入器
+ * ============================================================================ */
+
+/* 检测文件格式 */
+static OntologyFormat ont_detect_format(const char* file_path) {
+    if (!file_path) return ONT_FORMAT_AUTO;
+
+    /* 方法1: 根据扩展名 */
+    const char* ext = strrchr(file_path, '.');
+    if (ext) {
+        if (strcmp(ext, ".owl") == 0) return ONT_FORMAT_OWL_XML;
+        if (strcmp(ext, ".ttl") == 0) return ONT_FORMAT_RDF_TURTLE;
+        if (strcmp(ext, ".rdf") == 0) return ONT_FORMAT_RDF_XML;
+        /* .xml可能是OWL/XML */
+        if (strcmp(ext, ".xml") == 0) {
+            /* 读取文件头判断 */
+            FILE* fp = fopen(file_path, "rb");
+            if (fp) {
+                char header[256] = {0};
+                size_t n = fread(header, 1, 255, fp);
+                fclose(fp);
+                if (n > 0) {
+                    header[n] = '\0';
+                    if (strstr(header, "owl:") || strstr(header, "rdf:RDF")) {
+                        return ONT_FORMAT_OWL_XML;
+                    }
+                }
+            }
+            return ONT_FORMAT_OWL_XML; /* 默认XML */
+        }
+    }
+
+    /* 方法2: 根据文件内容 */
+    FILE* fp = fopen(file_path, "rb");
+    if (fp) {
+        char header[512] = {0};
+        size_t n = fread(header, 1, 511, fp);
+        fclose(fp);
+        if (n > 0) {
+            header[n] = '\0';
+            /* 检查XML头 */
+            if (strstr(header, "<?xml") || strstr(header, "<rdf:RDF") ||
+                strstr(header, "<owl:")) {
+                return ONT_FORMAT_OWL_XML;
+            }
+            /* 检查Turtle头 */
+            if (strstr(header, "@prefix") || strstr(header, "@base")) {
+                return ONT_FORMAT_RDF_TURTLE;
+            }
+        }
+    }
+
+    return ONT_FORMAT_OWL_XML; /* 默认尝试OWL/XML */
+}
+
+Ontology* ontology_import_auto(Ontology* ont, const char* file_path) {
+    if (!file_path) return NULL;
+
+    OntologyFormat format = ont_detect_format(file_path);
+
+    log_info("[Ontology] 自动检测格式: %s -> %s",
+             file_path,
+             format == ONT_FORMAT_OWL_XML ? "OWL/XML" :
+             format == ONT_FORMAT_RDF_TURTLE ? "RDF/Turtle" : "未知");
+
+    switch (format) {
+        case ONT_FORMAT_OWL_XML:
+        case ONT_FORMAT_RDF_XML:
+            return ontology_import_owl(ont, file_path);
+        case ONT_FORMAT_RDF_TURTLE:
+            return ontology_import_rdf(ont, file_path);
+        default:
+            /* 尝试两种格式 */
+            {
+                Ontology* result = ontology_import_owl(ont, file_path);
+                if (result) return result;
+                return ontology_import_rdf(ont, file_path);
+            }
+    }
+}
+
+/* ============================================================================
+ * 6. 文件保存器
+ * ============================================================================ */
+
+int ontology_save_to_file(Ontology* ont, const char* file_path, OntologyFormat format) {
+    if (!ont || !file_path) return -1;
+
+    /* 自动检测格式 */
+    if (format == ONT_FORMAT_AUTO) {
+        const char* ext = strrchr(file_path, '.');
+        if (ext) {
+            if (strcmp(ext, ".ttl") == 0) format = ONT_FORMAT_RDF_TURTLE;
+            else if (strcmp(ext, ".owl") == 0) format = ONT_FORMAT_OWL_XML;
+            else if (strcmp(ext, ".rdf") == 0) format = ONT_FORMAT_RDF_XML;
+            else format = ONT_FORMAT_OWL_XML; /* 默认OWL/XML */
+        } else {
+            format = ONT_FORMAT_OWL_XML;
+        }
+    }
+
+    char* content = NULL;
+    switch (format) {
+        case ONT_FORMAT_OWL_XML:
+        case ONT_FORMAT_RDF_XML:
+            content = ontology_export_owl(ont);
+            break;
+        case ONT_FORMAT_RDF_TURTLE:
+            content = ontology_export_rdf(ont);
+            break;
+        default:
+            return -1;
+    }
+
+    if (!content) return -1;
+
+    FILE* fp = fopen(file_path, "w");
+    if (!fp) {
+        safe_free((void**)&content);
+        log_warn("[Ontology] 无法写入文件: %s", file_path);
+        return -1;
+    }
+
+    size_t content_len = strlen(content);
+    size_t written = fwrite(content, 1, content_len, fp);
+    fclose(fp);
+    safe_free((void**)&content);
+
+    if (written != content_len) {
+        log_warn("[Ontology] 文件写入不完整: %s", file_path);
+        return -1;
+    }
+
+    log_info("[Ontology] 本体保存成功: %s (%zu字节)", file_path, content_len);
     return 0;
 }

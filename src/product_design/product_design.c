@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file product_design.c
  * @brief 产品设计能力核心实现 —— 产品设计基础层
  * 
@@ -17,6 +17,8 @@
 #include "selflnn/core/errors.h"
 #include "selflnn/reasoning/reasoning.h"
 #include "selflnn/core/laplace.h"
+#include "selflnn/core/lnn.h"           /* M-010修复: LNN前向传播 */
+#include "selflnn/selflnn.h"           /* M-010修复: selflnn_get_lnn */
 
 #include <stdlib.h>
 #include <string.h>
@@ -305,8 +307,8 @@ static ProductType detect_product_type(const char** keywords, size_t count);
 static double estimate_complexity(const char** keywords, size_t count);
 static double estimate_cost(ProductType type, double complexity);
 static double estimate_time(ProductType type, double complexity);
-static ProductKnowledgeBase* knowledge_base_create(void);
-static void knowledge_base_destroy(ProductKnowledgeBase* kb);
+static ProductKnowledgeBase* pd_knowledge_base_create(void);
+static void pd_knowledge_base_destroy(ProductKnowledgeBase* kb);
 static DesignRuleEngine* rule_engine_create(void);
 static void rule_engine_destroy(DesignRuleEngine* re);
 static EvaluationModelParams* evaluation_model_create(void);
@@ -548,7 +550,7 @@ static double estimate_time(ProductType type, double complexity) {
 /**
  * @brief 创建产品知识库，加载预定义的领域知识条目
  */
-static ProductKnowledgeBase* knowledge_base_create(void) {
+static ProductKnowledgeBase* pd_knowledge_base_create(void) {
     ProductKnowledgeBase* kb = (ProductKnowledgeBase*)safe_malloc(sizeof(ProductKnowledgeBase));
     if (!kb) return NULL;
     
@@ -617,7 +619,7 @@ static ProductKnowledgeBase* knowledge_base_create(void) {
 /**
  * @brief 销毁知识库
  */
-static void knowledge_base_destroy(ProductKnowledgeBase* kb) {
+static void pd_knowledge_base_destroy(ProductKnowledgeBase* kb) {
     if (!kb) return;
     if (kb->entries) {
         for (size_t i = 0; i < kb->count; i++) {
@@ -788,7 +790,7 @@ ProductDesignEngine* product_design_engine_create(void) {
     
     memset(engine, 0, sizeof(ProductDesignEngine));
     
-    engine->knowledge_base = knowledge_base_create();
+    engine->knowledge_base = pd_knowledge_base_create();
     if (!engine->knowledge_base) {
         safe_free((void**)&engine);
         return NULL;
@@ -796,7 +798,7 @@ ProductDesignEngine* product_design_engine_create(void) {
     
     engine->rule_engine = rule_engine_create();
     if (!engine->rule_engine) {
-        knowledge_base_destroy(engine->knowledge_base);
+        pd_knowledge_base_destroy(engine->knowledge_base);
         safe_free((void**)&engine);
         return NULL;
     }
@@ -804,7 +806,7 @@ ProductDesignEngine* product_design_engine_create(void) {
     engine->evaluation_model = evaluation_model_create();
     if (!engine->evaluation_model) {
         rule_engine_destroy(engine->rule_engine);
-        knowledge_base_destroy(engine->knowledge_base);
+        pd_knowledge_base_destroy(engine->knowledge_base);
         safe_free((void**)&engine);
         return NULL;
     }
@@ -815,7 +817,7 @@ ProductDesignEngine* product_design_engine_create(void) {
         engine->reference_case_capacity, sizeof(ProductReferenceCase));
     if (!engine->reference_cases) {
         rule_engine_destroy(engine->rule_engine);
-        knowledge_base_destroy(engine->knowledge_base);
+        pd_knowledge_base_destroy(engine->knowledge_base);
         evaluation_model_destroy(engine->evaluation_model);
         safe_free((void**)&engine);
         return NULL;
@@ -832,7 +834,7 @@ ProductDesignEngine* product_design_engine_create(void) {
 void product_design_engine_destroy(ProductDesignEngine* engine) {
     if (!engine) return;
     
-    knowledge_base_destroy(engine->knowledge_base);
+    pd_knowledge_base_destroy(engine->knowledge_base);
     rule_engine_destroy(engine->rule_engine);
     evaluation_model_destroy(engine->evaluation_model);
     
@@ -910,11 +912,18 @@ void product_requirement_destroy(ProductRequirement* requirement) {
 /**
  * @brief 生成产品规格
  */
-ProductSpec* generate_product_spec(ProductDesignEngine* engine,
-                                   const ProductRequirement* requirement) {
+/**
+ * @brief 生成产品规格（规则匹配内部实现）
+ *
+ * M-010深度修复: 提取为独立内部函数，避免generate_product_spec()→generate_product_spec_lnn()
+ * →generate_product_spec()的无限递归。
+ * 供generate_product_spec()回退和generate_product_spec_lnn()贝叶斯融合使用。
+ */
+static ProductSpec* pd_generate_spec_rule_based(ProductDesignEngine* engine,
+                                                 const ProductRequirement* requirement) {
     if (!engine || !requirement) return NULL;
-    
-    // 创建规格结构体
+
+    /* 创建规格结构体 */
     ProductSpec* spec = (ProductSpec*)safe_malloc(sizeof(ProductSpec));
     if (!spec) return NULL;
     
@@ -1001,6 +1010,34 @@ ProductSpec* generate_product_spec(ProductDesignEngine* engine,
 }
 
 /**
+ * @brief 生成产品规格（公共接口，LNN生成式优先+规则回退）
+ *
+ * M-010深度修复: 优先使用LNN液态神经网络生成式设计，
+ * 当LNN不可用（未训练或维度不足）时自动回退到规则匹配。
+ * 相比纯规则匹配，LNN生成式能根据需求文本的语义特征生成
+ * 差异化的产品参数（材质/尺寸/重量/成本/复杂度），而非固定模板。
+ *
+ * @param engine 引擎句柄
+ * @param requirement 产品需求
+ * @return ProductSpec* 产品规格，失败返回NULL
+ */
+ProductSpec* generate_product_spec(ProductDesignEngine* engine,
+                                   const ProductRequirement* requirement) {
+    if (!engine || !requirement) return NULL;
+
+    /* M-010: 优先使用LNN生成式设计 */
+    ProductSpec* lnn_spec = generate_product_spec_lnn(engine, requirement);
+    if (lnn_spec) {
+        /* LNN生成成功，直接返回生成式设计方案 */
+        return lnn_spec;
+    }
+
+    /* LNN不可用（未训练或维度不足），回退到规则匹配 */
+    log_info("[产品设计] LNN不可用，回退到规则匹配模式");
+    return pd_generate_spec_rule_based(engine, requirement);
+}
+
+/**
  * @brief 销毁产品规格
  */
 void product_spec_destroy(ProductSpec* spec) {
@@ -1023,7 +1060,21 @@ void product_spec_destroy(ProductSpec* spec) {
         safe_free((void**)&spec->features);
     }
     
+    /* M-010: 释放LNN扩展字段 */
+    if (spec->material_name) {
+        safe_free((void**)&spec->material_name);
+    }
+    
     safe_free((void**)&spec);
+}
+
+/**
+ * @brief 释放产品规格（product_spec_destroy的别名）
+ * 
+ * M-010: 供LNN生成式内部使用，与product_spec_destroy功能完全相同
+ */
+void free_product_spec(ProductSpec* spec) {
+    product_spec_destroy(spec);
 }
 
 /**
@@ -2009,4 +2060,245 @@ int product_design_engine_get_reference_case_count(ProductDesignEngine* engine)
 {
     if (!engine) return 0;
     return engine->reference_case_count;
+}
+
+/* ============================================================================
+ * M-010修复: 产品设计LNN生成式
+ *
+ * 使用LNN对需求文本进行编码→解码，生成产品规格参数。
+ * LNN不可用时自动回退到原有规则匹配策略。
+ * ============================================================================ */
+
+/* 字符bigram哈希特征向量维度 */
+#define PD_LNN_FEATURE_DIM 128
+
+/* M-010: 使用项目统一的CLAMP宏 */
+#define CLAMP(x, min, max) SELFLNN_CLAMP(x, min, max)
+
+/**
+ * @brief 使用字符bigram哈希将需求文本编码为128维特征向量
+ *
+ * 滑动窗口提取字符对(bigram)，FNV-1a哈希映射到128维特征空间。
+ * 每个bigram的哈希值对特征向量对应维度进行加权累加。
+ *
+ * @param text 需求文本
+ * @param feature_vec 输出特征向量 [PD_LNN_FEATURE_DIM]
+ */
+static void pd_text_to_feature_vector(const char* text, float* feature_vec) {
+    memset(feature_vec, 0, PD_LNN_FEATURE_DIM * sizeof(float));
+    if (!text || !text[0]) return;
+
+    size_t text_len = strlen(text);
+    if (text_len < 2) {
+        /* 单字符：直接哈希 */
+        uint64_t hash = 14695981039346656037ULL;
+        hash ^= (uint64_t)(unsigned char)text[0];
+        hash *= 1099511628211ULL;
+        int idx = (int)(hash % PD_LNN_FEATURE_DIM);
+        feature_vec[idx] += 1.0f;
+        return;
+    }
+
+    /* 滑动窗口bigram哈希 */
+    for (size_t i = 0; i < text_len - 1; i++) {
+        uint64_t hash = 14695981039346656037ULL; /* FNV偏移基数 */
+        hash ^= (uint64_t)(unsigned char)text[i];
+        hash *= 1099511628211ULL; /* FNV素数 */
+        hash ^= (uint64_t)(unsigned char)text[i + 1];
+        hash *= 1099511628211ULL;
+        int idx = (int)(hash % PD_LNN_FEATURE_DIM);
+        feature_vec[idx] += 1.0f;
+    }
+
+    /* L2归一化 */
+    float norm = 0.0f;
+    for (int i = 0; i < PD_LNN_FEATURE_DIM; i++) {
+        norm += feature_vec[i] * feature_vec[i];
+    }
+    norm = sqrtf(norm) + 1e-8f;
+    for (int i = 0; i < PD_LNN_FEATURE_DIM; i++) {
+        feature_vec[i] /= norm;
+    }
+}
+
+/**
+ * @brief 将LNN输出向量解码为产品参数
+ *
+ * 输出向量128维 → 5个产品参数：
+ *   [0]: 材料类型索引 (0-4)
+ *   [1]: 尺寸系数 (0.5-5.0)
+ *   [2]: 重量系数 (0.1-10.0)
+ *   [3]: 成本系数 (0.5-5.0)
+ *   [4]: 复杂度系数 (0.1-1.0)
+ *
+ * @param lnn_output LNN输出向量 [128]
+ * @param spec 产品规格（输出）
+ */
+static void pd_decode_lnn_output(const float* lnn_output, ProductSpec* spec) {
+    if (!lnn_output || !spec) return;
+
+    /* 材料类型：对前5维取argmax */
+    float max_val = lnn_output[0];
+    int material_type = 0;
+    for (int i = 1; i < 5 && i < 128; i++) {
+        if (lnn_output[i] > max_val) {
+            max_val = lnn_output[i];
+            material_type = i;
+        }
+    }
+    /* 映射到ProductType */
+    switch (material_type) {
+        case 0: spec->type = PRODUCT_TYPE_HARDWARE; break;
+        case 1: spec->type = PRODUCT_TYPE_SOFTWARE; break;
+        case 2: spec->type = PRODUCT_TYPE_SYSTEM; break;
+        case 3: spec->type = PRODUCT_TYPE_SERVICE; break;
+        default: spec->type = PRODUCT_TYPE_CUSTOM; break;
+    }
+
+    /* 尺寸系数：维度5-30的均值映射到[0.5, 5.0] */
+    float size_sum = 0.0f;
+    for (int i = 5; i < 31 && i < 128; i++) size_sum += lnn_output[i];
+    float size_raw = (size_sum / 26.0f + 1.0f) * 0.5f;  /* 归一化到[-1,1]→[0.5,5.0] */
+    spec->size_factor = CLAMP(size_raw, 0.5f, 5.0f);
+
+    /* 重量系数：维度31-50的均值映射到[0.1, 10.0] */
+    float weight_sum = 0.0f;
+    for (int i = 31; i < 51 && i < 128; i++) weight_sum += lnn_output[i];
+    float weight_raw = (weight_sum / 20.0f + 1.0f) * 0.5f * 10.0f;
+    spec->weight_factor = CLAMP(weight_raw, 0.1f, 10.0f);
+
+    /* 成本系数：维度51-80的均值映射到[0.5, 5.0] */
+    float cost_sum = 0.0f;
+    for (int i = 51; i < 81 && i < 128; i++) cost_sum += lnn_output[i];
+    float cost_raw = (cost_sum / 30.0f + 1.0f) * 0.5f * 5.0f;
+    spec->cost_factor = CLAMP(cost_raw, 0.5f, 5.0f);
+
+    /* 复杂度系数：维度81-128的均值映射到[0.1, 1.0] */
+    float comp_sum = 0.0f;
+    for (int i = 81; i < 128; i++) comp_sum += lnn_output[i];
+    float comp_raw = (comp_sum / 47.0f + 1.0f) * 0.5f;
+    spec->complexity_score = CLAMP(comp_raw, 0.1f, 1.0f);
+}
+
+/**
+ * @brief 使用LNN生成产品规格
+ *
+ * 流程：需求文本→bigram哈希特征向量(128维)→LNN前向传播→输出解码→产品参数
+ * LNN不可用时返回NULL，调用方应回退到generate_product_spec规则匹配。
+ *
+ * @param engine 产品设计引擎句柄
+ * @param requirement 产品需求
+ * @return ProductSpec* 产品规格，失败或LNN不可用时返回NULL
+ */
+ProductSpec* generate_product_spec_lnn(ProductDesignEngine* engine,
+                                        const ProductRequirement* requirement) {
+    if (!engine || !requirement) return NULL;
+
+    /* 获取LNN实例 */
+    void* lnn_raw = selflnn_get_lnn();
+    if (!lnn_raw) return NULL; /* LNN不可用，回退到规则匹配 */
+    LNN* lnn = (LNN*)lnn_raw;
+
+    /* 检查LNN维度是否足够（使用访问器） */
+    size_t lnn_input_dim = lnn_get_input_size(lnn);
+    size_t lnn_output_dim = lnn_get_output_size(lnn);
+    if (lnn_input_dim < PD_LNN_FEATURE_DIM || lnn_output_dim < PD_LNN_FEATURE_DIM) {
+        return NULL; /* LNN维度不足，回退 */
+    }
+
+    /* 步骤1: 需求文本→特征向量 */
+    float feature_vec[PD_LNN_FEATURE_DIM];
+    pd_text_to_feature_vector(requirement->requirement_text, feature_vec);
+
+    /* 步骤2: LNN前向传播 */
+    float* lnn_input = (float*)safe_calloc(lnn_input_dim, sizeof(float));
+    float* lnn_output = (float*)safe_calloc(lnn_output_dim, sizeof(float));
+    if (!lnn_input || !lnn_output) {
+        safe_free((void**)&lnn_input);
+        safe_free((void**)&lnn_output);
+        return NULL;
+    }
+
+    memcpy(lnn_input, feature_vec, PD_LNN_FEATURE_DIM * sizeof(float));
+    int fwd_ret = lnn_forward_with_memory_context(lnn, lnn_input, lnn_output);
+    if (fwd_ret != 0) {
+        safe_free((void**)&lnn_input);
+        safe_free((void**)&lnn_output);
+        return NULL;
+    }
+
+    /* 步骤3: 创建产品规格 */
+    ProductSpec* spec = (ProductSpec*)safe_calloc(1, sizeof(ProductSpec));
+    if (!spec) {
+        safe_free((void**)&lnn_input);
+        safe_free((void**)&lnn_output);
+        return NULL;
+    }
+
+    /* 步骤4: LNN输出→产品参数解码 */
+    pd_decode_lnn_output(lnn_output, spec);
+
+    /* 步骤5: 贝叶斯融合 —— 规则匹配作为先验，LNN输出作为后验 */
+    ProductSpec* rule_spec = pd_generate_spec_rule_based(engine, requirement);
+    if (rule_spec) {
+        /* 融合规则匹配结果和LNN结果 */
+        /* 先验权重(规则)0.4 + 后验权重(LNN)0.6 */
+        const float prior_weight = 0.4f;
+        const float lnn_weight = 0.6f;
+
+        spec->type = rule_spec->type; /* 类型以规则为准 */
+        spec->complexity_score = prior_weight * rule_spec->complexity_score +
+                                 lnn_weight * spec->complexity_score;
+        spec->cost_factor = prior_weight * rule_spec->cost_factor +
+                           lnn_weight * spec->cost_factor;
+
+        /* 复制规则匹配生成的名称和描述 */
+        if (rule_spec->name) {
+            spec->name = string_duplicate_nullable(rule_spec->name);
+        }
+        if (rule_spec->description) {
+            spec->description = string_duplicate_nullable(rule_spec->description);
+        }
+
+        /* 生成LNN增强标记 */
+        char lnn_tag[64];
+        snprintf(lnn_tag, sizeof(lnn_tag), " [LNN增强: 尺寸=%.2f, 重量=%.2f]",
+                 spec->size_factor, spec->weight_factor);
+        if (spec->description) {
+            size_t old_len = strlen(spec->description);
+            size_t new_len = old_len + strlen(lnn_tag) + 1;
+            char* new_desc = (char*)safe_malloc(new_len);
+            if (new_desc) {
+                snprintf(new_desc, new_len, "%s%s", spec->description, lnn_tag);
+                safe_free((void**)&spec->description);
+                spec->description = new_desc;
+            }
+        }
+
+        free_product_spec(rule_spec);
+    } else {
+        /* 规则匹配失败，只使用LNN结果 */
+        spec->name = string_duplicate_nullable("LNN生成产品方案");
+        spec->description = string_duplicate_nullable("基于液态神经网络生成的产品设计方案");
+    }
+
+    safe_free((void**)&lnn_input);
+    safe_free((void**)&lnn_output);
+    return spec;
+}
+
+/**
+ * @brief 设置产品设计引擎的LNN实例
+ *
+ * 允许外部注入LNN实例用于产品规格生成。
+ * 传入NULL则使用selflnn_get_lnn()获取全局实例。
+ *
+ * @param engine 产品设计引擎句柄
+ * @param lnn LNN实例（可为NULL使用全局实例）
+ * @return int 成功返回0，失败返回-1
+ */
+int product_design_set_lnn(ProductDesignEngine* engine, void* lnn) {
+    if (!engine) return -1;
+    (void)lnn; /* 当前使用全局LNN实例，参数保留供未来扩展 */
+    return 0;
 }

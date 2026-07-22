@@ -168,6 +168,10 @@ typedef struct {
     ArchitectureDescription* best_architecture; /**< 最佳架构 */
     int is_searching;              /**< 是否正在搜索 */
     int search_complete;           /**< 搜索是否完成 */
+    /* M-007修复: DARTS早停机制 */
+    int patience_counter;          /**< 早停耐心计数器（连续无改善代数） */
+    int patience_limit;            /**< 早停耐心阈值（默认20代） */
+    int early_stop_triggered;      /**< 是否已触发早停 */
 } NASSearchState;
 
 /**
@@ -362,6 +366,34 @@ int nas_deploy_best_architecture(NASSystem* system,
  */
 int nas_get_statistics(NASSystem* system, int generation,
                       float* statistics, size_t max_statistics);
+
+/* =========================================================================
+ * M-007修复: DARTS早停机制 API
+ * ========================================================================= */
+
+/**
+ * @brief 设置早停参数
+ *
+ * 配置验证损失连续无改善的最大容忍代数。
+ * 当连续patience_limit代验证损失无改善时，搜索自动终止。
+ *
+ * @param system NAS系统句柄
+ * @param patience_limit 早停阈值（0=禁用早停，默认20）
+ * @return int 成功返回0，失败返回-1
+ */
+int nas_set_early_stop(NASSystem* system, int patience_limit);
+
+/**
+ * @brief 获取早停状态
+ *
+ * 查询当前早停计数器和是否已触发早停。
+ *
+ * @param system NAS系统句柄
+ * @param counter_out 输出当前无改善代数（可为NULL）
+ * @param triggered_out 输出是否已触发早停（可为NULL）
+ * @return int 成功返回0，失败返回-1
+ */
+int nas_get_early_stop_status(NASSystem* system, int* counter_out, int* triggered_out);
 
 // ============================================================================
 // CfC液态神经架构搜索（A05.4.2）

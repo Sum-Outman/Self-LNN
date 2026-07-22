@@ -45,6 +45,7 @@
 #include "selflnn/core/laplace.h"
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/math_utils.h"
+#include "selflnn/utils/logging.h"
 #include <string.h>
 #include <math.h>
 #include <stdlib.h>

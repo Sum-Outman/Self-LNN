@@ -97,7 +97,10 @@ typedef enum {
     DEFUZZ_BISECTOR,        /**< 平分线法 */
     DEFUZZ_MOM,             /**< 最大平均值法（MOM） */
     DEFUZZ_LOM,             /**< 最大左值法（LOM） */
-    DEFUZZ_ROM              /**< 最大右值法（ROM） */
+    DEFUZZ_ROM,             /**< 最大右值法（ROM） */
+    DEFUZZ_HEIGHT,          /**< 高度法 — 取隶属度最高点(L-008新增) */
+    DEFUZZ_CENTER_OF_SUMS,  /**< 和中心法 — 各规则输出加权中心(L-008新增) */
+    DEFUZZ_WEIGHTED_AVG     /**< 加权平均法 — 对称隶属度函数适用(L-008新增) */
 } DefuzzificationMethod;
 
 /**

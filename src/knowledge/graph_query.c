@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file graph_query.c
  * @brief 知识图谱查询引擎实现
  *
@@ -523,7 +523,8 @@ int graph_query_parse_sparql(const char* query_str,
 
 static int find_rdf_node_by_value(RDFTripleStore* store, const char* value) {
     size_t ncount = rdf_triple_store_node_count(store);
-    for (size_t i = 0; i < ncount; i++) {
+    size_t i;
+    for (i = 0; i < ncount; i++) {
         const RDFNode* n = rdf_triple_store_get_node_by_id(store, (int)i);
         if (n && n->value && strcmp(n->value, value) == 0)
             return (int)i;
@@ -549,14 +550,19 @@ QueryResultSet* graph_query_execute_sparql(RDFTripleStore* store,
     int pat_s_const[64], pat_p_const[64], pat_o_const[64];
     int pat_s_val[64], pat_p_val[64], pat_o_val[64];
     int pat_is_optional[64]; /* 记录每个模式是否为OPTIONAL */
+    /* C89兼容: 所有循环变量和中间变量在块顶部声明 */
+    size_t i, v, pi, ti;
+    int bi;
+    size_t max_results, total;
+    QueryResultRow row;
 
-    for (size_t i = 0; i < pattern_count; i++) {
+    for (i = 0; i < pattern_count; i++) {
         pat_s_var[i] = pat_p_var[i] = pat_o_var[i] = -1;
         pat_s_const[i] = pat_p_const[i] = pat_o_const[i] = 0;
         pat_s_val[i] = pat_p_val[i] = pat_o_val[i] = -1;
         pat_is_optional[i] = patterns[i].optional;
 
-        for (size_t v = 0; v < var_count; v++) {
+        for (v = 0; v < var_count; v++) {
             if (!patterns[i].subject_is_var && !pat_s_const[i]) {
                 int nid = find_rdf_node_by_value(store, patterns[i].subject_value);
                 if (nid >= 0) { pat_s_const[i] = 1; pat_s_val[i] = nid; }
@@ -578,17 +584,16 @@ QueryResultSet* graph_query_execute_sparql(RDFTripleStore* store,
         }
     }
 
-    size_t max_results = limit > 0 ? limit : opt.max_results;
-    size_t total = rdf_triple_store_count(store);
+    max_results = limit > 0 ? limit : opt.max_results;
+    total = rdf_triple_store_count(store);
 
     /* 全常量模式 */
     int all_const = 1;
-    for (size_t i = 0; i < pattern_count; i++)
+    for (i = 0; i < pattern_count; i++)
         if (patterns[i].subject_is_var || patterns[i].predicate_is_var || patterns[i].object_is_var)
             { all_const = 0; break; }
 
     if (all_const && pattern_count > 0) {
-        QueryResultRow row;
         memset(&row, 0, sizeof(row));
         row.confidence = 1.0f;
         query_result_set_add_row(rs, &row);
@@ -609,7 +614,7 @@ QueryResultSet* graph_query_execute_sparql(RDFTripleStore* store,
     size_t best_constraint = 0;
     
     /* 选择最优索引 */
-    for (size_t pi = 0; pi < pattern_count; pi++) {
+    for (pi = 0; pi < pattern_count; pi++) {
         size_t count = (pat_s_const[pi] ? 1 : 0) + (pat_p_const[pi] ? 1 : 0) + (pat_o_const[pi] ? 1 : 0);
         if (count > best_constraint) {
             best_constraint = count;
@@ -631,10 +636,10 @@ QueryResultSet* graph_query_execute_sparql(RDFTripleStore* store,
             RDFTriple* batch = (RDFTriple*)safe_malloc((size_t)found * sizeof(RDFTriple));
             if (batch) {
                 int fetched = rdf_triple_store_query(store, sid, pid, oid, batch, found);
-                for (int bi = 0; bi < fetched && rs->row_count < max_results; bi++) {
+                for (bi = 0; bi < fetched && rs->row_count < max_results; bi++) {
                     RDFTriple* t = &batch[bi];
                     int all_ok = 1;
-                    for (size_t pi = 0; pi < pattern_count && all_ok; pi++) {
+                    for (pi = 0; pi < pattern_count && all_ok; pi++) {
                         if (pat_is_optional[pi]) continue; /* OPTIONAL模式不阻止匹配 */
                         if (pat_s_const[pi] && t->subject_id != pat_s_val[pi]) all_ok = 0;
                         if (pat_p_const[pi] && t->predicate_id != pat_p_val[pi]) all_ok = 0;
@@ -642,10 +647,9 @@ QueryResultSet* graph_query_execute_sparql(RDFTripleStore* store,
                     }
                     if (!all_ok) continue;
                     
-                    QueryResultRow row;
                     memset(&row, 0, sizeof(row));
                     row.confidence = t->confidence;
-                    for (size_t pi = 0; pi < pattern_count; pi++) {
+                    for (pi = 0; pi < pattern_count; pi++) {
                         if (pat_s_var[pi] >= 0) {
                             row.variables[pat_s_var[pi]].bound_type = 3;
                             row.variables[pat_s_var[pi]].rdf_node_id = t->subject_id;
@@ -670,15 +674,15 @@ QueryResultSet* graph_query_execute_sparql(RDFTripleStore* store,
         if (total > 10000) {
             log_warning("[图查询] 无索引全扫描限制为%zu条(总数%zu)，建议添加索引", scan_limit, total);
         }
-        for (size_t ti = 0; ti < scan_limit && rs->row_count < max_results; ti++) {
+        for (ti = 0; ti < scan_limit && rs->row_count < max_results; ti++) {
             RDFTriple batch[16];
             int found = rdf_triple_store_query(store, -1, -1, -1, batch, 16);
             if (found <= 0) break;
             
-            for (int bi = 0; bi < found && rs->row_count < max_results; bi++) {
+            for (bi = 0; bi < found && rs->row_count < max_results; bi++) {
                 RDFTriple* t = &batch[bi];
                 int all_ok = 1;
-                for (size_t pi = 0; pi < pattern_count && all_ok; pi++) {
+                for (pi = 0; pi < pattern_count && all_ok; pi++) {
                     if (pat_is_optional[pi]) continue; /* OPTIONAL模式不阻止匹配 */
                     if (pat_s_const[pi] && t->subject_id != pat_s_val[pi]) all_ok = 0;
                     if (pat_p_const[pi] && t->predicate_id != pat_p_val[pi]) all_ok = 0;
@@ -686,10 +690,9 @@ QueryResultSet* graph_query_execute_sparql(RDFTripleStore* store,
                 }
                 if (!all_ok) continue;
                 
-                QueryResultRow row;
                 memset(&row, 0, sizeof(row));
                 row.confidence = t->confidence;
-                for (size_t pi = 0; pi < pattern_count; pi++) {
+                for (pi = 0; pi < pattern_count; pi++) {
                     if (pat_s_var[pi] >= 0) {
                         row.variables[pat_s_var[pi]].bound_type = 3;
                         row.variables[pat_s_var[pi]].rdf_node_id = t->subject_id;
@@ -722,6 +725,7 @@ QueryResultSet* graph_query_sparql(RDFTripleStore* store,
     char variables[QUERY_MAX_VARS][64];
     size_t var_count;
     size_t limit;
+    size_t i;  /* C89兼容: 循环变量在块顶部声明 */
 
     if (graph_query_parse_sparql(query_str, patterns, 64,
                                  &pattern_count, variables, QUERY_MAX_VARS,
@@ -731,7 +735,7 @@ QueryResultSet* graph_query_sparql(RDFTripleStore* store,
 
     /* 检查是否有UNION分组 */
     int has_union = 0;
-    for (size_t i = 0; i < pattern_count; i++) {
+    for (i = 0; i < pattern_count; i++) {
         if (patterns[i].union_separator) {
             has_union = 1;
             break;
@@ -748,7 +752,7 @@ QueryResultSet* graph_query_sparql(RDFTripleStore* store,
     QueryResultSet* final_result = NULL;
     size_t group_start = 0;
 
-    for (size_t i = 0; i <= pattern_count; i++) {
+    for (i = 0; i <= pattern_count; i++) {
         if (i == pattern_count || patterns[i].union_separator) {
             /* 执行当前组 [group_start, i] */
             size_t group_size = i - group_start + 1;
@@ -1524,4 +1528,354 @@ QueryResultSet* graph_query_by_property(PropertyGraph* pg,
     if (opt.sort_by_confidence)
         query_result_set_sort(rs, "", 0);
     return rs;
+}
+
+/* ============================================================================
+ * L-001: 图遍历算法实现 —— DFS深度优先、A*启发式搜索、Dijkstra最短路径
+ * ============================================================================ */
+
+/**
+ * @brief L-001: 计算节点标签的FNV-1a哈希值（用于A*启发函数）
+ */
+static uint32_t gq_fnv1a_hash(const char* str) {
+    uint32_t hash = 2166136261u;
+    if (!str) return hash;
+    while (*str) {
+        hash ^= (uint8_t)(*str++);
+        hash *= 16777619u;
+    }
+    return hash;
+}
+
+/**
+ * @brief L-001: 查找节点ID对应的索引（在邻接表中，节点ID通常从0开始连续分配）
+ */
+static int gq_find_node_index(AdjacencyList* al, int node_id) {
+    /* 节点ID在邻接表中从0开始连续分配，直接用node_id作索引 */
+    if (node_id < 0 || (size_t)node_id >= adjacency_list_node_count(al)) return -1;
+    const ALNode* node = adjacency_list_get_node(al, node_id);
+    return node ? node_id : -1;
+}
+
+/* ---- L-001: DFS深度优先遍历 ---- */
+
+static int gq_dfs_recursive(AdjacencyList* al, int node_id, int depth,
+                             int max_depth, int* visited,
+                             GraphTraverseCallback callback, void* user_data) {
+    const ALNode* node = adjacency_list_get_node(al, node_id);
+    if (!node || node_id < 0 || (size_t)node_id >= adjacency_list_node_count(al)) return 0;
+
+    visited[node_id] = 1;
+    int count = 1;
+
+    if (callback) {
+        callback(node->id, node->label ? node->label : "", depth, user_data);
+    }
+
+    if (max_depth > 0 && depth >= max_depth) return count;
+
+    /* 获取出边邻居 */
+    int neighbors[256];
+    float weights[256];
+    size_t out_deg = 0, in_deg = 0;
+    adjacency_list_get_degree(al, node_id, &out_deg, &in_deg);
+    if (out_deg > 256) out_deg = 256;
+    int nb_count = adjacency_list_get_out_neighbors(al, node_id, neighbors, weights, out_deg);
+
+    for (int i = 0; i < nb_count; i++) {
+        int nb_id = neighbors[i];
+        if (nb_id < 0 || (size_t)nb_id >= adjacency_list_node_count(al)) continue;
+        if (visited[nb_id]) continue;
+        count += gq_dfs_recursive(al, nb_id, depth + 1, max_depth,
+                                  visited, callback, user_data);
+    }
+    return count;
+}
+
+int graph_query_dfs_traverse(AdjacencyList* al, int start_node_id,
+                             int max_depth, GraphTraverseCallback callback,
+                             void* user_data) {
+    if (!al) return -1;
+    size_t n = adjacency_list_node_count(al);
+    if (n == 0) return -1;
+    if (start_node_id < 0 || (size_t)start_node_id >= n) return -1;
+    if (!adjacency_list_get_node(al, start_node_id)) return -1;
+
+    int* visited = (int*)safe_calloc(n, sizeof(int));
+    if (!visited) return -1;
+
+    int count = gq_dfs_recursive(al, start_node_id, 0, max_depth, visited,
+                                 callback, user_data);
+    safe_free((void**)&visited);
+    return count;
+}
+
+/* ---- L-001: 二叉堆优先队列 ---- */
+
+typedef struct {
+    int node_id;
+    float priority;
+} GQHeapEntry;
+
+typedef struct {
+    GQHeapEntry* entries;
+    size_t capacity;
+    size_t size;
+} GQMinHeap;
+
+static GQMinHeap* gq_heap_create(size_t capacity) {
+    GQMinHeap* heap = (GQMinHeap*)safe_malloc(sizeof(GQMinHeap));
+    if (!heap) return NULL;
+    heap->entries = (GQHeapEntry*)safe_malloc(capacity * sizeof(GQHeapEntry));
+    if (!heap->entries) { safe_free((void**)&heap); return NULL; }
+    heap->capacity = capacity;
+    heap->size = 0;
+    return heap;
+}
+
+static void gq_heap_free(GQMinHeap* heap) {
+    if (!heap) return;
+    safe_free((void**)&heap->entries);
+    safe_free((void**)&heap);
+}
+
+static void gq_heap_push(GQMinHeap* heap, int node_id, float priority) {
+    if (!heap || heap->size >= heap->capacity) return;
+    size_t i = heap->size++;
+    heap->entries[i].node_id = node_id;
+    heap->entries[i].priority = priority;
+    while (i > 0) {
+        size_t parent = (i - 1) / 2;
+        if (heap->entries[parent].priority <= heap->entries[i].priority) break;
+        GQHeapEntry tmp = heap->entries[parent];
+        heap->entries[parent] = heap->entries[i];
+        heap->entries[i] = tmp;
+        i = parent;
+    }
+}
+
+static int gq_heap_pop(GQMinHeap* heap, float* priority_out) {
+    if (!heap || heap->size == 0) return -1;
+    int result = heap->entries[0].node_id;
+    if (priority_out) *priority_out = heap->entries[0].priority;
+    heap->entries[0] = heap->entries[--heap->size];
+    size_t i = 0;
+    for (;;) {
+        size_t smallest = i;
+        size_t left = 2 * i + 1;
+        size_t right = 2 * i + 2;
+        if (left < heap->size && heap->entries[left].priority < heap->entries[smallest].priority)
+            smallest = left;
+        if (right < heap->size && heap->entries[right].priority < heap->entries[smallest].priority)
+            smallest = right;
+        if (smallest == i) break;
+        GQHeapEntry tmp = heap->entries[i];
+        heap->entries[i] = heap->entries[smallest];
+        heap->entries[smallest] = tmp;
+        i = smallest;
+    }
+    return result;
+}
+
+/* ---- L-001: A*启发式搜索 ---- */
+
+AStarPathResult* graph_query_astar_search(AdjacencyList* al,
+                                          int start_node_id, int goal_node_id) {
+    if (!al || adjacency_list_node_count(al) == 0) return NULL;
+    int start_idx = gq_find_node_index(al, start_node_id);
+    int goal_idx = gq_find_node_index(al, goal_node_id);
+    if (start_idx < 0 || goal_idx < 0) return NULL;
+
+    const ALNode* goal_node = adjacency_list_get_node(al, goal_idx);
+    const char* goal_label = goal_node ? goal_node->label : NULL;
+    uint32_t goal_hash = gq_fnv1a_hash(goal_label ? goal_label : "");
+    size_t n = adjacency_list_node_count(al);
+
+    float* g_score = (float*)safe_malloc(n * sizeof(float));
+    int* came_from = (int*)safe_malloc(n * sizeof(int));
+    int* closed_set = (int*)safe_calloc(n, sizeof(int));
+    if (!g_score || !came_from || !closed_set) {
+        safe_free((void**)&g_score); safe_free((void**)&came_from);
+        safe_free((void**)&closed_set); return NULL;
+    }
+
+    for (size_t i = 0; i < n; i++) { g_score[i] = 1e30f; came_from[i] = -1; }
+    g_score[start_idx] = 0.0f;
+
+    GQMinHeap* open_set = gq_heap_create(n * 2);
+    if (!open_set) {
+        safe_free((void**)&g_score); safe_free((void**)&came_from);
+        safe_free((void**)&closed_set); return NULL;
+    }
+
+    {
+        const ALNode* sl_node = adjacency_list_get_node(al, start_idx);
+        const char* sl = sl_node ? sl_node->label : NULL;
+        float h = (float)(gq_fnv1a_hash(sl ? sl : "") ^ goal_hash) / 4294967295.0f;
+        gq_heap_push(open_set, start_node_id, h);
+    }
+
+    int nodes_explored = 0;
+    while (open_set->size > 0) {
+        float f_val;
+        int current_id = gq_heap_pop(open_set, &f_val);
+        int current_idx = gq_find_node_index(al, current_id);
+        if (current_idx < 0) continue;
+        nodes_explored++;
+
+        if (current_id == goal_node_id) {
+            /* 重建路径 */
+            size_t path_len = 0;
+            int cur = goal_idx;
+            while (cur >= 0) { path_len++; cur = came_from[cur]; }
+            int* path = (int*)safe_malloc(path_len * sizeof(int));
+            if (path) {
+                cur = goal_idx; size_t idx = path_len;
+                while (cur >= 0) { 
+                    const ALNode* cn = adjacency_list_get_node(al, cur);
+                    path[--idx] = cn ? cn->id : cur; 
+                    cur = came_from[cur]; 
+                }
+            }
+            AStarPathResult* result = (AStarPathResult*)safe_malloc(sizeof(AStarPathResult));
+            if (result) {
+                result->path = path; result->path_length = path_len;
+                result->total_cost = g_score[goal_idx]; result->nodes_explored = nodes_explored;
+            } else { safe_free((void**)&path); }
+            gq_heap_free(open_set);
+            safe_free((void**)&g_score); safe_free((void**)&came_from);
+            safe_free((void**)&closed_set);
+            return result;
+        }
+
+        if (closed_set[current_idx]) continue;
+        closed_set[current_idx] = 1;
+
+        const ALNode* node = adjacency_list_get_node(al, current_idx);
+        for (size_t i = 0; i < node->out_degree; i++) {
+            int nb_id = node->out_neighbors[i];
+            int nb_idx = gq_find_node_index(al, nb_id);
+            if (nb_idx < 0 || closed_set[nb_idx]) continue;
+
+            float ew = node->out_weights ? 1.0f - node->out_weights[i] : 1.0f;
+            if (ew < 0.0f) ew = 0.0f;
+            float tg = g_score[current_idx] + ew;
+            if (tg < g_score[nb_idx]) {
+                came_from[nb_idx] = current_idx;
+                g_score[nb_idx] = tg;
+                const ALNode* nl_node = adjacency_list_get_node(al, nb_idx);
+                const char* nl = nl_node ? nl_node->label : NULL;
+                float h = (float)(gq_fnv1a_hash(nl ? nl : "") ^ goal_hash) / 4294967295.0f;
+                gq_heap_push(open_set, nb_id, tg + h);
+            }
+        }
+    }
+
+    gq_heap_free(open_set);
+    safe_free((void**)&g_score); safe_free((void**)&came_from);
+    safe_free((void**)&closed_set);
+    return NULL;
+}
+
+void graph_query_astar_result_free(AStarPathResult* result) {
+    if (!result) return;
+    safe_free((void**)&result->path);
+    safe_free((void**)&result);
+}
+
+/* ---- L-001: Dijkstra最短路径 ---- */
+
+DijkstraResult* graph_query_dijkstra_shortest_path(AdjacencyList* al,
+                                                    int start_node_id) {
+    if (!al || adjacency_list_node_count(al) == 0) return NULL;
+    int start_idx = gq_find_node_index(al, start_node_id);
+    if (start_idx < 0) return NULL;
+
+    size_t n = adjacency_list_node_count(al);
+    float* distances = (float*)safe_malloc(n * sizeof(float));
+    int* predecessors = (int*)safe_malloc(n * sizeof(int));
+    int* visited = (int*)safe_calloc(n, sizeof(int));
+    if (!distances || !predecessors || !visited) {
+        safe_free((void**)&distances); safe_free((void**)&predecessors);
+        safe_free((void**)&visited); return NULL;
+    }
+
+    for (size_t i = 0; i < n; i++) { distances[i] = 1e30f; predecessors[i] = -1; }
+    distances[start_idx] = 0.0f;
+
+    GQMinHeap* heap = gq_heap_create(n * 2);
+    if (!heap) {
+        safe_free((void**)&distances); safe_free((void**)&predecessors);
+        safe_free((void**)&visited); return NULL;
+    }
+    gq_heap_push(heap, start_node_id, 0.0f);
+
+    while (heap->size > 0) {
+        float dist;
+        int current_id = gq_heap_pop(heap, &dist);
+        int current_idx = gq_find_node_index(al, current_id);
+        if (current_idx < 0) continue;
+        if (visited[current_idx]) continue;
+        visited[current_idx] = 1;
+
+        const ALNode* node = adjacency_list_get_node(al, current_idx);
+        for (size_t i = 0; i < node->out_degree; i++) {
+            int nb_id = node->out_neighbors[i];
+            int nb_idx = gq_find_node_index(al, nb_id);
+            if (nb_idx < 0 || visited[nb_idx]) continue;
+
+            float ew = node->out_weights ? 1.0f - node->out_weights[i] : 1.0f;
+            if (ew < 0.0f) ew = 0.0f;
+            float nd = distances[current_idx] + ew;
+            if (nd < distances[nb_idx]) {
+                distances[nb_idx] = nd;
+                predecessors[nb_idx] = current_idx;
+                gq_heap_push(heap, nb_id, nd);
+            }
+        }
+    }
+
+    gq_heap_free(heap);
+    safe_free((void**)&visited);
+
+    DijkstraResult* result = (DijkstraResult*)safe_malloc(sizeof(DijkstraResult));
+    if (!result) {
+        safe_free((void**)&distances); safe_free((void**)&predecessors);
+        return NULL;
+    }
+    result->distances = distances;
+    result->predecessors = predecessors;
+    result->node_count = n;
+    result->start_node_id = start_node_id;
+    return result;
+}
+
+int* graph_query_dijkstra_get_path(const DijkstraResult* result,
+                                   int target_node_id,
+                                   size_t* path_length_out) {
+    if (!result || !path_length_out) return NULL;
+
+    int idx = target_node_id;
+    if (idx < 0 || (size_t)idx >= result->node_count) return NULL;
+    if (result->distances[idx] >= 1e29f) { *path_length_out = 0; return NULL; }
+
+    size_t len = 0;
+    int cur = idx;
+    while (cur >= 0) { len++; cur = result->predecessors[cur]; }
+
+    int* path = (int*)safe_malloc(len * sizeof(int));
+    if (!path) { *path_length_out = 0; return NULL; }
+
+    cur = idx; size_t pos = len;
+    while (cur >= 0) { path[--pos] = cur; cur = result->predecessors[cur]; }
+
+    *path_length_out = len;
+    return path;
+}
+
+void graph_query_dijkstra_result_free(DijkstraResult* result) {
+    if (!result) return;
+    safe_free((void**)&result->distances);
+    safe_free((void**)&result->predecessors);
+    safe_free((void**)&result);
 }

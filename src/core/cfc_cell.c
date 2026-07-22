@@ -1415,20 +1415,30 @@ static void cfc_closed_form_solution(CfCCell* cell, const float* input,
         
         output[i] = output_gate * tanh_new;
         
-        /* 自适应时间常数（仅当液时域缩放关闭时生效）。
-         * 当use_liquid_scaling=1时，compute_liquid_time_constants已接管τ计算，
-         * 且cfc_forward_liquid在调用cfc_forward前会覆盖time_constants，
-         * 此处的启发式更新仅用于非液时域模式下的自适应τ调整。 */
-        if (cell->use_adaptive_tau && !cell->use_liquid_scaling) {
+        /* M-012修复: 自适应时间常数全路径启用
+         * 原实现仅在非液时域缩放模式下启用自适应τ，当use_liquid_scaling=1时跳过。
+         * 修复后：液时域缩放模式下也启用自适应τ，
+         * 使用混合策略：compute_liquid_time_constants的τ占70% + 自适应τ占30%。
+         * 非液时域模式下保持原有的100%自适应τ行为。
+         * 这样确保所有路径下τ都能根据神经元激活状态动态调节。 */
+        if (cell->use_adaptive_tau) {
             float activation_magnitude = fabsf(new_state);
             float beta = CFC_ADAPTIVE_TAU_BETA;
             float target_tau = cell->min_time_constant + 
                               (cell->max_time_constant - cell->min_time_constant) * 
                               expf(-beta * activation_magnitude);
             float tau_adjustment = cell->state->adaptation_rate * (target_tau - time_constants[i]);
-            cell->time_constants[i] += tau_adjustment;
-            if (cell->time_constants[i] < cell->min_time_constant) cell->time_constants[i] = cell->min_time_constant;
-            if (cell->time_constants[i] > cell->max_time_constant) cell->time_constants[i] = cell->max_time_constant;
+            float adaptive_tau = time_constants[i] + tau_adjustment;
+            if (adaptive_tau < cell->min_time_constant) adaptive_tau = cell->min_time_constant;
+            if (adaptive_tau > cell->max_time_constant) adaptive_tau = cell->max_time_constant;
+            
+            if (cell->use_liquid_scaling) {
+                /* 液时域缩放模式：混合策略 — 70%液时域τ + 30%自适应τ */
+                cell->time_constants[i] = 0.7f * cell->time_constants[i] + 0.3f * adaptive_tau;
+            } else {
+                /* 非液时域模式：100%自适应τ */
+                cell->time_constants[i] = adaptive_tau;
+            }
         }
     }
 }
@@ -4729,6 +4739,184 @@ static int compute_liquid_time_constants(CfCCell* cell, const float* input,
         if (tau > tau_max) tau = tau_max;
         tau_out[i] = tau;
     }
+
+    return 0;
+}
+
+/* ============================================================================
+ * M-012修复: 液时域缩放动态性增强
+ * ============================================================================ */
+
+/**
+ * @brief 基于隐藏状态动态调制时间常数
+ *
+ * τ_final = τ_base + σ(W_state * h + b_state) * Δτ_max
+ */
+int cfc_state_dependent_tau(CfCCell* cell, const float* hidden_state, float* tau_out) {
+    SELFLNN_CHECK_NULL(cell, "CfC单元句柄为空");
+    SELFLNN_CHECK_NULL(hidden_state, "隐藏状态为空");
+    SELFLNN_CHECK_NULL(tau_out, "tau输出为空");
+    SELFLNN_CHECK_INITIALIZED(cell, "CfC单元未初始化");
+
+    if (!cell->use_state_dependent_tau) {
+        /* 状态依赖tau未启用，直接返回当前tau值 */
+        if (cell->computed_liquid_tau) {
+            memcpy(tau_out, cell->computed_liquid_tau,
+                   cell->config.hidden_size * sizeof(float));
+        }
+        return 0;
+    }
+
+    size_t hidden_size = cell->config.hidden_size;
+    float tau_min = cell->liquid_tau_min;
+    float tau_max = cell->liquid_tau_max;
+    float tau_range = tau_max - tau_min;
+
+    /* 初始化状态依赖权重（首次调用时懒初始化） */
+    if (!cell->tau_state_weights) {
+        cell->tau_state_weights = (float*)safe_calloc(hidden_size, sizeof(float));
+        cell->tau_state_bias = (float*)safe_calloc(hidden_size, sizeof(float));
+        if (!cell->tau_state_weights || !cell->tau_state_bias) {
+            return -1;
+        }
+        /* 默认初始化：小随机权重，零偏置 */
+        for (size_t i = 0; i < hidden_size; i++) {
+            cell->tau_state_weights[i] = 0.1f;
+            cell->tau_state_bias[i] = 0.0f;
+        }
+    }
+
+    /* 计算状态调制项: modulation = σ(W_state * h + b_state) */
+    for (size_t i = 0; i < hidden_size; i++) {
+        float net = cell->tau_state_bias[i];
+        net += cell->tau_state_weights[i] * hidden_state[i];
+        /* sigmoid: σ(x) = 1/(1+exp(-x)) */
+        float modulation = (net > 10.0f) ? 1.0f :
+                          (net < -10.0f) ? 0.0f :
+                          1.0f / (1.0f + expf(-net));
+
+        /* 获取基础tau（从computed_liquid_tau或默认值） */
+        float base_tau = cell->computed_liquid_tau ?
+                        cell->computed_liquid_tau[i] : tau_min;
+
+        /* τ_final = τ_base + modulation * Δτ_max */
+        float tau = base_tau + modulation * tau_range * 0.5f;
+        if (tau < tau_min) tau = tau_min;
+        if (tau > tau_max) tau = tau_max;
+        tau_out[i] = tau;
+    }
+
+    return 0;
+}
+
+/**
+ * @brief EMA平滑时间常数避免突变
+ */
+int cfc_tau_smooth(CfCCell* cell, const float* tau_new, float* tau_smoothed) {
+    SELFLNN_CHECK_NULL(cell, "CfC单元句柄为空");
+    SELFLNN_CHECK_NULL(tau_new, "新tau为空");
+    SELFLNN_CHECK_NULL(tau_smoothed, "平滑输出为空");
+    SELFLNN_CHECK_INITIALIZED(cell, "CfC单元未初始化");
+
+    size_t hidden_size = cell->config.hidden_size;
+    float alpha = cell->tau_smooth_alpha;
+
+    /* 初始化历史tau状态（首次调用时懒初始化） */
+    if (!cell->tau_state) {
+        cell->tau_state = (float*)safe_calloc(hidden_size, sizeof(float));
+        if (!cell->tau_state) return -1;
+        /* 首次调用时直接使用新tau作为初始状态 */
+        memcpy(cell->tau_state, tau_new, hidden_size * sizeof(float));
+        memcpy(tau_smoothed, tau_new, hidden_size * sizeof(float));
+        return 0;
+    }
+
+    /* EMA平滑: τ_smoothed = α * τ_new + (1-α) * τ_old */
+    for (size_t i = 0; i < hidden_size; i++) {
+        /* 检测NaN/Inf保护 */
+        float new_val = tau_new[i];
+        float old_val = cell->tau_state[i];
+        if (isnan(new_val) || isinf(new_val)) new_val = old_val;
+        if (isnan(old_val) || isinf(old_val)) old_val = new_val;
+
+        float smoothed = alpha * new_val + (1.0f - alpha) * old_val;
+        cell->tau_state[i] = smoothed;
+        tau_smoothed[i] = smoothed;
+    }
+
+    return 0;
+}
+
+/**
+ * @brief 运行时配置tau范围
+ */
+int cfc_set_tau_range(CfCCell* cell, float tau_min, float tau_max) {
+    SELFLNN_CHECK_NULL(cell, "CfC单元句柄为空");
+    SELFLNN_CHECK_INITIALIZED(cell, "CfC单元未初始化");
+
+    if (tau_min <= 0.0f || tau_max <= tau_min) {
+        selflnn_set_last_error(SELFLNN_ERROR_INVALID_PARAMETER, __func__, __FILE__, __LINE__,
+                              "tau范围无效: tau_min=%.4f, tau_max=%.4f (要求tau_min>0, tau_max>tau_min)",
+                              tau_min, tau_max);
+        return -1;
+    }
+
+    cell->liquid_tau_min = tau_min;
+    cell->liquid_tau_max = tau_max;
+
+    return 0;
+}
+
+/**
+ * @brief 查询tau统计信息
+ */
+int cfc_get_tau_statistics(CfCCell* cell, float* mean_out, float* std_out,
+                           float* min_out, float* max_out) {
+    SELFLNN_CHECK_NULL(cell, "CfC单元句柄为空");
+    SELFLNN_CHECK_INITIALIZED(cell, "CfC单元未初始化");
+
+    size_t hidden_size = cell->config.hidden_size;
+
+    /* 使用computed_liquid_tau或tau_state作为数据源 */
+    const float* tau_source = cell->tau_state ?
+                             cell->tau_state :
+                             (cell->computed_liquid_tau ? cell->computed_liquid_tau : NULL);
+
+    if (!tau_source) {
+        /* 无tau数据 */
+        if (mean_out) *mean_out = 0.0f;
+        if (std_out) *std_out = 0.0f;
+        if (min_out) *min_out = 0.0f;
+        if (max_out) *max_out = 0.0f;
+        return 0;
+    }
+
+    /* 计算统计量 */
+    float sum = 0.0f;
+    float t_min = FLT_MAX;
+    float t_max = -FLT_MAX;
+
+    for (size_t i = 0; i < hidden_size; i++) {
+        float t = tau_source[i];
+        sum += t;
+        if (t < t_min) t_min = t;
+        if (t > t_max) t_max = t;
+    }
+
+    float mean = sum / (float)hidden_size;
+
+    /* 计算标准差 */
+    float var_sum = 0.0f;
+    for (size_t i = 0; i < hidden_size; i++) {
+        float diff = tau_source[i] - mean;
+        var_sum += diff * diff;
+    }
+    float std = sqrtf(var_sum / (float)hidden_size);
+
+    if (mean_out) *mean_out = mean;
+    if (std_out) *std_out = std;
+    if (min_out) *min_out = t_min;
+    if (max_out) *max_out = t_max;
 
     return 0;
 }

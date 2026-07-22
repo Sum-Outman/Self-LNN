@@ -1,4 +1,4 @@
-﻿#ifndef SELFLNN_COMPUTER_OPERATION_H
+#ifndef SELFLNN_COMPUTER_OPERATION_H
 #define SELFLNN_COMPUTER_OPERATION_H
 
 #include "selflnn/core/tensor.h"
@@ -168,10 +168,11 @@ typedef struct {
     int enable_app_control;
     int enable_demo_recording;
     float safety_confirm_threshold;
+    int headless_mode;           /* M-008修复: 无头模式(0=真实屏幕, 1=虚拟屏幕) */
 } COConfig;
 
 #define CO_CONFIG_DEFAULT { \
-    100, {0,0,1920,1080}, 1, 1, 1.0f, 0.1f, 3, 1, 1, 1, 1, 1, 1, 1, 0.8f \
+    100, {0,0,1920,1080}, 1, 1, 1.0f, 0.1f, 3, 1, 1, 1, 1, 1, 1, 1, 0.8f, 0 \
 }
 
 typedef struct COSystem COSystem;
@@ -251,6 +252,13 @@ int co_learn_from_demo(COSystem* system, const float* screen_sequence, const COA
 
 /* 设置计算机系统音量 */
 int co_system_set_volume(void* system, float volume);
+
+/* M-008修复: 无头模式支持 - 无需真实屏幕即可操作计算机 */
+int co_set_headless_mode(COSystem* system, int enabled);
+int co_is_headless_mode(const COSystem* system);
+int co_set_virtual_screen(COSystem* system, const float* screen_data, size_t width, size_t height, size_t channels);
+int co_get_virtual_screen(const COSystem* system, float* screen_data, size_t* width, size_t* height, size_t* channels);
+int co_clear_virtual_screen(COSystem* system);
 
 #ifdef __cplusplus
 }

@@ -1435,6 +1435,268 @@ int gradient(const MathExpressionNode* node,
     return 0;
 }
 
+/* ============================================================================
+ * M-009修复: 高阶偏微分、混合偏导、海森矩阵、雅可比矩阵实现
+ * ============================================================================ */
+
+/**
+ * @brief 高阶导数：对同一变量求n阶导数（使用高阶中心差分）
+ */
+double higher_order_derivative(const MathExpressionNode* node,
+                               const char** variable_names,
+                               const double* variable_values,
+                               size_t num_variables,
+                               const char* diff_var_name,
+                               int order) {
+    if (!node || !variable_names || !variable_values || !diff_var_name) return NAN;
+    if (order < 1 || order > 4) return NAN;
+
+    /* 定位求导变量索引 */
+    size_t diff_index = num_variables;
+    for (size_t i = 0; i < num_variables; i++) {
+        if (strcmp(variable_names[i], diff_var_name) == 0) {
+            diff_index = i;
+            break;
+        }
+    }
+    if (diff_index >= num_variables) return NAN;
+
+    double h = 1e-5; /* 差分步长 */
+    MathEvalContext ctx;
+    ctx.variable_names = variable_names;
+    ctx.variable_count = num_variables;
+
+    /* 分配临时变量数组 */
+    double* vals = (double*)safe_malloc(num_variables * sizeof(double));
+    if (!vals) return NAN;
+    for (size_t i = 0; i < num_variables; i++) vals[i] = variable_values[i];
+
+    double result = NAN;
+
+    switch (order) {
+        case 1:
+            /* 一阶中心差分: f'(x) ≈ (f(x+h) - f(x-h)) / (2h) */
+            vals[diff_index] = variable_values[diff_index] + h;
+            ctx.variable_values = vals;
+            double fp = math_expression_evaluate(node, &ctx);
+            vals[diff_index] = variable_values[diff_index] - h;
+            ctx.variable_values = vals;
+            double fm = math_expression_evaluate(node, &ctx);
+            result = (fp - fm) / (2.0 * h);
+            break;
+
+        case 2:
+            /* 二阶中心差分: f''(x) ≈ (f(x+h) - 2f(x) + f(x-h)) / h² */
+            vals[diff_index] = variable_values[diff_index];
+            ctx.variable_values = vals;
+            double f0 = math_expression_evaluate(node, &ctx);
+            vals[diff_index] = variable_values[diff_index] + h;
+            ctx.variable_values = vals;
+            fp = math_expression_evaluate(node, &ctx);
+            vals[diff_index] = variable_values[diff_index] - h;
+            ctx.variable_values = vals;
+            fm = math_expression_evaluate(node, &ctx);
+            result = (fp - 2.0 * f0 + fm) / (h * h);
+            break;
+
+        case 3:
+            /* 三阶中心差分: f'''(x) ≈ (f(x+2h) - 2f(x+h) + 2f(x-h) - f(x-2h)) / (2h³) */
+            vals[diff_index] = variable_values[diff_index] + 2.0 * h;
+            ctx.variable_values = vals;
+            double f2p = math_expression_evaluate(node, &ctx);
+            vals[diff_index] = variable_values[diff_index] + h;
+            ctx.variable_values = vals;
+            fp = math_expression_evaluate(node, &ctx);
+            vals[diff_index] = variable_values[diff_index] - h;
+            ctx.variable_values = vals;
+            fm = math_expression_evaluate(node, &ctx);
+            vals[diff_index] = variable_values[diff_index] - 2.0 * h;
+            ctx.variable_values = vals;
+            double f2m = math_expression_evaluate(node, &ctx);
+            result = (f2p - 2.0 * fp + 2.0 * fm - f2m) / (2.0 * h * h * h);
+            break;
+
+        case 4:
+            /* 四阶中心差分: f''''(x) ≈ (f(x+2h) - 4f(x+h) + 6f(x) - 4f(x-h) + f(x-2h)) / h⁴ */
+            vals[diff_index] = variable_values[diff_index] + 2.0 * h;
+            ctx.variable_values = vals;
+            f2p = math_expression_evaluate(node, &ctx);
+            vals[diff_index] = variable_values[diff_index] + h;
+            ctx.variable_values = vals;
+            fp = math_expression_evaluate(node, &ctx);
+            vals[diff_index] = variable_values[diff_index];
+            ctx.variable_values = vals;
+            f0 = math_expression_evaluate(node, &ctx);
+            vals[diff_index] = variable_values[diff_index] - h;
+            ctx.variable_values = vals;
+            fm = math_expression_evaluate(node, &ctx);
+            vals[diff_index] = variable_values[diff_index] - 2.0 * h;
+            ctx.variable_values = vals;
+            f2m = math_expression_evaluate(node, &ctx);
+            result = (f2p - 4.0 * fp + 6.0 * f0 - 4.0 * fm + f2m) / (h * h * h * h);
+            break;
+
+        default:
+            result = NAN;
+            break;
+    }
+
+    safe_free((void**)&vals);
+    return result;
+}
+
+/**
+ * @brief 混合偏导数：对不同变量求混合偏导
+ *
+ * 通过递归调用partial_derivative实现:
+ * ∂²f/∂x∂y = ∂/∂x(∂f/∂y) 即先对y求偏导得到新函数，再对x求偏导
+ */
+double mixed_partial_derivative(const MathExpressionNode* node,
+                                const char** variable_names,
+                                const double* variable_values,
+                                size_t num_variables,
+                                const char** diff_vars,
+                                int var_count) {
+    if (!node || !variable_names || !variable_values || !diff_vars || var_count < 1) return NAN;
+    if (var_count > 4) return NAN; /* 最多支持4阶混合偏导 */
+
+    double h = 1e-5;
+    double result = 0.0;
+
+    /* 分配临时值数组 */
+    double* vals = (double*)safe_malloc(num_variables * sizeof(double));
+    if (!vals) return NAN;
+
+    if (var_count == 1) {
+        /* 单变量：直接调用partial_derivative */
+        result = partial_derivative(node, variable_names, variable_values,
+                                     num_variables, diff_vars[0]);
+    } else if (var_count == 2) {
+        /* 二阶混合偏导 ∂²f/∂x∂y: 使用中心差分嵌套 */
+        /* 定义g(x) = ∂f/∂y(x)，然后∂g/∂x用中心差分 */
+        size_t x_idx = num_variables;
+        size_t y_idx = num_variables;
+        for (size_t i = 0; i < num_variables; i++) {
+            if (strcmp(variable_names[i], diff_vars[0]) == 0) x_idx = i;
+            if (strcmp(variable_names[i], diff_vars[1]) == 0) y_idx = i;
+        }
+        if (x_idx >= num_variables || y_idx >= num_variables) {
+            safe_free((void**)&vals);
+            return NAN;
+        }
+
+        /* 对x使用中心差分: ∂²f/∂x∂y ≈ (∂f/∂y(x+h) - ∂f/∂y(x-h)) / (2h) */
+        for (size_t i = 0; i < num_variables; i++) vals[i] = variable_values[i];
+        vals[x_idx] = variable_values[x_idx] + h;
+        double dfy_plus = partial_derivative(node, variable_names, vals,
+                                              num_variables, diff_vars[1]);
+        vals[x_idx] = variable_values[x_idx] - h;
+        double dfy_minus = partial_derivative(node, variable_names, vals,
+                                               num_variables, diff_vars[1]);
+        if (isnan(dfy_plus) || isnan(dfy_minus)) {
+            result = NAN;
+        } else {
+            result = (dfy_plus - dfy_minus) / (2.0 * h);
+        }
+    } else {
+        /* 三阶及以上：递归降阶 */
+        /* 对第一个变量使用中心差分，递归计算 */
+        size_t first_idx = num_variables;
+        for (size_t i = 0; i < num_variables; i++) {
+            if (strcmp(variable_names[i], diff_vars[0]) == 0) {
+                first_idx = i;
+                break;
+            }
+        }
+        if (first_idx >= num_variables) {
+            safe_free((void**)&vals);
+            return NAN;
+        }
+
+        for (size_t i = 0; i < num_variables; i++) vals[i] = variable_values[i];
+        vals[first_idx] = variable_values[first_idx] + h;
+        double plus = mixed_partial_derivative(node, variable_names, vals,
+                                                num_variables, diff_vars + 1, var_count - 1);
+        vals[first_idx] = variable_values[first_idx] - h;
+        double minus = mixed_partial_derivative(node, variable_names, vals,
+                                                 num_variables, diff_vars + 1, var_count - 1);
+        if (isnan(plus) || isnan(minus)) {
+            result = NAN;
+        } else {
+            result = (plus - minus) / (2.0 * h);
+        }
+    }
+
+    safe_free((void**)&vals);
+    return result;
+}
+
+/**
+ * @brief 海森矩阵：计算n×n二阶偏导数矩阵
+ */
+int compute_hessian(const MathExpressionNode* node,
+                    const char** variable_names,
+                    const double* variable_values,
+                    size_t num_variables,
+                    double* hessian_out) {
+    if (!node || !variable_names || !variable_values || !hessian_out) return -1;
+    if (num_variables == 0) return -1;
+
+    size_t n = num_variables;
+    const char* diff_vars[2];
+
+    for (size_t i = 0; i < n; i++) {
+        for (size_t j = 0; j < n; j++) {
+            diff_vars[0] = variable_names[i];
+            diff_vars[1] = variable_names[j];
+            double val = mixed_partial_derivative(node, variable_names,
+                                                   variable_values, num_variables,
+                                                   diff_vars, 2);
+            /* 利用对称性: H[i][j] = H[j][i] */
+            hessian_out[i * n + j] = val;
+            if (i != j) {
+                hessian_out[j * n + i] = val;
+            }
+        }
+    }
+
+    return 0;
+}
+
+/**
+ * @brief 雅可比矩阵：计算m×n一阶偏导数矩阵（向量值函数）
+ */
+int mp_compute_jacobian(MathExpressionNode** functions,
+                     size_t function_count,
+                     const char** variable_names,
+                     const double* variable_values,
+                     size_t num_variables,
+                     double* jacobian_out) {
+    if (!functions || !variable_names || !variable_values || !jacobian_out) return -1;
+    if (function_count == 0 || num_variables == 0) return -1;
+
+    size_t m = function_count;
+    size_t n = num_variables;
+
+    for (size_t i = 0; i < m; i++) {
+        if (!functions[i]) {
+            /* 无效函数，该行填充NaN */
+            for (size_t j = 0; j < n; j++) {
+                jacobian_out[i * n + j] = NAN;
+            }
+            continue;
+        }
+        for (size_t j = 0; j < n; j++) {
+            double val = partial_derivative(functions[i], variable_names,
+                                             variable_values, num_variables,
+                                             variable_names[j]);
+            jacobian_out[i * n + j] = val;
+        }
+    }
+
+    return 0;
+}
+
 MathExpressionNode* expression_substitute(const MathExpressionNode* node,
                                           const char* variable_name,
                                           const MathExpressionNode* replacement) {

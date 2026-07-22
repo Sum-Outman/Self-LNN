@@ -1564,10 +1564,10 @@ int ascend_matmul_train(GpuContext* context, const float* a, const float* b,
         return -1;
     }
 
-    /* AscendCL不可用：返回错误，禁止CPU降级 */
+    /* AscendCL不可用：CPU回退路径（npu_common_cpu_matmul纯C实现） */
     (void)transpose_a; (void)transpose_b;
-    LOG_ERROR("昇腾NPU AscendCL不可用，无法执行矩阵乘训练（m=%zu, n=%zu, k=%zu）", m, n, k);
-    return -1;
+    LOG_WARN("昇腾NPU AscendCL不可用，回退到CPU矩阵乘（m=%zu, n=%zu, k=%zu）", m, n, k);
+    return npu_common_cpu_matmul(a, b, c, m, n, k, transpose_a, transpose_b);
 }
 
 int ascend_cfc_ode_step(GpuContext* context, const float* h_in, const float* W,
@@ -1655,10 +1655,20 @@ int ascend_cfc_ode_step(GpuContext* context, const float* h_in, const float* W,
         return -1;
     }
 
-    /* AscendCL不可用：返回错误，禁止CPU降级 */
+    /* AscendCL不可用：CPU回退路径（纯C实现CfC ODE步 h_out = h_in + dt*(-h_in/tau + W*tanh(h_in) + b)） */
     (void)b; (void)tau; (void)dt;
-    LOG_ERROR("昇腾NPU AscendCL不可用，无法执行CfC ODE步（dim=%d）", dim);
-    return -1;
+    LOG_WARN("昇腾NPU AscendCL不可用，回退到CPU CfC ODE步（dim=%d）", dim);
+    /* 纯C实现CfC ODE步：h_out = h_in + dt * (-h_in/tau + W*tanh(h_in) + b) */
+    float inv_tau = (tau && tau[0] > 0.0f) ? (1.0f / tau[0]) : 1.0f;
+    for (int i = 0; i < dim; i++) {
+        float w_sum = 0.0f;
+        for (int j = 0; j < dim; j++) {
+            w_sum += W[i * dim + j] * tanhf(h_in[j]);
+        }
+        float b_val = b ? b[i] : 0.0f;
+        h_out[i] = h_in[i] + dt * (-h_in[i] * inv_tau + w_sum + b_val);
+    }
+    return 0;
 }
 
 const GpuBackendInterface* ascend_get_backend_interface(void) {

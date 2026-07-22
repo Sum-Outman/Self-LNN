@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file voice_motion_control.c
  * @brief 实时语音指令运动控制完整实现
  */
@@ -473,4 +473,160 @@ int voice_motion_list_commands(const VoiceMotionControl* vmc, char* buffer, size
 
 static int voice_motion_get_dict_count(const VoiceMotionControl* vmc) {
     return vmc ? vmc->dict_count : -1;
+}
+
+/* ================================================================
+ * M-007修复: 语音指令控制运动集成增强
+ *
+ * 增强功能:
+ *   1. 上下文感知命令处理 - 考虑机器人当前状态和环境
+ *   2. 执行反馈循环 - 基于实际执行状态更新进度
+ *   3. 命令链 - 支持复杂多步骤运动序列
+ *   4. 碰撞避免 - 基本安全距离检查
+ * ================================================================ */
+
+/* 机器人状态上下文 */
+typedef struct {
+    float position[3];       /* 当前位置 (x, y, z) */
+    float orientation[3];    /* 当前朝向 (roll, pitch, yaw) */
+    float velocity[3];       /* 当前速度 */
+    float joint_angles[6];   /* 关节角度 */
+    float battery_level;     /* 电量 (0-100) */
+    float obstacle_distance; /* 最近障碍物距离 */
+    int is_moving;           /* 是否正在运动 */
+    int gripper_state;       /* 0=空闲, 1=抓取中, 2=已抓取 */
+    time_t last_update;      /* 最后更新时间 */
+} RobotContext;
+
+/* 上下文感知命令处理 */
+int voice_motion_process_with_context(VoiceMotionControl* vmc,
+                                       const char* text,
+                                       const RobotContext* context,
+                                       MotionCommand* cmd) {
+    /* 先执行基本文本解析 */
+    int result = voice_motion_process_text(vmc, text, cmd);
+    if (result != 0 || !cmd) return result;
+
+    if (!context) return result; /* 无上下文时使用默认行为 */
+
+    /* 上下文安全调整 */
+    /* 1. 低电量限制：电量低于15%时限制移动速度 */
+    if (context->battery_level < 15.0f && context->battery_level > 0.0f) {
+        if (cmd->type == MOTION_CMD_MOVE || cmd->type == MOTION_CMD_SPEED) {
+            float limit = context->battery_level / 15.0f * 0.3f;
+            if (cmd->param1 > limit) cmd->param1 = limit;
+            cmd->confidence *= 0.7f;
+        }
+    }
+
+    /* 2. 障碍物避让：前方有障碍物时限制前进命令 */
+    if (context->obstacle_distance > 0.0f && context->obstacle_distance < 0.5f) {
+        if (cmd->type == MOTION_CMD_MOVE && cmd->param1 > 0.0f) {
+            /* 障碍物太近，拒绝前进，转为停止 */
+            cmd->type = MOTION_CMD_STOP;
+            cmd->param1 = 0.0f;
+            cmd->confidence = 1.0f;
+            snprintf(cmd->raw_text, sizeof(cmd->raw_text),
+                     "前方%.1f米有障碍物，已自动停止", context->obstacle_distance);
+        }
+    }
+
+    /* 3. 抓取状态感知：已抓取物体时调整释放命令 */
+    if (context->gripper_state == 2 && cmd->type == MOTION_CMD_GRIP) {
+        /* 已抓取物体，再次抓取命令转为确认 */
+        cmd->confidence *= 0.5f;
+    }
+
+    /* 4. 运动中调整：如果正在运动，新命令并发执行 */
+    if (context->is_moving) {
+        cmd->confidence = (cmd->confidence > 0.5f) ? 0.8f : cmd->confidence;
+    }
+
+    return 0;
+}
+
+/* 带反馈的执行 */
+int voice_motion_execute_with_feedback(VoiceMotionControl* vmc,
+                                        const MotionCommand* cmd,
+                                        const RobotContext* context) {
+    int exec_result = voice_motion_execute(vmc, cmd);
+    if (exec_result != 0) return exec_result;
+
+    if (!context) return 0;
+
+    /* 根据上下文估算更准确的执行时间 */
+    if (cmd->type == MOTION_CMD_MOVE) {
+        /* 考虑当前速度估算剩余时间 */
+        float current_speed = sqrtf(context->velocity[0] * context->velocity[0] +
+                                     context->velocity[1] * context->velocity[1] +
+                                     context->velocity[2] * context->velocity[2]);
+        if (current_speed > 0.01f) {
+            float est_time = fabsf(cmd->param1) / (current_speed + 0.1f);
+            vmc->current_exec.est_completion = time(NULL) + (time_t)(est_time + 0.5f);
+        }
+    } else if (cmd->type == MOTION_CMD_TURN) {
+        /* 基于角速度估算 */
+        float yaw_rate = fabsf(context->velocity[2]); /* 使用偏航角速度 */
+        if (yaw_rate > 0.01f) {
+            float est_time = fabsf(cmd->param1) / yaw_rate;
+            vmc->current_exec.est_completion = time(NULL) + (time_t)(est_time + 0.5f);
+        }
+    }
+
+    return 0;
+}
+
+/* 获取执行反馈描述 */
+int voice_motion_get_execution_feedback(const VoiceMotionControl* vmc,
+                                         char* feedback, size_t feedback_size) {
+    if (!vmc || !feedback || feedback_size == 0) return -1;
+
+    if (!vmc->current_exec.is_executing) {
+        snprintf(feedback, feedback_size, "空闲");
+        return 0;
+    }
+
+    float progress;
+    voice_motion_get_progress((VoiceMotionControl*)vmc, &progress);
+
+    const char* type_names[] = {
+        "移动", "转向", "停止", "变速", "抓取",
+        "释放", "举升", "降低", "跟随", "巡逻", "未知"
+    };
+    const char* type_name = (vmc->current_exec.type < 11) ?
+        type_names[vmc->current_exec.type] : "未知";
+
+    snprintf(feedback, feedback_size,
+             "执行中: %s (进度: %.0f%%, 目标: %.2f, 当前: %.2f)",
+             type_name, progress * 100.0f,
+             vmc->current_exec.target_value, vmc->current_exec.current_value);
+    return 0;
+}
+
+/* 命令链执行：按顺序执行多个命令 */
+int voice_motion_execute_chain(VoiceMotionControl* vmc,
+                                const MotionCommand* commands,
+                                size_t num_commands,
+                                const RobotContext* context) {
+    if (!vmc || !commands || num_commands == 0) return -1;
+
+    for (size_t i = 0; i < num_commands; i++) {
+        /* 等待上一个命令完成 */
+        while (vmc->current_exec.is_executing) {
+            float progress;
+            voice_motion_get_progress(vmc, &progress);
+            if (progress >= 1.0f) break;
+#ifdef _WIN32
+            Sleep(50);
+#else
+            usleep(50000);
+#endif
+        }
+
+        /* 执行当前命令 */
+        int result = voice_motion_execute_with_feedback(vmc, &commands[i], context);
+        if (result != 0) return result;
+    }
+
+    return 0;
 }

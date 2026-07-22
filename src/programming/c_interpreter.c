@@ -36,6 +36,8 @@
 #define CI_MAX_MEM_BLOCKS 256  /* M-026: 最大内存块数量 */
 #define CI_MAX_LOOP_ITERATIONS 100000  /* P-P1-16: 循环最大迭代次数，防止死循环挂起AGI线程 */
 #define CI_MAX_CALL_DEPTH 256  /* P-P2-17: 递归最大调用深度，防止嵌套块栈溢出 */
+#define CI_MAX_USER_FUNCS 32   /* M-011: 用户自定义函数最大数量 */
+#define CI_MAX_FUNC_PARAMS 8   /* M-011: 用户函数最大参数数量 */
 
 /* 变量类型 — P2-006扩展：添加CI_VAR_BOOL支持 */
 typedef enum {
@@ -116,7 +118,9 @@ typedef enum {
     CI_TOK_AND = 28,       /* && 逻辑与 */
     CI_TOK_OR = 29,        /* || 逻辑或 */
     CI_TOK_NOT = 30,       /* ! 逻辑非 */
-    CI_TOK_NOT_EQ = 31     /* != 不等于 */
+    CI_TOK_NOT_EQ = 31,    /* != 不等于 */
+    CI_TOK_DEF = 32,       /* M-011: def 函数定义关键字 */
+    CI_TOK_RETURN = 33     /* M-011: return 返回关键字 */
 } CiTokenType;
 
 typedef struct {
@@ -124,6 +128,16 @@ typedef struct {
     float num_val;
     char ident[64];
 } CiToken;
+
+/* M-011: 用户自定义函数定义（必须在CiInterpreter之前定义，因为CiInterpreter包含其数组） */
+typedef struct {
+    char name[CI_MAX_FUNC_NAME];           /**< 函数名 */
+    char param_names[CI_MAX_FUNC_PARAMS][64]; /**< 参数名列表 */
+    int param_count;                       /**< 参数数量 */
+    int body_start_token;                  /**< 函数体起始token索引 */
+    int body_end_token;                    /**< 函数体结束token索引(不含'}' ) */
+    int is_defined;                        /**< 是否已定义 */
+} CiUserFunction;
 
 /* 解释器状态 */
 typedef struct {
@@ -141,6 +155,11 @@ typedef struct {
     char error_msg[256];
     CiMemoryPool mem;         /* M-026: 解释器内存池 */
     int call_depth;           /* P-P2-17: 当前递归调用深度(用于_parse_block嵌套保护) */
+    /* M-011: 用户自定义函数支持 */
+    CiUserFunction user_funcs[CI_MAX_USER_FUNCS]; /**< 用户函数注册表 */
+    int user_func_count;                           /**< 已注册用户函数数量 */
+    float return_value;                            /**< 函数返回值 */
+    int has_return;                                /**< 是否已执行return语句 */
 } CiInterpreter;
 
 /* 内置数学函数（单参数float→float） */
@@ -452,7 +471,14 @@ static int _ci_tokenize(CiInterpreter* ci) {
             if (len >= 63) len = 63;
             memcpy(ci->tokens[ci->token_count].ident, ci->source + start, len);
             ci->tokens[ci->token_count].ident[len] = '\0';
-            ci->tokens[ci->token_count].type = CI_TOK_IDENT;
+            /* M-011: 关键字检测 —— def和return映射为专用Token类型 */
+            if (strcmp(ci->tokens[ci->token_count].ident, "def") == 0) {
+                ci->tokens[ci->token_count].type = CI_TOK_DEF;
+            } else if (strcmp(ci->tokens[ci->token_count].ident, "return") == 0) {
+                ci->tokens[ci->token_count].type = CI_TOK_RETURN;
+            } else {
+                ci->tokens[ci->token_count].type = CI_TOK_IDENT;
+            }
             ci->token_count++;
             continue;
         }
@@ -658,6 +684,10 @@ static int _ci_expect_tok(CiInterpreter* ci, CiTokenType type) {
 
 static float _ci_expr(CiInterpreter* ci);
 
+/* M-011: 前向声明 —— _ci_primary调用_ci_call_user_function，后者定义在控制流区域 */
+static float _ci_call_user_function(CiInterpreter* ci, const char* func_name,
+                                     float* args, int arg_count);
+
 /* 基本单元: 数字 | 标识符[可能带下标] | ( 表达式 ) */
 static float _ci_primary(CiInterpreter* ci) {
     CiToken* tok = _ci_current(ci);
@@ -704,9 +734,37 @@ static float _ci_primary(CiInterpreter* ci) {
             if (_ci_current(ci)->type == CI_TOK_RBRACKET) _ci_next(ci); /* 跳过] */
             return _ci_get_array_elem(ci, name, idx);
         }
-        /* 检查是否为内置函数调用 */
+        /* 检查是否为函数调用 */
         if (_ci_current(ci)->type == CI_TOK_LPAREN) {
             _ci_next(ci); /* 跳过( */
+
+            /* M-011: 优先检查用户自定义函数 */
+            {
+                int is_user_func = 0;
+                for (int k = 0; k < ci->user_func_count; k++) {
+                    if (ci->user_funcs[k].is_defined &&
+                        strcmp(name, ci->user_funcs[k].name) == 0) {
+                        is_user_func = 1;
+                        break;
+                    }
+                }
+                if (is_user_func) {
+                    /* 解析参数列表 */
+                    float args[CI_MAX_FUNC_PARAMS];
+                    int arg_count = 0;
+                    if (_ci_current(ci)->type != CI_TOK_RPAREN) {
+                        args[arg_count++] = _ci_expr(ci);
+                        while (_ci_current(ci)->type == CI_TOK_COMMA &&
+                               arg_count < CI_MAX_FUNC_PARAMS) {
+                            _ci_next(ci);  /* 跳过逗号 */
+                            args[arg_count++] = _ci_expr(ci);
+                        }
+                    }
+                    if (_ci_current(ci)->type == CI_TOK_RPAREN)
+                        _ci_next(ci);  /* 跳过')' */
+                    return _ci_call_user_function(ci, name, args, arg_count);
+                }
+            }
 
             /* M-026: 先检查多参数内置函数，使用源文本解析逗号分隔参数 */
             int is_multi = 0;
@@ -966,8 +1024,10 @@ static float _ci_exec_statement(CiInterpreter* ci) {
     /* P1修复1: 检测控制流关键字和代码块，委托给_ci_statement处理
      * 原实现仅处理赋值和表达式语句，从不进入if/for/while/{块路径，
      * 导致从公共API self_programming_interpret_expr()无法执行控制流语句。
-     * 此处在入口处增加对{块和if/for/while关键字的检测（基于token，带词边界）。 */
+     * 此处在入口处增加对{块和if/for/while/def/return关键字的检测（基于token，带词边界）。 */
     if (tok->type == CI_TOK_LBRACE ||
+        tok->type == CI_TOK_DEF ||      /* M-011: 函数定义 */
+        tok->type == CI_TOK_RETURN ||   /* M-011: 返回语句 */
         (tok->type == CI_TOK_IDENT &&
          (strcmp(tok->ident, "if") == 0 ||
           strcmp(tok->ident, "for") == 0 ||
@@ -1056,6 +1116,12 @@ static void _ci_skip_statement(CiInterpreter* ci) {
             _ci_next(ci);
             tok = _ci_current(ci);
         } while (depth > 0 && tok->type != CI_TOK_EOF);
+    } else if (tok->type == CI_TOK_DEF) {
+        /* M-011: 跳过函数定义: def name(params) {body} */
+        _ci_next(ci);             /* 消费def */
+        _ci_next(ci);             /* 消费函数名 */
+        _ci_skip_paren(ci);       /* 跳过(params) */
+        _ci_skip_statement(ci);   /* 跳过{body} */
     } else if (tok->type == CI_TOK_IDENT && strcmp(tok->ident, "if") == 0) {
         /* 跳过嵌套if语句: if (cond) stmt [else stmt] */
         _ci_next(ci);             /* 消费if */
@@ -1093,6 +1159,256 @@ static void _ci_skip_paren(CiInterpreter* ci) {
     } while (depth > 0 && _ci_current(ci)->type != CI_TOK_EOF);
 }
 
+/* ============================================================================
+ * M-011: 用户自定义函数支持
+ *
+ * 实现 def 函数定义、return 返回、函数调用（参数绑定 + 局部作用域）。
+ * 调用栈深度使用已有的 CI_MAX_CALL_DEPTH 256 保护。
+ * ============================================================================ */
+
+/**
+ * @brief M-011: 解析函数定义
+ *
+ * 语法: def functionName(param1, param2, ...) { body }
+ * 'def'关键字已由调用者消费。
+ *
+ * @param ci 解释器状态
+ * @return 0成功，-1失败
+ */
+static int _ci_parse_function_def(CiInterpreter* ci) {
+    /* 期望函数名 */
+    CiToken* name_tok = _ci_current(ci);
+    if (name_tok->type != CI_TOK_IDENT) {
+        ci->has_error = 1;
+        snprintf(ci->error_msg, sizeof(ci->error_msg), "行%d: 函数定义缺少函数名", ci->lineno);
+        return -1;
+    }
+
+    if (ci->user_func_count >= CI_MAX_USER_FUNCS) {
+        ci->has_error = 1;
+        snprintf(ci->error_msg, sizeof(ci->error_msg),
+                 "用户函数数量超过上限%d", CI_MAX_USER_FUNCS);
+        return -1;
+    }
+
+    CiUserFunction* uf = &ci->user_funcs[ci->user_func_count];
+    strncpy(uf->name, name_tok->ident, CI_MAX_FUNC_NAME - 1);
+    uf->name[CI_MAX_FUNC_NAME - 1] = '\0';
+    uf->is_defined = 0;
+    uf->param_count = 0;
+    _ci_next(ci);  /* 消费函数名 */
+
+    /* 期望 '(' */
+    if (!_ci_expect_tok(ci, CI_TOK_LPAREN)) {
+        ci->has_error = 1;
+        snprintf(ci->error_msg, sizeof(ci->error_msg),
+                 "函数'%s'定义缺少'('", uf->name);
+        return -1;
+    }
+
+    /* 解析参数列表: param1, param2, ..., paramN */
+    if (_ci_current(ci)->type != CI_TOK_RPAREN) {
+        /* 读取第一个参数 */
+        CiToken* param = _ci_current(ci);
+        if (param->type == CI_TOK_IDENT) {
+            strncpy(uf->param_names[uf->param_count], param->ident, 63);
+            uf->param_names[uf->param_count][63] = '\0';
+            uf->param_count++;
+            _ci_next(ci);
+        } else {
+            ci->has_error = 1;
+            snprintf(ci->error_msg, sizeof(ci->error_msg),
+                     "函数'%s'参数名无效", uf->name);
+            return -1;
+        }
+        /* 读取后续参数 */
+        while (_ci_current(ci)->type == CI_TOK_COMMA &&
+               uf->param_count < CI_MAX_FUNC_PARAMS) {
+            _ci_next(ci);  /* 消费逗号 */
+            param = _ci_current(ci);
+            if (param->type == CI_TOK_IDENT) {
+                strncpy(uf->param_names[uf->param_count], param->ident, 63);
+                uf->param_names[uf->param_count][63] = '\0';
+                uf->param_count++;
+                _ci_next(ci);
+            } else {
+                ci->has_error = 1;
+                snprintf(ci->error_msg, sizeof(ci->error_msg),
+                         "函数'%s'参数%d名无效", uf->name, uf->param_count + 1);
+                return -1;
+            }
+        }
+    }
+
+    /* 期望 ')' */
+    if (!_ci_expect_tok(ci, CI_TOK_RPAREN)) {
+        ci->has_error = 1;
+        snprintf(ci->error_msg, sizeof(ci->error_msg),
+                 "函数'%s'参数列表缺少')'", uf->name);
+        return -1;
+    }
+
+    /* 期望 '{' */
+    if (!_ci_expect_tok(ci, CI_TOK_LBRACE)) {
+        ci->has_error = 1;
+        snprintf(ci->error_msg, sizeof(ci->error_msg),
+                 "函数'%s'体缺少'{'", uf->name);
+        return -1;
+    }
+
+    /* 记录函数体起始位置（'{'之后第一个token） */
+    uf->body_start_token = ci->token_pos;
+
+    /* 跳过函数体到匹配的'}' */
+    int depth = 1;
+    while (depth > 0 && _ci_current(ci)->type != CI_TOK_EOF) {
+        if (_ci_current(ci)->type == CI_TOK_LBRACE) depth++;
+        else if (_ci_current(ci)->type == CI_TOK_RBRACE) depth--;
+        if (depth > 0) _ci_next(ci);
+    }
+
+    if (depth > 0) {
+        ci->has_error = 1;
+        snprintf(ci->error_msg, sizeof(ci->error_msg),
+                 "函数'%s'体缺少'}'", uf->name);
+        return -1;
+    }
+
+    uf->body_end_token = ci->token_pos;  /* 记录'}'的位置 */
+    _ci_expect_tok(ci, CI_TOK_RBRACE);   /* 消费'}' */
+
+    uf->is_defined = 1;
+    ci->user_func_count++;
+
+    return 0;
+}
+
+/**
+ * @brief M-011: 解析return语句
+ *
+ * 语法: return [expression];
+ * 'return'关键字已由调用者消费。
+ *
+ * @param ci 解释器状态
+ * @return 返回值
+ */
+static float _ci_parse_return(CiInterpreter* ci) {
+    float result = 0.0f;
+
+    /* 可选表达式 */
+    if (_ci_current(ci)->type != CI_TOK_SEMI) {
+        result = _ci_expr(ci);
+    }
+
+    /* 消费分号 */
+    if (_ci_current(ci)->type == CI_TOK_SEMI) {
+        _ci_next(ci);
+    }
+
+    ci->has_return = 1;
+    ci->return_value = result;
+    return result;
+}
+
+/**
+ * @brief M-011: 调用用户自定义函数
+ *
+ * 执行流程:
+ *   1. 查找函数定义
+ *   2. 参数数量校验
+ *   3. 保存当前变量作用域（var_count快照）
+ *   4. 绑定参数为局部变量
+ *   5. 执行函数体token序列
+ *   6. 恢复变量作用域
+ *   7. 返回return_value
+ *
+ * @param ci      解释器状态
+ * @param func_name 函数名
+ * @param args      参数值数组
+ * @param arg_count 参数数量
+ * @return 函数返回值
+ */
+static float _ci_call_user_function(CiInterpreter* ci, const char* func_name,
+                                     float* args, int arg_count) {
+    /* 查找函数定义 */
+    CiUserFunction* uf = NULL;
+    for (int i = 0; i < ci->user_func_count; i++) {
+        if (strcmp(ci->user_funcs[i].name, func_name) == 0 &&
+            ci->user_funcs[i].is_defined) {
+            uf = &ci->user_funcs[i];
+            break;
+        }
+    }
+
+    if (!uf) return 0.0f;  /* 函数未定义 */
+
+    /* 参数数量校验 */
+    if (arg_count != uf->param_count) {
+        ci->has_error = 1;
+        snprintf(ci->error_msg, sizeof(ci->error_msg),
+                 "函数'%s'参数数量不匹配: 期望%d个, 实际%d个",
+                 func_name, uf->param_count, arg_count);
+        return 0.0f;
+    }
+
+    /* 调用深度保护 */
+    if (ci->call_depth >= CI_MAX_CALL_DEPTH) {
+        ci->has_error = 1;
+        snprintf(ci->error_msg, sizeof(ci->error_msg),
+                 "函数调用深度超过上限%d", CI_MAX_CALL_DEPTH);
+        return 0.0f;
+    }
+
+    /* 保存当前变量作用域 */
+    int saved_var_count = ci->var_count;
+    int saved_call_depth = ci->call_depth;
+    ci->call_depth++;
+
+    /* 绑定参数为局部变量（遮蔽外层同名变量） */
+    for (int i = 0; i < uf->param_count; i++) {
+        CiVariable* v = _ci_add_var(ci, uf->param_names[i]);
+        if (v) {
+            v->fval = args[i];
+            v->type = CI_VAR_FLOAT;
+        }
+    }
+
+    /* 重置返回状态 */
+    ci->has_return = 0;
+    ci->return_value = 0.0f;
+
+    /* 保存当前token位置，执行函数体 */
+    int saved_token_pos = ci->token_pos;
+    ci->token_pos = uf->body_start_token;
+
+    int iter_count = 0;
+    while (ci->token_pos < uf->body_end_token &&
+           ci->token_pos < ci->token_count &&
+           !ci->has_return) {
+        /* 防止函数体内的死循环 */
+        if (++iter_count > CI_MAX_LOOP_ITERATIONS) {
+            log_warn("[C解释器] 函数'%s'执行超过最大迭代上限%d，强制终止",
+                     func_name, CI_MAX_LOOP_ITERATIONS);
+            break;
+        }
+        int prev_pos = ci->token_pos;
+        _ci_statement(ci);
+        if (ci->token_pos == prev_pos) {
+            _ci_next(ci);  /* 防止卡死 */
+        }
+    }
+
+    float result = ci->return_value;
+
+    /* 恢复变量作用域（弹出局部变量） */
+    ci->var_count = saved_var_count;
+    ci->call_depth = saved_call_depth;
+    ci->token_pos = saved_token_pos;
+    ci->has_return = 0;
+
+    return result;
+}
+
 /* ---- 控制流 区块/语句/if/for/while ----
  * P1修复1/2/5: 全部改为token-based解析，消除source[pos]与token_pos不同步问题。
  * 关键字检测通过token的ident字段精确匹配（tokenizer已处理词边界），
@@ -1103,6 +1419,19 @@ static float _ci_statement(CiInterpreter* ci) {
     /* {代码块} */
     if (tok->type == CI_TOK_LBRACE) {
         return (float)_ci_parse_block(ci);
+    }
+
+    /* M-011: def函数定义关键字（专用Token类型，精确匹配） */
+    if (tok->type == CI_TOK_DEF) {
+        _ci_next(ci);  /* 消费"def"关键字token */
+        _ci_parse_function_def(ci);
+        return 0.0f;  /* 函数定义不产生返回值 */
+    }
+
+    /* M-011: return返回关键字（专用Token类型，精确匹配） */
+    if (tok->type == CI_TOK_RETURN) {
+        _ci_next(ci);  /* 消费"return"关键字token */
+        return _ci_parse_return(ci);
     }
 
     /* 控制流关键字检测（token精确匹配，自带词边界） */
@@ -1373,7 +1702,7 @@ int self_programming_interpreter_available(void) {
  * @return 解释器能力字符串
  */
 const char* self_programming_interpreter_capability(void) {
-    return "C子集解释器: 算术/比较/赋值/复合赋值/数组下标/指针解引用/结构体成员/print/printf/malloc/free/strcpy/memset/memcpy/if/for/while/sin/cos/sqrt/abs/rand";
+    return "C子集解释器: 算术/比较/赋值/复合赋值/数组下标/指针解引用/结构体成员/用户函数定义(def)/返回值(return)/print/printf/malloc/free/strcpy/memset/memcpy/if/for/while/sin/cos/sqrt/abs/rand/tan/log/exp/floor/ceil";
 }
 
 /**

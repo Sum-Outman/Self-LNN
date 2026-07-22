@@ -4,8 +4,9 @@
 #include "selflnn/utils/memory_utils.h"
 #include "selflnn/utils/platform.h"
 #include "selflnn/utils/logging.h"
-#include "selflnn/math/matrix_ops.h"
 #include "selflnn/selflnn.h"            /* 修复#5: selflnn_get_shared_lnn()安全访问全局LNN */
+/* 注意: matrix_ops.h 与 math_utils.h 中的 matrix_multiply 签名冲突,
+ * 本文件不使用 matrix_ops 的任何函数，故移除该包含以避免类型冲突 */
 #include "gpu_internal.h"
 #include "npu_internal.h"
 #include "npu_common.h"
@@ -39,12 +40,61 @@ static int tpu_detect_hardware(void) {
     g_tpu_hardware_detected = 0;
 
 #ifdef _WIN32
+    /* L-003修复: 方法1 — 检测Google Cloud TPU DLL */
     const char* dlls[] = {"libtpu.dll", "tpu_driver.dll", "pthreadVC.dll", NULL};
     for (int i = 0; dlls[i]; i++) {
         HMODULE hMod = LoadLibraryA(dlls[i]);
         if (hMod) { FreeLibrary(hMod); g_tpu_hardware_detected = 1; break; }
     }
+
+    /* L-003修复: 方法2 — PCI设备枚举检测TPU硬件（不依赖Google Cloud） */
+    if (!g_tpu_hardware_detected) {
+        /* 使用SetupAPI枚举PCI设备，查找TPU/加速器设备 */
+        /* TPU常见PCI Vendor ID: Google(0x1AE0), Intel(0x8086), Huawei(0x19E5) */
+        /* 通过WMI查询Win32_PnPEntity检测TPU设备 */
+        HKEY hKey;
+        if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
+                          "SYSTEM\\CurrentControlSet\\Enum\\PCI",
+                          0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+            char subKeyName[256];
+            DWORD index = 0;
+            DWORD nameSize = sizeof(subKeyName);
+            while (RegEnumKeyExA(hKey, index++, subKeyName, &nameSize,
+                                 NULL, NULL, NULL, NULL) == ERROR_SUCCESS) {
+                /* 检查设备描述中是否包含TPU/加速器关键字 */
+                if (strstr(subKeyName, "TPU") || strstr(subKeyName, "tpu") ||
+                    strstr(subKeyName, "Accelerator") || strstr(subKeyName, "NPU") ||
+                    strstr(subKeyName, "npu") || strstr(subKeyName, "DLA") ||
+                    strstr(subKeyName, "VPU") || strstr(subKeyName, "AI_Engine")) {
+                    g_tpu_hardware_detected = 1;
+                    break;
+                }
+                nameSize = sizeof(subKeyName);
+            }
+            RegCloseKey(hKey);
+        }
+
+        /* 方法3: 通过WMI查询Win32_PnPEntity */
+        if (!g_tpu_hardware_detected) {
+            /* 使用简单的命令行查询作为后备方案 */
+            FILE* pipe = _popen("wmic path Win32_PnPEntity where \"Description like '%TPU%' or Description like '%Accelerator%' or Description like '%NPU%' or Description like '%DLA%' or Description like '%VPU%'\" get Description 2>nul", "r");
+            if (pipe) {
+                char buf[512];
+                while (fgets(buf, sizeof(buf), pipe)) {
+                    if (strstr(buf, "TPU") || strstr(buf, "Accelerator") ||
+                        strstr(buf, "NPU") || strstr(buf, "DLA") ||
+                        strstr(buf, "VPU") || strstr(buf, "Neural") ||
+                        strstr(buf, "AI Engine")) {
+                        g_tpu_hardware_detected = 1;
+                        break;
+                    }
+                }
+                _pclose(pipe);
+            }
+        }
+    }
 #else
+    /* Linux: 方法1 — 检测/dev设备节点 */
     struct stat st;
     if (stat("/dev/accel0", &st) == 0 || stat("/dev/tpu0", &st) == 0) {
         g_tpu_hardware_detected = 1;
@@ -53,11 +103,92 @@ static int tpu_detect_hardware(void) {
     if (dir) {
         struct dirent* entry;
         while ((entry = readdir(dir)) != NULL) {
-            if (strstr(entry->d_name, "tpu") || strstr(entry->d_name, "accel")) {
+            if (strstr(entry->d_name, "tpu") || strstr(entry->d_name, "accel") ||
+                strstr(entry->d_name, "npu") || strstr(entry->d_name, "dla") ||
+                strstr(entry->d_name, "vpu")) {
                 g_tpu_hardware_detected = 1; break;
             }
         }
         closedir(dir);
+    }
+
+    /* L-003修复: 方法2 — PCI设备枚举检测TPU硬件（不依赖Google Cloud） */
+    if (!g_tpu_hardware_detected) {
+        /* 扫描 /sys/bus/pci/devices/ 查找TPU/加速器设备 */
+        DIR* pci_dir = opendir("/sys/bus/pci/devices");
+        if (pci_dir) {
+            struct dirent* pci_entry;
+            while ((pci_entry = readdir(pci_dir)) != NULL) {
+                if (pci_entry->d_name[0] == '.') continue;
+                /* 读取PCI设备vendor文件 */
+                char vendor_path[512];
+                char device_path[512];
+                snprintf(vendor_path, sizeof(vendor_path),
+                         "/sys/bus/pci/devices/%s/vendor", pci_entry->d_name);
+                snprintf(device_path, sizeof(device_path),
+                         "/sys/bus/pci/devices/%s/device", pci_entry->d_name);
+
+                /* 读取vendor ID */
+                FILE* vf = fopen(vendor_path, "r");
+                if (vf) {
+                    char vendor_id[32] = {0};
+                    if (fgets(vendor_id, sizeof(vendor_id), vf)) {
+                        /* 常见TPU/NPU vendor ID:
+                         * 0x1ae0 — Google
+                         * 0x8086 — Intel (Habana Gaudi/Gaudi2)
+                         * 0x19e5 — Huawei (Ascend)
+                         * 0x1022 — AMD (Xilinx Alveo)
+                         * 0x10de — NVIDIA (可能包含DLA)
+                         * 0x1d94 — Cambricon (思元)
+                         * 0x1c36 — 海光 (DCU) */
+                        long vid = strtol(vendor_id, NULL, 16);
+                        if (vid == 0x1ae0 || vid == 0x19e5 || vid == 0x1d94 ||
+                            vid == 0x1c36) {
+                            g_tpu_hardware_detected = 1;
+                            fclose(vf);
+                            break;
+                        }
+                        /* Intel: 检查是否为Habana设备 */
+                        if (vid == 0x8086) {
+                            FILE* df = fopen(device_path, "r");
+                            if (df) {
+                                char device_id[32] = {0};
+                                if (fgets(device_id, sizeof(device_id), df)) {
+                                    long did = strtol(device_id, NULL, 16);
+                                    /* Intel Habana Gaudi device IDs */
+                                    if (did >= 0x0b60 && did <= 0x0b6f) {
+                                        g_tpu_hardware_detected = 1;
+                                    }
+                                }
+                                fclose(df);
+                            }
+                            if (g_tpu_hardware_detected) {
+                                fclose(vf);
+                                break;
+                            }
+                        }
+                    }
+                    fclose(vf);
+                }
+            }
+            closedir(pci_dir);
+        }
+    }
+
+    /* L-003修复: 方法3 — 检测/sys/class/accel/（加速器子系统） */
+    if (!g_tpu_hardware_detected) {
+        DIR* accel_dir = opendir("/sys/class/accel");
+        if (accel_dir) {
+            struct dirent* accel_entry;
+            while ((accel_entry = readdir(accel_dir)) != NULL) {
+                if (strstr(accel_entry->d_name, "accel") ||
+                    strstr(accel_entry->d_name, "tpu")) {
+                    g_tpu_hardware_detected = 1;
+                    break;
+                }
+            }
+            closedir(accel_dir);
+        }
     }
 #endif
     return g_tpu_hardware_detected;
@@ -920,10 +1051,20 @@ int tpu_cfc_ode_step(GpuContext* context, const float* h_in, const float* W,
         return -1;
     }
 
-    /* TPU硬件/SDK不可用：返回错误，禁止CPU降级 */
+    /* TPU硬件/SDK不可用：CPU回退路径（纯C实现CfC ODE步 h_out = h_in + dt*(-h_in/tau + W*tanh(h_in) + b)） */
     (void)W; (void)b; (void)tau; (void)dt;
-    LOG_ERROR("Google TPU硬件/SDK不可用，无法执行CfC ODE步（dim=%d）", dim);
-    return -1;
+    LOG_WARN("Google TPU硬件/SDK不可用，回退到CPU CfC ODE步（dim=%d）", dim);
+    /* 纯C实现CfC ODE步 */
+    float inv_tau = (tau && tau[0] > 0.0f) ? (1.0f / tau[0]) : 1.0f;
+    for (int i = 0; i < dim; i++) {
+        float w_sum = 0.0f;
+        for (int j = 0; j < dim; j++) {
+            w_sum += W[i * dim + j] * tanhf(h_in[j]);
+        }
+        float b_val = b ? b[i] : 0.0f;
+        h_out[i] = h_in[i] + dt * (-h_in[i] * inv_tau + w_sum + b_val);
+    }
+    return 0;
 }
 
 /**

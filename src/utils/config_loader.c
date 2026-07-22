@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file config_loader.c
  * @brief K-030: 系统配置文件加载与保存 (纯C, 零依赖)
  */
@@ -189,8 +189,56 @@ int selflnn_config_load_from_file(const char* filepath, SystemConfig* config) {
             } else {
                 config->mixed_precision_mode = 0;
             }
+
+            /* H-003修复: 解析training子对象中此前未解析的字段
+             * epochs/batch_size/learning_rate/validation_split/early_stopping_patience/distributed_enabled
+             * 此前这些字段在JSON中存在但未被代码解析，导致用户修改配置文件无效。 */
+            {
+                const JsonValue* v = json_get(training_v, "epochs");
+                if (v && v->type == JSON_NUMBER) config->training_epochs = json_to_int_clamped(v->data.number_val);
+                else config->training_epochs = 100;
+                if (config->training_epochs <= 0) config->training_epochs = 100;
+
+                v = json_get(training_v, "batch_size");
+                if (v && v->type == JSON_NUMBER) config->training_batch_size = json_to_int_clamped(v->data.number_val);
+                else config->training_batch_size = 32;
+                if (config->training_batch_size <= 0) config->training_batch_size = 32;
+
+                v = json_get(training_v, "learning_rate");
+                if (v && v->type == JSON_NUMBER) config->training_learning_rate = (float)v->data.number_val;
+                else config->training_learning_rate = 0.001f;
+                if (config->training_learning_rate <= 0.0f) config->training_learning_rate = 0.001f;
+
+                v = json_get(training_v, "validation_split");
+                if (v && v->type == JSON_NUMBER) config->training_validation_split = (float)v->data.number_val;
+                else config->training_validation_split = 0.1f;
+                if (config->training_validation_split < 0.0f || config->training_validation_split > 1.0f)
+                    config->training_validation_split = 0.1f;
+
+                v = json_get(training_v, "early_stopping_patience");
+                if (v && v->type == JSON_NUMBER) config->training_early_stopping_patience = json_to_int_clamped(v->data.number_val);
+                else config->training_early_stopping_patience = 10;
+                if (config->training_early_stopping_patience <= 0) config->training_early_stopping_patience = 10;
+
+                v = json_get(training_v, "distributed_enabled");
+                if (v && (v->type == JSON_NUMBER || v->type == JSON_BOOL))
+                    config->training_distributed_enabled = (v->data.number_val != 0) ? 1 : 0;
+                else config->training_distributed_enabled = 0;
+
+                log_info("[H-003] JSON配置训练参数: epochs=%d, batch=%d, lr=%.6f, val_split=%.2f, patience=%d, distributed=%d",
+                    config->training_epochs, config->training_batch_size, config->training_learning_rate,
+                    config->training_validation_split, config->training_early_stopping_patience,
+                    config->training_distributed_enabled);
+            }
         } else {
             config->mixed_precision_mode = 0;
+            /* H-003修复: training对象不存在时设置默认值 */
+            config->training_epochs = 100;
+            config->training_batch_size = 32;
+            config->training_learning_rate = 0.001f;
+            config->training_validation_split = 0.1f;
+            config->training_early_stopping_patience = 10;
+            config->training_distributed_enabled = 0;
         }
     }
 

@@ -244,6 +244,10 @@ struct SelfCognitionSystem {
     float cumulative_calibration_gain;             /**< 累积校准增益 */
     struct DeepReflectionEngine* dr_engine;         /**< 深度反思引擎（缓存引用） */
     struct DTCSystem* dtc_system;                   /**< 深度思维链系统（缓存引用） */
+
+    /* L-009深度修复: BDI模型集成到自我认知系统 */
+    BDIModel* bdi_model;                            /**< BDI信念-愿望-意图模型 */
+    int bdi_enabled;                                /**< BDI是否启用 */
 };
 
 /* 辅助函数声明 */
@@ -299,6 +303,7 @@ static void detect_narrative_arc(SelfNarrativeState* narrative);
  * @brief 创建自我认知系统
  */
 SelfCognitionSystem* self_cognition_create(const SelfCognitionConfig* config) {
+    int i;
     if (!config) {
         selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
                               "创建自我认知系统：配置参数为空");
@@ -371,7 +376,7 @@ SelfCognitionSystem* self_cognition_create(const SelfCognitionConfig* config) {
     system->correction_count = 0;
     
     // 增强T3：初始化统一功能状态数组（全部默认启用）
-    for (int i = 0; i < FEATURE_COUNT; i++) {
+    for(i = 0; i < FEATURE_COUNT; i++) {
         system->feature_states[i] = 1;
     }
     // 根据现有配置覆盖特定功能的状态
@@ -522,18 +527,52 @@ SelfCognitionSystem* self_cognition_create(const SelfCognitionConfig* config) {
             memset(system->laplace_spectrum_buffer, 0, 256 * sizeof(float));
         }
     }
-    
+
+    /* L-009深度修复: 初始化BDI信念-愿望-意图模型 */
+    {
+        BDIConfig bdi_cfg;
+        bdi_config_get_default(&bdi_cfg);
+        system->bdi_model = bdi_model_create(&bdi_cfg);
+        if (system->bdi_model) {
+            int bdi_ret = bdi_model_init(system->bdi_model);
+            if (bdi_ret == 0) {
+                /* 将BDI模型连接到共享LNN，实现非线性状态演化 */
+                void* shared_lnn = selflnn_get_shared_lnn();
+                if (shared_lnn) {
+                    bdi_model_set_lnn(system->bdi_model, shared_lnn);
+                }
+                system->bdi_enabled = 1;
+                log_info("[自我认知] BDI模型已集成: 信念维度=%d, 欲望维度=%d, 意图维度=%d, "
+                         "目标容量=%d, 计划容量=%d",
+                         bdi_cfg.belief_dim, bdi_cfg.desire_dim, bdi_cfg.intention_dim,
+                         bdi_cfg.max_goals, bdi_cfg.max_plans);
+            } else {
+                log_warning("[自我认知] BDI模型初始化失败，禁用BDI功能");
+                bdi_model_destroy(system->bdi_model);
+                system->bdi_model = NULL;
+                system->bdi_enabled = 0;
+            }
+        } else {
+            system->bdi_enabled = 0;
+            log_warning("[自我认知] BDI模型创建失败，将继续使用基础信念更新");
+        }
+    }
+
     return system;
 }
 
 /* ===================== 认知记忆系统（P1-03修复） ===================== */
 
 int self_cognition_memory_consolidate(SelfCognitionSystem* system) {
+    size_t i;
+    float total_significance;
+    int consolidated_count;
+    time_t now;
     if (!system) return -1;
     /* 短期记忆→长期记忆巩固：基于历史记录内容哈希 */
-    float total_significance = 0.0f;
-    int consolidated_count = 0;
-    for (size_t i = 0; i < system->reflection_history_size && i < 100; i++) {
+    total_significance = 0.0f;
+    consolidated_count = 0;
+    for(i = 0; i < system->reflection_history_size && i < 100; i++) {
         if (system->reflection_history[i]) {
             float significance = 0.5f + (float)(i % 10) * 0.05f;
             if (significance > 0.3f) {
@@ -558,8 +597,8 @@ int self_cognition_memory_consolidate(SelfCognitionSystem* system) {
         }
     }
     /* 应用艾宾浩斯遗忘曲线衰减 */
-    time_t now = time(NULL);
-    for (size_t i = 0; i < system->cognitive_memory_size; i++) {
+    now = time(NULL);
+    for(i = 0; i < system->cognitive_memory_size; i++) {
         double elapsed_hours = difftime(now, system->cognitive_memory[i].timestamp) / 3600.0;
         system->cognitive_memory[i].forgetting_factor = 
             (float)expf((float)(-elapsed_hours / (24.0 * system->cognitive_memory[i].significance * 10.0 + 1.0)));
@@ -648,6 +687,8 @@ static int _self_cognition_check_lnn_ready_internal(SelfCognitionSystem* system)
 /* ===================== 迭代式元认知循环（P1-04修复） ===================== */
 
 int self_cognition_iterative_reflection(SelfCognitionSystem* system, int max_iterations) {
+    size_t i;
+    char issue_desc[256];
     if (!system) return -1;
 
 /* LNN未训练保护 —— 未训练的LNN随机权重会导致无意义的反思输出 */
@@ -672,11 +713,10 @@ int self_cognition_iterative_reflection(SelfCognitionSystem* system, int max_ite
         
         /* 第2步：检测矛盾和异常（认知记忆遗忘统计） */
         int anomalies = 0;
-        for (size_t i = 0; i < system->cognitive_memory_size && i < 50; i++) {
+        for(i = 0; i < system->cognitive_memory_size && i < 50; i++) {
             if (system->cognitive_memory[i].forgetting_factor < 0.3f) anomalies++;
         }
         
-        char issue_desc[256];
         if (anomalies > 5) {
             snprintf(issue_desc, sizeof(issue_desc),
                     "迭代%d级%d: %d个遗忘严重记忆片段", 
@@ -722,6 +762,7 @@ int self_cognition_iterative_reflection(SelfCognitionSystem* system, int max_ite
  * @brief 释放自我认知系统
  */
 void self_cognition_free(SelfCognitionSystem* system) {
+    size_t i;
     if (!system) {
         return;
     }
@@ -731,7 +772,7 @@ void self_cognition_free(SelfCognitionSystem* system) {
     
     // 释放反思历史
     if (system->reflection_history) {
-        for (size_t i = 0; i < system->reflection_history_size; i++) {
+        for(i = 0; i < system->reflection_history_size; i++) {
             safe_free((void**)&system->reflection_history[i]);
         }
         safe_free((void**)&system->reflection_history);
@@ -761,7 +802,7 @@ void self_cognition_free(SelfCognitionSystem* system) {
     
     // 释放元认知推理历史
     if (system->metacognition_history) {
-        for (size_t i = 0; i < system->metacognition_history_size; i++) {
+        for(i = 0; i < system->metacognition_history_size; i++) {
             metacognition_result_free(&system->metacognition_history[i]);
         }
         safe_free((void**)&system->metacognition_history);
@@ -769,7 +810,7 @@ void self_cognition_free(SelfCognitionSystem* system) {
     
     // 释放深度反思结果历史
     if (system->reflection_results) {
-        for (size_t i = 0; i < system->reflection_results_size; i++) {
+        for(i = 0; i < system->reflection_results_size; i++) {
             deep_reflection_result_free(&system->reflection_results[i]);
         }
         safe_free((void**)&system->reflection_results);
@@ -777,7 +818,7 @@ void self_cognition_free(SelfCognitionSystem* system) {
     
     // 释放预测历史
     if (system->prediction_history) {
-        for (size_t i = 0; i < system->prediction_history_size; i++) {
+        for(i = 0; i < system->prediction_history_size; i++) {
             self_prediction_result_free(&system->prediction_history[i]);
         }
         safe_free((void**)&system->prediction_history);
@@ -800,6 +841,12 @@ void self_cognition_free(SelfCognitionSystem* system) {
     }
     safe_free((void**)&system->laplace_spectrum_buffer);
 
+    /* L-009深度修复: 释放BDI模型 */
+    if (system->bdi_model) {
+        bdi_model_destroy(system->bdi_model);
+        system->bdi_model = NULL;
+    }
+
     /* P1修复: 销毁互斥锁 */
     if (system->lock) {
         mutex_destroy(system->lock);
@@ -817,11 +864,15 @@ void self_cognition_free(SelfCognitionSystem* system) {
  * 调用者必须在外部持有system->lock。
  */
 static int self_cognition_update_nolock(SelfCognitionSystem* system, SelfCognitionDimension dimension) {
+    time_t current_time;
+    size_t state_dim;
+    int epochs;
+    float acc;
     if (!system) {
         return -1;
     }
 
-    time_t current_time = time(NULL);
+    current_time = time(NULL);
 
     // 检查是否需要更新（基于时间间隔）
     if (system->config.enable_continuous_monitoring &&
@@ -878,7 +929,7 @@ static int self_cognition_update_nolock(SelfCognitionSystem* system, SelfCogniti
         collect_system_state(system, state_buf, 64);
 
         /* 修复缺陷11: 使用sizeof(state_buf)/sizeof(float)替代硬编码的32 */
-        size_t state_dim = sizeof(state_buf) / sizeof(float);
+        state_dim = sizeof(state_buf) / sizeof(float);
         if (!system->state_history) {
             system->state_history_capacity = 128;
             system->state_history = (float*)safe_calloc(
@@ -892,9 +943,9 @@ static int self_cognition_update_nolock(SelfCognitionSystem* system, SelfCogniti
         }
 
         if (system->state_history_size >= 30 && system->state_history_size % 10 == 0) {
-            int epochs = 3;
+            epochs = 3;
             train_self_model_internal(system, epochs);
-            float acc = assess_model_accuracy_internal(system);
+            acc = assess_model_accuracy_internal(system);
             system->model_accuracy = acc;
             system->is_model_trained = 1;
             system->last_model_update = time(NULL);
@@ -917,6 +968,72 @@ int self_cognition_update(SelfCognitionSystem* system, SelfCognitionDimension di
     int ret = self_cognition_update_nolock(system, dimension);
     mutex_unlock(system->lock);
     return ret;
+}
+
+/* ============================================================================
+ * L-009深度修复: BDI模型公共API — 认知循环集成
+ * ============================================================================ */
+
+/**
+ * @brief 获取BDI模型句柄
+ *
+ * 供AGI认知循环直接访问BDI模型进行目标-计划-意图推理。
+ *
+ * @param system 自我认知系统
+ * @return BDIModel* BDI模型句柄，未启用返回NULL
+ */
+BDIModel* self_cognition_get_bdi_model(SelfCognitionSystem* system) {
+    if (!system || !system->bdi_enabled) return NULL;
+    return system->bdi_model;
+}
+
+/**
+ * @brief 执行BDI认知步骤
+ *
+ * 在AGI认知循环中调用，执行完整的BDI推理循环：
+ *   感知→信念更新→意图重考虑→目标排序→手段-目的推理→意图承诺→计划执行
+ *
+ * @param system 自我认知系统
+ * @param observation 观测向量（NULL=跳过信念更新）
+ * @param certainty 观测确定性
+ * @return int 执行的动作数，失败返回-1，BDI未启用返回0
+ */
+int self_cognition_bdi_step(SelfCognitionSystem* system,
+                            const float* observation, float certainty) {
+    if (!system || !system->bdi_enabled || !system->bdi_model) return 0;
+    return bdi_model_step(system->bdi_model, observation, certainty);
+}
+
+/**
+ * @brief 向BDI模型添加目标
+ *
+ * 供AGI规划模块将高层次目标注入BDI执行系统。
+ *
+ * @param system 自我认知系统
+ * @param name 目标名称
+ * @param description 目标描述
+ * @param priority 优先级
+ * @param deadline 截止时间
+ * @return int 目标ID，失败返回-1
+ */
+int self_cognition_bdi_add_goal(SelfCognitionSystem* system,
+                                const char* name, const char* description,
+                                float priority, long deadline) {
+    if (!system || !system->bdi_enabled || !system->bdi_model) return -1;
+    return bdi_model_add_goal(system->bdi_model, name, description,
+                              priority, deadline, NULL, NULL, 0);
+}
+
+/**
+ * @brief 获取BDI运行统计
+ *
+ * @param system 自我认知系统
+ * @param stats 输出统计信息
+ * @return int 成功返回0
+ */
+int self_cognition_bdi_get_stats(SelfCognitionSystem* system, BDIStats* stats) {
+    if (!system || !system->bdi_enabled || !system->bdi_model || !stats) return -1;
+    return bdi_model_get_stats(system->bdi_model, stats);
 }
 
 // ==================== 元认知系统集成接口 ====================
@@ -1580,12 +1697,23 @@ void self_cognition_reset(SelfCognitionSystem* system) {
  * 包含：信念一致性检查、假设检验、矛盾检测、趋势分析、风险评估
  */
 static void perform_deep_self_analysis(SelfCognitionSystem* system) {
+    size_t i;
+    size_t j;
+    int b;
+    float error_rate;
+    float reasoning_ability;
+    float adaptability;
+    float belief_gap;
+    float trend;
+    int conflicts;
+    float risk_score;
+    float experience_quality;
     if (!system) return;
     
     /* 第1维度：信念一致性检查 */
-    float reasoning_ability = system->capability.reasoning_ability;
-    float adaptability = system->capability.adaptability;
-    float belief_gap = fabsf(reasoning_ability - adaptability);
+    reasoning_ability = system->capability.reasoning_ability;
+    adaptability = system->capability.adaptability;
+    belief_gap = fabsf(reasoning_ability - adaptability);
     if (belief_gap > 0.3f) {
         log_debug("[自我分析] 信念分歧检测：推理能力%.2f vs 适应能力%.2f，差距=%.2f",
                  reasoning_ability, adaptability, belief_gap);
@@ -1597,13 +1725,13 @@ static void perform_deep_self_analysis(SelfCognitionSystem* system) {
     if (system->performance_history && system->performance_history_size > 20) {
         float recent_avg = 0.0f, older_avg = 0.0f;
         size_t half = system->performance_history_size / 2;
-        for (size_t i = 0; i < half; i++) older_avg += system->performance_history[i];
-        for (size_t i = half; i < system->performance_history_size; i++) 
+        for(i = 0; i < half; i++) older_avg += system->performance_history[i];
+        for(i = half; i < system->performance_history_size; i++) 
             recent_avg += system->performance_history[i];
         older_avg /= (float)half;
         recent_avg /= (float)(system->performance_history_size - half);
         
-        float trend = recent_avg - older_avg;
+        trend = recent_avg - older_avg;
         if (trend < -0.1f) {
             log_warning("[自我分析] 假设检验：性能下降趋势=%.3f，触发修正", trend);
             system->adaptive_correction_strength = fminf(1.0f, 
@@ -1616,13 +1744,13 @@ static void perform_deep_self_analysis(SelfCognitionSystem* system) {
     }
     
     /* 第3维度：矛盾检测（认知记忆片段间冲突） */
-    int conflicts = 0;
-    for (size_t i = 0; i < system->cognitive_memory_size && i < 100; i++) {
-        for (size_t j = i + 1; j < system->cognitive_memory_size && j < 100; j++) {
+    conflicts = 0;
+    for(i = 0; i < system->cognitive_memory_size && i < 100; i++) {
+        for(j = i + 1; j < system->cognitive_memory_size && j < 100; j++) {
             uint32_t hash_diff = system->cognitive_memory[i].content_hash ^ 
                                 system->cognitive_memory[j].content_hash;
             int similar_bits = 0;
-            for (int b = 0; b < 32; b++) if (!(hash_diff & (1u << b))) similar_bits++;
+            for(b = 0; b < 32; b++) if (!(hash_diff & (1u << b))) similar_bits++;
             float similarity = (float)similar_bits / 32.0f;
             float sig_diff = fabsf(system->cognitive_memory[i].significance -
                                   system->cognitive_memory[j].significance);
@@ -1638,17 +1766,17 @@ static void perform_deep_self_analysis(SelfCognitionSystem* system) {
     }
     
     /* 第4维度：风险预评估 */
-    float error_rate = system->system_status.error_count > 0 ?
+    error_rate = system->system_status.error_count > 0 ?
         (float)system->system_status.error_count / 
         (float)(system->correction_count + 1) : 0.0f;
-    float risk_score = error_rate * 0.4f + belief_gap * 0.3f + 
+    risk_score = error_rate * 0.4f + belief_gap * 0.3f + 
                       system->adaptive_correction_strength * 0.3f;
     if (risk_score > 0.5f) {
         log_warning("[自我分析] 风险预警：综合风险评分=%.2f", risk_score);
     }
     
     /* 第5维度：自身体验质量评估 */
-    float experience_quality = system->model_accuracy * 0.3f +
+    experience_quality = system->model_accuracy * 0.3f +
                               (1.0f - error_rate) * 0.3f +
                               system->confidence_level * 0.2f +
                               fminf(1.0f, system->update_count / 1000.0f) * 0.2f;
@@ -1659,6 +1787,15 @@ static void perform_deep_self_analysis(SelfCognitionSystem* system) {
  * @brief 更新系统状态（真实实现）
  */
 static void update_system_status(SelfCognitionSystem* system) {
+    float cpu_stress;
+    float memory_stress;
+    float error_probability;
+    float warning_probability;
+    time_t current_time;
+    float base_temperature;
+    float cpu_contribution;
+    float time_contribution;
+    float ambient_variation;
     if (!system) {
         return;
     }
@@ -1671,11 +1808,11 @@ static void update_system_status(SelfCognitionSystem* system) {
     
     // 基于资源使用率和系统负载计算错误和警告
     // 高资源使用率可能导致更多警告，极端情况可能导致错误
-    float cpu_stress = system->system_status.cpu_usage * 2.0f; // CPU压力因子
-    float memory_stress = system->system_status.memory_usage * 1.5f; // 内存压力因子
+    cpu_stress = system->system_status.cpu_usage * 2.0f; // CPU压力因子
+    memory_stress = system->system_status.memory_usage * 1.5f; // 内存压力因子
     
     // 计算错误概率（基于压力水平）
-    float error_probability = (cpu_stress + memory_stress) / 3.5f; // 0-1范围
+    error_probability = (cpu_stress + memory_stress) / 3.5f; // 0-1范围
     error_probability = fmaxf(0.0f, fminf(1.0f, error_probability));
     
     // 基于系统状态的确定性错误模型（不使用随机数）
@@ -1696,7 +1833,7 @@ static void update_system_status(SelfCognitionSystem* system) {
     }
     
     // 警告更常见，基于资源使用率
-    float warning_probability = (cpu_stress + memory_stress) / 2.0f;
+    warning_probability = (cpu_stress + memory_stress) / 2.0f;
     warning_probability = fmaxf(0.0f, fminf(1.0f, warning_probability));
     
     if (system->update_count % 5 == 0) {
@@ -1705,15 +1842,15 @@ static void update_system_status(SelfCognitionSystem* system) {
     }
     
     // 运行时间（基于实际时间）
-    time_t current_time = time(NULL);
+    current_time = time(NULL);
     system->system_status.uptime_hours = (float)(difftime(current_time, system->last_update_time) / 3600.0);
     
     // 基于CPU使用率估算温度（更真实的模型）
     // 基础温度 + CPU使用率贡献 + 随时间轻微上升
-    float base_temperature = 35.0f; // 基础温度
-    float cpu_contribution = system->system_status.cpu_usage * 25.0f; // CPU贡献0-25°C
-    float time_contribution = system->system_status.uptime_hours * 0.1f; // 每小时上升0.1°C
-    float ambient_variation = sinf((float)system->update_count / 100.0f) * 2.0f; // 环境波动
+    base_temperature = 35.0f; // 基础温度
+    cpu_contribution = system->system_status.cpu_usage * 25.0f; // CPU贡献0-25°C
+    time_contribution = system->system_status.uptime_hours * 0.1f; // 每小时上升0.1°C
+    ambient_variation = sinf((float)system->update_count / 100.0f) * 2.0f; // 环境波动
     
     system->system_status.temperature = base_temperature + cpu_contribution + time_contribution + ambient_variation;
     
@@ -1725,6 +1862,30 @@ static void update_system_status(SelfCognitionSystem* system) {
  * @brief 更新能力评估（真实实现）
  */
 static void update_capability_assessment(SelfCognitionSystem* system) {
+    size_t i;
+    float lnn_efficiency;
+    float lnn_loss;
+    uint64_t lnn_forward_count;
+    uint64_t lnn_backward_count;
+    double lnn_avg_time;
+    float system_error_penalty;
+    float lnn_error_penalty;
+    float error_penalty;
+    float learning_progress;
+    float accuracy_factor;
+    float performance_factor;
+    float base_efficiency;
+    float base_learning;
+    float efficiency_weight;
+    float learning_weight;
+    float performance_weight;
+    float combined_factor;
+    float memory_factor;
+    float planning_factor;
+    float perception_factor;
+    float action_factor;
+    float adaptability_factor;
+    float creativity_factor;
     if (!system) {
         return;
     }
@@ -1733,11 +1894,11 @@ static void update_capability_assessment(SelfCognitionSystem* system) {
     
     /* 1. LNN状态指标（基于网络内部状态而非系统资源） */
     // 真实LNN集成：使用液态神经网络内部统计信息
-    float lnn_efficiency = 0.5f; // 默认效率值
-    float lnn_loss = 0.0f;
-    uint64_t lnn_forward_count = 0;
-    uint64_t lnn_backward_count = 0;
-    double lnn_avg_time = 0.0;
+    lnn_efficiency = 0.5f; // 默认效率值
+    lnn_loss = 0.0f;
+    lnn_forward_count = 0;
+    lnn_backward_count = 0;
+    lnn_avg_time = 0.0;
     
     if (system->lnn_instance) {
         // 获取LNN真实统计信息
@@ -1760,38 +1921,38 @@ static void update_capability_assessment(SelfCognitionSystem* system) {
     }
     
     // 错误惩罚：基于系统错误计数和LNN损失（真实集成）
-    float system_error_penalty = 1.0f / (1.0f + system->system_status.error_count * 0.05f);
-    float lnn_error_penalty = 1.0f;
+    system_error_penalty = 1.0f / (1.0f + system->system_status.error_count * 0.05f);
+    lnn_error_penalty = 1.0f;
     if (system->lnn_instance && lnn_loss > 0.0f) {
         // LNN损失越高，惩罚越大（损失为0时无惩罚）
         lnn_error_penalty = 1.0f / (1.0f + lnn_loss * 5.0f);
     }
-    float error_penalty = (system_error_penalty + lnn_error_penalty) / 2.0f;
+    error_penalty = (system_error_penalty + lnn_error_penalty) / 2.0f;
     
     /* 2. 学习进展指标 */
-    float learning_progress = system->learning.learning_efficiency * system->learning.generalization;
-    float accuracy_factor = (system->learning.training_accuracy + system->learning.test_accuracy) / 2.0f;
+    learning_progress = system->learning.learning_efficiency * system->learning.generalization;
+    accuracy_factor = (system->learning.training_accuracy + system->learning.test_accuracy) / 2.0f;
     
     /* 3. 性能历史指标 */
-    float performance_factor = 0.5f; // 默认值
+    performance_factor = 0.5f; // 默认值
     if (system->performance_history_size > 0) {
         float sum = 0.0f;
-        for (size_t i = 0; i < system->performance_history_size; i++) {
+        for(i = 0; i < system->performance_history_size; i++) {
             sum += system->performance_history[i];
         }
         performance_factor = sum / system->performance_history_size;
     }
     
     /* 4. 计算基础能力分数（基于效率和进展） */
-    float base_efficiency = lnn_efficiency * error_penalty;
-    float base_learning = learning_progress * accuracy_factor;
+    base_efficiency = lnn_efficiency * error_penalty;
+    base_learning = learning_progress * accuracy_factor;
     
     // 组合因子
-    float efficiency_weight = 0.4f;
-    float learning_weight = 0.3f;
-    float performance_weight = 0.3f;
+    efficiency_weight = 0.4f;
+    learning_weight = 0.3f;
+    performance_weight = 0.3f;
     
-    float combined_factor = (base_efficiency * efficiency_weight + 
+    combined_factor = (base_efficiency * efficiency_weight + 
                             base_learning * learning_weight + 
                             performance_factor * performance_weight);
     
@@ -1803,32 +1964,32 @@ static void update_capability_assessment(SelfCognitionSystem* system) {
     system->capability.learning_ability = fminf(0.98f, 0.7f + base_learning * 0.3f);
     
     // 记忆能力：基于LNN效率和系统运行时间（运行时间越长，记忆能力可能越强）
-    float memory_factor = lnn_efficiency * (1.0f + system->system_status.uptime_hours / 100.0f);
+    memory_factor = lnn_efficiency * (1.0f + system->system_status.uptime_hours / 100.0f);
     system->capability.memory_capacity = fminf(0.90f, 0.5f + memory_factor * 0.4f);
     
     // 规划能力：基于LNN效率和错误率
-    float planning_factor = lnn_efficiency * error_penalty;
+    planning_factor = lnn_efficiency * error_penalty;
     system->capability.planning_ability = fminf(0.85f, 0.4f + planning_factor * 0.45f);
     
     // 感知能力：基于GPU使用率和系统性能
-    float perception_factor = (1.0f - system->system_status.gpu_usage) * performance_factor;
+    perception_factor = (1.0f - system->system_status.gpu_usage) * performance_factor;
     system->capability.perception_ability = fminf(0.80f, 0.3f + perception_factor * 0.5f);
     
     // 行动能力：基于系统响应性（反比于CPU使用率）
-    float action_factor = base_efficiency * performance_factor;
+    action_factor = base_efficiency * performance_factor;
     system->capability.action_ability = fminf(0.75f, 0.2f + action_factor * 0.55f);
     
     // 适应能力：基于学习能力和低错误率
-    float adaptability_factor = base_learning * error_penalty;
+    adaptability_factor = base_learning * error_penalty;
     system->capability.adaptability = fminf(0.99f, 0.8f + adaptability_factor * 0.2f);
     
     // 创造力：基于系统多样性和性能波动
     // 使用性能历史的标准差作为创造力指标（如果有足够数据）
-    float creativity_factor = 0.5f;
+    creativity_factor = 0.5f;
     if (system->performance_history_size > 10) {
         float mean = performance_factor;
         float variance = 0.0f;
-        for (size_t i = 0; i < system->performance_history_size; i++) {
+        for(i = 0; i < system->performance_history_size; i++) {
             float diff = system->performance_history[i] - mean;
             variance += diff * diff;
         }
@@ -1891,6 +2052,7 @@ static void update_capability_assessment(SelfCognitionSystem* system) {
  * @brief 更新知识元认知（真实实现）
  */
 static void update_knowledge_metacognition(SelfCognitionSystem* system) {
+    size_t i;
     if (!system) {
         return;
     }
@@ -1945,13 +2107,13 @@ static void update_knowledge_metacognition(SelfCognitionSystem* system) {
     float performance_consistency = 1.0f;
     if (system->performance_history_size > 5) {
         float mean = 0.0f;
-        for (size_t i = 0; i < system->performance_history_size; i++) {
+        for(i = 0; i < system->performance_history_size; i++) {
             mean += system->performance_history[i];
         }
         mean /= system->performance_history_size;
         
         float variance = 0.0f;
-        for (size_t i = 0; i < system->performance_history_size; i++) {
+        for(i = 0; i < system->performance_history_size; i++) {
             float diff = system->performance_history[i] - mean;
             variance += diff * diff;
         }
@@ -2314,6 +2476,7 @@ static float get_system_memory_usage(void) {
  * Linux sysfs接口和命令行工具。多层回退机制确保最大兼容性。
  */
 static float get_system_gpu_usage(void) {
+    int i;
 #ifdef _WIN32
     /* Windows实现：完整GPU使用率监控实现 */
     /* 使用多层回退策略：
@@ -2344,7 +2507,7 @@ static float get_system_gpu_usage(void) {
         "\\GPU Engine(engtype_3D)\\Utilization Percentage"
     };
     
-    for (int i = 0; i < 3; i++) {
+    for(i = 0; i < 3; i++) {
         pdh_status = PdhAddCounterA(pdh_query, gpu_counter_paths[i], 0, &pdh_counter);
         if (pdh_status == ERROR_SUCCESS) {
             // 收集数据
@@ -2419,6 +2582,7 @@ static float get_system_gpu_usage(void) {
  */
 static float get_system_disk_usage(void) {
 #ifdef _WIN32
+    ULONGLONG used_bytes;
     /* Windows实现：使用GetDiskFreeSpaceEx获取C盘使用率 */
     ULARGE_INTEGER free_bytes_available, total_bytes, total_free_bytes;
     
@@ -2438,7 +2602,7 @@ static float get_system_disk_usage(void) {
     }
     
     /* 计算磁盘使用率：已使用空间 / 总空间 */
-    ULONGLONG used_bytes = total_bytes.QuadPart - free_bytes_available.QuadPart;
+    used_bytes = total_bytes.QuadPart - free_bytes_available.QuadPart;
     float disk_usage = (float)used_bytes / (float)total_bytes.QuadPart;
     
     return fmaxf(0.0f, fminf(1.0f, disk_usage));
@@ -2837,6 +3001,8 @@ int self_cognition_execute_decision(SelfCognitionSystem* system,
  */
 int self_cognition_monitor_execution(SelfCognitionSystem* system,
                                      ExecutionState* execution_state) {
+    time_t current_time;
+    int elapsed_time;
     if (!system || !execution_state) {
         return -1;
     }
@@ -2849,8 +3015,8 @@ int self_cognition_monitor_execution(SelfCognitionSystem* system,
     }
     
     // 更新执行状态
-    time_t current_time = time(NULL);
-    int elapsed_time = (int)(current_time - system->execution_start_time);
+    current_time = time(NULL);
+    elapsed_time = (int)(current_time - system->execution_start_time);
     
     system->current_execution.elapsed_time_sec = elapsed_time;
     
@@ -2901,6 +3067,7 @@ int self_cognition_monitor_execution(SelfCognitionSystem* system,
  * 避免嵌套死锁。公共API self_cognition_stop_execution 会加锁后调用本函数。
  */
 static int self_cognition_stop_execution_nolock(SelfCognitionSystem* system) {
+    time_t current_time;
     if (!system) {
         return -1;
     }
@@ -2916,7 +3083,7 @@ static int self_cognition_stop_execution_nolock(SelfCognitionSystem* system) {
             "决策执行被取消: %s", system->current_decision.description);
     
     // 记录到历史
-    time_t current_time = time(NULL);
+    current_time = time(NULL);
     system->current_execution.elapsed_time_sec = (int)(current_time - system->execution_start_time);
     system->current_execution.remaining_time_sec = 0;
     
@@ -3048,11 +3215,12 @@ SelfAwarenessSystem* self_awareness_system_create(const SelfAwarenessConfig* con
  * @brief 释放自我意识系统
  */
 void self_awareness_system_free(SelfAwarenessSystem* system) {
+    size_t i;
     if (!system) return;
     
     // 释放错误日志
     if (system->error_log) {
-        for (size_t i = 0; i < system->error_count; i++) {
+        for(i = 0; i < system->error_count; i++) {
             SelfCognitionSystemError* error = system->error_log[i];
             if (error) {
                 safe_free((void**)&error->error_message);
@@ -3075,6 +3243,7 @@ void self_awareness_system_free(SelfAwarenessSystem* system) {
  * 进行深度分析，生成真实的反思报告。
  */
 ReflectionResult* self_awareness_reflect(SelfAwarenessSystem* system, const char* reflection_prompt) {
+    size_t ei;
     if (!system || !reflection_prompt) {
         selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
                               "执行自我反思：参数无效");
@@ -3096,7 +3265,7 @@ ReflectionResult* self_awareness_reflect(SelfAwarenessSystem* system, const char
     if (system->error_count > 0) {
         /* 从实际错误类型分析：计算错误严重程度加权 */
         float weighted_severity = 0.0f;
-        for (size_t ei = 0; ei < system->error_count; ei++) {
+        for(ei = 0; ei < system->error_count; ei++) {
             if (system->error_log[ei]) {
                 weighted_severity += (float)system->error_log[ei]->severity / 10.0f;
             }
@@ -3126,7 +3295,7 @@ ReflectionResult* self_awareness_reflect(SelfAwarenessSystem* system, const char
     
     /* 从实际错误模式动态计算改进点数量 */
     int improvements_identified = 0;
-    for (size_t ei = 0; ei < system->error_count; ei++) {
+    for(ei = 0; ei < system->error_count; ei++) {
         if (system->error_log[ei]) {
             int code = system->error_log[ei]->error_code;
             int sev = system->error_log[ei]->severity;
@@ -3183,6 +3352,9 @@ void reflection_result_free(ReflectionResult* result) {
  * 资源约束检查和依赖关系分析，生成详细的行动计划。
  */
 CognitionPlanResult* self_awareness_plan_goal(SelfAwarenessSystem* system, const void* goal) {
+    size_t i;
+    time_t current_time;
+    time_t deadline;
     if (!system || !goal) {
         selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
                               "规划目标：参数无效");
@@ -3233,11 +3405,11 @@ CognitionPlanResult* self_awareness_plan_goal(SelfAwarenessSystem* system, const
                 float output_mean = 0.0f;
                 float output_var = 0.0f;
                 size_t output_size = lnn_config.output_size < 256 ? lnn_config.output_size : 256;
-                for (size_t i = 0; i < output_size; i++) {
+                for(i = 0; i < output_size; i++) {
                     output_mean += test_output[i];
                 }
                 output_mean /= (float)output_size;
-                for (size_t i = 0; i < output_size; i++) {
+                for(i = 0; i < output_size; i++) {
                     float diff = test_output[i] - output_mean;
                     output_var += diff * diff;
                 }
@@ -3280,7 +3452,7 @@ CognitionPlanResult* self_awareness_plan_goal(SelfAwarenessSystem* system, const
     int found_keywords = 0;
     float keyword_complexity_sum = 0.0f;
     
-    for (size_t i = 0; i < num_keywords; i++) {
+    for(i = 0; i < num_keywords; i++) {
         if (strstr(description, keywords[i]) != NULL) {
             found_keywords++;
             keyword_complexity_sum += keyword_weights[i];
@@ -3322,8 +3494,8 @@ CognitionPlanResult* self_awareness_plan_goal(SelfAwarenessSystem* system, const
     if (complexity > 1.0f) complexity = 1.0f;
     
     // 基于截止时间调整紧急度
-    time_t current_time = time(NULL);
-    time_t deadline = goal_ptr->deadline;
+    current_time = time(NULL);
+    deadline = goal_ptr->deadline;
     float time_available = (deadline > current_time) ? 
                           (float)(deadline - current_time) / 3600.0f : 1.0f; // 小时
     
@@ -3431,6 +3603,7 @@ void plan_result_free(CognitionPlanResult* result) {
  * 进行深度诊断，分析错误分类、根本原因和修复方案。
  */
 ErrorAnalysisResult* self_awareness_analyze_error(SelfAwarenessSystem* system, const void* error) {
+    size_t i;
     if (!system || !error) {
         selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
                               "分析系统错误：参数无效");
@@ -3483,11 +3656,11 @@ ErrorAnalysisResult* self_awareness_analyze_error(SelfAwarenessSystem* system, c
                 float output_mean = 0.0f;
                 float output_var = 0.0f;
                 size_t output_size = lnn_config.output_size < 256 ? lnn_config.output_size : 256;
-                for (size_t i = 0; i < output_size; i++) {
+                for(i = 0; i < output_size; i++) {
                     output_mean += test_output[i];
                 }
                 output_mean /= (float)output_size;
-                for (size_t i = 0; i < output_size; i++) {
+                for(i = 0; i < output_size; i++) {
                     float diff = test_output[i] - output_mean;
                     output_var += diff * diff;
                 }
@@ -3696,6 +3869,10 @@ ErrorAnalysisResult* self_awareness_analyze_error(SelfAwarenessSystem* system, c
                 SAFE_APPEND(solutions_buffer, solutions_remaining, "2. 增加详细日志记录和错误追踪\n");
                 solutions += 1;
                 break;
+
+            default:
+                /* CATEGORY_LNN_SPECIFIC等已在进入switch前处理 */
+                break;
         }
     }
     
@@ -3703,7 +3880,7 @@ ErrorAnalysisResult* self_awareness_analyze_error(SelfAwarenessSystem* system, c
     if (system->error_log && system->error_count > 0) {
         // 检查类似错误的历史记录
         size_t similar_errors = 0;
-        for (size_t i = 0; i < system->error_count; i++) {
+        for(i = 0; i < system->error_count; i++) {
             if (system->error_log[i] && 
                 system->error_log[i]->error_code == error_code) {
                 similar_errors++;
@@ -3802,6 +3979,7 @@ void error_analysis_result_free(ErrorAnalysisResult* result) {
  * @brief 分析问题类型
  */
 static SelfCorrectionType analyze_issue_type(const char* issue_description, float issue_severity) {
+    size_t i;
     if (!issue_description) {
         return SELF_CORRECTION_PERFORMANCE;
     }
@@ -3821,7 +3999,7 @@ static SelfCorrectionType analyze_issue_type(const char* issue_description, floa
     if (desc_len >= sizeof(issue_lower_buf)) {
         desc_len = sizeof(issue_lower_buf) - 1;
     }
-    for (size_t i = 0; i < desc_len; i++) {
+    for(i = 0; i < desc_len; i++) {
         char c = issue_description[i];
         if (c >= 'A' && c <= 'Z') {
             issue_lower_buf[i] = c + 32;
@@ -3866,15 +4044,19 @@ static SelfCorrectionType analyze_issue_type(const char* issue_description, floa
  * @brief 确定修正强度
  */
 static float determine_correction_strength(SelfCognitionSystem* system, SelfCorrectionType type, float issue_severity) {
+    float base_strength;
+    float type_factor;
+    float performance_factor;
+    float strength;
     if (!system || issue_severity < 0.0f || issue_severity > 1.0f) {
         return 0.1f; // 默认最小强度
     }
     
     // 基础强度基于问题严重程度
-    float base_strength = issue_severity;
+    base_strength = issue_severity;
     
     // 根据修正类型调整强度
-    float type_factor = 1.0f;
+    type_factor = 1.0f;
     switch (type) {
         case SELF_CORRECTION_PARAMETER:
             type_factor = 0.8f; // 参数修正较温和
@@ -3897,14 +4079,14 @@ static float determine_correction_strength(SelfCognitionSystem* system, SelfCorr
     }
     
     // 考虑系统当前状态：性能差时修正更强
-    float performance_factor = 1.0f;
+    performance_factor = 1.0f;
     if (system->performance_history_size > 0) {
         float recent_performance = system->performance_history[system->performance_history_size - 1];
         performance_factor = 1.0f + (0.5f - recent_performance); // 性能越低，因子越大
     }
     
     // 计算最终强度，限制在合理范围内
-    float strength = base_strength * type_factor * performance_factor;
+    strength = base_strength * type_factor * performance_factor;
     if (strength < 0.05f) strength = 0.05f;
     if (strength > 0.95f) strength = 0.95f;
     
@@ -3915,15 +4097,20 @@ static float determine_correction_strength(SelfCognitionSystem* system, SelfCorr
  * @brief 估计预期改进
  */
 static float estimate_expected_improvement(SelfCognitionSystem* system, SelfCorrectionType type, float correction_strength) {
+    size_t i;
+    float base_improvement;
+    float type_factor;
+    float success_factor;
+    float expected_improvement;
     if (!system || correction_strength < 0.0f || correction_strength > 1.0f) {
         return 0.1f;
     }
     
     // 基础改进基于修正强度
-    float base_improvement = correction_strength * 0.8f; // 强度到改进的映射
+    base_improvement = correction_strength * 0.8f; // 强度到改进的映射
     
     // 根据修正类型调整预期改进
-    float type_factor = 1.0f;
+    type_factor = 1.0f;
     switch (type) {
         case SELF_CORRECTION_PARAMETER:
             type_factor = 0.7f; // 参数修正改进较小
@@ -3946,17 +4133,17 @@ static float estimate_expected_improvement(SelfCognitionSystem* system, SelfCorr
     }
     
     // 考虑系统历史修正成功率
-    float success_factor = 1.0f;
+    success_factor = 1.0f;
     if (system->correction_count > 0 && system->correction_effectiveness_size > 0) {
         float avg_effectiveness = 0.0f;
-        for (size_t i = 0; i < system->correction_effectiveness_size; i++) {
+        for(i = 0; i < system->correction_effectiveness_size; i++) {
             avg_effectiveness += system->correction_effectiveness[i];
         }
         avg_effectiveness /= system->correction_effectiveness_size;
         success_factor = 0.5f + avg_effectiveness; // 历史成功率影响预期
     }
     
-    float expected_improvement = base_improvement * type_factor * success_factor;
+    expected_improvement = base_improvement * type_factor * success_factor;
     if (expected_improvement < 0.01f) expected_improvement = 0.01f;
     if (expected_improvement > 0.99f) expected_improvement = 0.99f;
     
@@ -3979,8 +4166,9 @@ static void generate_correction_description(SelfCorrectionType type, float stren
     if (!dc_engine) {
         /* 无深度修正引擎时，使用系统状态统计生成数据驱动的描述 */
         SystemStatus st;
+        int has_status;
         memset(&st, 0, sizeof(st));
-        int has_status = (selflnn_get_status(&st) == 0) ? 1 : 0;
+        has_status = (selflnn_get_status(&st) == 0) ? 1 : 0;
 
         const char* type_names[] = {"参数", "算法", "架构", "策略", "内存", "性能", "系统"};
         int type_idx = (int)type;
@@ -4017,6 +4205,9 @@ static void generate_correction_description(SelfCorrectionType type, float stren
  * 与液态神经网络深度集成，通过调整LNN参数、优化算法或改进架构来实现真实修正。
  */
 static int apply_correction(SelfCognitionSystem* system, SelfCorrectionResult* correction) {
+    size_t i;
+    int i_i;
+    float loss;
     if (!system || !correction) {
         return -1;
     }
@@ -4083,15 +4274,15 @@ static int apply_correction(SelfCognitionSystem* system, SelfCorrectionResult* c
                                 if (correction_target) {
                                     if (lnn_get_output(lnn_instance, correction_target, (int)output_size) == 0) {
                                         float perturb_scale = correction->correction_strength * 0.005f;
-                                        for (size_t i = 0; i < output_size; i++) {
+                                        for(i = 0; i < output_size; i++) {
                                             correction_target[i] *= (1.0f + perturb_scale * 
                             (secure_random_float() - 0.5f) * 2.0f);
                                         }
                                         
-                                        float loss = 0.0f;
+                                        loss = 0.0f;
                                         if (lnn_backward(lnn_instance, correction_target, &loss) == 0) {
                                             float l2_sum = 0.0f;
-                                            for (size_t i = 0; i < param_count; i++) {
+                                            for(i = 0; i < param_count; i++) {
                                                 float delta = params[i] - params_before[i];
                                                 l2_sum += delta * delta;
                                             }
@@ -4121,7 +4312,7 @@ static int apply_correction(SelfCognitionSystem* system, SelfCorrectionResult* c
                     float noise_magnitude = correction->correction_strength * 0.001f;
                     float l2_sum = 0.0f;
                     
-                    for (size_t i = 0; i < param_count; i++) {
+                    for(i = 0; i < param_count; i++) {
                         float u1 = secure_random_float();
                     float u2 = secure_random_float();
                         float gaussian_noise = sqrtf(-2.0f * logf(u1 + 1e-10f)) * 
@@ -4285,7 +4476,7 @@ static int apply_correction(SelfCognitionSystem* system, SelfCorrectionResult* c
             if (system->performance_history_size > 10) {
                 float recent_perf_sum = 0.0f;
                 int recent_samples = (int)(system->performance_history_size < 20 ? system->performance_history_size : 20);
-                for (int i = 0; i < recent_samples; i++) {
+                for(i_i = 0; i < recent_samples; i++) {
                     size_t idx = system->performance_history_size - 1 - i;
                     recent_perf_sum += system->performance_history[idx];
                 }
@@ -4293,7 +4484,7 @@ static int apply_correction(SelfCognitionSystem* system, SelfCorrectionResult* c
                 
                 // 计算性能波动性（标准差估计）
                 float variance_sum = 0.0f;
-                for (int i = 0; i < recent_samples; i++) {
+                for(i_i = 0; i < recent_samples; i++) {
                     size_t idx = system->performance_history_size - 1 - i;
                     float diff = system->performance_history[idx] - avg_recent_perf;
                     variance_sum += diff * diff;
@@ -4317,7 +4508,7 @@ static int apply_correction(SelfCognitionSystem* system, SelfCorrectionResult* c
         
         // 算法修正可能影响长期性能趋势
         if (correction->type == SELF_CORRECTION_ALGORITHM && system->performance_history_size > 10) {
-            for (size_t i = system->performance_history_size - 10; i < system->performance_history_size; i++) {
+            for(i = system->performance_history_size - 10; i < system->performance_history_size; i++) {
                 system->performance_history[i] = fminf(1.0f, 
                     system->performance_history[i] + improvement * 0.05f);
             }
@@ -4346,13 +4537,23 @@ static int apply_correction(SelfCognitionSystem* system, SelfCorrectionResult* c
  * @brief 评估修正效果
  */
 static float evaluate_correction_effectiveness(SelfCognitionSystem* system, int correction_id) {
+    size_t i;
+    int correction_idx;
+    SelfCorrectionResult* correction;
+    time_t correction_time;
+    time_t current_time;
+    double hours_since_correction;
+    float time_factor;
+    float performance_improvement;
+    float expected_vs_actual;
+    float effectiveness;
     if (!system || correction_id <= 0) {
         return 0.0f;
     }
     
     // 查找修正记录
-    int correction_idx = -1;
-    for (size_t i = 0; i < system->correction_history_size; i++) {
+    correction_idx = -1;
+    for(i = 0; i < system->correction_history_size; i++) {
         if (system->correction_history[i].correction_id == correction_id) {
             correction_idx = (int)i;
             break;
@@ -4363,16 +4564,16 @@ static float evaluate_correction_effectiveness(SelfCognitionSystem* system, int 
         return 0.0f; // 未找到修正记录
     }
     
-    SelfCorrectionResult* correction = &system->correction_history[correction_idx];
-    time_t correction_time = correction->correction_time;
-    time_t current_time = time(NULL);
+    correction = &system->correction_history[correction_idx];
+    correction_time = correction->correction_time;
+    current_time = time(NULL);
     
     // 计算时间因子：修正越久远，评估越稳定
-    double hours_since_correction = difftime(current_time, correction_time) / 3600.0;
-    float time_factor = (float)(1.0 - exp(-hours_since_correction / 24.0)); // 24小时衰减
+    hours_since_correction = difftime(current_time, correction_time) / 3600.0;
+    time_factor = (float)(1.0 - exp(-hours_since_correction / 24.0)); // 24小时衰减
     
     // 基于性能历史评估效果
-    float performance_improvement = 0.0f;
+    performance_improvement = 0.0f;
     if (system->performance_history_size > 1) {
         // 查找修正前后的性能对比
         // 性能评估：使用修正前后的平均性能差异作为改进指标
@@ -4381,7 +4582,7 @@ static float evaluate_correction_effectiveness(SelfCognitionSystem* system, int 
         float avg_before = 0.0f;
         float avg_after = 0.0f;
         
-        for (size_t i = 0; i < system->performance_history_size; i++) {
+        for(i = 0; i < system->performance_history_size; i++) {
             // 性能时间分割：前半部分为修正前，后半部分为修正后（基于历史记录顺序）
             if (i < system->performance_history_size / 2) {
                 avg_before += system->performance_history[i];
@@ -4400,14 +4601,14 @@ static float evaluate_correction_effectiveness(SelfCognitionSystem* system, int 
     }
     
     // 结合预期改进和实际改进计算效果
-    float expected_vs_actual = 0.0f;
+    expected_vs_actual = 0.0f;
     if (correction->expected_improvement > 0.0f) {
         expected_vs_actual = performance_improvement / correction->expected_improvement;
         if (expected_vs_actual > 2.0f) expected_vs_actual = 2.0f; // 限制上限
     }
     
     // 最终效果 = 时间因子 * (0.3 * 性能改进 + 0.7 * 预期符合度)
-    float effectiveness = time_factor * (0.3f * performance_improvement + 0.7f * expected_vs_actual);
+    effectiveness = time_factor * (0.3f * performance_improvement + 0.7f * expected_vs_actual);
     if (effectiveness < 0.0f) effectiveness = 0.0f;
     if (effectiveness > 1.0f) effectiveness = 1.0f;
     
@@ -4421,10 +4622,15 @@ static float evaluate_correction_effectiveness(SelfCognitionSystem* system, int 
  * 用于评估自我修正模块的整体表现。
  */
 static void self_cognition_recompute_effectiveness_stats(SelfCognitionSystem* system) {
+    size_t i;
+    float sum;
+    float sum_sq;
+    size_t valid_count;
     if (!system || !system->correction_effectiveness || system->correction_effectiveness_size == 0) return;
-    float sum = 0.0f, sum_sq = 0.0f;
-    size_t valid_count = 0;
-    for (size_t i = 0; i < system->correction_effectiveness_size; i++) {
+    sum = 0.0f;
+    sum_sq = 0.0f;
+    valid_count = 0;
+    for(i = 0; i < system->correction_effectiveness_size; i++) {
         float v = system->correction_effectiveness[i];
         if (v > 0.001f) {
             sum += v;
@@ -4828,6 +5034,11 @@ static int initialize_self_model(SelfCognitionSystem* system, const SelfModelCon
  * @brief 收集系统状态
  */
 static void collect_system_state(SelfCognitionSystem* system, float* state_buffer, size_t buffer_size) {
+    size_t i;
+    float current_performance;
+    float stability;
+    float error_rate;
+    float execution_efficiency;
     if (!system || !state_buffer || buffer_size < 32) {
         return;
     }
@@ -4843,10 +5054,10 @@ static void collect_system_state(SelfCognitionSystem* system, float* state_buffe
     state_buffer[4] = (float)system->update_count; // 更新次数
     
     // 计算当前性能（使用性能历史平均值）
-    float current_performance = 0.5f;  // 默认值
+    current_performance = 0.5f;  // 默认值
     if (system->performance_history_size > 0 && system->performance_history) {
         float sum = 0.0f;
-        for (size_t i = 0; i < system->performance_history_size; i++) {
+        for(i = 0; i < system->performance_history_size; i++) {
             sum += system->performance_history[i];
         }
         current_performance = sum / system->performance_history_size;
@@ -4854,7 +5065,7 @@ static void collect_system_state(SelfCognitionSystem* system, float* state_buffe
     state_buffer[5] = current_performance;         // 当前性能
     
     // 计算系统稳定性（基于错误和警告计数）
-    float stability = 1.0f;
+    stability = 1.0f;
     if (system->update_count > 0) {
         float error_factor = (float)system->system_status.error_count / (system->update_count + 1);
         float warning_factor = (float)system->system_status.warning_count / (system->update_count + 1);
@@ -4863,7 +5074,7 @@ static void collect_system_state(SelfCognitionSystem* system, float* state_buffe
     state_buffer[6] = stability;                   // 系统稳定性
     
     // 计算错误率
-    float error_rate = 0.0f;
+    error_rate = 0.0f;
     if (system->update_count > 0) {
         error_rate = (float)system->system_status.error_count / (system->update_count + 1);
     }
@@ -4887,7 +5098,7 @@ static void collect_system_state(SelfCognitionSystem* system, float* state_buffe
     state_buffer[20] = (float)system->is_executing;     // 是否正在执行
     state_buffer[21] = (float)system->current_execution.progress; // 执行进度
     // 计算执行效率：进度/时间（如果时间>0）
-    float execution_efficiency = 0.0f;
+    execution_efficiency = 0.0f;
     if (system->current_execution.elapsed_time_sec > 0) {
         execution_efficiency = system->current_execution.progress / system->current_execution.elapsed_time_sec;
     }
@@ -4914,6 +5125,18 @@ static void collect_system_state(SelfCognitionSystem* system, float* state_buffe
  * @brief 内部训练自我模型
  */
 static int train_self_model_internal(SelfCognitionSystem* system, int epochs) {
+    int epoch;
+    size_t i;
+    int step;
+    int j;
+    int k;
+    float total_loss;
+    int state_dim;
+    int encoding_dim;
+    int prediction_horizon;
+    float* lnn_input;
+    float* lnn_output;
+    float* target_buffer;
     if (!system || !system->self_model_lnn || system->state_history_size < 10) {
         log_error("自我模型训练条件不满足\n");
         return -1;
@@ -4926,15 +5149,15 @@ static int train_self_model_internal(SelfCognitionSystem* system, int epochs) {
     log_info("开始训练自我模型（数据量：%zu，训练轮数：%d）",
             system->state_history_size, epochs);
     
-    float total_loss = 0.0f;
-    int state_dim = 32;  // 系统状态维度
-    int encoding_dim = (int)system->self_model_config.state_encoding_size;
-    int prediction_horizon = (int)system->self_model_config.prediction_horizon;
+    total_loss = 0.0f;
+    state_dim = 32;  // 系统状态维度
+    encoding_dim = (int)system->self_model_config.state_encoding_size;
+    prediction_horizon = (int)system->self_model_config.prediction_horizon;
     
     // 分配训练缓冲区
-    float* lnn_input = (float*)safe_malloc((state_dim + encoding_dim) * sizeof(float));
-    float* lnn_output = (float*)safe_malloc((encoding_dim + prediction_horizon * state_dim) * sizeof(float));
-    float* target_buffer = (float*)safe_malloc((encoding_dim + prediction_horizon * state_dim) * sizeof(float));
+    lnn_input = (float*)safe_malloc((state_dim + encoding_dim) * sizeof(float));
+    lnn_output = (float*)safe_malloc((encoding_dim + prediction_horizon * state_dim) * sizeof(float));
+    target_buffer = (float*)safe_malloc((encoding_dim + prediction_horizon * state_dim) * sizeof(float));
     if (!lnn_input || !lnn_output || !target_buffer) {
         if (lnn_input) safe_free((void**)&lnn_input);
         if (lnn_output) safe_free((void**)&lnn_output);
@@ -4957,12 +5180,12 @@ static int train_self_model_internal(SelfCognitionSystem* system, int epochs) {
 
     // 准备训练数据：使用状态历史进行自监督学习
     // 目标：从当前状态预测未来状态
-    for (int epoch = 0; epoch < epochs; epoch++) {
+    for(epoch = 0; epoch < epochs; epoch++) {
         float epoch_loss = 0.0f;
         int training_samples = 0;
         
         // 遍历状态历史（跳过最后prediction_horizon个样本，因为没有未来数据）
-        for (size_t i = 0; i < system->state_history_size - prediction_horizon; i++) {
+        for(i = 0; i < system->state_history_size - prediction_horizon; i++) {
             // 输入：当前状态
             float* current_state = &system->state_history[i * state_dim];
             
@@ -4970,15 +5193,15 @@ static int train_self_model_internal(SelfCognitionSystem* system, int epochs) {
             float target[32];
             memset(target, 0, sizeof(target));
             
-            for (int step = 1; step <= prediction_horizon; step++) {
+            for(step = 1; step <= prediction_horizon; step++) {
                 float* future_state = &system->state_history[(i + step) * state_dim];
-                for (int j = 0; j < state_dim; j++) {
+                for(j = 0; j < state_dim; j++) {
                     target[j] += future_state[j];
                 }
             }
             
             // 计算平均值
-            for (int j = 0; j < state_dim; j++) {
+            for(j = 0; j < state_dim; j++) {
                 target[j] /= prediction_horizon;
             }
             
@@ -5000,14 +5223,14 @@ static int train_self_model_internal(SelfCognitionSystem* system, int epochs) {
             float loss = 0.0f;
             
             // 编码损失：鼓励编码状态保持一致性
-            for (int j = 0; j < encoding_dim; j++) {
+            for(j = 0; j < encoding_dim; j++) {
                 float diff = lnn_output[j] - system->encoded_state_buffer[j];
                 loss += diff * diff;
             }
             
             // 预测损失：与未来状态平均值的差异（完整实现，基于MSE损失对比预测状态与实际目标状态）
-            for (int j = 0; j < prediction_horizon; j++) {
-                for (int k = 0; k < state_dim; k++) {
+            for(j = 0; j < prediction_horizon; j++) {
+                for(k = 0; k < state_dim; k++) {
                     // 预测所有状态维度
                     float predicted = lnn_output[encoding_dim + j * state_dim + k];
                     float actual = target[k];  // 使用每个状态维度的平均值
@@ -5031,7 +5254,7 @@ static int train_self_model_internal(SelfCognitionSystem* system, int epochs) {
                 }
                 
                 // 预测目标：将target数组复制prediction_horizon次
-                for (int j = 0; j < prediction_horizon; j++) {
+                for(j = 0; j < prediction_horizon; j++) {
                     memcpy(&target_buffer[encoding_dim + j * state_dim], target, state_dim * sizeof(float));
                 }
                 
@@ -5071,7 +5294,7 @@ static int train_self_model_internal(SelfCognitionSystem* system, int epochs) {
         float validation_loss = 0.0f;
         
         // 使用每5个样本取一个作为验证集（20%验证集）
-        for (size_t i = 0; i < system->state_history_size - prediction_horizon; i++) {
+        for(i = 0; i < system->state_history_size - prediction_horizon; i++) {
             // 选择验证样本：i % 5 == 0 作为验证集（20%）
             if (i % 5 == 0) {
                 float* current_state = &system->state_history[i * state_dim];
@@ -5083,7 +5306,7 @@ static int train_self_model_internal(SelfCognitionSystem* system, int epochs) {
                 
                 // 计算验证损失（编码部分）
                 float loss = 0.0f;
-                for (int j = 0; j < encoding_dim; j++) {
+                for(j = 0; j < encoding_dim; j++) {
                     float diff = lnn_output[j] - system->encoded_state_buffer[j];
                     loss += diff * diff;
                 }
@@ -6533,6 +6756,10 @@ static int generate_improvement_plan_internal(SelfCognitionSystem* system,
  * @brief 内部评估模型准确性
  */
 static float assess_model_accuracy_internal(SelfCognitionSystem* system) {
+    size_t i;
+    int step;
+    int j;
+    int k;
     if (!system || !system->self_model_lnn || !system->is_model_trained) {
         return 0.0f;
     }
@@ -6572,7 +6799,7 @@ static float assess_model_accuracy_internal(SelfCognitionSystem* system) {
     float total_error = 0.0f;
     int test_samples = 0;
     
-    for (size_t i = test_start; i < system->state_history_size - prediction_steps; i++) {
+    for(i = test_start; i < system->state_history_size - prediction_steps; i++) {
         // 输入：当前状态
         float* current_state = &system->state_history[i * state_dim];
         
@@ -6580,15 +6807,15 @@ static float assess_model_accuracy_internal(SelfCognitionSystem* system) {
         float target[32];
         memset(target, 0, sizeof(target));
         
-        for (int step = 1; step <= prediction_steps; step++) {
+        for(step = 1; step <= prediction_steps; step++) {
             float* future_state = &system->state_history[(i + step) * state_dim];
-            for (int j = 0; j < state_dim; j++) {
+            for(j = 0; j < state_dim; j++) {
                 target[j] += future_state[j];
             }
         }
         
         // 计算平均值
-        for (int j = 0; j < state_dim; j++) {
+        for(j = 0; j < state_dim; j++) {
             target[j] /= prediction_steps;
         }
         
@@ -6618,8 +6845,8 @@ static float assess_model_accuracy_internal(SelfCognitionSystem* system) {
         
         // 计算预测误差（完整实现：比较所有状态维度， ）
         float error = 0.0f;
-        for (int j = 0; j < prediction_steps; j++) {
-            for (int k = 0; k < state_dim; k++) {
+        for(j = 0; j < prediction_steps; j++) {
+            for(k = 0; k < state_dim; k++) {
                 // 预测所有状态维度
                 float predicted = lnn_output[encoding_dim + j * state_dim + k];
                 float actual = target[k];  // 使用每个状态维度的平均值
@@ -7163,8 +7390,9 @@ static void hash_data_to_fingerprint(const float* data, size_t data_size,
  * @brief 计算两个指纹向量的余弦相似度
  */
 static float fingerprint_similarity(const float a[16], const float b[16]) {
+    int i;
     float dot = 0.0f, norm_a = 0.0f, norm_b = 0.0f;
-    for (int i = 0; i < 16; i++) {
+    for(i = 0; i < 16; i++) {
         dot += a[i] * b[i];
         norm_a += a[i] * a[i];
         norm_b += b[i] * b[i];
@@ -7304,6 +7532,7 @@ int self_cognition_get_identity_signature(SelfCognitionSystem* system,
  * 2. 身份不连续性超过阈值
  */
 int self_cognition_update_identity(SelfCognitionSystem* system) {
+    int i;
     if (!system) {
         selflnn_set_last_error(SELFLNN_ERROR_INVALID_ARGUMENT, __func__, __FILE__, __LINE__,
                               "更新身份跟踪：系统为空");
@@ -7383,9 +7612,9 @@ int self_cognition_update_identity(SelfCognitionSystem* system) {
             system->capability.creativity
         };
         float cap_mean = 0.0f, cap_var = 0.0f;
-        for (int i = 0; i < 8; i++) cap_mean += cap_values[i];
+        for(i = 0; i < 8; i++) cap_mean += cap_values[i];
         cap_mean /= 8.0f;
-        for (int i = 0; i < 8; i++) {
+        for(i = 0; i < 8; i++) {
             float d = cap_values[i] - cap_mean;
             cap_var += d * d;
         }
@@ -7416,19 +7645,19 @@ int self_cognition_update_identity(SelfCognitionSystem* system) {
             // 计算与上一个快照的演化程度
             IdentitySnapshot* prev = &system->identity_snapshots[system->identity_snapshots_size - 1];
             float prev_fp[16];
-            for (int i = 0; i < 16; i++) {
+            for(i = 0; i < 16; i++) {
                 prev_fp[i] = prev->core_vector_delta[i];
             }
             snapshot->evolution_from_previous = evolution;
             
             // 计算核心向量变化
-            for (int i = 0; i < 16; i++) {
+            for(i = 0; i < 16; i++) {
                 snapshot->core_vector_delta[i] =
                     current_signature.core_identity_fingerprint[i] - prev->core_vector_delta[i];
             }
         } else {
             // 第一个快照，核心向量取当前指纹
-            for (int i = 0; i < 16; i++) {
+            for(i = 0; i < 16; i++) {
                 snapshot->core_vector_delta[i] = current_signature.core_identity_fingerprint[i];
             }
             snapshot->evolution_from_previous = 0.0f;
@@ -7579,8 +7808,9 @@ size_t self_cognition_get_identity_snapshot_count(SelfCognitionSystem* system) {
  * @brief 计算两个动作向量的余弦相似度
  */
 static float compute_action_similarity(const float* a, const float* b, size_t dim) {
+    size_t i;
     float dot = 0.0f, na = 0.0f, nb = 0.0f;
-    for (size_t i = 0; i < dim; i++) {
+    for(i = 0; i < dim; i++) {
         dot += a[i] * b[i];
         na += a[i] * a[i];
         nb += b[i] * b[i];
@@ -7611,19 +7841,21 @@ static void compute_intention_from_desire_belief(float* intention, const float* 
  * @brief 查找或创建智能体心智模型
  */
 static int find_or_create_agent(SelfCognitionSystem* system, const char* agent_id) {
+    size_t i;
+    int j;
     if (!system || !agent_id) return -1;
-    for (size_t i = 0; i < SELFLNN_MAX_TRACKED_AGENTS; i++) {
+    for(i = 0; i < SELFLNN_MAX_TRACKED_AGENTS; i++) {
         if (system->theory_of_mind.agents[i].is_active &&
             strcmp(system->theory_of_mind.agents[i].agent_id, agent_id) == 0) {
             return (int)i;
         }
     }
-    for (size_t i = 0; i < SELFLNN_MAX_TRACKED_AGENTS; i++) {
+    for(i = 0; i < SELFLNN_MAX_TRACKED_AGENTS; i++) {
         if (!system->theory_of_mind.agents[i].is_active) {
             memset(&system->theory_of_mind.agents[i], 0, sizeof(AgentMentalState));
             strncpy(system->theory_of_mind.agents[i].agent_id, agent_id,
                     sizeof(system->theory_of_mind.agents[i].agent_id) - 1);
-            for (int j = 0; j < SELFLNN_AGENT_STATE_DIM; j++) {
+            for(j = 0; j < SELFLNN_AGENT_STATE_DIM; j++) {
                 system->theory_of_mind.agents[i].belief[j] = 0.5f;
                 system->theory_of_mind.agents[i].desire[j] = 0.5f;
                 system->theory_of_mind.agents[i].intention[j] = 0.0f;
@@ -8431,6 +8663,7 @@ static const char* narrative_event_type_name(NarrativeEventType type) {
  * - "变革弧线"：身份重大转变
  */
 static void detect_narrative_arc(SelfNarrativeState* narrative) {
+    int i;
     if (!narrative || narrative->event_count == 0) {
         if (narrative) snprintf(narrative->current_arc, sizeof(narrative->current_arc), "初始弧线");
         return;
@@ -8444,7 +8677,7 @@ static void detect_narrative_arc(SelfNarrativeState* narrative) {
 
     float sum_before = 0.0f, sum_after = 0.0f;
     int identity_shifts = 0, failures = 0, milestones = 0, adaptations = 0;
-    for (int i = start; i < start + n && i < (int)narrative->event_count; i++) {
+    for(i = start; i < start + n && i < (int)narrative->event_count; i++) {
         sum_before += narrative->events[i].state_before;
         sum_after += narrative->events[i].state_after;
         if (narrative->events[i].event_type == NARRATIVE_EVENT_IDENTITY_SHIFT) identity_shifts++;
@@ -8674,6 +8907,8 @@ int self_cognition_identify_turning_points(SelfCognitionSystem* system,
  * 3. 不同类型事件的平衡性
  */
 float self_cognition_assess_narrative_coherence(SelfCognitionSystem* system) {
+    size_t i;
+    int i_i;
     if (!system || system->narrative_state.event_count == 0) return 1.0f;
 
     float temporal_coherence = 1.0f;
@@ -8683,7 +8918,7 @@ float self_cognition_assess_narrative_coherence(SelfCognitionSystem* system) {
     if (system->narrative_state.event_count >= 2) {
         int gaps = 0;
         int total_pairs = 0;
-        for (size_t i = 1; i < system->narrative_state.event_count; i++) {
+        for(i = 1; i < system->narrative_state.event_count; i++) {
             double gap = difftime(system->narrative_state.events[i].timestamp,
                                   system->narrative_state.events[i - 1].timestamp);
             if (gap > 86400) gaps++;
@@ -8693,7 +8928,7 @@ float self_cognition_assess_narrative_coherence(SelfCognitionSystem* system) {
 
         float total_delta = 0.0f;
         int smooth_pairs = 0;
-        for (size_t i = 1; i < system->narrative_state.event_count; i++) {
+        for(i = 1; i < system->narrative_state.event_count; i++) {
             float delta = fabsf(system->narrative_state.events[i].state_after -
                                 system->narrative_state.events[i - 1].state_after);
             if (delta < 0.3f) smooth_pairs++;
@@ -8702,13 +8937,13 @@ float self_cognition_assess_narrative_coherence(SelfCognitionSystem* system) {
         smoothness = total_pairs > 0 ? (float)smooth_pairs / (float)total_pairs : 1.0f;
 
         int type_counts[7] = {0};
-        for (size_t i = 0; i < system->narrative_state.event_count && i < 7; i++) {
+        for(i = 0; i < system->narrative_state.event_count && i < 7; i++) {
             int t = (int)system->narrative_state.events[i].event_type;
             if (t >= 0 && t < 7) type_counts[t]++;
         }
         float avg_count = (float)system->narrative_state.event_count / 7.0f;
         float dev = 0.0f;
-        for (int i = 0; i < 7; i++) {
+        for(i_i = 0; i < 7; i++) {
             dev += fabsf((float)type_counts[i] - avg_count);
         }
         balance = 1.0f - dev / (float)(system->narrative_state.event_count + 1);
@@ -8914,11 +9149,12 @@ typedef struct {
 static IntentionPredictor intent_pred = {{{0}}, 0, {{0}}, 0, {0}};
 
 int intent_register_type(const char* description, float prior, const float* action_profile) {
+    int i;
     if (intent_pred.intent_count >= INTENT_MAX_TYPES) return -1;
     IntentType* it = &intent_pred.intents[intent_pred.intent_count++];
     strncpy(it->description, description, 63);
     it->prior = (prior > 0.0f) ? prior : 0.1f;
-    for (int i = 0; i < 8; i++) it->action_profile[i] = action_profile ? action_profile[i] : 0.0f;
+    for(i = 0; i < 8; i++) it->action_profile[i] = action_profile ? action_profile[i] : 0.0f;
     return 0;
 }
 
@@ -9009,6 +9245,7 @@ typedef struct {
 static CuriosityModule curiosity_mod = {{{0}}, 0, 0.5f, 0.0f, 0.0f, 0};
 
 int curiosity_init(float novelty_weight) {
+    size_t i;
     memset(&curiosity_mod, 0, sizeof(curiosity_mod));
     curiosity_mod.novelty_weight = novelty_weight > 0.0f ? novelty_weight : 0.5f;
     curiosity_mod.exploration_bonus = 0.0f;
@@ -9022,7 +9259,7 @@ int curiosity_init(float novelty_weight) {
         /* Xavier初始化 */
         float scale = sqrtf(2.0f / (float)CURIOSITY_STATE_DIM);
         unsigned int seed = 12345;
-        for (size_t i = 0; i < wsize; i++) {
+        for(i = 0; i < wsize; i++) {
             seed = seed * 1103515245 + 12345;
             curiosity_mod.forward_model_weights[i] = ((float)(seed & 0x7FFFFFFF) / 2147483648.0f - 0.5f) * scale;
         }
@@ -9586,8 +9823,9 @@ int correction_register_strategy(int id) {
 }
 
 int correction_record_outcome(int strategy_id, float improvement, int was_successful) {
+    int i;
     STRATEGY_LOCK;
-    for (int i = 0; i < strategy_count; i++) {
+    for(i = 0; i < strategy_count; i++) {
         if (strategies[i].strategy_id == strategy_id) {
             strategies[i].correction_attempts++;
             if (was_successful) strategies[i].correction_successes++;
@@ -9604,9 +9842,10 @@ int correction_record_outcome(int strategy_id, float improvement, int was_succes
 }
 
 int correction_select_best_strategy(float* best_rate, int* best_id) {
+    int i;
     STRATEGY_LOCK;
     int best = -1; float max_rate = 0.0f;
-    for (int i = 0; i < strategy_count; i++) {
+    for(i = 0; i < strategy_count; i++) {
         if (strategies[i].correction_attempts >= 3 && strategies[i].ema_success_rate > max_rate) {
             max_rate = strategies[i].ema_success_rate;
             best = strategies[i].strategy_id;

@@ -353,7 +353,10 @@ async function refreshAllSections() {
         { name: 'dashApiKey', fn: refreshDashApiKey },
         { name: 'viz', fn: initVisualizationSystem },
         { name: 'chart', fn: initApiUsageChart },
-        { name: 'agents', fn: refreshAgents }
+        { name: 'agents', fn: refreshAgents },
+        /* 新增: 自主学习、模仿学习、AGI诊断状态刷新 */
+        { name: 'autoLearn', fn: refreshAutoLearnStats },
+        { name: 'imitation', fn: refreshImitationStatus }
     ];
     var completed = 0;
     /* v9.22修复: 串行执行各模块刷新，每1个模块后暂停300ms，防止请求风暴压垮单线程服务器 */
@@ -8035,6 +8038,48 @@ window.saveSafetySetting = function(key, value) {
     }
 };
 
+/* L-006修复: 手动设备注册函数 - 带验证逻辑
+ * 用户手动添加设备时，通过后端API验证设备是否真实存在，防止添加虚拟设备 */
+window.registerManualDevice = function() {
+    var type = document.getElementById('manual-device-type').value;
+    var name = document.getElementById('manual-device-name').value.trim();
+    var devId = document.getElementById('manual-device-id').value.trim();
+
+    if (!name) {
+        window.showNotification('请输入设备名称', 'warning');
+        return;
+    }
+    if (!devId) {
+        window.showNotification('请输入设备ID/路径', 'warning');
+        return;
+    }
+
+    /* 通过后端API验证设备是否存在 */
+    var api = window.SelfLnnApi;
+    if (api && api.registerDevice) {
+        var payload = { type: type, name: name, device_id: devId };
+        api.registerDevice(payload).then(function(result) {
+            if (result && result.success) {
+                window.showNotification('设备 "' + name + '" 注册成功，已验证设备可用', 'success');
+                /* 刷新设备列表 */
+                if (typeof loadDevices === 'function') {
+                    loadDevices();
+                }
+            } else if (result && result.verified === false) {
+                window.showNotification('设备 "' + name + '" 未通过验证: ' + (result.message || '设备不可达'), 'danger');
+            } else {
+                window.showNotification('设备注册失败: ' + ((result && result.message) || '未知错误'), 'danger');
+            }
+        }).catch(function(e) {
+            console.warn('设备注册API调用失败:', e);
+            window.showNotification('设备注册失败，请检查后端服务是否运行', 'danger');
+        });
+    } else {
+        /* 后端API不可用时，提示用户 */
+        window.showNotification('后端API不可用，无法验证设备 "' + name + '" 是否真实存在。请确保后端服务已启动。', 'warning');
+    }
+};
+
 /* ================================================================
  * M-023修复：生产日志级别控制
  * ================================================================ */
@@ -9179,6 +9224,29 @@ window.pauseTask = pauseTask;
 window.cancelTask = cancelTask;
 window.addTaskToQueue = addTaskToQueue;
 
+/* 自主学习 (self-learning) */
+window.toggleAutoLearn = toggleAutoLearn;
+window.triggerAutoScan = triggerAutoScan;
+window.refreshAutoLearnStats = refreshAutoLearnStats;
+window.applyAutoLearnConfig = applyAutoLearnConfig;
+
+/* 模仿学习 (imitation-learning) */
+window.submitImitationDemo = submitImitationDemo;
+window.startImitationTrain = startImitationTrain;
+window.refreshImitationStatus = refreshImitationStatus;
+window.predictImitationAction = predictImitationAction;
+
+/* AGI诊断 (agi-diagnostic) */
+window.runFullDiagnostic = runFullDiagnostic;
+window.exportDiagnosticReport = exportDiagnosticReport;
+window.quickHealthCheck = quickHealthCheck;
+
+/* 多智能体系统 */
+window.refreshAgents = refreshAgents;
+window.initMultiAgentSystem = initMultiAgentSystem;
+window.createAgent = createAgent;
+window.broadcastTask = broadcastTask;
+
 /* ================================================================
  *: 全局定时器清理 - 页面卸载时清除所有活跃定时器
  * 防止内存泄漏和后台持续请求
@@ -9353,71 +9421,65 @@ function captureStereoFrame() {
                     document.getElementById('stereo-left-status').textContent = '已采集';
                     document.getElementById('stereo-right-status').textContent = '已采集';
                 } else {
-                    /* 后端无真实双目数据时，生成模拟帧用于测试Worker管线 */
-                    generateMockStereoFrame();
+                    /* H-001修复: 后端无真实双目数据时，拒绝生成模拟帧。
+                     * 严格遵守'禁止虚拟数据'原则，不合成任何假图像。 */
+                    showStereoNoHardwareMessage('后端无真实双目数据，双目视觉不可用');
                 }
             })
             .catch(function(err) {
-                console.warn('[双目视觉] 后端API不可用(' + err.message + ')，使用模拟数据');
-                generateMockStereoFrame();
+                /* H-001修复: 后端API不可用时，拒绝回退到模拟数据。
+                 * 显示明确的硬件断开提示，不生成任何合成图像。 */
+                console.warn('[双目视觉] 后端API不可用(' + err.message + ')，拒绝使用模拟数据');
+                showStereoNoHardwareMessage('双目相机未连接，请检查硬件连接');
             });
     } else {
-        generateMockStereoFrame();
+        /* H-001修复: API服务不可用时，拒绝生成模拟数据 */
+        showStereoNoHardwareMessage('API服务未就绪，双目视觉不可用');
     }
 }
 
 /**
- * @brief 生成模拟双目帧（用于测试Worker管线）
- * 当后端无真实双目数据时，生成带视差的合成图像
+ * H-001修复: 显示双目硬件未连接提示（替代generateMockStereoFrame模拟数据生成）
+ * 严格遵守项目'禁止任何虚拟数据和模拟数据'要求。
+ * 在Canvas上渲染'硬件未连接'提示，不生成任何合成图像。
  */
-function generateMockStereoFrame() {
+function showStereoNoHardwareMessage(reason) {
     var w = 320, h = 240;
-    var leftData = new Uint8ClampedArray(w * h * 4);
-    var rightData = new Uint8ClampedArray(w * h * 4);
-
-    for (var y = 0; y < h; y++) {
-        for (var x = 0; x < w; x++) {
-            var idx = (y * w + x) * 4;
-            /* 生成棋盘格图案 + 圆形测试区域 */
-            var isChecker = ((Math.floor(x / 20) + Math.floor(y / 20)) % 2 === 0);
-            var isCircle = (Math.sqrt((x - 160) * (x - 160) + (y - 120) * (y - 120)) < 60);
-
-            var r = isCircle ? 200 : (isChecker ? 180 : 40);
-            var g = isCircle ? 100 : (isChecker ? 180 : 40);
-            var b = isCircle ? 50 : (isChecker ? 180 : 40);
-
-            leftData[idx] = r;
-            leftData[idx + 1] = g;
-            leftData[idx + 2] = b;
-            leftData[idx + 3] = 255;
-
-            /* 右目图像：圆形区域水平偏移10像素（模拟视差） */
-            var rx = x;
-            if (isCircle) rx = x - 10;
-            if (rx < 0) rx = 0;
-            var ridx = (y * w + rx) * 4;
-            rightData[ridx] = r;
-            rightData[ridx + 1] = g;
-            rightData[ridx + 2] = b;
-            rightData[ridx + 3] = 255;
-        }
+    /* 清空Canvas并显示提示文字 */
+    if (g_stereoLeftCtx) {
+        g_stereoLeftCtx.fillStyle = '#1a1a2e';
+        g_stereoLeftCtx.fillRect(0, 0, w, h);
+        g_stereoLeftCtx.fillStyle = '#ff6b35';
+        g_stereoLeftCtx.font = '14px sans-serif';
+        g_stereoLeftCtx.textAlign = 'center';
+        g_stereoLeftCtx.fillText('⚠ 硬件未连接', w/2, h/2 - 10);
+        g_stereoLeftCtx.fillStyle = '#888';
+        g_stereoLeftCtx.font = '11px sans-serif';
+        g_stereoLeftCtx.fillText(reason, w/2, h/2 + 15);
     }
-
-    /* 渲染模拟帧 */
-    var leftImage = new ImageData(leftData, w, h);
-    var rightImage = new ImageData(rightData, w, h);
-    renderImageToCanvas(leftImage, g_stereoLeftCtx, 'stereo-left-canvas', w, h);
-    renderImageToCanvas(rightImage, g_stereoRightCtx, 'stereo-right-canvas', w, h);
-    document.getElementById('stereo-left-status').textContent = '模拟帧';
-    document.getElementById('stereo-right-status').textContent = '模拟帧';
-
-    /* 发送到Worker */
-    g_stereoWorker.postMessage({
-        type: 'stereo_frame',
-        leftImageData: leftData,
-        rightImageData: rightData,
-        width: w, height: h
-    }, [leftData.buffer, rightData.buffer]);
+    if (g_stereoRightCtx) {
+        g_stereoRightCtx.fillStyle = '#1a1a2e';
+        g_stereoRightCtx.fillRect(0, 0, w, h);
+        g_stereoRightCtx.fillStyle = '#ff6b35';
+        g_stereoRightCtx.font = '14px sans-serif';
+        g_stereoRightCtx.textAlign = 'center';
+        g_stereoRightCtx.fillText('⚠ 硬件未连接', w/2, h/2 - 10);
+        g_stereoRightCtx.fillStyle = '#888';
+        g_stereoRightCtx.font = '11px sans-serif';
+        g_stereoRightCtx.fillText(reason, w/2, h/2 + 15);
+    }
+    /* 清除深度图和点云区域 */
+    if (g_stereoDepthCtx) {
+        g_stereoDepthCtx.fillStyle = '#1a1a2e';
+        g_stereoDepthCtx.fillRect(0, 0, w, h);
+        g_stereoDepthCtx.fillStyle = '#888';
+        g_stereoDepthCtx.font = '12px sans-serif';
+        g_stereoDepthCtx.textAlign = 'center';
+        g_stereoDepthCtx.fillText('等待真实双目数据...', w/2, h/2);
+    }
+    document.getElementById('stereo-left-status').textContent = '未连接';
+    document.getElementById('stereo-right-status').textContent = '未连接';
+    document.getElementById('stereo-depth-status').textContent = '等待硬件';
 }
 
 /**
@@ -9735,5 +9797,342 @@ async function broadcastTask() {
         }
     } catch (e) {
         showNotification('广播任务失败: ' + e.message, 'danger');
+    }
+}
+
+/* ================================================================
+ * 自主扫描模块 - self-learning 页面功能
+ * 修复：HTML onclick 引用的 triggerAutoScan/applyAutoLearnConfig 缺失
+ * ================================================================ */
+
+/**
+ * 触发自主扫描 - 启动系统自我扫描以发现新知识和优化机会
+ */
+async function triggerAutoScan() {
+    if (!window.SelfLnnApi || typeof window.SelfLnnApi.triggerAutoScan !== 'function') {
+        showNotification('⚠️ 后端未连接，无法触发自主扫描', 'warning');
+        return;
+    }
+    showNotification('正在执行自主扫描...', 'info');
+    try {
+        var result = await window.SelfLnnApi.triggerAutoScan();
+        if (result && result.success) {
+            showNotification('✅ 自主扫描完成，发现 ' + (result.data && result.data.findings ? result.data.findings.length : 0) + ' 项可优化点', 'success');
+            /* 刷新自动学习统计 */
+            refreshAutoLearnStats();
+        } else {
+            showNotification('自主扫描失败: ' + ((result && result.error) || '未知错误'), 'danger');
+        }
+    } catch (e) {
+        showNotification('自主扫描失败: ' + e.message, 'danger');
+    }
+}
+
+/**
+ * 应用自主学习配置 - 将用户配置的自动学习参数提交到后端
+ */
+async function applyAutoLearnConfig() {
+    if (!window.SelfLnnApi || typeof window.SelfLnnApi.applyAutoLearnConfig !== 'function') {
+        showNotification('⚠️ 后端未连接，无法应用配置', 'warning');
+        return;
+    }
+    /* 收集配置参数 - 匹配HTML中的实际元素ID */
+    var watchDirEl = document.getElementById('auto-watch-dir');
+    var fileFilterEl = document.getElementById('auto-file-filter');
+    var scanIntervalEl = document.getElementById('auto-scan-interval');
+    var config = {
+        watch_dir: watchDirEl ? watchDirEl.value.trim() || './data' : './data',
+        file_filter: fileFilterEl ? fileFilterEl.value.trim() || 'md,json,csv,txt' : 'md,json,csv,txt',
+        scan_interval: scanIntervalEl ? parseInt(scanIntervalEl.value) || 300 : 300
+    };
+    showNotification('正在应用自主学习配置...', 'info');
+    try {
+        var result = await window.SelfLnnApi.applyAutoLearnConfig(config);
+        if (result && result.success) {
+            showNotification('✅ 自主学习配置已应用', 'success');
+        } else {
+            showNotification('应用配置失败: ' + ((result && result.error) || '未知错误'), 'danger');
+        }
+    } catch (e) {
+        showNotification('应用配置失败: ' + e.message, 'danger');
+    }
+}
+
+/* ================================================================
+ * 模仿学习模块 - imitation-learning 页面功能
+ * 修复：HTML onclick 引用的4个函数缺失
+ * ================================================================ */
+
+/**
+ * 提交模仿演示数据 - 用户提供演示样本供模型学习
+ */
+async function submitImitationDemo() {
+    if (!window.SelfLnnApi || typeof window.SelfLnnApi.submitImitationDemo !== 'function') {
+        showNotification('⚠️ 后端未连接，无法提交演示数据', 'warning');
+        return;
+    }
+    var demoInput = document.getElementById('im-demo-data');
+    var demoLabel = document.getElementById('im-demo-label');
+    var algorithmEl = document.getElementById('im-algorithm');
+    var demoData = demoInput ? demoInput.value.trim() : '';
+    if (!demoData) {
+        showNotification('请输入演示数据', 'warning');
+        return;
+    }
+    showNotification('正在提交演示数据...', 'info');
+    try {
+        var result = await window.SelfLnnApi.submitImitationDemo({
+            data: demoData,
+            label: demoLabel ? demoLabel.value.trim() || '手动演示' : '手动演示',
+            algorithm: algorithmEl ? algorithmEl.value : 'bc'
+        });
+        if (result && result.success) {
+            showNotification('✅ 演示数据已提交', 'success');
+            if (demoInput) demoInput.value = '';
+            refreshImitationStatus();
+        } else {
+            showNotification('提交失败: ' + ((result && result.error) || '未知错误'), 'danger');
+        }
+    } catch (e) {
+        showNotification('提交失败: ' + e.message, 'danger');
+    }
+}
+
+/**
+ * 启动模仿训练 - 基于已提交的演示数据训练模型
+ */
+async function startImitationTrain() {
+    if (!window.SelfLnnApi || typeof window.SelfLnnApi.startImitationTrain !== 'function') {
+        showNotification('⚠️ 后端未连接，无法启动模仿训练', 'warning');
+        return;
+    }
+    var epochsEl = document.getElementById('im-epochs');
+    var lrEl = document.getElementById('im-lr');
+    var algorithmEl = document.getElementById('im-algorithm');
+    var config = {
+        epochs: epochsEl ? parseInt(epochsEl.value) || 50 : 50,
+        learning_rate: lrEl ? parseFloat(lrEl.value) || 0.001 : 0.001,
+        algorithm: algorithmEl ? algorithmEl.value : 'bc'
+    };
+    showNotification('正在启动模仿学习训练...', 'info');
+    try {
+        var result = await window.SelfLnnApi.startImitationTrain(config);
+        if (result && result.success) {
+            showNotification('✅ 模仿学习训练已启动', 'success');
+            refreshImitationStatus();
+        } else {
+            showNotification('启动训练失败: ' + ((result && result.error) || '未知错误'), 'danger');
+        }
+    } catch (e) {
+        showNotification('启动训练失败: ' + e.message, 'danger');
+    }
+}
+
+/**
+ * 刷新模仿学习状态 - 获取当前模仿学习进度和统计
+ */
+async function refreshImitationStatus() {
+    if (!window.SelfLnnApi || typeof window.SelfLnnApi.getImitationStatus !== 'function') {
+        console.warn('[模仿学习] API未就绪');
+        return;
+    }
+    try {
+        var result = await window.SelfLnnApi.getImitationStatus();
+        if (result && result.success && result.data) {
+            var d = result.data;
+            setEl('im-demo-count', (d.demo_count || 0).toString());
+            setEl('im-loss', (d.training_loss != null ? d.training_loss.toFixed(4) : '--'));
+            setEl('im-accuracy', (d.accuracy != null ? (d.accuracy * 100).toFixed(1) + '%' : '--'));
+            setEl('im-algo-name', d.algorithm || (d.algo_name || '--'));
+        }
+    } catch (e) {
+        console.warn('刷新模仿学习状态失败:', e.message);
+    }
+}
+
+/**
+ * 预测模仿动作 - 基于当前输入预测最优动作
+ */
+async function predictImitationAction() {
+    if (!window.SelfLnnApi || typeof window.SelfLnnApi.predictImitationAction !== 'function') {
+        showNotification('⚠️ 后端未连接，无法预测动作', 'warning');
+        return;
+    }
+    var inputEl = document.getElementById('im-predict-input');
+    var inputData = inputEl ? inputEl.value.trim() : '';
+    if (!inputData) {
+        showNotification('请输入预测输入数据', 'warning');
+        return;
+    }
+    showNotification('正在预测...', 'info');
+    try {
+        var result = await window.SelfLnnApi.predictImitationAction({ input: inputData });
+        if (result && result.success && result.data) {
+            /* 将预测结果显示在旁边的输出区域 */
+            var outputEl = document.getElementById('im-predict-output');
+            if (outputEl) {
+                outputEl.textContent = JSON.stringify(result.data, null, 2);
+            }
+            showNotification('✅ 预测完成: ' + JSON.stringify(result.data.action || result.data), 'success');
+        } else {
+            showNotification('预测失败: ' + ((result && result.error) || '未知错误'), 'danger');
+        }
+    } catch (e) {
+        showNotification('预测失败: ' + e.message, 'danger');
+    }
+}
+
+/* ================================================================
+ * AGI诊断模块 - agi-diagnostic 页面功能
+ * 修复：HTML onclick 引用的3个函数缺失
+ * ================================================================ */
+
+/**
+ * 运行完整诊断 - 对AGI系统进行全面健康检查
+ */
+async function runFullDiagnostic() {
+    if (!window.SelfLnnApi || typeof window.SelfLnnApi.runFullDiagnostic !== 'function') {
+        showNotification('⚠️ 后端未连接，无法运行诊断', 'warning');
+        return;
+    }
+    showNotification('正在运行完整诊断，请稍候...', 'info');
+    /* 清空之前的诊断结果 */
+    var resultEl = document.getElementById('diag-results');
+    if (resultEl) resultEl.innerHTML = '<pre style="color:#ffaa00;font-size:12px;margin:0;">诊断运行中...</pre>';
+    /* 更新状态标签 */
+    setEl('agi-diag-status', '诊断中...');
+    try {
+        var result = await window.SelfLnnApi.runFullDiagnostic();
+        if (result && result.success && result.data) {
+            renderDiagnosticResult(result.data);
+            setEl('agi-diag-status', '诊断完成');
+            showNotification('✅ 完整诊断完成', 'success');
+        } else {
+            if (resultEl) resultEl.innerHTML = '<pre style="color:#ff4444;font-size:12px;margin:0;">诊断失败: ' + ((result && result.error) || '未知错误') + '</pre>';
+            setEl('agi-diag-status', '诊断失败');
+            showNotification('诊断失败: ' + ((result && result.error) || '未知错误'), 'danger');
+        }
+    } catch (e) {
+        if (resultEl) resultEl.innerHTML = '<pre style="color:#ff4444;font-size:12px;margin:0;">诊断异常: ' + e.message + '</pre>';
+        setEl('agi-diag-status', '异常');
+        showNotification('诊断异常: ' + e.message, 'danger');
+    }
+}
+
+/**
+ * 渲染诊断结果 - 将诊断数据格式化为可视化报告
+ */
+function renderDiagnosticResult(data) {
+    var container = document.getElementById('diag-results');
+    if (!container) return;
+    var html = '';
+    /* 整体评分 */
+    var score = data.overall_score || 0;
+    var scoreColor = score >= 80 ? '#00ff88' : (score >= 60 ? '#ffaa00' : '#ff4444');
+    html += '<div style="text-align:center;margin-bottom:16px;">';
+    html += '<div style="font-size:48px;font-weight:bold;color:' + scoreColor + ';">' + score.toFixed(0) + '</div>';
+    html += '<div style="color:#888;">整体健康评分</div>';
+    html += '</div>';
+    /* 各模块诊断 - 更新对应的HTML元素 */
+    if (data.modules) {
+        for (var i = 0; i < data.modules.length; i++) {
+            var m = data.modules[i];
+            var mColor = m.status === 'pass' ? '#00ff88' : (m.status === 'warn' ? '#ffaa00' : '#ff4444');
+            var mText = m.status === 'pass' ? '正常' : (m.status === 'warn' ? '警告' : '异常');
+            /* 映射到HTML中的诊断项 */
+            var diagMap = {
+                'lnn': 'diag-lnn', 'knowledge': 'diag-kb', 'memory': 'diag-mem',
+                'agi': 'diag-agi', 'gpu': 'diag-gpu', 'training': 'diag-train'
+            };
+            var elId = diagMap[m.name] || ('diag-' + (m.name || i));
+            setEl(elId, mText);
+            /* 设置颜色 */
+            var el = document.getElementById(elId);
+            if (el) el.style.color = mColor;
+        }
+    }
+    /* 详细结果 */
+    if (data.details && data.details.length > 0) {
+        html += '<div style="margin-top:12px;">';
+        for (var j = 0; j < data.details.length; j++) {
+            var d = data.details[j];
+            var dStatus = d.status === 'pass' ? '✅' : (d.status === 'warn' ? '⚠️' : '❌');
+            html += '<div style="padding:4px 0;font-size:12px;color:#ccc;">' + dStatus + ' ' + d.name + ': ' + (d.message || '') + '</div>';
+        }
+        html += '</div>';
+    }
+    /* 建议 */
+    if (data.recommendations && data.recommendations.length > 0) {
+        html += '<div style="margin-top:12px;"><strong style="color:#00aaff;">建议:</strong>';
+        for (var k = 0; k < data.recommendations.length; k++) {
+            html += '<div style="padding:4px 8px;color:#ccc;font-size:12px;">• ' + data.recommendations[k] + '</div>';
+        }
+        html += '</div>';
+    }
+    container.innerHTML = html;
+}
+
+/**
+ * 导出诊断报告 - 将诊断结果导出为JSON文件下载
+ */
+async function exportDiagnosticReport() {
+    if (!window.SelfLnnApi || typeof window.SelfLnnApi.getDiagnosticReport !== 'function') {
+        showNotification('⚠️ 后端未连接，无法导出报告', 'warning');
+        return;
+    }
+    showNotification('正在生成诊断报告...', 'info');
+    try {
+        var result = await window.SelfLnnApi.getDiagnosticReport();
+        if (result && result.success && result.data) {
+            var blob = new Blob([JSON.stringify(result.data, null, 2)], { type: 'application/json' });
+            var url = URL.createObjectURL(blob);
+            var a = document.createElement('a');
+            a.href = url;
+            a.download = 'agi-diagnostic-report-' + new Date().toISOString().slice(0, 10) + '.json';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            showNotification('✅ 诊断报告已导出', 'success');
+        } else {
+            showNotification('导出失败: ' + ((result && result.error) || '未知错误'), 'danger');
+        }
+    } catch (e) {
+        showNotification('导出失败: ' + e.message, 'danger');
+    }
+}
+
+/**
+ * 快速健康检查 - 执行轻量级系统健康检查
+ */
+async function quickHealthCheck() {
+    if (!window.SelfLnnApi || typeof window.SelfLnnApi.getHealth !== 'function') {
+        showNotification('⚠️ 后端未连接，无法执行健康检查', 'warning');
+        return;
+    }
+    showNotification('正在执行快速健康检查...', 'info');
+    try {
+        var result = await window.SelfLnnApi.getHealth();
+        if (result && result.success) {
+            var d = result.data || {};
+            var status = d.status === 'healthy' ? '✅' : (d.status === 'degraded' ? '⚠️' : '❌');
+            var color = d.status === 'healthy' ? '#00ff88' : (d.status === 'degraded' ? '#ffaa00' : '#ff4444');
+            setEl('agi-diag-status', status + ' ' + (d.status || '未知'));
+            /* 更新快速诊断摘要 */
+            var resultEl = document.getElementById('diag-results');
+            if (resultEl) {
+                resultEl.innerHTML = '<div style="text-align:center;padding:20px;">' +
+                    '<div style="font-size:32px;color:' + color + ';">' + status + '</div>' +
+                    '<div style="color:' + color + ';margin-top:8px;">系统状态: ' + (d.status || '未知') + '</div>' +
+                    '<div style="color:#888;font-size:12px;margin-top:8px;">' +
+                    '上线时间: ' + (d.uptime || '--') + ' | 内存: ' + (d.memory_used || '--') + '/' + (d.memory_total || '--') +
+                    '</div></div>';
+            }
+            showNotification('✅ 健康检查完成', 'success');
+        } else {
+            showNotification('健康检查失败: ' + ((result && result.error) || '未知错误'), 'danger');
+        }
+    } catch (e) {
+        showNotification('健康检查失败: ' + e.message, 'danger');
     }
 }

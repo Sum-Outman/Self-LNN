@@ -4215,6 +4215,81 @@ class ApiService {
         } catch (e) { return { success: false, error: e.message }; }
     }
 
+    /* 模仿学习 - 提交演示数据 */
+    async submitImitationDemo(payload) {
+        try {
+            var resp = await this.request('/imitation/demonstration', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(payload)
+            });
+            var data = await resp.json();
+            return { success: resp.ok, data: data };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* 模仿学习 - 启动训练 */
+    async startImitationTrain(config) {
+        try {
+            var resp = await this.request('/imitation/train', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(config || {})
+            });
+            var data = await resp.json();
+            return { success: resp.ok, data: data };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* 模仿学习 - 预测动作 */
+    async predictImitationAction(payload) {
+        try {
+            var resp = await this.request('/imitation/predict', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(payload)
+            });
+            var data = await resp.json();
+            return { success: resp.ok, data: data };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* 自主学习 - 触发自主扫描 */
+    async triggerAutoScan() {
+        try {
+            var resp = await this.request('/auto-learn/scan', {method: 'POST'});
+            var data = await resp.json();
+            return { success: resp.ok, data: data };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* 自主学习 - 应用配置 */
+    async applyAutoLearnConfig(config) {
+        try {
+            var resp = await this.request('/auto-learn/toggle', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(config)
+            });
+            var data = await resp.json();
+            return { success: resp.ok, data: data };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* AGI诊断 - 运行完整诊断 */
+    async runFullDiagnostic() {
+        try {
+            var resp = await this.request('/agi/diagnostic', {method: 'GET'});
+            var data = await resp.json();
+            return { success: resp.ok, data: data };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
+    /* AGI诊断 - 获取诊断报告 */
+    async getDiagnosticReport() {
+        try {
+            var resp = await this.request('/agi/diagnostic/export', {method: 'GET'});
+            var data = await resp.json();
+            return { success: resp.ok, data: data };
+        } catch (e) { return { success: false, error: e.message }; }
+    }
+
     async setImitationAlgorithm(algorithm) {
         try {
             var resp = await this.request('/imitation/algorithm', {

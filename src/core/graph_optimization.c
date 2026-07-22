@@ -650,7 +650,7 @@ static GraphNode* fuse_matched_nodes(GraphNode* start_node, const FusionRule* ru
         nodes_to_fuse[i]->fused = 1;
     }
     
-    safe_free(nodes_to_fuse);
+    safe_free((void**)&nodes_to_fuse);
     return fused_node;
 }
 
@@ -774,9 +774,9 @@ int graph_fuse_operators(ComputationGraph* graph,
                                 local_nodes_to_fuse[node_idx]->eliminated = 1;
                             }
                             
-                            safe_free(local_nodes_to_fuse);
+                            safe_free((void**)&local_nodes_to_fuse);
                         } else {
-                            safe_free(local_nodes_to_fuse);
+                            safe_free((void**)&local_nodes_to_fuse);
                         }
                     }
                 }
@@ -1151,6 +1151,13 @@ int graph_memory_optimization(ComputationGraph* graph) {
     graph->optimized = 1;
     return optimized_count > 0 ? optimized_count : total_tensors;
 }
+
+/* ==================== 前向声明 ==================== */
+/* 公共子表达式消除、循环不变代码外提、并行执行 —— 在graph_optimize中调用，
+ * 定义在文件后续位置，需前向声明以满足C89规范 */
+int graph_common_subexpression_elimination(ComputationGraph* graph);
+int graph_loop_invariant_code_motion(ComputationGraph* graph);
+int graph_execute_parallel(ComputationGraph* graph);
 
 /**
  * @brief 应用优化策略

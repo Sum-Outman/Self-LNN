@@ -624,7 +624,11 @@ int multimodal_integration_process_audio(
         if (semantic_result_code == 0) {
             /* 提取语义特征 */
             if (feature_count + 4 <= processor->config.speech_config.max_features) {
+                #ifndef SELFLNN_NO_EMOTION
                 audio_features[feature_count++] = semantic_result.emotion.intensity;
+#else
+                audio_features[feature_count++] = 0.0f; /* 情感功能编译期禁用，使用0值填充 */
+#endif
                 audio_features[feature_count++] = semantic_result.intent.confidence;
                 audio_features[feature_count++] = semantic_result.recognition_confidence;
                 audio_features[feature_count++] = (float)semantic_result.num_keywords;

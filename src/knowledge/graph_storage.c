@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file graph_storage.c
  * @brief 知识图谱存储引擎实现
  *
@@ -2052,4 +2052,449 @@ RDFTripleStore* rdf_triple_store_load(const char* filename) {
 
     fclose(fp);
     return store;
+}
+
+/* ============================================================================
+ * M-006修复：统一图存储引擎抽象层实现
+ * 将三种图存储引擎（邻接表、属性图、RDF三元组）统一为单一接口。
+ * 实现日期: 2026-07-22
+ * ============================================================================ */
+
+/** @brief 统一图存储内部结构体 */
+struct GraphStorage {
+    GraphStorageType engine_type;   /**< 当前引擎类型 */
+    void* engine;                   /**< 底层引擎句柄 */
+    GraphStorageConfig config;      /**< 配置 */
+    int is_initialized;             /**< 是否已初始化 */
+};
+
+void graph_storage_config_get_default(GraphStorageConfig* config) {
+    if (!config) return;
+    memset(config, 0, sizeof(GraphStorageConfig));
+    config->engine_type = GRAPH_STORAGE_ADJACENCY_LIST;
+    config->initial_node_capacity = 1024;
+    config->initial_edge_capacity = 4096;
+    config->enable_property_index = 0;
+    config->enable_rdf_inference = 0;
+}
+
+GraphStorage* graph_storage_create(const GraphStorageConfig* config) {
+    GraphStorage* gs = (GraphStorage*)safe_calloc(1, sizeof(GraphStorage));
+    if (!gs) return NULL;
+
+    if (config) {
+        memcpy(&gs->config, config, sizeof(GraphStorageConfig));
+    } else {
+        graph_storage_config_get_default(&gs->config);
+    }
+
+    /* 根据配置创建对应的底层引擎 */
+    switch (gs->config.engine_type) {
+        case GRAPH_STORAGE_ADJACENCY_LIST:
+        case GRAPH_STORAGE_AUTO:
+            gs->engine = adjacency_list_create(gs->config.initial_node_capacity);
+            gs->engine_type = GRAPH_STORAGE_ADJACENCY_LIST;
+            break;
+
+        case GRAPH_STORAGE_PROPERTY_GRAPH:
+            gs->engine = property_graph_create(gs->config.initial_node_capacity);
+            gs->engine_type = GRAPH_STORAGE_PROPERTY_GRAPH;
+            break;
+
+        case GRAPH_STORAGE_RDF_TRIPLE:
+            gs->engine = rdf_triple_store_create();
+            gs->engine_type = GRAPH_STORAGE_RDF_TRIPLE;
+            break;
+
+        default:
+            /* 默认使用邻接表 */
+            gs->engine = adjacency_list_create(gs->config.initial_node_capacity);
+            gs->engine_type = GRAPH_STORAGE_ADJACENCY_LIST;
+            break;
+    }
+
+    if (!gs->engine) {
+        safe_free((void**)&gs);
+        return NULL;
+    }
+
+    gs->is_initialized = 1;
+    return gs;
+}
+
+void graph_storage_free(GraphStorage* gs) {
+    if (!gs) return;
+
+    if (gs->engine) {
+        switch (gs->engine_type) {
+            case GRAPH_STORAGE_ADJACENCY_LIST:
+                adjacency_list_free((AdjacencyList*)gs->engine);
+                break;
+            case GRAPH_STORAGE_PROPERTY_GRAPH:
+                property_graph_free((PropertyGraph*)gs->engine);
+                break;
+            case GRAPH_STORAGE_RDF_TRIPLE:
+                rdf_triple_store_free((RDFTripleStore*)gs->engine);
+                break;
+            default:
+                break;
+        }
+        gs->engine = NULL;
+    }
+
+    gs->is_initialized = 0;
+    safe_free((void**)&gs);
+}
+
+int graph_storage_add_node(GraphStorage* gs, const char* label) {
+    if (!gs || !gs->engine) return -1;
+
+    switch (gs->engine_type) {
+        case GRAPH_STORAGE_ADJACENCY_LIST:
+            return adjacency_list_add_node((AdjacencyList*)gs->engine, label);
+
+        case GRAPH_STORAGE_PROPERTY_GRAPH:
+            return property_graph_add_node((PropertyGraph*)gs->engine, label);
+
+        case GRAPH_STORAGE_RDF_TRIPLE: {
+            /* RDF存储：节点通过值创建 */
+            RDFNodeType node_type = RDF_NODE_IRI;
+            if (label && label[0] == '_' && label[1] == ':') {
+                node_type = RDF_NODE_BLANK;
+            }
+            return rdf_triple_store_get_node((RDFTripleStore*)gs->engine,
+                node_type, label ? label : "_:auto", NULL, NULL);
+        }
+
+        default:
+            return -1;
+    }
+}
+
+int graph_storage_add_edge(GraphStorage* gs, int source_id, int target_id,
+                           const char* label, float weight, int directed) {
+    if (!gs || !gs->engine) return -1;
+
+    switch (gs->engine_type) {
+        case GRAPH_STORAGE_ADJACENCY_LIST:
+            if (directed) {
+                return adjacency_list_add_edge((AdjacencyList*)gs->engine,
+                    source_id, target_id, label, weight);
+            } else {
+                return adjacency_list_add_undirected_edge((AdjacencyList*)gs->engine,
+                    source_id, target_id, label, weight);
+            }
+
+        case GRAPH_STORAGE_PROPERTY_GRAPH:
+            return property_graph_add_edge((PropertyGraph*)gs->engine,
+                source_id, target_id, label, weight, directed);
+
+        case GRAPH_STORAGE_RDF_TRIPLE:
+            if (label) {
+                return rdf_triple_store_add_triple((RDFTripleStore*)gs->engine,
+                    source_id, target_id, /* predicate_id from label */
+                    target_id, weight);
+            }
+            return -1;
+
+        default:
+            return -1;
+    }
+}
+
+int graph_storage_get_node(GraphStorage* gs, int node_id, GSGraphNode* node) {
+    if (!gs || !gs->engine || !node) return -1;
+    memset(node, 0, sizeof(GSGraphNode));
+
+    switch (gs->engine_type) {
+        case GRAPH_STORAGE_ADJACENCY_LIST: {
+            const ALNode* al_node = adjacency_list_get_node(
+                (AdjacencyList*)gs->engine, node_id);
+            if (!al_node) return -1;
+            node->node_id = al_node->id;
+            node->label = al_node->label;
+            node->origin = GRAPH_STORAGE_ADJACENCY_LIST;
+            node->internal_node = (void*)al_node;
+            return 0;
+        }
+
+        case GRAPH_STORAGE_PROPERTY_GRAPH: {
+            const PGNode* pg_node = property_graph_get_node(
+                (PropertyGraph*)gs->engine, node_id);
+            if (!pg_node) return -1;
+            node->node_id = pg_node->id;
+            node->label = pg_node->label;
+            node->origin = GRAPH_STORAGE_PROPERTY_GRAPH;
+            node->internal_node = (void*)pg_node;
+            return 0;
+        }
+
+        case GRAPH_STORAGE_RDF_TRIPLE: {
+            const RDFNode* rdf_node = rdf_triple_store_get_node_by_id(
+                (RDFTripleStore*)gs->engine, node_id);
+            if (!rdf_node) return -1;
+            node->node_id = rdf_node->id;
+            node->label = rdf_node->value;
+            node->origin = GRAPH_STORAGE_RDF_TRIPLE;
+            node->internal_node = (void*)rdf_node;
+            return 0;
+        }
+
+        default:
+            return -1;
+    }
+}
+
+int graph_storage_get_edge(GraphStorage* gs, int edge_id, GSGraphEdge* edge) {
+    if (!gs || !gs->engine || !edge) return -1;
+    memset(edge, 0, sizeof(GSGraphEdge));
+
+    switch (gs->engine_type) {
+        case GRAPH_STORAGE_ADJACENCY_LIST: {
+            const ALEdge* al_edge = adjacency_list_get_edge_by_id(
+                (AdjacencyList*)gs->engine, edge_id);
+            if (!al_edge) return -1;
+            edge->edge_id = al_edge->id;
+            edge->source_id = al_edge->source_id;
+            edge->target_id = al_edge->target_id;
+            edge->label = al_edge->label;
+            edge->weight = al_edge->weight;
+            edge->directed = al_edge->directed;
+            edge->origin = GRAPH_STORAGE_ADJACENCY_LIST;
+            return 0;
+        }
+
+        case GRAPH_STORAGE_PROPERTY_GRAPH: {
+            /* 属性图没有直接的get_edge_by_id，需要通过has_edge和get_edge_between */
+            /* 这里返回基础信息 */
+            edge->edge_id = edge_id;
+            edge->origin = GRAPH_STORAGE_PROPERTY_GRAPH;
+            return 0;
+        }
+
+        case GRAPH_STORAGE_RDF_TRIPLE: {
+            /* RDF使用三元组ID作为边ID */
+            edge->edge_id = edge_id;
+            edge->origin = GRAPH_STORAGE_RDF_TRIPLE;
+            return 0;
+        }
+
+        default:
+            return -1;
+    }
+}
+
+int graph_storage_get_neighbors(GraphStorage* gs, int node_id,
+                                int* neighbors, float* weights, size_t max_count) {
+    if (!gs || !gs->engine || !neighbors || max_count == 0) return -1;
+
+    switch (gs->engine_type) {
+        case GRAPH_STORAGE_ADJACENCY_LIST:
+            return adjacency_list_get_out_neighbors((AdjacencyList*)gs->engine,
+                node_id, neighbors, weights, max_count);
+
+        case GRAPH_STORAGE_PROPERTY_GRAPH: {
+            /* 属性图：遍历所有节点，检查是否存在边 */
+            PropertyGraph* pg = (PropertyGraph*)gs->engine;
+            size_t count = 0;
+            int node_cap = property_graph_get_node_capacity(pg);
+            for (int i = 0; i < node_cap && count < max_count; i++) {
+                if (property_graph_has_edge(pg, node_id, i)) {
+                    neighbors[count] = i;
+                    if (weights) {
+                        const PGEdge* e = property_graph_get_edge_between(pg, node_id, i);
+                        weights[count] = e ? e->weight : 1.0f;
+                    }
+                    count++;
+                }
+            }
+            return (int)count;
+        }
+
+        case GRAPH_STORAGE_RDF_TRIPLE: {
+            /* RDF存储：查询主语为node_id的三元组，宾语即为邻居 */
+            RDFTripleStore* store = (RDFTripleStore*)gs->engine;
+            RDFTriple* triples = (RDFTriple*)safe_malloc(
+                max_count * sizeof(RDFTriple));
+            if (!triples) return -1;
+            int count = rdf_triple_store_query(store, node_id, -1, -1,
+                triples, max_count);
+            for (int i = 0; i < count; i++) {
+                neighbors[i] = triples[i].object_id;
+                if (weights) weights[i] = triples[i].confidence;
+            }
+            safe_free((void**)&triples);
+            return count;
+        }
+
+        default:
+            return -1;
+    }
+}
+
+int graph_storage_has_edge(GraphStorage* gs, int source_id, int target_id) {
+    if (!gs || !gs->engine) return -1;
+
+    switch (gs->engine_type) {
+        case GRAPH_STORAGE_ADJACENCY_LIST:
+            return adjacency_list_has_edge((AdjacencyList*)gs->engine,
+                source_id, target_id);
+
+        case GRAPH_STORAGE_PROPERTY_GRAPH:
+            return property_graph_has_edge((PropertyGraph*)gs->engine,
+                source_id, target_id);
+
+        case GRAPH_STORAGE_RDF_TRIPLE: {
+            /* RDF: 查询是否存在从source到target的三元组 */
+            RDFTriple result;
+            int count = rdf_triple_store_query((RDFTripleStore*)gs->engine,
+                source_id, -1, target_id, &result, 1);
+            return (count > 0) ? 1 : 0;
+        }
+
+        default:
+            return -1;
+    }
+}
+
+int graph_storage_get_stats(GraphStorage* gs, GraphStorageStats* stats) {
+    if (!gs || !stats) return -1;
+    memset(stats, 0, sizeof(GraphStorageStats));
+
+    stats->engine_type = gs->engine_type;
+    stats->is_initialized = gs->is_initialized;
+
+    switch (gs->engine_type) {
+        case GRAPH_STORAGE_ADJACENCY_LIST: {
+            AdjacencyList* al = (AdjacencyList*)gs->engine;
+            stats->node_count = adjacency_list_node_count(al);
+            stats->edge_count = adjacency_list_edge_count(al);
+            break;
+        }
+        case GRAPH_STORAGE_PROPERTY_GRAPH: {
+            PropertyGraph* pg = (PropertyGraph*)gs->engine;
+            property_graph_get_stats(pg, &stats->node_count, &stats->edge_count);
+            break;
+        }
+        case GRAPH_STORAGE_RDF_TRIPLE: {
+            RDFTripleStore* store = (RDFTripleStore*)gs->engine;
+            stats->node_count = rdf_triple_store_node_count(store);
+            stats->edge_count = rdf_triple_store_count(store);
+            break;
+        }
+        default:
+            return -1;
+    }
+
+    /* 估算内存使用量 */
+    stats->memory_usage_bytes = stats->node_count * 256 + stats->edge_count * 128;
+
+    return 0;
+}
+
+size_t graph_storage_node_count(GraphStorage* gs) {
+    if (!gs || !gs->engine) return 0;
+    GraphStorageStats stats;
+    if (graph_storage_get_stats(gs, &stats) == 0) {
+        return stats.node_count;
+    }
+    return 0;
+}
+
+size_t graph_storage_edge_count(GraphStorage* gs) {
+    if (!gs || !gs->engine) return 0;
+    GraphStorageStats stats;
+    if (graph_storage_get_stats(gs, &stats) == 0) {
+        return stats.edge_count;
+    }
+    return 0;
+}
+
+GraphStorageType graph_storage_get_engine_type(GraphStorage* gs) {
+    if (!gs) return GRAPH_STORAGE_AUTO;
+    return gs->engine_type;
+}
+
+void* graph_storage_get_internal_engine(GraphStorage* gs) {
+    if (!gs) return NULL;
+    return gs->engine;
+}
+
+int graph_storage_save(GraphStorage* gs, const char* filename) {
+    if (!gs || !gs->engine || !filename) return -1;
+
+    switch (gs->engine_type) {
+        case GRAPH_STORAGE_ADJACENCY_LIST:
+            /* 邻接表暂不支持直接保存，通过属性图格式保存 */
+            return -1;
+
+        case GRAPH_STORAGE_PROPERTY_GRAPH:
+            return property_graph_save((PropertyGraph*)gs->engine, filename);
+
+        case GRAPH_STORAGE_RDF_TRIPLE:
+            return rdf_triple_store_save((RDFTripleStore*)gs->engine, filename);
+
+        default:
+            return -1;
+    }
+}
+
+GraphStorage* graph_storage_load(const char* filename) {
+    if (!filename) return NULL;
+
+    /* 尝试不同的加载方式，根据文件扩展名和内容判断 */
+    size_t len = strlen(filename);
+
+    /* 尝试RDF格式加载 */
+    if (len > 4 && (strcmp(filename + len - 4, ".nt") == 0 ||
+                    strcmp(filename + len - 4, ".ttl") == 0)) {
+        RDFTripleStore* store = rdf_triple_store_create();
+        if (store) {
+            int count = rdf_triple_store_import_ntriples(store, filename);
+            if (count >= 0) {
+                GraphStorageConfig config;
+                graph_storage_config_get_default(&config);
+                config.engine_type = GRAPH_STORAGE_RDF_TRIPLE;
+                GraphStorage* gs = graph_storage_create(&config);
+                if (gs) {
+                    /* 替换引擎 */
+                    rdf_triple_store_free((RDFTripleStore*)gs->engine);
+                    gs->engine = store;
+                    gs->engine_type = GRAPH_STORAGE_RDF_TRIPLE;
+                    return gs;
+                }
+            }
+            rdf_triple_store_free(store);
+        }
+    }
+
+    /* 尝试属性图格式加载 */
+    PropertyGraph* pg = property_graph_load(filename);
+    if (pg) {
+        GraphStorageConfig config;
+        graph_storage_config_get_default(&config);
+        config.engine_type = GRAPH_STORAGE_PROPERTY_GRAPH;
+        GraphStorage* gs = graph_storage_create(&config);
+        if (gs) {
+            property_graph_free((PropertyGraph*)gs->engine);
+            gs->engine = pg;
+            gs->engine_type = GRAPH_STORAGE_PROPERTY_GRAPH;
+            return gs;
+        }
+        property_graph_free(pg);
+    }
+
+    return NULL;
+}
+
+void graph_node_free(GSGraphNode* node) {
+    if (!node) return;
+    /* label和internal_node属于底层引擎，不需要在此释放 */
+    memset(node, 0, sizeof(GSGraphNode));
+}
+
+void graph_edge_free(GSGraphEdge* edge) {
+    if (!edge) return;
+    /* label属于底层引擎 */
+    memset(edge, 0, sizeof(GSGraphEdge));
 }
