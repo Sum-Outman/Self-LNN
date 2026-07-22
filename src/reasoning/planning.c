@@ -250,7 +250,7 @@ static float planning_evolution_evaluate_fitness(PlanningSystem* system, const f
     float diversity_score = 0.0f;
     if (system->evolution_population && system->evolution_population_size > 1) {
         /* 先计算种群均值 */
-        float* pop_mean = (float*)calloc(genome_len, sizeof(float));
+        float* pop_mean = (float*)safe_calloc(genome_len, sizeof(float));
         if (pop_mean) {
             for (size_t i = 0; i < system->evolution_population_size; i++) {
                 const float* other = system->evolution_population + i * genome_len;
@@ -283,7 +283,7 @@ static float planning_evolution_evaluate_fitness(PlanningSystem* system, const f
                 diversity_score = normalized_div * 0.8f; /* 正奖励 */
             }
 
-            free(pop_mean);
+            safe_free((void**)&pop_mean);
         }
     }
 
@@ -3394,7 +3394,7 @@ typedef struct MCTSNode {
 } MCTSNode;
 
 static MCTSNode* mcts_node_create(int state_id, int action_id, MCTSNode* parent, float prior) {
-    MCTSNode* node = (MCTSNode*)calloc(1, sizeof(MCTSNode));
+    MCTSNode* node = (MCTSNode*)safe_calloc(1, sizeof(MCTSNode));
     if (!node) return NULL;
     node->state_id = state_id;
     node->action_id = action_id;
@@ -3408,8 +3408,8 @@ static MCTSNode* mcts_node_create(int state_id, int action_id, MCTSNode* parent,
 static void mcts_node_free(MCTSNode* node) {
     if (!node) return;
     for (int i = 0; i < node->child_count; i++) mcts_node_free(node->children[i]);
-    if (node->children) free(node->children);
-    free(node);
+    if (node->children) safe_free((void**)&node->children);
+    safe_free((void**)&node);
 }
 
 static float mcts_ucb_score(MCTSNode* node, float total_visits, float exploration_const) {

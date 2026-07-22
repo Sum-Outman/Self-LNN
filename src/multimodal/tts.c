@@ -1979,6 +1979,16 @@ static int tts_is_untrained(TTSEngine* engine) {
     return 0;
 }
 
+/* v9.24: 导出函数供backend.c预检TTS引擎状态，避免未训练引擎导致崩溃 */
+int tts_is_untrained_export(TTSEngine* engine) {
+    return tts_is_untrained(engine);
+}
+
+LNN* tts_engine_get_shared_lnn(TTSEngine* engine) {
+    if (!engine) return NULL;
+    return engine->shared_lnn;
+}
+
 /* =============================================================== *
  * 核心波形生成函数（液态状态逐样本生成）                              *
  * =============================================================== */

@@ -1768,10 +1768,27 @@ int evolution_engine_apply_best_to_lnn(EvolutionEngine* engine) {
     if (!best || !best->chromosome || best->chromosome_size == 0) return -1;
 
     LNN* lnn = (LNN*)engine->target_lnn;
+
+    /* K-013修复: 先获取LNN写锁，再获取参数指针，防止与HTTP推理/在线学习/训练管线产生竞态 */
+    mutex_lock(&lnn->lock);
+
+    /* 在锁内重新验证LNN有效性，防止加锁期间LNN被销毁 */
+    if (!lnn || !engine->lnn_connected) {
+        mutex_unlock(&lnn->lock);
+        return -1;
+    }
+
     float* params = lnn_get_parameters(lnn);
-    if (!params) return -1;
+    if (!params) {
+        mutex_unlock(&lnn->lock);
+        return -1;
+    }
 
     size_t total_params = lnn_get_parameter_count(lnn);
+    if (total_params == 0) {
+        mutex_unlock(&lnn->lock);
+        return -1;
+    }
     size_t copy_count = (total_params < best->chromosome_size) ? total_params : best->chromosome_size;
 
     /* K-013: 演化权重变更验证 —— 计算L2范式变化量 */
@@ -1793,9 +1810,6 @@ int evolution_engine_apply_best_to_lnn(EvolutionEngine* engine) {
 /* 写入前记录日志 */
     log_info("[演化验证] 开始写入LNN权重: 染色体大小=%zu, LNN参数数=%zu, 适应度=%.6f",
              best->chromosome_size, total_params, best->fitness);
-
-/* 获取LNN写锁，防止与HTTP推理/在线学习/训练管线产生竞态 */
-    mutex_lock(&lnn->lock);
 
 /* Step1: 写入规范参数块（weight_matrix + bias_vector连续块） */
     memcpy(params, best->chromosome, copy_count * sizeof(float));

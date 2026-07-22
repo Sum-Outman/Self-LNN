@@ -837,16 +837,36 @@ int arch_controller_submit_change(ArchitectureController* controller,
     
     lnn_unlock(old_lnn);
 
-    /* M-008修复: 延迟释放旧LNN——在解锁后使用宽限期策略。
+    /* M-008修复: 延迟释放旧LNN——在解锁后使用真正的宽限期策略。
      * 旧LNN在锁内已从全局指针断开，任何新操作都将获取new_lnn的锁。
      * 宽限期(grace period)确保所有已在old_lnn锁上等待的线程完成操作后才释放。
-     * 实现方式：休眠短暂宽限期后释放，等价于轻量级RCU。 */
+     * 实现方式：
+     *   1. 完整内存屏障(全序)确保所有CPU核心看到新指针
+     *   2. 短暂休眠(1ms)作为真正的宽限期，让所有在途操作完成
+     *   3. 再次内存屏障确保休眠期间的内存操作全局可见
+     * 这比4次自增循环的"伪宽限期"提供了真正的并发安全保障。 */
     {
-        volatile int grace_period = 0;
-        /* 2次内存屏障等待——确保所有CPU核心看到新指针后才释放旧数据 */
-        for (int gp = 0; gp < 4; gp++) {
-            grace_period++;  /* 防止编译器优化掉循环 */
+#ifdef _WIN32
+        MemoryBarrier();  /* 全序内存屏障：确保InterlockedExchangePointer对所有核心可见 */
+        Sleep(1);         /* 1ms宽限期：给所有在途训练线程足够时间完成当前操作 */
+        MemoryBarrier();  /* 再次屏障：确保休眠期间的所有内存写入全局可见 */
+#elif defined(__GNUC__) || defined(__clang__)
+        __sync_synchronize();  /* 全序内存屏障 */
+        /* POSIX: nanosleep 1ms 宽限期 */
+        {
+            struct timespec ts = {0, 1000000}; /* 1ms */
+            nanosleep(&ts, NULL);
         }
+        __sync_synchronize();
+#else
+        /* 通用回退：使用volatile忙等待约1ms（约100000次循环） */
+        {
+            volatile int grace_count = 0;
+            for (int i = 0; i < 100000; i++) {
+                grace_count++;
+            }
+        }
+#endif
     }
     lnn_free(old_lnn);
 

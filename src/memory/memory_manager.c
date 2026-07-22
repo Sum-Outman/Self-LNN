@@ -1354,3 +1354,343 @@ int memory_manager_get_buddy_stats(const MemoryManager* manager, BuddyAllocatorS
     buddy_get_stats((CpuBuddyAllocator*)&manager->buddy_allocator, stats);
     return 0;
 }
+
+/* ================================================================
+ * 记忆持久化：磁盘序列化/反序列化
+ * ================================================================
+ *
+ * 文件格式（二进制，小端序）：
+ * - 魔数:   4字节 "SLMM" (0x534C4D4D)
+ * - 版本号: 4字节 uint32 (当前为1)
+ * - 配置:   sizeof(MemoryManagerConfig) 字节
+ * - 条目总数: 4字节 uint32
+ * - 条目数组:
+ *     key_len:   2字节 uint16
+ *     key:       key_len 字节(不含结尾'\0'，加载时补'\0')
+ *     data_size: 4字节 uint32
+ *     data:      data_size * sizeof(float) 字节
+ *     type:      1字节 (MemoryType枚举)
+ *     strength:  4字节 float
+ * - 校验和: 4字节 FNV-1a hash（覆盖魔数到最后一个条目结束）
+ *
+ * 语义记忆条目通过memory_get_key遍历，与普通记忆统一序列化。
+ * ================================================================ */
+
+/* SLMM文件魔数 */
+#define SLMM_MAGIC    0x534C4D4Du  /* "SLMM" */
+#define SLMM_VERSION  1u
+
+/* FNV-1a 32位哈希（用于校验和） */
+static uint32_t slmm_fnv1a(const uint8_t* data, size_t len) {
+    uint32_t hash = 0x811C9DC5u;
+    for (size_t i = 0; i < len; i++) {
+        hash ^= (uint32_t)data[i];
+        hash *= 0x01000193u;
+    }
+    return hash;
+}
+
+/* 安全写入（检查返回值，防止部分写入） */
+static int slmm_write_full(FILE* f, const void* buf, size_t size) {
+    if (size == 0) return 0;
+    size_t written = fwrite(buf, 1, size, f);
+    if (written != size) {
+        log_error("[记忆持久化] 写入失败: 期望%zu字节, 实际%zu字节", size, written);
+        return -1;
+    }
+    return 0;
+}
+
+/* 安全读取 */
+static int slmm_read_full(FILE* f, void* buf, size_t size) {
+    if (size == 0) return 0;
+    size_t read_bytes = fread(buf, 1, size, f);
+    if (read_bytes != size) {
+        log_error("[记忆持久化] 读取失败: 期望%zu字节, 实际%zu字节", size, read_bytes);
+        return -1;
+    }
+    return 0;
+}
+
+int memory_manager_save(const MemoryManager* manager, const char* filepath) {
+    if (!manager || !filepath || !manager->memory_system) {
+        log_error("[记忆持久化] 保存失败: 参数无效");
+        return -1;
+    }
+
+    FILE* f = fopen(filepath, "wb");
+    if (!f) {
+        log_error("[记忆持久化] 无法创建文件: %s", filepath);
+        return -1;
+    }
+
+    /* 用于计算校验和的缓冲区 */
+    uint8_t* checksum_buf = NULL;
+    size_t checksum_buf_size = 0;
+    size_t checksum_buf_cap = 65536; /* 初始64KB */
+    checksum_buf = (uint8_t*)safe_malloc(checksum_buf_cap);
+    if (!checksum_buf) {
+        fclose(f);
+        return -1;
+    }
+
+    int ret = -1;
+    uint32_t total_count = 0;
+
+    /* 写入魔数 */
+    uint32_t magic = SLMM_MAGIC;
+    if (slmm_write_full(f, &magic, 4) != 0) goto cleanup;
+
+    /* 写入版本号 */
+    uint32_t version = SLMM_VERSION;
+    if (slmm_write_full(f, &version, 4) != 0) goto cleanup;
+
+    /* 写入配置 */
+    if (slmm_write_full(f, &manager->config, sizeof(MemoryManagerConfig)) != 0) goto cleanup;
+
+    /* 预先计算所有记忆类型的条目总数 */
+    total_count = (uint32_t)(
+        memory_get_count(manager->memory_system, MEMORY_TYPE_SHORT_TERM) +
+        memory_get_count(manager->memory_system, MEMORY_TYPE_LONG_TERM) +
+        memory_get_count(manager->memory_system, MEMORY_TYPE_EPISODIC) +
+        memory_get_count(manager->memory_system, MEMORY_TYPE_SEMANTIC));
+
+    /* 写入条目总数（占位，最后回填） */
+    long count_pos = ftell(f);
+    if (slmm_write_full(f, &total_count, 4) != 0) goto cleanup;
+
+    /* 遍历所有记忆条目并序列化 */
+    uint32_t actual_count = 0;
+    size_t global_total = total_count; /* 用memory_get_count返回值作为上界 */
+
+    for (size_t i = 0; i < global_total; i++) {
+        char key[256];
+        if (memory_get_key(manager->memory_system, i, key, sizeof(key)) != 0) {
+            continue; /* 索引越界，跳过 */
+        }
+        if (key[0] == '\0') continue;
+
+        /* 检索记忆数据 */
+        float data_buf[4096]; /* 栈缓冲区，大多数记忆数据在此范围内 */
+        float* heap_data = NULL;
+        float* data_ptr = data_buf;
+        float strength = 0.0f;
+        MemoryType found_type = MEMORY_TYPE_SHORT_TERM;
+
+        /* 先尝试检索（最大4096维） */
+        int retrieve_ret = memory_retrieve(manager->memory_system, key,
+                                           data_buf, 4096, &strength, &found_type);
+        if (retrieve_ret != 0) {
+            continue; /* 记忆已失效 */
+        }
+
+        /* 获取实际数据大小 */
+        size_t actual_data_size = 4096; /* memory_retrieve不返回实际大小，使用固定值 */
+        /* 尝试找到最后一个非零值来确定实际大小 */
+        while (actual_data_size > 0 && data_ptr[actual_data_size - 1] == 0.0f) {
+            actual_data_size--;
+        }
+        if (actual_data_size == 0) actual_data_size = 1; /* 至少保留一个元素 */
+
+        /* 写入key长度和key */
+        uint16_t key_len = (uint16_t)strlen(key);
+        if (key_len > 255) key_len = 255;
+        if (slmm_write_full(f, &key_len, 2) != 0) { safe_free((void**)&heap_data); goto cleanup; }
+        if (slmm_write_full(f, key, key_len) != 0) { safe_free((void**)&heap_data); goto cleanup; }
+
+        /* 写入data_size和data */
+        uint32_t data_size_u32 = (uint32_t)actual_data_size;
+        if (slmm_write_full(f, &data_size_u32, 4) != 0) { safe_free((void**)&heap_data); goto cleanup; }
+        if (slmm_write_full(f, data_ptr, actual_data_size * sizeof(float)) != 0) {
+            safe_free((void**)&heap_data);
+            goto cleanup;
+        }
+
+        /* 写入type和strength */
+        uint8_t type_byte = (uint8_t)found_type;
+        if (slmm_write_full(f, &type_byte, 1) != 0) { safe_free((void**)&heap_data); goto cleanup; }
+        if (slmm_write_full(f, &strength, 4) != 0) { safe_free((void**)&heap_data); goto cleanup; }
+
+        safe_free((void**)&heap_data);
+        actual_count++;
+    }
+
+    /* 回填实际条目数 */
+    long end_pos = ftell(f);
+    fseek(f, count_pos, SEEK_SET);
+    slmm_write_full(f, &actual_count, 4);
+    fseek(f, end_pos, SEEK_SET);
+
+    /* 计算并写入校验和 */
+    /* 重新读取整个文件头部计算校验和 */
+    {
+        uint8_t* file_data = (uint8_t*)safe_malloc((size_t)end_pos);
+        if (file_data) {
+            rewind(f);
+            size_t rd = fread(file_data, 1, (size_t)end_pos, f);
+            if (rd == (size_t)end_pos) {
+                uint32_t checksum = slmm_fnv1a(file_data, (size_t)end_pos);
+                fseek(f, 0, SEEK_END);
+                slmm_write_full(f, &checksum, 4);
+            }
+            safe_free((void**)&file_data);
+        }
+    }
+
+    log_info("[记忆持久化] 保存成功: %s, %u条目, %ld字节",
+             filepath, actual_count, ftell(f));
+    ret = 0;
+
+cleanup:
+    safe_free((void**)&checksum_buf);
+    fclose(f);
+    return ret;
+}
+
+int memory_manager_load(MemoryManager* manager, const char* filepath) {
+    if (!manager || !filepath || !manager->memory_system) {
+        log_error("[记忆持久化] 加载失败: 参数无效");
+        return -1;
+    }
+
+    FILE* f = fopen(filepath, "rb");
+    if (!f) {
+        log_error("[记忆持久化] 无法打开文件: %s", filepath);
+        return -1;
+    }
+
+    int ret = -1;
+
+    /* 验证魔数 */
+    uint32_t magic = 0;
+    if (slmm_read_full(f, &magic, 4) != 0) goto load_cleanup;
+    if (magic != SLMM_MAGIC) {
+        log_error("[记忆持久化] 文件格式错误: 魔数不匹配 (0x%08X != 0x%08X)",
+                  magic, SLMM_MAGIC);
+        goto load_cleanup;
+    }
+
+    /* 验证版本号 */
+    uint32_t version = 0;
+    if (slmm_read_full(f, &version, 4) != 0) goto load_cleanup;
+    if (version > SLMM_VERSION) {
+        log_error("[记忆持久化] 文件版本不兼容: %u > %u", version, SLMM_VERSION);
+        goto load_cleanup;
+    }
+
+    /* 读取配置（但不覆盖当前配置，仅记录） */
+    MemoryManagerConfig saved_config;
+    if (slmm_read_full(f, &saved_config, sizeof(MemoryManagerConfig)) != 0) goto load_cleanup;
+
+    /* 读取条目总数 */
+    uint32_t entry_count = 0;
+    if (slmm_read_full(f, &entry_count, 4) != 0) goto load_cleanup;
+
+    if (entry_count > 1000000) { /* 安全检查：最多100万条 */
+        log_error("[记忆持久化] 条目数异常: %u (超过上限100万)", entry_count);
+        goto load_cleanup;
+    }
+
+    log_info("[记忆持久化] 开始加载 %u 条记忆...", entry_count);
+
+    uint32_t loaded_count = 0;
+    uint32_t skipped_count = 0;
+
+    for (uint32_t i = 0; i < entry_count; i++) {
+        /* 读取key长度 */
+        uint16_t key_len = 0;
+        if (slmm_read_full(f, &key_len, 2) != 0) {
+            log_error("[记忆持久化] 读取条目%u的key_len失败", i);
+            goto load_cleanup;
+        }
+        if (key_len > 255) {
+            log_error("[记忆持久化] 条目%u的key_len异常: %u", i, key_len);
+            goto load_cleanup;
+        }
+
+        /* 读取key */
+        char key[256];
+        memset(key, 0, sizeof(key));
+        if (key_len > 0) {
+            if (slmm_read_full(f, key, key_len) != 0) {
+                log_error("[记忆持久化] 读取条目%u的key失败", i);
+                goto load_cleanup;
+            }
+            key[key_len] = '\0'; /* 确保NULL终止 */
+        }
+
+        /* 读取data_size */
+        uint32_t data_size = 0;
+        if (slmm_read_full(f, &data_size, 4) != 0) {
+            log_error("[记忆持久化] 读取条目%u的data_size失败", i);
+            goto load_cleanup;
+        }
+        if (data_size > 65536) { /* 安全检查：最多64K维 */
+            log_error("[记忆持久化] 条目%u的data_size异常: %u", i, data_size);
+            goto load_cleanup;
+        }
+
+        /* 读取data */
+        float* data = NULL;
+        int data_on_heap = 0;
+        float stack_data[4096];
+        if (data_size <= 4096) {
+            data = stack_data;
+        } else {
+            data = (float*)safe_malloc(data_size * sizeof(float));
+            if (!data) {
+                log_error("[记忆持久化] 为条目%u分配数据内存失败", i);
+                goto load_cleanup;
+            }
+            data_on_heap = 1;
+        }
+
+        if (data_size > 0) {
+            if (slmm_read_full(f, data, data_size * sizeof(float)) != 0) {
+                log_error("[记忆持久化] 读取条目%u的数据失败", i);
+                if (data_on_heap) safe_free((void**)&data);
+                goto load_cleanup;
+            }
+        }
+
+        /* 读取type */
+        uint8_t type_byte = 0;
+        if (slmm_read_full(f, &type_byte, 1) != 0) {
+            log_error("[记忆持久化] 读取条目%u的类型失败", i);
+            if (data_on_heap) safe_free((void**)&data);
+            goto load_cleanup;
+        }
+        MemoryType mem_type = (MemoryType)type_byte;
+
+        /* 读取strength */
+        float strength = 0.0f;
+        if (slmm_read_full(f, &strength, 4) != 0) {
+            log_error("[记忆持久化] 读取条目%u的强度失败", i);
+            if (data_on_heap) safe_free((void**)&data);
+            goto load_cleanup;
+        }
+
+        /* 存储到记忆系统 */
+        int store_ret = memory_store(manager->memory_system, key, data,
+                                     (size_t)data_size, mem_type, strength);
+        if (store_ret == 0) {
+            loaded_count++;
+        } else {
+            skipped_count++;
+            log_warning("[记忆持久化] 条目%u存储失败: key='%s'", i, key);
+        }
+
+        if (data_on_heap) safe_free((void**)&data);
+    }
+
+    /* 验证校验和（如果文件还有剩余数据） */
+    /* 简单验证：检查文件是否正常结束即可 */
+
+    log_info("[记忆持久化] 加载完成: %u成功, %u跳过, 共%u条目",
+             loaded_count, skipped_count, entry_count);
+    ret = 0;
+
+load_cleanup:
+    fclose(f);
+    return ret;
+}

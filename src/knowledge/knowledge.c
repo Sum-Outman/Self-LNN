@@ -375,6 +375,19 @@ float knowledge_string_similarity(const char* str1, const char* str2) {
 
     int max_len = len1 > len2 ? len1 : len2;
 
+    /* FIX-SEARCH-SUBSTR: 子串包含检测。
+     * 原实现仅按Levenshtein编辑距离（且按UTF-8字节而非字符），
+     * 导致查询词"独角兽"对长subject"独角兽是神话中的生物"相似度仅0.30，
+     * content模式添加的知识（整句作subject）永远无法被检索到。
+     * 较短串完全包含于较长串时（搜索引擎基本行为），给予高相似度0.85。 */
+    {
+        const char* shorter = len1 <= len2 ? str1 : str2;
+        const char* longer  = len1 <= len2 ? str2 : str1;
+        if (strstr(longer, shorter) != NULL) {
+            return 0.85f;
+        }
+    }
+
     /* 使用两行动态规划计算Levenshtein编辑距离，O(n*m)时间 O(min(n,m))空间 */
     int* prev = (int*)safe_malloc((len2 + 1) * sizeof(int));
     int* curr = (int*)safe_malloc((len2 + 1) * sizeof(int));
@@ -2331,25 +2344,47 @@ int knowledge_base_search_similar(KnowledgeBase* kb,
     /* KB-003修复: 添加读锁保护，防止并发修改导致的数据损坏 */
     KB_RLOCK(kb);
 
-    /* 若CfC嵌入引擎可用，使用语义搜索代替字符串匹配以提升召回率 */
+    /* [P1-06修复] 同时运行CfC语义搜索和字符串匹配搜索，合并结果
+     * 原代码在CfC返回>0结果时直接短路return，导致新写入条目（嵌入向量
+     * 尚未更新）和老条目（字符串匹配更精准）无法被搜索到。
+     * 修复: 始终运行字符串匹配循环，CfC结果作为补充合并。 */
+    int cfc_found = 0;
     if (kb->cfc_embed && subject) {
-        int cfc_found = knowledge_base_cfc_semantic_search(kb, subject, similarity_threshold,
-                                                           results, max_results);
-        if (cfc_found > 0) { KB_RUNLOCK(kb); return cfc_found; }
+        cfc_found = knowledge_base_cfc_semantic_search(kb, subject, similarity_threshold,
+                                                       results, max_results);
+    }
+    /* 如果CfC已填满结果，直接返回 */
+    if (cfc_found > 0 && (size_t)cfc_found >= max_results) {
+        KB_RUNLOCK(kb); return cfc_found;
     }
     
-    size_t match_count = 0;
+    size_t match_count = (cfc_found > 0) ? (size_t)cfc_found : 0;
+    size_t remaining = max_results - match_count;
     
     for (size_t i = 0; i < kb->size && match_count < max_results; i++) {
         KnowledgeEntry* entry = &kb->entries[i].entry;
-        
+
         float subject_sim = knowledge_string_similarity(subject, entry->subject);
         float predicate_sim = knowledge_string_similarity(predicate, entry->predicate);
         float object_sim = knowledge_string_similarity(object, entry->object);
-        
-        float total_sim = (subject_sim + predicate_sim + object_sim) / 3.0f;
-        
-        if (total_sim >= similarity_threshold) {
+
+        /* FIX-SEARCH-DENOM: 原实现对NULL查询字段也算0分并参与三等分平均，
+         * 导致单字段查询(如仅按subject搜索)总分上限仅0.333，
+         * subject相似度0.85的内容仍可能因其他字段拉低而漏检。
+         * 现仅对实际提供的查询字段求平均。 */
+        float sim_sum = 0.0f;
+        int field_count = 0;
+        if (subject)   { sim_sum += subject_sim;   field_count++; }
+        if (predicate) { sim_sum += predicate_sim; field_count++; }
+        if (object)    { sim_sum += object_sim;    field_count++; }
+        float total_sim = (field_count > 0) ? (sim_sum / (float)field_count) : 0.0f;
+
+        /* 若单字段高度匹配（>=0.85，如子串包含），视为整体命中 */
+        float max_field_sim = subject_sim;
+        if (predicate_sim > max_field_sim) max_field_sim = predicate_sim;
+        if (object_sim > max_field_sim) max_field_sim = object_sim;
+
+        if (total_sim >= similarity_threshold || max_field_sim >= 0.85f) {
             if (copy_knowledge_entry(&results[match_count], entry) == 0) {
                 match_count++;
             }
@@ -2391,11 +2426,6 @@ static float cosine_similarity(const float* v1, const float* v2, int dim) {
 int knowledge_base_enable_cfc_embedding(KnowledgeBase* kb, int embedding_dim) {
     if (!kb) return -1;
     if (kb->cfc_embed) return 0;
-    /* P6-060: cfc_embed_create may hang on repeated calls (resource exhaustion).
-     * Disabled until working tree patches restore proper resource management. */
-    return 0;
-
-#if 0  /* Original code - hangs on 3rd+ knowledge_base creation */
 
     KB_WLOCK(kb);
     if (kb->cfc_embed) { KB_WUNLOCK(kb); return 0; }
@@ -2416,7 +2446,10 @@ int knowledge_base_enable_cfc_embedding(KnowledgeBase* kb, int embedding_dim) {
     cfg.cfc_steps = 5;
 
     kb->cfc_embed = cfc_embed_create(&cfg);
-    if (!kb->cfc_embed) return -1;
+    if (!kb->cfc_embed) {
+        KB_WUNLOCK(kb);
+        return -1;
+    }
     kb->cfc_embed_dim = embedding_dim;
 
     /* 注册所有已有条目中的实体和关系到嵌入引擎 */
@@ -2448,7 +2481,6 @@ int knowledge_base_enable_cfc_embedding(KnowledgeBase* kb, int embedding_dim) {
 
     KB_WUNLOCK(kb);
     return 0;
-#endif
 }
 
 /**

@@ -642,7 +642,7 @@ int audio_enum_devices(AudioDeviceInfo* devices, int max_devices) {
             /* 过滤掉一些系统设备 */
             if (strstr(name, "surround") || strstr(name, "iec958") ||
                 strstr(name, "hdmi") || strstr(name, "modem")) {
-                free(name); free(desc); if (ioid) free(ioid);
+                safe_free((void**)&name); safe_free((void**)&desc); if (ioid) safe_free((void**)&ioid);
                 continue;
             }
 
@@ -668,9 +668,9 @@ int audio_enum_devices(AudioDeviceInfo* devices, int max_devices) {
             }
         }
 
-        if (name) free(name);
-        if (desc) free(desc);
-        if (ioid) free(ioid);
+        if (name) safe_free((void**)&name);
+        if (desc) safe_free((void**)&desc);
+        if (ioid) safe_free((void**)&ioid);
     }
 
     snd_device_name_free_hint((void**)hints);
@@ -1402,7 +1402,7 @@ void audio_capture_free(AudioCaptureContext* ctx) {
  * 使用Hann窗+实数DFT计算幅度谱。当ctx为NULL或无采集数据时返回全零谱(如实反映无数据状态)。
  * 这不是FFT(Tukey-Cooley)，而是精确的O(N²)离散傅里叶变换，适用于短窗口(≤4096点)的实时分析。
  * 频率分辨率 = sample_rate / fft_points，输出频谱为单边幅度谱(magnitude)。 */
-int audio_capture_get_spectrum(AudioCaptureContext* ctx, float* spectrum, int* fft_size) {
+int audio_capture_get_spectrum(AudioCaptureContext* ctx, float* spectrum, size_t* size) {
     /* 默认参数: 512点DFT, 窗口时长约10.7ms@48kHz */
     int n_fft = 512;
     int sample_rate = 44100;
@@ -1413,16 +1413,16 @@ int audio_capture_get_spectrum(AudioCaptureContext* ctx, float* spectrum, int* f
     }
 
     /* 计算输出频谱大小: 单边谱 = n_fft/2 + 1 个频点 */
-    int n_freq = n_fft / 2 + 1;
+    size_t n_freq = (size_t)(n_fft / 2 + 1);
 
-    if (fft_size) *fft_size = n_freq;
+    if (size) *size = n_freq;
 
     if (!spectrum) return 0;
 
     /* 生成合成测试信号: 当无真实采集数据时，用正弦波生成可验证的频谱数据。
      * 这是真实数学计算而非占位——频谱反映合成的440Hz + 880Hz双音信号。 */
     /* 分配临时缓冲区 */
-    float* windowed = (float*)malloc(sizeof(float) * (size_t)n_fft);
+    float* windowed = (float*)safe_malloc(sizeof(float) * (size_t)n_fft);
     if (!windowed) {
         memset(spectrum, 0, sizeof(float) * (size_t)n_freq);
         return -1;
@@ -1443,7 +1443,7 @@ int audio_capture_get_spectrum(AudioCaptureContext* ctx, float* spectrum, int* f
     /* 步骤2: 实数DFT → 单边幅度谱
      * X[k] = Σ windowed[n] * e^(-j*2π*k*n/N), n=0..N-1
      * magnitude[k] = sqrt(Re[k]² + Im[k]²) / N */
-    for (int k = 0; k < n_freq; k++) {
+    for (size_t k = 0; k < n_freq; k++) {
         float re = 0.0f, im = 0.0f;
         float omega = 2.0f * 3.14159265358979f * (float)k / (float)n_fft;
         for (int n = 0; n < n_fft; n++) {
@@ -1462,7 +1462,7 @@ int audio_capture_get_spectrum(AudioCaptureContext* ctx, float* spectrum, int* f
         }
     }
 
-    free(windowed);
+    safe_free((void**)&windowed);
     return 0;
 }
 
@@ -1805,9 +1805,9 @@ int audio_capture_enumerate_devices(AudioCaptureDeviceInfo* devices, int max_dev
             }
         }
 
-        if (name) free(name);
-        if (desc) free(desc);
-        if (ioid) free(ioid);
+        if (name) safe_free((void**)&name);
+        if (desc) safe_free((void**)&desc);
+        if (ioid) safe_free((void**)&ioid);
     }
 
     snd_device_name_free_hint((void**)hints);

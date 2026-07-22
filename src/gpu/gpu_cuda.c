@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file gpu_cuda.c
  * @brief NVIDIA CUDA GPU后端完整实现
  * 
@@ -25,6 +25,19 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <time.h>
+
+/* 可配置GPU架构目标：默认sm_89(NVIDIA Ada Lovelace RTX 40系列)
+ * 修改此宏即可适配其他架构:
+ *   sm_75: Turing (RTX 20/GTX 16)    sm_80: Ampere (A100)
+ *   sm_86: Ampere (RTX 30)           sm_89: Ada Lovelace (RTX 40)
+ *   sm_90: Hopper (H100)             sm_100: Blackwell (RTX 50)
+ * 编译时可通过 -DGPU_PTX_TARGET=\"sm_XX\" 覆盖默认值 */
+#ifndef GPU_PTX_TARGET
+#define GPU_PTX_TARGET "sm_89"
+#endif
+
+/* PTX架构字符串宏，用于在PTX源码中嵌入.target指令 */
+#define GPU_PTX_TARGET_STR ".target " GPU_PTX_TARGET "\n"
 
 // CUDA错误码定义（如果没有CUDA头文件）
 #ifndef cudaErrorNotReady
@@ -263,15 +276,34 @@ static const char* CUDA_CFC_ODE_KERNEL =
 "    float activation = tanhf(act_sum);\n"
 "    float gate = 1.0f / (1.0f + expf(-gate_sum));\n"
 "    float driver = gate * activation;\n"
-"    /* RK4步进 */\n"
+"    /* RK4步进：每个中间阶段重新计算导数 f(h) = (-h + gate(h)*activation(h)) / tau\n"
+"     * 正确RK4：k1=f(h), k2=f(h+0.5*dt*k1), k3=f(h+0.5*dt*k2), k4=f(h+dt*k3)\n"
+"     * 每个阶段的gate和activation都依赖于当时的h值，因此必须重新计算 */\n"
 "    float k1 = (-h + driver) / t;\n"
 "    float h_k2 = h + 0.5f * dt * k1;\n"
-"    float act_k2 = activation, gate_k2 = gate;\n"
-"    float k2 = (-h_k2 + driver) / t;\n"
+"    /* k2阶段：使用h_k2重新计算gate和activation */\n"
+"    float h_k2_act = W_ah[idx * dim + idx] * h_k2;\n"
+"    float h_k2_gate = W_gh[idx * dim + idx] * h_k2;\n"
+"    float act_k2 = tanhf(b_a[idx] + in_act_sum + h_k2_act);\n"
+"    float gate_k2 = 1.0f / (1.0f + expf(-(b_g[idx] + in_gate_sum + h_k2_gate)));\n"
+"    float driver_k2 = gate_k2 * act_k2;\n"
+"    float k2 = (-h_k2 + driver_k2) / t;\n"
 "    float h_k3 = h + 0.5f * dt * k2;\n"
-"    float k3 = (-h_k3 + driver) / t;\n"
+"    /* k3阶段：使用h_k3重新计算gate和activation */\n"
+"    float h_k3_act = W_ah[idx * dim + idx] * h_k3;\n"
+"    float h_k3_gate = W_gh[idx * dim + idx] * h_k3;\n"
+"    float act_k3 = tanhf(b_a[idx] + in_act_sum + h_k3_act);\n"
+"    float gate_k3 = 1.0f / (1.0f + expf(-(b_g[idx] + in_gate_sum + h_k3_gate)));\n"
+"    float driver_k3 = gate_k3 * act_k3;\n"
+"    float k3 = (-h_k3 + driver_k3) / t;\n"
 "    float h_k4 = h + dt * k3;\n"
-"    float k4 = (-h_k4 + driver) / t;\n"
+"    /* k4阶段：使用h_k4重新计算gate和activation */\n"
+"    float h_k4_act = W_ah[idx * dim + idx] * h_k4;\n"
+"    float h_k4_gate = W_gh[idx * dim + idx] * h_k4;\n"
+"    float act_k4 = tanhf(b_a[idx] + in_act_sum + h_k4_act);\n"
+"    float gate_k4 = 1.0f / (1.0f + expf(-(b_g[idx] + in_gate_sum + h_k4_gate)));\n"
+"    float driver_k4 = gate_k4 * act_k4;\n"
+"    float k4 = (-h_k4 + driver_k4) / t;\n"
 "    float new_h = h + (dt / 6.0f) * (k1 + 2.0f*k2 + 2.0f*k3 + k4);\n"
 "    if (isnan(new_h) || isinf(new_h)) new_h = h;\n"
 "    h_out[idx] = new_h;\n"
@@ -1136,7 +1168,7 @@ static const char* CUDA_CFC_ODE_STEP_SIMPLE_KERNEL =
  * 参数: A[m×n], B[n×k], C[m×k], m, n, k */
 static const char* PTX_MATMUL_KERNEL =
 ".version 7.0\n"
-".target sm_89\n"
+GPU_PTX_TARGET_STR
 ".address_size 64\n"
 "\n"
 ".visible .entry matmul_train(\n"
@@ -1214,7 +1246,7 @@ static const char* PTX_MATMUL_KERNEL =
  * 参数: input[N×C×H×W], kernel[K×C×KH×KW], output[N×K×OH×OW] */
 static const char* PTX_CONV2D_KERNEL =
 ".version 7.0\n"
-".target sm_89\n"
+GPU_PTX_TARGET_STR
 ".address_size 64\n"
 "\n"
 ".visible .entry conv2d_embedded(\n"
@@ -1322,7 +1354,7 @@ static const char* PTX_CONV2D_KERNEL =
  * 计算: h[i] = tanh(b[i] + W[i,:]*h + W[:,i+hidden]*x) */
 static const char* PTX_CFC_STEP_KERNEL =
 ".version 7.0\n"
-".target sm_89\n"
+GPU_PTX_TARGET_STR
 ".address_size 64\n"
 "\n"
 ".visible .entry cfc_step_embedded(\n"
@@ -4947,7 +4979,7 @@ int cuda_batch_norm_backward(GpuContext* ctx, const float* input, const float* g
         cudaMemcpy(d_gamma, gamma, feature_bytes, cudaMemcpyHostToDevice);
     } else {
         /* 默认gamma=1 */
-        float* ones = (float*)malloc(feature_bytes);
+        float* ones = (float*)safe_malloc(feature_bytes);
         if (!ones) { /* C-012修复: NULL检查 */
             /* C-004修复: kernel未在此函数中声明，直接释放已分配GPU内存 */
             cudaFree(d_input); cudaFree(d_grad_output); cudaFree(d_grad_input);
@@ -4956,18 +4988,18 @@ int cuda_batch_norm_backward(GpuContext* ctx, const float* input, const float* g
         }
         for (size_t i = 0; i < features; i++) ones[i] = 1.0f;
         cudaMemcpy(d_gamma, ones, feature_bytes, cudaMemcpyHostToDevice);
-        free(ones);
+        safe_free((void**)&ones);
     }
 
     /* 先计算均值/方差（在host端完成，简化处理） */
     /* 第1步：计算batch_mean和batch_var */
-    float* h_input = (float*)malloc(total_bytes);
-    float* host_mean = (float*)calloc(features, sizeof(float));
-    float* host_var = (float*)calloc(features, sizeof(float));
+    float* h_input = (float*)safe_malloc(total_bytes);
+    float* host_mean = (float*)safe_calloc(features, sizeof(float));
+    float* host_var = (float*)safe_calloc(features, sizeof(float));
     if (!h_input || !host_mean || !host_var) { /* C-012修复: NULL检查 */
-            if (h_input) free(h_input);
-            if (host_mean) free(host_mean);
-            if (host_var) free(host_var);
+            if (h_input) safe_free((void**)&h_input);
+            if (host_mean) safe_free((void**)&host_mean);
+            if (host_var) safe_free((void**)&host_var);
             /* C-004修复: kernel未声明，直接释放GPU分配 */
             cudaFree(d_input); cudaFree(d_grad_output); cudaFree(d_grad_input);
             cudaFree(d_gamma); cudaFree(d_mean); cudaFree(d_var);
@@ -4986,7 +5018,7 @@ int cuda_batch_norm_backward(GpuContext* ctx, const float* input, const float* g
         host_mean[f] = mean;
         host_var[f] = sum_sq / (float)batch_size - mean * mean;
     }
-    free(h_input);
+    safe_free((void**)&h_input);
 
     cudaMemcpy(d_mean, host_mean, feature_bytes, cudaMemcpyHostToDevice);
     cudaMemcpy(d_var, host_var, feature_bytes, cudaMemcpyHostToDevice);
@@ -4994,7 +5026,7 @@ int cuda_batch_norm_backward(GpuContext* ctx, const float* input, const float* g
     GpuKernel* kernel = cuda_backend_kernel_create(ctx, "batch_norm_backward", "batch_norm_backward");
     if (!kernel) {
         set_cuda_error_string("cuda_batch_norm_backward: 内核创建失败");
-        free(host_mean); free(host_var);
+        safe_free((void**)&host_mean); safe_free((void**)&host_var);
         cudaFree(d_input); cudaFree(d_grad_output); cudaFree(d_grad_input);
         cudaFree(d_gamma); cudaFree(d_mean); cudaFree(d_var);
         return -1;
@@ -5014,7 +5046,7 @@ int cuda_batch_norm_backward(GpuContext* ctx, const float* input, const float* g
     if (cuda_backend_kernel_execute(kernel, features, 256) != 0) {
         set_cuda_error_string("cuda_batch_norm_backward: 内核执行失败");
         cuda_backend_kernel_free(kernel);
-        free(host_mean); free(host_var);
+        safe_free((void**)&host_mean); safe_free((void**)&host_var);
         cudaFree(d_input); cudaFree(d_grad_output); cudaFree(d_grad_input);
         cudaFree(d_gamma); cudaFree(d_mean); cudaFree(d_var);
         return -1;
@@ -5025,14 +5057,14 @@ int cuda_batch_norm_backward(GpuContext* ctx, const float* input, const float* g
 
     /* 计算grad_gamma和grad_beta（通过归约计算） */
     if (grad_gamma || grad_beta) {
-        float* h_grad_output = (float*)malloc(total_bytes);
-        float* h_input_local = (float*)malloc(total_bytes);
+        float* h_grad_output = (float*)safe_malloc(total_bytes);
+        float* h_input_local = (float*)safe_malloc(total_bytes);
         if (!h_grad_output || !h_input_local) { /* C-012修复: NULL检查 */
-            if (h_grad_output) free(h_grad_output);
-            if (h_input_local) free(h_input_local);
+            if (h_grad_output) safe_free((void**)&h_grad_output);
+            if (h_input_local) safe_free((void**)&h_input_local);
             /* P0修复: kernel已在第4995行释放，h_input已在第4962行释放，
                此处不再重复释放，避免 double-free */
-            free(host_mean); free(host_var);
+            safe_free((void**)&host_mean); safe_free((void**)&host_var);
             cudaFree(d_input); cudaFree(d_grad_output); cudaFree(d_grad_input);
             cudaFree(d_gamma); cudaFree(d_mean); cudaFree(d_var);
             return -1;
@@ -5059,12 +5091,12 @@ int cuda_batch_norm_backward(GpuContext* ctx, const float* input, const float* g
                 grad_beta[f] = sum;
             }
         }
-        free(h_grad_output);
-        free(h_input_local);
+        safe_free((void**)&h_grad_output);
+        safe_free((void**)&h_input_local);
     }
 
-    free(host_mean);
-    free(host_var);
+    safe_free((void**)&host_mean);
+    safe_free((void**)&host_var);
 
     cudaFree(d_input);
     cudaFree(d_grad_output);
@@ -5347,11 +5379,11 @@ int cuda_cross_entropy_loss_gradient(GpuContext* ctx, const float* logits,
         cuda_backend_kernel_free(kernel);
     } else {
         /* One-hot标签：使用归约计算（简化：在GPU上逐元素计算） */
-        float* h_logits = (float*)malloc(logits_bytes);
-        float* h_targets_local = (float*)malloc(targets_bytes);
+        float* h_logits = (float*)safe_malloc(logits_bytes);
+        float* h_targets_local = (float*)safe_malloc(targets_bytes);
         if (!h_logits || !h_targets_local) { /* C-012修复: NULL检查 */
-            if (h_logits) free(h_logits);
-            if (h_targets_local) free(h_targets_local);
+            if (h_logits) safe_free((void**)&h_logits);
+            if (h_targets_local) safe_free((void**)&h_targets_local);
             /* C-004修复: kernel未声明，直接释放GPU分配 */
             /* C-013修复: 添加d_gradients释放，防止GPU内存泄漏 */
             cudaFree(d_logits); cudaFree(d_gradients); cudaFree(d_targets); cudaFree(d_loss);
@@ -5360,11 +5392,11 @@ int cuda_cross_entropy_loss_gradient(GpuContext* ctx, const float* logits,
         cudaMemcpy(h_logits, d_logits, logits_bytes, cudaMemcpyDeviceToHost);
         cudaMemcpy(h_targets_local, d_targets, targets_bytes, cudaMemcpyDeviceToHost);
 
-        float* h_gradients = (float*)calloc(num_elements, sizeof(float));
+        float* h_gradients = (float*)safe_calloc(num_elements, sizeof(float));
         /* C-014修复: 添加h_gradients的NULL检查，防止空指针解引用 */
         if (!h_gradients) {
-            free(h_logits);
-            free(h_targets_local);
+            safe_free((void**)&h_logits);
+            safe_free((void**)&h_targets_local);
             cudaFree(d_logits); cudaFree(d_gradients); cudaFree(d_targets); cudaFree(d_loss);
             return -1;
         }
@@ -5391,9 +5423,9 @@ int cuda_cross_entropy_loss_gradient(GpuContext* ctx, const float* logits,
         memcpy(gradients, h_gradients, logits_bytes);
         *loss = total_loss / (float)batch_size;
 
-        free(h_logits);
-        free(h_targets_local);
-        free(h_gradients);
+        safe_free((void**)&h_logits);
+        safe_free((void**)&h_targets_local);
+        safe_free((void**)&h_gradients);
     }
 
     if (is_integer_label) {
@@ -5754,7 +5786,7 @@ int gpu_benchmark_throughput(float* bandwidth_gbps, float* compute_tflops, int* 
     err = cudaMalloc(&d_dst, test_size);
     if (err != cudaSuccess) { cudaFree(d_src); *bandwidth_gbps = 0.0f; *compute_tflops = 0.0f; return -1; }
 
-    h_buf = (float*)malloc(test_size);
+    h_buf = (float*)safe_malloc(test_size);
     if (!h_buf) { cudaFree(d_src); cudaFree(d_dst); return -1; }
 
     cudaEvent_t start_ev, stop_ev;
@@ -5779,7 +5811,7 @@ int gpu_benchmark_throughput(float* bandwidth_gbps, float* compute_tflops, int* 
 
     cudaFree(d_src);
     cudaFree(d_dst);
-    free(h_buf);
+    safe_free((void**)&h_buf);
     cudaEventDestroy(start_ev);  /* H-012修复: 释放CUDA事件资源 */
     cudaEventDestroy(stop_ev);   /* H-012修复: 释放CUDA事件资源 */
 

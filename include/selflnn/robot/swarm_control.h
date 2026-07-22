@@ -54,6 +54,8 @@ typedef struct {
     float velocity[3];
     float orientation[4];
     float angular_velocity[3];
+    float mass;               /**< 机器人质量(kg)，默认1.0，影响加速度响应 */
+    float inertia[3];         /**< 转动惯量[Ixx,Iyy,Izz]，默认[1.0,1.0,1.0] */
     int robot_id;
     int is_active;
     float battery_level;

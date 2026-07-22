@@ -4975,16 +4975,40 @@ int reasoning_infer_with_knowledge(ReasoningEngine* engine,
         }
     }
 
-    /* 步骤3: 使用增强的前提执行标准推理 */
-    int ret;
-    if (augmented_premises) {
-        ret = reasoning_infer(engine, augmented_premises, augmented_count,
-                             conclusion, max_conclusion_size, mode);
-        safe_free((void**)&augmented_premises);
-    } else {
-        ret = reasoning_infer(engine, premises, num_premises,
-                             conclusion, max_conclusion_size, mode);
+    /* 步骤3: 使用增强的前提执行标准推理
+     * P0-009修复: 不能调用reasoning_infer()，因为该函数会再次检测
+     * engine->external_kb并进入reasoning_infer_with_knowledge()，
+     * 形成无限递归导致超时。必须直接调用核心推理函数。 */
+    const float* active_premises = augmented_premises ? augmented_premises : premises;
+    size_t active_count = augmented_premises ? augmented_count : num_premises;
+    int ret = -1;
+    switch (mode) {
+        case REASONING_DEDUCTIVE:
+            ret = deductive_reasoning_indexed(engine, active_premises, active_count,
+                                             conclusion, max_conclusion_size);
+            break;
+        case REASONING_INDUCTIVE:
+            ret = inductive_reasoning(active_premises, active_count, conclusion,
+                                     max_conclusion_size);
+            break;
+        case REASONING_ABDUCTIVE:
+            ret = abductive_reasoning(active_premises, active_count, conclusion,
+                                     max_conclusion_size, engine->knowledge_base,
+                                     engine->knowledge_base_size);
+            break;
+        case REASONING_ANALOGICAL:
+            ret = analogical_reasoning_for_infer(engine, active_premises, active_count,
+                                                conclusion, max_conclusion_size);
+            break;
+        case REASONING_CAUSAL:
+            ret = causal_reasoning_for_infer(engine, active_premises, active_count,
+                                            conclusion, max_conclusion_size);
+            break;
+        default:
+            ret = -1;
+            break;
     }
+    safe_free((void**)&augmented_premises);
 
     if (ret != 0) {
         return ret;

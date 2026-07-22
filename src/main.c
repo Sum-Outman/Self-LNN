@@ -3380,12 +3380,7 @@ skip_agi_injection:
     ATOMIC_STORE_64(&g_last_cognition, (LONG64)g_start_time);
     ATOMIC_STORE_64(&g_last_safety, (LONG64)g_start_time);
 
-#if 0 /* L-010修复：main_loop_restart 为死代码标签，永远无法被goto跳转到，已移除 */
-#ifndef _MSC_VER
-main_loop_restart:
-#endif
-#endif
-    /* E002修复: 移除Mini HTTP服务器（原代码在此启动独立原始socket HTTP服务器
+/* E002修复: 移除Mini HTTP服务器（原代码在此启动独立原始socket HTTP服务器
      * 绑定8080端口，与BackendServer端口冲突导致bind失败。
      * BackendServer已提供完整的HTTP API服务，无需额外Mini HTTP服务器。 */
     {

@@ -4855,13 +4855,20 @@ int knowledge_graph_execute_sparql(KnowledgeGraph* graph,
                                               &matches[p * 256], 256);
     }
 
-    /* 检查是否有任何模式无匹配（非OPTIONAL模式） */
+    /* [P1-05修复] 检查是否有任何模式无匹配（非OPTIONAL模式）
+     * 原代码无匹配时返回-1，导致空图/空结果输出"query failed"。
+     * 修复: 空结果集是合法SPARQL查询结果，返回0行bindings。 */
     for (size_t p = 0; p < pattern_count; p++) {
         if (match_counts[p] == 0 && !patterns[p].optional) {
-            /* P2修复(修复4): matches 由 safe_calloc 分配，必须用 safe_free 释放，
-             * 不能直接用 free()，否则破坏内存统计与安全释放机制 */
+            /* 非OPTIONAL模式无匹配：返回空结果集而非错误 */
+            result->row_count = 0;
+            result->var_count = var_count;
+            for (size_t v = 0; v < var_count; v++) {
+                strncpy(result->var_names[v], variables[v], 63);
+                result->var_names[v][63] = '\0';
+            }
             safe_free((void**)&matches);
-            return -1;
+            return 0;  /* 空结果集是合法响应 */
         }
     }
 

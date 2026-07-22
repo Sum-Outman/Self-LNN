@@ -1,4 +1,4 @@
-#include "selflnn/backend/websocket_push.h"
+﻿#include "selflnn/backend/websocket_push.h"
 #include "selflnn/core/common.h"
 #include "selflnn/core/errors.h"
 #include "selflnn/utils/memory_utils.h"
@@ -54,9 +54,15 @@ typedef int ws_socket_t;
 #define WS_ECONNRESET ECONNRESET
 #endif
 
+/* WebSocket连接状态机 */
+#define WS_STATE_CONNECTING  0  /**< 正在握手 */
+#define WS_STATE_OPEN        1  /**< 连接已建立，可收发数据 */
+#define WS_STATE_CLOSING     2  /**< 已发送关闭帧，等待对方确认 */
+#define WS_STATE_CLOSED      3  /**< 连接已关闭 */
+
 typedef struct {
     ws_socket_t sock;
-    int active;
+    int state;               /**< 连接状态: WS_STATE_OPEN/CLOSING/CLOSED */
     struct sockaddr_in addr;  /* P2-17修复: 存储客户端地址用于速率限制 */
     char recv_buffer[WS_MAX_MESSAGE_SIZE];
     size_t recv_len;
@@ -65,7 +71,6 @@ typedef struct {
     size_t send_pos;
     uint8_t frame_buffer[WS_MAX_MESSAGE_SIZE + 16];
     long last_active;
-    int closing;
     /* L-006修复: 分片消息支持 —— 累积分片帧到完整消息 */
     uint8_t fragment_buffer[WS_MAX_MESSAGE_SIZE]; /* 分片累积缓冲区 */
     size_t fragment_len;                          /* 已累积的字节数 */
@@ -429,7 +434,7 @@ static void ws_client_init(WSClientInternal* cli, ws_socket_t sock, struct socka
     if (!cli) return;
     memset(cli, 0, sizeof(WSClientInternal));
     cli->sock = sock;
-    cli->active = 1;
+    cli->state = WS_STATE_OPEN;
     cli->addr = addr;  /* P2-17修复: 存储客户端地址 */
     cli->last_active = (long)time(NULL);
 }
@@ -440,11 +445,10 @@ static void ws_client_close(WSClientInternal* cli)
     ws_send_close(cli->sock, 1000);
     WS_CLOSE(cli->sock);
     cli->sock = WS_INVALID;
-    cli->active = 0;
+    cli->state = WS_STATE_CLOSED;
     cli->recv_len = 0;
     cli->send_len = 0;
     cli->send_pos = 0;
-    cli->closing = 0;
     /* L-006修复: 关闭时清除分片累积状态 */
     cli->fragment_len = 0;
     cli->fragment_active = 0;
@@ -497,7 +501,7 @@ static void* ws_push_accept_thread(void* arg)
         /* P2-17修复: 每IP连接数限制，防止DoS */
         int ip_count = 0;
         for (int i = 0; i < WS_MAX_CLIENTS; i++) {
-            if (srv->clients[i].active && srv->clients[i].addr.sin_addr.s_addr == client_addr.sin_addr.s_addr) {
+            if (srv->clients[i].state == WS_STATE_OPEN && srv->clients[i].addr.sin_addr.s_addr == client_addr.sin_addr.s_addr) {
                 ip_count++;
             }
         }
@@ -510,7 +514,7 @@ static void* ws_push_accept_thread(void* arg)
         mutex_lock(srv->mutex);
         int slot = -1;
         for (int i = 0; i < WS_MAX_CLIENTS; i++) {
-            if (!srv->clients[i].active) { slot = i; break; }
+            if (srv->clients[i].state != WS_STATE_OPEN) { slot = i; break; }
         }
         if (slot < 0) { mutex_unlock(srv->mutex); WS_CLOSE(client); continue; }
 
@@ -519,7 +523,7 @@ static void* ws_push_accept_thread(void* arg)
          * (如ws_push_broadcast_json)在active=1但sock未设置时访问，
          * 可能使用未初始化的socket导致崩溃或数据损坏。 */
         ws_client_init(&srv->clients[slot], client, client_addr);
-        srv->clients[slot].active = 1;
+        srv->clients[slot].state = WS_STATE_OPEN;
         mutex_unlock(srv->mutex);
 
         /* v9.11修复: 握手前强制设为阻塞模式。
@@ -653,7 +657,7 @@ void ws_push_server_stop(WSPushServer* srv)
         srv->accept_thread = NULL;
     }
     for (int i = 0; i < WS_MAX_CLIENTS; i++) {
-        if (srv->clients[i].active) ws_client_close(&srv->clients[i]);
+        if (srv->clients[i].state == WS_STATE_OPEN) ws_client_close(&srv->clients[i]);
     }
     if (srv->listen_sock != WS_INVALID) {
         WS_CLOSE(srv->listen_sock);
@@ -733,7 +737,7 @@ int ws_push_broadcast(WSPushServer* srv, WSMessageType type, const char* data)
     /* 第一阶段：锁定后快照活跃客户端socket列表 */
     mutex_lock(srv->mutex);
     for (int i = 0; i < WS_MAX_CLIENTS; i++) {
-        if (!srv->clients[i].active) continue;
+        if (srv->clients[i].state != WS_STATE_OPEN) continue;
         ws_socket_t sock = srv->clients[i].sock;
         if (sock == WS_INVALID) continue;
         active_socks[active_count] = sock;
@@ -753,7 +757,7 @@ int ws_push_broadcast(WSPushServer* srv, WSMessageType type, const char* data)
              * 若不验证socket一致性，将误关闭新客户端。 */
             mutex_lock(srv->mutex);
             if (active_indices[i] < WS_MAX_CLIENTS &&
-                srv->clients[active_indices[i]].active &&
+                srv->clients[active_indices[i]].state == WS_STATE_OPEN &&
                 srv->clients[active_indices[i]].sock == active_socks[i]) {
                 /* socket一致：确认是同一客户端，安全关闭 */
                 ws_client_close(&srv->clients[active_indices[i]]);
@@ -780,7 +784,7 @@ int ws_push_broadcast_json(WSPushServer* srv, const char* json_message)
     /* 第一阶段：锁定后快照活跃客户端socket列表 */
     mutex_lock(srv->mutex);
     for (int i = 0; i < WS_MAX_CLIENTS; i++) {
-        if (!srv->clients[i].active) continue;
+        if (srv->clients[i].state != WS_STATE_OPEN) continue;
         ws_socket_t sock = srv->clients[i].sock;
         if (sock == WS_INVALID) continue;
         active_socks[active_count] = sock;
@@ -800,7 +804,7 @@ int ws_push_broadcast_json(WSPushServer* srv, const char* json_message)
              * 若不验证socket一致性，将误关闭新客户端。 */
             mutex_lock(srv->mutex);
             if (active_indices[i] < WS_MAX_CLIENTS &&
-                srv->clients[active_indices[i]].active &&
+                srv->clients[active_indices[i]].state == WS_STATE_OPEN &&
                 srv->clients[active_indices[i]].sock == active_socks[i]) {
                 /* socket一致：确认是同一客户端，安全关闭 */
                 ws_client_close(&srv->clients[active_indices[i]]);
@@ -819,7 +823,7 @@ int ws_push_get_client_count(const WSPushServer* srv)
     /* H-MED-002: 遍历客户端数组前加锁，防止并发修改 */
     mutex_lock(((WSPushServer*)srv)->mutex);
     for (int i = 0; i < WS_MAX_CLIENTS; i++) {
-        if (srv->clients[i].active) count++;
+        if (srv->clients[i].state == WS_STATE_OPEN) count++;
     }
     mutex_unlock(((WSPushServer*)srv)->mutex);
     return count;
@@ -831,9 +835,9 @@ int ws_push_send_to_client(WSPushServer* srv, int client_index, const char* json
         return -1;
     }
     WSClientInternal* cli = &srv->clients[client_index];
-    /* H-MED-002: 访问cli->active和cli->sock前加锁，防止并发关闭/修改 */
+    /* H-MED-002: 访问cli->state和cli->sock前加锁，防止并发关闭/修改 */
     mutex_lock(srv->mutex);
-    if (!cli->active || cli->sock == WS_INVALID) {
+    if (cli->state != WS_STATE_OPEN || cli->sock == WS_INVALID) {
         mutex_unlock(srv->mutex);
         return -1;
     }
@@ -857,7 +861,7 @@ int ws_push_get_next_available_client(WSPushServer* srv)
     /* P3-11修复: 添加互斥锁保护clients数组遍历 */
     mutex_lock(srv->mutex);
     for (int i = 0; i < WS_MAX_CLIENTS; i++) {
-        if (srv->clients[i].active) {
+        if (srv->clients[i].state == WS_STATE_OPEN) {
             mutex_unlock(srv->mutex);
             return i;
         }
@@ -871,7 +875,7 @@ int ws_push_get_next_available_client(WSPushServer* srv)
  * P0修复: 添加帧头越界读取防护，在读取ptr[1]/ptr[2]/ptr[3]前检查remain
  * P1修复: 使用cli->recv_buffer实现跨TCP段帧重组，不完整帧保留到下次recv */
 static void ws_client_process(WSPushServer* server, int client_slot, WSClientInternal* cli) {
-    if (!cli || !cli->active || cli->sock == WS_INVALID) return;
+    if (!cli || cli->state != WS_STATE_OPEN || cli->sock == WS_INVALID) return;
 
     /* P1修复: 使用持久接收缓冲区实现跨TCP段帧重组。
      * 原代码将recv数据读入局部缓冲区直接处理，当WebSocket帧跨越
@@ -943,8 +947,10 @@ static void ws_client_process(WSPushServer* server, int client_slot, WSClientInt
             return;
         } else if (opcode == 0x09) {
             ws_send_pong(cli->sock, payload, payload_len);
+        } else if (opcode == 0x0A) {
+            /* Pong帧：更新客户端活跃时间戳，维持心跳连接 */
+            cli->last_active = (long)time(NULL);
         }
-        /* opcode 0x0A (pong) 无需处理 */
         /* 数据帧(0x01/0x02)和延续帧(0x00)的分片逻辑 */
         else if (opcode == 0x01 || opcode == 0x02) {
             if (!fin_flag) {
@@ -1029,11 +1035,11 @@ int ws_push_server_poll(WSPushServer* srv, int timeout_ms)
                     mutex_lock(srv->mutex);
                     int found = -1;
                     for (int j = 0; j < WS_MAX_CLIENTS; j++) {
-                        if (!srv->clients[j].active) { found = j; break; }
+                        if (srv->clients[j].state != WS_STATE_OPEN) { found = j; break; }
                     }
                     if (found >= 0) {
                         ws_client_init(&srv->clients[found], client, client_addr);
-                        srv->clients[found].active = 1;
+                        srv->clients[found].state = WS_STATE_OPEN;
                         mutex_unlock(srv->mutex);
                         /* 握手前强制设为阻塞模式 */
                         ws_set_nonblock(client, 0);
@@ -1055,11 +1061,11 @@ int ws_push_server_poll(WSPushServer* srv, int timeout_ms)
             } else {
                 /* 客户端FD事件处理 */
                 for (int j = 0; j < WS_MAX_CLIENTS; j++) {
-                    if (srv->clients[j].active && srv->clients[j].sock == fd) {
+                    if (srv->clients[j].state == WS_STATE_OPEN && srv->clients[j].sock == fd) {
                         int sock_before = srv->clients[j].sock;
                         ws_client_process(srv, j, &srv->clients[j]);
                         /* P0-8修复：客户端被关闭后从epoll中删除FD，防止FD重用导致数据错乱 */
-                        if (!srv->clients[j].active || srv->clients[j].sock == WS_INVALID) {
+                        if (srv->clients[j].state != WS_STATE_OPEN || srv->clients[j].sock == WS_INVALID) {
                             epoll_ctl(srv->epoll_fd, EPOLL_CTL_DEL, sock_before, NULL);
                         }
                         break;
@@ -1088,11 +1094,11 @@ int ws_push_server_poll(WSPushServer* srv, int timeout_ms)
                     mutex_lock(srv->mutex);
                     int found = -1;
                     for (int j = 0; j < WS_MAX_CLIENTS; j++) {
-                        if (!srv->clients[j].active) { found = j; break; }
+                        if (srv->clients[j].state != WS_STATE_OPEN) { found = j; break; }
                     }
                     if (found >= 0) {
                         ws_client_init(&srv->clients[found], client, client_addr);
-                        srv->clients[found].active = 1;
+                        srv->clients[found].state = WS_STATE_OPEN;
                         mutex_unlock(srv->mutex);
                         /* 握手前强制设为阻塞模式 */
                         ws_set_nonblock(client, 0);
@@ -1112,11 +1118,11 @@ int ws_push_server_poll(WSPushServer* srv, int timeout_ms)
                 }
             } else {
                 for (int j = 0; j < WS_MAX_CLIENTS; j++) {
-                    if (srv->clients[j].active && srv->clients[j].sock == fd) {
+                    if (srv->clients[j].state == WS_STATE_OPEN && srv->clients[j].sock == fd) {
                         int sock_before = srv->clients[j].sock;
                         ws_client_process(srv, j, &srv->clients[j]);
                         /* C-002修复：客户端被关闭后从kqueue中删除FD，防止FD重用导致数据错乱 */
-                        if (!srv->clients[j].active || srv->clients[j].sock == WS_INVALID) {
+                        if (srv->clients[j].state != WS_STATE_OPEN || srv->clients[j].sock == WS_INVALID) {
                             struct kevent ev;
                             EV_SET(&ev, sock_before, EVFILT_READ, EV_DELETE, 0, 0, NULL);
                             kevent(srv->kqueue_fd, &ev, 1, NULL, 0, NULL);
@@ -1138,7 +1144,7 @@ int ws_push_server_poll(WSPushServer* srv, int timeout_ms)
     FD_SET(srv->listen_sock, &rfds);
     int has_write = 0;
     for (int i = 0; i < WS_MAX_CLIENTS; i++) {
-        if (!srv->clients[i].active || srv->clients[i].sock == WS_INVALID) continue;
+        if (srv->clients[i].state != WS_STATE_OPEN || srv->clients[i].sock == WS_INVALID) continue;
         /* P1-15修复: FD_SETSIZE溢出防护，防止栈损坏 */
         if ((int)srv->clients[i].sock < 0 || (int)srv->clients[i].sock >= FD_SETSIZE) {
             /* 客户端socket超出FD_SETSIZE范围，跳过避免栈溢出 */
@@ -1169,11 +1175,11 @@ int ws_push_server_poll(WSPushServer* srv, int timeout_ms)
             mutex_lock(srv->mutex);
             int found = -1;
             for (int i = 0; i < WS_MAX_CLIENTS; i++) {
-                if (!srv->clients[i].active) { found = i; break; }
+                if (srv->clients[i].state != WS_STATE_OPEN) { found = i; break; }
             }
             if (found >= 0) {
                 ws_client_init(&srv->clients[found], client, client_addr);
-                srv->clients[found].active = 1;
+                srv->clients[found].state = WS_STATE_OPEN;
                 mutex_unlock(srv->mutex);
                 /* 握手前强制设为阻塞模式 */
                 ws_set_nonblock(client, 0);
@@ -1191,7 +1197,7 @@ int ws_push_server_poll(WSPushServer* srv, int timeout_ms)
     }
     for (int i = 0; i < WS_MAX_CLIENTS; i++) {
         WSClientInternal* cli = &srv->clients[i];
-        if (!cli->active || cli->sock == WS_INVALID) continue;
+        if (cli->state != WS_STATE_OPEN || cli->sock == WS_INVALID) continue;
         if (FD_ISSET(cli->sock, &rfds)) {
             /* P1修复: select路径也使用持久接收缓冲区实现跨TCP段帧重组。
              * P0修复: 添加帧头越界读取防护。 */
@@ -1251,7 +1257,10 @@ int ws_push_server_poll(WSPushServer* srv, int timeout_ms)
                     break;
                 }
                 else if (opcode == 0x09) { ws_send_pong(cli->sock, payload, payload_len); }
-                else if (opcode == 0x0A) { }
+                else if (opcode == 0x0A) {
+                    /* Pong帧：更新客户端活跃时间戳，维持心跳连接 */
+                    cli->last_active = (long)time(NULL);
+                }
                 /* L-006修复: select路径数据帧分片处理 */
                 else if ((opcode == 0x01 || opcode == 0x02) && !fin_flag_select) {
                     /* 分片首帧: 开始累积 */
@@ -1307,7 +1316,7 @@ int ws_push_server_poll(WSPushServer* srv, int timeout_ms)
             srv->last_tick = now;
             for (int i = 0; i < WS_MAX_CLIENTS; i++) {
                 WSClientInternal* cli = &srv->clients[i];
-                if (!cli->active || cli->sock == WS_INVALID) continue;
+                if (cli->state != WS_STATE_OPEN || cli->sock == WS_INVALID) continue;
                 /* 发送ping帧 */
                 unsigned char ping_data[8] = {0};
                 memcpy(ping_data, &now, sizeof(now));

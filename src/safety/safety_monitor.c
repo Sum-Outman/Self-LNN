@@ -1213,14 +1213,14 @@ int safety_check_network(SafetyMonitor* monitor) {
         /* 首先获取所需缓冲区大小 */
         GetTcpTable2(NULL, &table_size, FALSE);
         if (table_size > 0 && table_size < 1048576) { /* 限制最大1MB防止异常 */
-            MIB_TCPTABLE2* tcp_table = (MIB_TCPTABLE2*)malloc(table_size);
+            MIB_TCPTABLE2* tcp_table = (MIB_TCPTABLE2*)safe_malloc(table_size);
             if (tcp_table) {
                 if (GetTcpTable2(tcp_table, &table_size, FALSE) == NO_ERROR) {
                     current_connections = (int)tcp_table->dwNumEntries;
                     /* 估算带宽：每个连接按平均负载估算 */
                     current_bandwidth_mbps = (float)current_connections * 0.01f;
                 }
-                free(tcp_table);
+                safe_free((void**)&tcp_table);
             }
         }
     }

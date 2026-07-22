@@ -796,8 +796,30 @@ static int parse_json_string(const char* json, const char* key, char* value, siz
         start++;
     }
     if (*start != '"') {
+        /* FIX-JSON-LITERAL: 兼容RFC 8259原始字面量（true/false/null/数字）。
+         * 原代码遇到非字符串值直接返回-3，导致前端发送的标准JSON布尔/数字
+         * （如 {"enabled": true}、{"enabled": 0}）解析失败——所有开关类API
+         * （agi/feature/toggle、auto-learn/toggle等）永远落入"禁用"分支。
+         * 现在将字面量按文本形式拷贝到value（"true"/"false"/"0"/"1.5"），
+         * 使调用方 strcmp(val,"true")/strcmp(val,"1") 的判断逻辑自动兼容。 */
+        const char* lit = start;
+        size_t lit_len = 0;
+        while (lit[lit_len] != '\0' && lit[lit_len] != ',' && lit[lit_len] != '}' &&
+               lit[lit_len] != ']' && lit[lit_len] != ' ' && lit[lit_len] != '\t' &&
+               lit[lit_len] != '\n' && lit[lit_len] != '\r') {
+            lit_len++;
+        }
+        /* 仅接受JSON规范字面量起始（true/false/null/数字/负号），避免把语法错误当字面量 */
+        if (lit_len > 0 && lit_len < max_length &&
+            (strncmp(lit, "true", 4) == 0 || strncmp(lit, "false", 5) == 0 ||
+             strncmp(lit, "null", 4) == 0 ||
+             (*lit >= '0' && *lit <= '9') || *lit == '-' || *lit == '+')) {
+            memcpy(value, lit, lit_len);
+            value[lit_len] = '\0';
+            return 0;
+        }
         value[0] = '\0';
-        return -3;  /* 值不是字符串类型 */
+        return -3;  /* 值不是字符串类型且非规范字面量 */
     }
     start++;  /* 跳过开始引号，现在指向值的第一个字符 */
     
@@ -1004,8 +1026,14 @@ static int parse_json_float(const char* json, const char* key, float* value) {
     /* C-013修复: 格式化字符串安全防护。
      * 使用 "%.20s" 格式限定符确保start/key内容不会被解释为格式字符串，
      * 即使start中包含'%'字符也仅作为普通字符输出，最多输出20个字符防止缓冲区溢出。 */
-    SELFLNN_CHECK(sscanf(start, "%f", value) == 1, SELFLNN_ERROR_FORMAT_ERROR,
-                 "JSON解析失败: 浮点值解析错误（键：%.20s，起始：%.20s）", key, start);
+    if (sscanf(start, "%f", value) != 1) {
+        /* FIX-JSON-LITERAL: 兼容标准JSON布尔字面量（true→1.0、false→0.0） */
+        if (strncmp(start, "true", 4) == 0) { *value = 1.0f; return 0; }
+        if (strncmp(start, "false", 5) == 0) { *value = 0.0f; return 0; }
+        SELFLNN_CHECK(0, SELFLNN_ERROR_FORMAT_ERROR,
+                     "JSON解析失败: 浮点值解析错误（键：%.20s，起始：%.20s）", key, start);
+        return SELFLNN_ERROR_FORMAT_ERROR;
+    }
     
     /* P1修复: 验证解析的浮点值是否为NaN或Inf，防止异常值注入神经网络 */
     if (!isfinite(*value)) {
@@ -1047,10 +1075,18 @@ static int parse_json_int(const char* json, const char* key, int* value) {
     }
     
     // 解析整数
-    SELFLNN_CHECK(sscanf(start, "%d", value) == 1, SELFLNN_ERROR_FORMAT_ERROR,
+    if (sscanf(start, "%d", value) == 1) {
+        return 0;
+    }
+    /* FIX-JSON-LITERAL: 兼容标准JSON布尔字面量（true→1、false→0）。
+     * 前端密钥管理、功能开关等直接发送 {"enabled": true/false}，
+     * 原代码sscanf解析失败后直接报错，导致开关操作失效。 */
+    if (strncmp(start, "true", 4) == 0) { *value = 1; return 0; }
+    if (strncmp(start, "false", 5) == 0) { *value = 0; return 0; }
+    SELFLNN_CHECK(0, SELFLNN_ERROR_FORMAT_ERROR,
                  "JSON解析失败: 整数值解析错误（键：%s，起始：%.20s）", key, start);
-    
-    return 0;
+
+    return SELFLNN_ERROR_FORMAT_ERROR;
 }
 
 /**
@@ -2633,6 +2669,7 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/shutdown") == 0)                  return API_POST_SHUTDOWN;
     if (strcmp(p, "/api/backup") == 0)                    return API_POST_BACKUP;
     if (strcmp(p, "/api/system/diagnostic") == 0)         return API_GET_SYSTEM_DIAGNOSTIC;
+    if (strcmp(p, "/api/system/full_status") == 0)        return API_GET_STATUS;  /* 路由别名: 完整系统状态→/api/status */
     if (strcmp(p, "/api/system/export_diagnostic") == 0)  return API_GET_SYSTEM_EXPORT_DIAGNOSTIC;
     if (strcmp(p, "/api/system/restart") == 0)            return API_POST_SYSTEM_RESTART;
     if (strcmp(p, "/api/system/logs") == 0)               return API_GET_SYSTEM_LOGS;
@@ -2653,6 +2690,7 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/sensor") == 0)                    return API_POST_SENSOR;
     if (strcmp(p, "/api/sensor/list") == 0)              return API_GET_SENSOR_LIST;      /* H-11: 传感器列表 */
     if (strcmp(p, "/api/sensor/start") == 0)             return API_POST_SENSOR_START;    /* H-11: 启动传感器采集 */
+    if (strcmp(p, "/api/sensor/calibrate") == 0)          return API_POST_ROBOT_CALIBRATE;  /* 路由别名: 传感器校准→机器人校准 */
     if (strcmp(p, "/api/multimodal/status") == 0)         return API_GET_MULTIMODAL_STATUS;
     if (strcmp(p, "/api/multimodal/teach") == 0)          return API_POST_MULTIMODAL_TEACH;
     if (strcmp(p, "/api/multimodal/teach/test") == 0)     return API_POST_MULTIMODAL_TEACH_TEST;
@@ -2738,6 +2776,8 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/memory/clear") == 0)              return API_POST_MEMORY_CLEAR;
     if (strcmp(p, "/api/memory/search") == 0)             return API_POST_MEMORY_SEARCH;
     if (strcmp(p, "/api/memory/sleep_consolidation") == 0) return API_POST_MEMORY_SLEEP_CONSOLIDATION;
+    if (strcmp(p, "/api/memory/save") == 0)               return API_POST_MEMORY_SAVE;
+    if (strcmp(p, "/api/memory/load") == 0)               return API_POST_MEMORY_LOAD;
 
     /* === 训练 === */
     if (strcmp(p, "/api/training") == 0)                  return API_POST_TRAINING;
@@ -2787,6 +2827,7 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     /* === 机器人 === */
     if (strcmp(p, "/api/robot/status") == 0)              return API_GET_ROBOT_STATUS;
     if (strcmp(p, "/api/robot/command") == 0)             return API_POST_ROBOT_COMMAND;
+    if (strcmp(p, "/api/robot/control") == 0)             return API_POST_ROBOT_COMMAND;  /* 路由别名: /api/robot/command */
     if (strcmp(p, "/api/robot/list") == 0)                return API_GET_ROBOT_LIST;
     if (strcmp(p, "/api/robot/reboot") == 0)              return API_POST_ROBOT_REBOOT;
     if (strcmp(p, "/api/robot/calibrate") == 0)           return API_POST_ROBOT_CALIBRATE;
@@ -2837,11 +2878,13 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/simulation/clear") == 0)            return API_POST_SIMULATION_CLEAR;
     if (strcmp(p, "/api/simulation/command") == 0)          return API_POST_SIMULATION_COMMAND;
     if (strcmp(p, "/api/robot/path/plan") == 0)             return API_POST_ROBOT_PATH_PLAN;
+    if (strcmp(p, "/api/robot/plan") == 0)                 return API_POST_ROBOT_PATH_PLAN;  /* 路由别名: /api/robot/path/plan */
     if (strcmp(p, "/api/fleet/status") == 0)              return API_GET_FLEET_STATUS;
 
     /* === 设备 === */
     if (strcmp(p, "/api/devices/list") == 0)
         return (method && strcmp(method, "GET") == 0) ? API_GET_DEVICE_LIST : API_POST_DEVICES_LIST;
+    if (strcmp(p, "/api/device/list") == 0)               return API_GET_DEVICE_LIST;  /* 路由别名: /api/devices/list */
     if (strcmp(p, "/api/devices/status") == 0)            return API_POST_DEVICES_STATUS;
     if (strcmp(p, "/api/devices/register") == 0)          return API_POST_DEVICES_REGISTER_V1;
     if (strcmp(p, "/api/devices/unregister") == 0)        return API_POST_DEVICES_UNREGISTER_V1;
@@ -2884,6 +2927,7 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/agi/plan") == 0)                  return API_POST_AGI_PLAN;
     if (strcmp(p, "/api/agi/memory") == 0)                return API_POST_AGI_MEMORY;
     if (strcmp(p, "/api/agi/evolve") == 0)                return API_POST_AGI_EVOLVE;
+    if (strcmp(p, "/api/agi/self_reflect") == 0)          return API_POST_SELF_REFLECT;  /* 路由别名: /api/self/reflect */
     if (strcmp(p, "/api/agi/tasks") == 0)                 return API_GET_AGI_TASKS;
     if (strcmp(p, "/api/agi/diagnostic") == 0)            return API_GET_AGI_DIAGNOSTIC;
     if (strcmp(p, "/api/agi/diagnostic/export") == 0)     return API_GET_AGI_DIAGNOSTIC_EXPORT;
@@ -2934,6 +2978,7 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
         return (method && strcmp(method, "POST") == 0) ? API_POST_PRODUCT_SPEC : (ApiRequestType)271;
     }
     if (strcmp(p, "/api/product/design") == 0)            return (ApiRequestType)270;
+    if (strcmp(p, "/api/product/generate") == 0)          return API_POST_PRODUCT_DESIGN;  /* 路由别名: /api/product/design */
 
     /* === 安全 === */
     if (strcmp(p, "/api/safety/status") == 0)             return API_GET_SAFETY_STATUS;
@@ -2942,6 +2987,7 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/safety/soft_stop") == 0)          return API_POST_SAFETY_SOFT_STOP;
     if (strcmp(p, "/api/safety/reset") == 0)              return API_POST_SAFETY_RESET;
     if (strcmp(p, "/api/safety/events") == 0)             return API_GET_SAFETY_EVENTS;
+    if (strcmp(p, "/api/safety/scan") == 0)               return API_POST_SAFETY_CHECK;  /* 路由别名: /api/safety/check */
 
     /* === 演化 === */
     if (strcmp(p, "/api/evolution") == 0)                 return API_POST_EVOLUTION;
@@ -2954,6 +3000,7 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/auto-learn/stats") == 0)          return API_GET_AUTO_LEARN_STATS;
     if (strcmp(p, "/api/auto-learn/export") == 0)         return API_POST_AUTO_LEARN_EXPORT; /* 集成修复: 统一路由表补全 */
     if (strcmp(p, "/api/auto-learn/toggle") == 0)         return API_POST_AUTO_LEARN_TOGGLE;
+    if (strcmp(p, "/api/auto-learn/start") == 0)          return API_POST_AUTO_LEARN_SCAN;  /* 路由别名: /api/auto-learn/scan */
 
     /* === 学习 === */
     if (strcmp(p, "/api/learning") == 0)                  return API_GET_LEARNING;
@@ -2973,6 +3020,7 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     /* === 超参数搜索 === */
     if (strcmp(p, "/api/hyperparameter/start") == 0)      return API_POST_HYPERPARAMETER_START;
     if (strcmp(p, "/api/hyperparameter/status") == 0)     return API_GET_HYPERPARAMETER_STATUS;
+    if (strcmp(p, "/api/hyperparameter/tune") == 0)        return API_POST_HYPERPARAMETER_START;  /* 路由别名: /api/hyperparameter/start */
 
     /* === 模型管理 === */
     if (strcmp(p, "/api/model/load") == 0)                return API_POST_MODEL_LOAD;
@@ -2984,6 +3032,8 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
     if (strcmp(p, "/api/model/info") == 0)                return API_GET_MODEL_INFO;
     if (strcmp(p, "/api/checkpoint/list") == 0)            return API_POST_MODEL_LOAD;
     if (strcmp(p, "/api/checkpoint/load") == 0)            return API_POST_MODEL_LOAD;
+    if (strcmp(p, "/api/checkpoint/save") == 0)            return API_POST_BACKUP;  /* 路由别名: 检查点保存→系统备份 */
+    if (strcmp(p, "/api/model/export") == 0)               return API_POST_TRAINING_EXPORT;  /* 路由别名: 模型导出→训练导出 */
 
     /* === 技能库 === */
     if (strcmp(p, "/api/skills") == 0)                    return API_GET_SKILLS;
@@ -2994,13 +3044,16 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
 
     /* === 决策日志 === */
     if (strcmp(p, "/api/decision/log") == 0)              return API_GET_DECISION_LOG;
+    if (strcmp(p, "/api/decision/make") == 0)              return API_POST_AGI_DECIDE;  /* 路由别名: 决策→AGI决策引擎 */
 
     /* === 能力诊断 === */
     if (strcmp(p, "/api/capability/diagnose") == 0)       return API_POST_CAPABILITY_DIAGNOSE;
+    if (strcmp(p, "/api/cognition") == 0)                  return API_GET_AGI_COGNITION_STATE;
     if (strcmp(p, "/api/cognition/state") == 0)           return API_GET_AGI_COGNITION_STATE;
     if (strcmp(p, "/api/cognition/health") == 0)          return API_GET_AGI_COGNITION_STATE;
     if (strcmp(p, "/api/cognition/tom") == 0)             return API_GET_COGNITION_TOM;
     if (strcmp(p, "/api/cognition/status") == 0)         return API_GET_AGI_COGNITION_STATE;
+    if (strcmp(p, "/api/cognition/reflect") == 0)         return API_POST_METACOGNITION_REFLECT;  /* 路由别名: /api/metacognition/reflect */
 
     /* === 教学系统 === */
     if (strcmp(p, "/api/teach/look_and_learn") == 0)      return API_POST_TEACH_LOOK_AND_LEARN;
@@ -3096,6 +3149,7 @@ static ApiRequestType backend_route_path_to_type(const char* path, const char* m
 
     /* === 文档 === */
     if (strcmp(p, "/api/docs") == 0)                     return API_GET_API_DOCS;
+    if (strcmp(p, "/api/api/docs") == 0)                   return API_GET_API_DOCS;  /* 路由别名: /api/docs */
 
     /* === 模仿学习 === */
     if (strcmp(p, "/api/imitation/demonstration") == 0)   return API_POST_IMITATION_DEMONSTRATION;
@@ -5609,6 +5663,19 @@ int backend_load_config(BackendConfig* config, const char* path) {
     return 0;
 }
 
+/* FIX-ESTOP-CRASH: 紧急停止硬件回调的签名匹配包装函数。
+ * emergency_stop_register_hardware_callback 要求回调签名为 void(*)(int level, void* ctx)，
+ * 而 robot_emergency_stop 签名为 int(void* robot)。原代码直接强转注册，
+ * 调用时 level 整数值被当作 Robot* 指针解引用 → 访问非法地址(0x2) → SEH崩溃。
+ * 此包装函数严格匹配 (int level, void* ctx) 签名，将 ctx 正确解释为 Robot*。 */
+extern int robot_emergency_stop(void* robot);
+static void backend_hardware_stop_wrapper(int level, void* ctx) {
+    (void)level;  /* 停止级别由紧急停止系统内部管理，硬件急停无需区分 */
+    if (ctx) {
+        robot_emergency_stop(ctx);
+    }
+}
+
 /**
  * @brief 创建后端服务器
  */
@@ -6296,6 +6363,12 @@ BackendServer* backend_server_create(const BackendConfig* config) {
                               "创建安全监控失败");
     }
 
+    /* FIX-ESTOP-CRASH: 硬件停止回调包装函数（前向定义供下方注册使用）。
+     * 签名严格匹配 emergency_stop_register_hardware_callback 要求的
+     * void(*)(int level, void* ctx)，避免函数指针签名不匹配导致的崩溃。 */
+    extern int robot_emergency_stop(void* robot);
+    // 注：实际wrapper定义为文件级静态函数 backend_hardware_stop_wrapper（见下方）
+
     // 初始化紧急停止系统
     EmergencyStopConfig esc_cfg;
     memset(&esc_cfg, 0, sizeof(EmergencyStopConfig));
@@ -6324,12 +6397,17 @@ BackendServer* backend_server_create(const BackendConfig* config) {
          *    KILL/PHYSICAL_CUT级别可通过已注册的task_scheduler_pause兜底 */
         void* ts = (void*)server->task_scheduler;
         
-        /* 硬件停止回调: 使用robot_emergency_stop包装函数 */
+        /* FIX-ESTOP-CRASH: 硬件停止回调签名必须是 void(*)(int level, void* ctx)，
+         * 原代码直接注册单参数函数 robot_emergency_stop(void*) 并强转签名。
+         * 调用时 emergency_stop_execute 以 (level, ctx) 两参数调用，
+         * robot_emergency_stop 收到的第一个参数实际是 level 整数值(如2)，
+         * 被当作 Robot* 指针解引用 → 访问非法地址(0x2) → SEH崩溃(type 126)。
+         * 现改为签名匹配的静态包装函数，ctx 才是 Robot*。 */
         extern int robot_emergency_stop(void* robot);
         if (server->robot_instance) {
             emergency_stop_register_hardware_callback(server->emergency_stop_sys,
-                (void(*)(void*))robot_emergency_stop, server->robot_instance);
-            log_info("[后端] 紧急停止: 硬件停止回调已注册 → robot_emergency_stop");
+                backend_hardware_stop_wrapper, server->robot_instance);
+            log_info("[后端] 紧急停止: 硬件停止回调已注册 → robot_emergency_stop(签名匹配包装)");
         }
         
         /* 任务调度器回调: 使用真实函数指针 */
@@ -8355,7 +8433,8 @@ static int handle_api_kg_endpoint(BackendServer* server,
     case 320: /* /api/kg/visualize */
         json_data = (char*)safe_malloc(65536);
         if (json_data) {
-            if (knowledge_graph_export_visual_json(kg, json_data, 65536, 0) != 0)
+            /* 函数返回-1表示失败，>=0表示成功（返回写入字节数） */
+            if (knowledge_graph_export_visual_json(kg, json_data, 65536, 0) < 0)
                 snprintf(json_data, 65536, "{\"error\":\"visual_export_failed\"}");
         }
         break;
@@ -8368,29 +8447,46 @@ static int handle_api_kg_endpoint(BackendServer* server,
         int added_nodes = 0, added_edges = 0;
         /* 如果body直接包含nodes/edges数组(紧凑格式)，也尝试从body解析 */
         if (!nodes_json[0] && !edges_json[0]) {
-            /* 尝试从body中直接查找"nodes"和"edges"字段
-             * 前端发送格式: { "nodes": [...], "edges": [...] }  */
-            size_t rlen = request_length ? request_length : strlen(request_data);
+            /* [P1-05修复] 从body中提取节点和边数组
+             * 原strchr(ns,']')在嵌套数组时会错误匹配第一个内层']'。
+             * 修复: 使用括号深度计数，确保匹配正确的闭合括号。 */
             const char* np = strstr(request_data, "\"nodes\"");
             const char* ep = strstr(request_data, "\"edges\"");
-            if (np && ep) {
-                /* 提取nodes数组内容 (两个[之间) */
+            if (np) {
                 const char* ns = strchr(np, '[');
-                const char* ne = ns ? strchr(ns, ']') : NULL;
-                if (ns && ne && (ne > ns)) {
-                    size_t copy_len = (size_t)(ne - ns + 1);
-                    if (copy_len > sizeof(nodes_json) - 1) copy_len = sizeof(nodes_json) - 1;
-                    memcpy(nodes_json, ns, copy_len);
-                    nodes_json[copy_len] = '\0';
+                if (ns) {
+                    /* 括号深度计数找到匹配的 ] */
+                    int depth = 1;
+                    const char* ne = ns + 1;
+                    while (*ne && depth > 0) {
+                        if (*ne == '[') depth++;
+                        else if (*ne == ']') depth--;
+                        if (depth > 0) ne++;
+                    }
+                    if (depth == 0 && ne > ns) {
+                        size_t copy_len = (size_t)(ne - ns + 1);
+                        if (copy_len > sizeof(nodes_json) - 1) copy_len = sizeof(nodes_json) - 1;
+                        memcpy(nodes_json, ns, copy_len);
+                        nodes_json[copy_len] = '\0';
+                    }
                 }
-                /* 提取edges数组内容 */
+            }
+            if (ep) {
                 const char* es = strchr(ep, '[');
-                const char* ee = es ? strchr(es, ']') : NULL;
-                if (es && ee && (ee > es)) {
-                    size_t copy_len = (size_t)(ee - es + 1);
-                    if (copy_len > sizeof(edges_json) - 1) copy_len = sizeof(edges_json) - 1;
-                    memcpy(edges_json, es, copy_len);
-                    edges_json[copy_len] = '\0';
+                if (es) {
+                    int depth = 1;
+                    const char* ee = es + 1;
+                    while (*ee && depth > 0) {
+                        if (*ee == '[') depth++;
+                        else if (*ee == ']') depth--;
+                        if (depth > 0) ee++;
+                    }
+                    if (depth == 0 && ee > es) {
+                        size_t copy_len = (size_t)(ee - es + 1);
+                        if (copy_len > sizeof(edges_json) - 1) copy_len = sizeof(edges_json) - 1;
+                        memcpy(edges_json, es, copy_len);
+                        edges_json[copy_len] = '\0';
+                    }
                 }
             }
         }
@@ -8484,6 +8580,28 @@ static int handle_api_kg_endpoint(BackendServer* server,
                     }
                 }
                 ptr = obj_end + 1;
+            }
+        }
+        /* 三元组格式回退: {"s":"主体","p":"谓词","o":"客体"} — 创建节点和边 */
+        if (added_nodes == 0 && added_edges == 0) {
+            char s_val[256] = "", p_val[256] = "", o_val[256] = "";
+            parse_json_string(request_data, "s", s_val, sizeof(s_val));
+            parse_json_string(request_data, "p", p_val, sizeof(p_val));
+            parse_json_string(request_data, "o", o_val, sizeof(o_val));
+            if (s_val[0] && o_val[0]) {
+                /* 创建主体节点和客体节点 */
+                KnowledgeGraphNode* sn = knowledge_graph_add_node(kg, 1, s_val, NULL, 0, 0.5f);
+                KnowledgeGraphNode* on = knowledge_graph_add_node(kg, 1, o_val, NULL, 0, 0.5f);
+                if (sn) added_nodes++;
+                if (on) added_nodes++;
+                if (sn && on && p_val[0]) {
+                    KnowledgeGraphEdge* e = knowledge_graph_add_edge(kg, 0, sn, on, p_val, 0.5f, 0.5f);
+                    if (e) added_edges++;
+                } else if (sn && on) {
+                    /* 无谓词时创建默认关联边 */
+                    KnowledgeGraphEdge* e = knowledge_graph_add_edge(kg, 0, sn, on, "关联", 0.5f, 0.5f);
+                    if (e) added_edges++;
+                }
             }
         }
         json_data = (char*)safe_malloc(512);
@@ -9085,6 +9203,86 @@ static void async_training_worker(void* arg) {
     /* 清理训练数据 */
     safe_free((void**)&ctx->inputs);
     safe_free((void**)&ctx->targets);
+    safe_free((void**)&ctx);
+}
+
+/* ================================================================
+ * v9.24修复: 异步演化上下文 - 将演化从HTTP请求线程分离到线程池
+ * 解决evolution_step同步阻塞导致HTTP超时的问题
+ * ================================================================ */
+typedef struct {
+    BackendServer* server;
+    char evolve_target[64];
+    int generations;
+    int task_id;
+    uint64_t start_ms;
+} AsyncEvolveContext;
+
+/* 异步演化工作线程函数 */
+static void async_evolve_worker(void* arg) {
+    AsyncEvolveContext* ctx = (AsyncEvolveContext*)arg;
+    if (!ctx || !ctx->server) {
+        safe_free((void**)&ctx);
+        return;
+    }
+    
+    log_info("[演化] 异步演化开始: 目标=%s, 代数=%d", ctx->evolve_target, ctx->generations);
+    
+    void* evo = selflnn_get_evolution_engine();
+    if (!evo) {
+        agi_task_update(ctx->server, ctx->task_id, "failed", 1.0f,
+            "{\"error\":\"演化引擎不可用\"}", 0.0f);
+        safe_free((void**)&ctx);
+        return;
+    }
+    
+    int evolve_result = -1;
+    float best_fitness = 0.0f;
+    float avg_fitness = 0.0f;
+    float diversity = 0.0f;
+    int final_gen = 0;
+    
+    /* 执行指定代数的演化 */
+    for (int g = 0; g < ctx->generations; g++) {
+        EvolutionStats evo_stats;
+        memset(&evo_stats, 0, sizeof(evo_stats));
+        evolve_result = evolution_step((EvolutionEngine*)evo);
+        evolution_get_stats((EvolutionEngine*)evo, &evo_stats);
+        best_fitness = evo_stats.final_best_fitness;
+        avg_fitness = (evo_stats.initial_best_fitness + evo_stats.final_best_fitness) * 0.5f;
+        diversity = evo_stats.improvement;
+        final_gen = (int)evo_stats.total_generations;
+        
+        if (evolve_result == 0 && evo_stats.final_best_fitness > 0.0f) {
+            int applied = evolution_engine_apply_best_to_lnn((EvolutionEngine*)evo);
+            (void)applied;
+        }
+        
+        /* 更新任务进度 */
+        float progress = (float)(g + 1) / (float)ctx->generations;
+        char result_buf[512];
+        snprintf(result_buf, sizeof(result_buf),
+            "{\"generation\":%d,\"best_fitness\":%.6f,\"avg_fitness\":%.6f}",
+            g + 1, best_fitness, avg_fitness);
+        agi_task_update(ctx->server, ctx->task_id, "running", progress, result_buf, best_fitness);
+    }
+    
+    uint64_t end_ms = platform_get_time_ms();
+    uint64_t duration = end_ms - ctx->start_ms;
+    
+    /* 最终结果 */
+    char final_result[1024];
+    snprintf(final_result, sizeof(final_result),
+        "{\"success\":%s,\"generations_completed\":%d,\"best_fitness\":%.6f,"
+        "\"avg_fitness\":%.6f,\"diversity\":%.6f,\"duration_ms\":%llu}",
+        evolve_result == 0 ? "true" : "false",
+        final_gen, best_fitness, avg_fitness, diversity, duration);
+    
+    agi_task_update(ctx->server, ctx->task_id, "completed", 1.0f, final_result, best_fitness);
+    
+    log_info("[演化] 异步演化完成: 结果=%d, 最优适应度=%.6f, 耗时=%llums",
+             evolve_result, best_fitness, duration);
+    
     safe_free((void**)&ctx);
 }
 
@@ -9903,6 +10101,9 @@ static int handle_api_post_robot_trajectory(BackendServer* server,
             response->data_length = strlen(json_data);
             response->status_code = 503;
         }
+        /* FIX-MISSING-RETURN: 机器人控制不可用设置503后必须立即返回，
+         * 原代码继续执行导致503被后续400/500覆盖，错误语义丢失 */
+        return 0;
     }
     int robot_id = 0;
     int num_points = 0;
@@ -9921,6 +10122,9 @@ static int handle_api_post_robot_trajectory(BackendServer* server,
             response->data_length = strlen(json_data);
             response->status_code = 400;
         }
+        /* FIX-MISSING-RETURN: 轨迹数据缺失设置400后必须立即返回，
+         * 原代码继续以空轨迹调用控制器，返回误导性"轨迹执行失败" */
+        return 0;
     }
     num_points = traj_count / 7;
     if (num_points > 100) num_points = 100;
@@ -9977,9 +10181,26 @@ static int handle_api_post_robot_emergency_stop(BackendServer* server,
     parse_json_int(request_data, "robot_id", &robot_id);
     parse_json_int(request_data, "all", &all_robots);
     int result = -1;
+    /* FIX-ESTOP-SEMANTIC: 原代码无机器人时返回笼统500"紧急停止失败"，误导调用方。
+     * 现区分：有机器人但停止失败→500；未注册任何机器人→503并明确说明。 */
+    int has_any_robot = 0;
+    if (server->ros_controller && ros_robot_controller_get_robot_count(server->ros_controller) > 0) has_any_robot = 1;
+    if (server->robot_instance) has_any_robot = 1;
+    if (!has_any_robot) {
+        json_data = (char*)safe_malloc(256);
+        if (json_data) {
+            snprintf(json_data, 256,
+                    "{\"emergency\":{\"error\":\"未注册任何机器人，无对象可执行紧急停止\",\"robot_id\":%d,\"status\":\"no_robot\"}}",
+                    robot_id);
+            response->data = json_data;
+            response->data_length = strlen(json_data);
+            response->status_code = 503;
+        }
+        return 0;
+    }
     if (server->ros_controller && all_robots) {
         result = ros_robot_controller_emergency_stop_all(server->ros_controller);
-    } else if (server->ros_controller) {
+    } else if (server->ros_controller && robot_id < ros_robot_controller_get_robot_count(server->ros_controller)) {
         result = ros_robot_controller_emergency_stop(server->ros_controller, robot_id);
     } else if (server->robot_instance) {
         result = robot_emergency_stop(server->robot_instance) == 0 ? 0 : -1;
@@ -10250,8 +10471,9 @@ static int handle_api_post_robot_training(BackendServer* server,
     json_data = (char*)safe_malloc(1024);
     if (json_data) {
         snprintf(json_data, 1024,
-                "{\"training\":{\"action\":\"%s\",\"result\":%d}}",
-                action_msg, result);
+                "{\"training\":{\"action\":\"%s\",\"result\":%d,\"error\":\"%s\"}}",
+                action_msg, result,
+                result == 0 ? "none" : "操作失败：ROS控制器未连接或机器人未就绪");
         response->data = json_data;
         response->data_length = strlen(json_data);
         response->status_code = result == 0 ? 200 : 500;
@@ -10539,8 +10761,9 @@ static int handle_api_post_gazebo_control(BackendServer* server,
     json_data = (char*)safe_malloc(512);
     if (json_data) {
         snprintf(json_data, 512,
-                "{\"gazebo_control\":{\"action\":\"%s\",\"result\":%d}}",
-                action_msg, result);
+                "{\"gazebo_control\":{\"action\":\"%s\",\"result\":%d,\"error\":\"%s\"}}",
+                action_msg, result,
+                result == 0 ? "none" : "操作失败：Gazebo仿真器未运行或模型文件不存在");
         response->data = json_data;
         response->data_length = strlen(json_data);
         response->status_code = result == 0 ? 200 : 500;
@@ -11398,67 +11621,81 @@ static int handle_api_post_audio_recognize(BackendServer* server,
         }
         return 0;  /* V-001修复: handle_api_post_audio_recognize缺失return导致NULL解引用 */
     }
-            
-    /* 使用LNN进行音频特征提取和识别 */
-    char recognized_text[1024] = {0};
-    float audio_conf = 0.0f;
-    float features[256] = {0};
-    int feature_count = request_length > 256 ? 256 : (int)request_length;
-            
-    /* 从原始音频数据提取特征（简单的能量谱分析） */
-    for (int i = 0; i < feature_count; i++) {
-        features[i] = (float)((unsigned char)request_data[i]) / 255.0f;
-    }
-            
-    /* 通过LNN进行音频识别 */
-    if (server->lnn_instance) {
-        float lnn_output[128] = {0};
-        selflnn_safe_forward(server->lnn_instance, features, lnn_output);
-        /* 从LNN输出计算真实置信度：使用输出的最大激活值归一化 */
-        float max_out = 0.0f;
-        for (int i = 0; i < 128; i++) {
-            if (lnn_output[i] > max_out) max_out = lnn_output[i];
+
+    /* FIX-FAKE-ASR: 移除造假识别路径（原代码把LNN输出数值包装成"音频指令_NN"模板文本
+     * 并配0.92+虚假置信度，违反"禁止虚假实现"原则）。
+     * 现与 /api/voice/recognize 统一为真实语音识别引擎调用：
+     * 识别引擎未初始化→503；无有效语音→返回empty状态，绝不编造识别文本。 */
+    void* sr = selflnn_get_speech_recognizer();
+    if (!sr) {
+        json_data = (char*)safe_malloc(256);
+        if (json_data) {
+            snprintf(json_data, 256,
+                    "{\"audio_recognition\":{\"status\":\"unavailable\","
+                    "\"error\":\"语音识别引擎未初始化，请连接麦克风或启动多模态管理器\"}}");
+            response->data = json_data;
+            response->data_length = strlen(json_data);
+            response->status_code = 503;
         }
-        audio_conf = max_out > 1.0f ? 0.95f : (max_out > 0.5f ? 0.75f + max_out * 0.2f : max_out * 1.5f);
-        if (audio_conf > 1.0f) audio_conf = 1.0f;
-        if (audio_conf < 0.0f) audio_conf = 0.0f;
-                
-        /* 将LNN输出映射为文本（使用知识库进行语义映射） */
-        if (server->knowledge_base) {
-            char query[512];
-            snprintf(query, sizeof(query), "audio_pattern_%d", (int)(lnn_output[0] * 100));
-            KnowledgeQuery kb_query;
-            memset(&kb_query, 0, sizeof(kb_query));
-            kb_query.object_pattern = query;
-            KnowledgeEntry kb_results[5];
-            int num_results = knowledge_base_query(server->knowledge_base, &kb_query, kb_results, 5);
-            if (num_results > 0 && kb_results[0].object) {
-                strncpy(recognized_text, kb_results[0].object, sizeof(recognized_text) - 1);
-                audio_conf = audio_conf * 0.8f + kb_results[0].confidence * 0.2f;
-            } else {
-                snprintf(recognized_text, sizeof(recognized_text), "音频指令_%d", (int)(lnn_output[0] * 100) % 100);
-            }
-        } else {
-            snprintf(recognized_text, sizeof(recognized_text), "音频识别结果_%d", feature_count);
+        return 0;
+    }
+
+    /* 提取音频样本：优先解析JSON float数组（"data"/"audio"/"samples"字段），
+     * 否则将请求体视为原始float PCM数据。
+     * 注意：parse_json_float_array内部安全上限为1024个元素。 */
+    float samples[1024] = {0};
+    int num_samples = parse_json_float_array(request_data, "data", samples, 1024);
+    if (num_samples <= 0) num_samples = parse_json_float_array(request_data, "audio", samples, 1024);
+    if (num_samples <= 0) num_samples = parse_json_float_array(request_data, "samples", samples, 1024);
+    if (num_samples <= 0) {
+        /* 原始PCM float路径：请求体直接为float数组 */
+        int raw_n = (int)(request_length / sizeof(float));
+        num_samples = (raw_n > 1024) ? 1024 : raw_n;
+        if (num_samples > 0) memcpy(samples, request_data, (size_t)num_samples * sizeof(float));
+    }
+    if (num_samples <= 0) {
+        json_data = (char*)safe_malloc(256);
+        if (json_data) {
+            snprintf(json_data, 256,
+                    "{\"audio_recognition\":{\"status\":\"empty\","
+                    "\"error\":\"未提供有效音频样本（支持data/audio/samples数组或原始PCM）\"}}");
+            response->data = json_data;
+            response->data_length = strlen(json_data);
+            response->status_code = 400;
+        }
+        return 0;
+    }
+
+    SpeechRecognitionResult sr_result;
+    memset(&sr_result, 0, sizeof(sr_result));
+    int ret = speech_recognizer_recognize((SpeechRecognizer*)sr, samples, num_samples, &sr_result);
+    if (ret == 0 && sr_result.text && sr_result.text[0]) {
+        size_t len = strlen(sr_result.text);
+        json_data = (char*)safe_malloc(len + 256);
+        if (json_data) {
+            snprintf(json_data, len + 256,
+                    "{\"audio_recognition\":{\"status\":\"success\",\"text\":\"%s\",\"confidence\":%.4f}}",
+                    sr_result.text, sr_result.confidence);
+            response->data = json_data;
+            response->data_length = strlen(json_data);
+            response->status_code = 200;
         }
     } else {
-        snprintf(recognized_text, sizeof(recognized_text), "LNN不可用_音频特征提取");
-        audio_conf = 0.0f;
+        /* 识别引擎正常但未检出有效语音：诚实返回empty，不编造文本 */
+        json_data = (char*)safe_malloc(256);
+        if (json_data) {
+            snprintf(json_data, 256,
+                    "{\"audio_recognition\":{\"status\":\"empty\",\"text\":\"\",\"confidence\":0.0,"
+                    "\"message\":\"未检测到有效语音信号\"}}");
+            response->data = json_data;
+            response->data_length = strlen(json_data);
+            response->status_code = 200;
+        }
     }
-            
-    json_data = (char*)safe_malloc(1024);
-    if (json_data) {
-        snprintf(json_data, 1024,
-                "{\"audio_recognition\":{"
-                "\"status\":\"success\","
-                "\"text\":\"%s\","
-                "\"confidence\":%.4f"
-                "}}",
-                recognized_text, audio_conf);
-        response->data = json_data;
-        response->data_length = strlen(json_data);
-        response->status_code = 200;
-    }
+    if (sr_result.token_confidences) safe_free((void**)&sr_result.token_confidences);
+    if (sr_result.token_boundaries) safe_free((void**)&sr_result.token_boundaries);
+    if (sr_result.token_ids) safe_free((void**)&sr_result.token_ids);
+    if (sr_result.text) safe_free((void**)&sr_result.text);
     return 0;
 }
 static int handle_api_post_tts_synthesize(BackendServer* server,
@@ -11530,6 +11767,30 @@ static int handle_api_post_tts_synthesize(BackendServer* server,
     tts_engine_set_speed(server->tts_engine, speed);
     tts_engine_set_pitch(server->tts_engine, pitch);
     tts_engine_set_volume(server->tts_engine, volume);
+
+    /* v9.24修复: TTS引擎未训练且无共享LNN时，generate_waveform内部
+     * CfC ODE演化路径会导致进程崩溃（SEH无法捕获）。
+     * 在此添加预检防护，直接返回错误而非尝试合成。 */
+    {
+        extern int tts_is_untrained_export(TTSEngine* engine);
+        int untrained = tts_is_untrained_export(server->tts_engine);
+        extern LNN* tts_engine_get_shared_lnn(TTSEngine* engine);
+        LNN* tts_lnn = tts_engine_get_shared_lnn(server->tts_engine);
+        if (untrained && !tts_lnn) {
+            json_data = (char*)safe_malloc(512);
+            if (json_data) {
+                snprintf(json_data, 512,
+                    "{\"tts\":{\"status\":\"error\",\"text_received\":\"%s\","
+                    "\"message\":\"TTS引擎未训练且无共享LNN，无法合成语音。请先训练模型或调用tts_engine_set_lnn绑定LNN实例\","
+                    "\"sample_rate\":22050,\"num_samples\":0}}",
+                    tts_text);
+                response->data = json_data;
+                response->data_length = strlen(json_data);
+                response->status_code = 503;
+            }
+            return 0;
+        }
+    }
             
 /* SEH保护 + 引擎完整性预检 双层保护TTS合成 */
     TTSAudio* audio = NULL;
@@ -14127,11 +14388,13 @@ static int handle_api_post_robot_coordinate(BackendServer* server,
     if (json_data) {
         snprintf(json_data, 512,
                 "{\"success\":%s,\"send_method\":\"%s\",\"robot_id\":%d,"
-                "\"coordinate\":{\"x\":%.2f,\"y\":%.2f,\"z\":%.2f}}",
+                "\"coordinate\":{\"x\":%.2f,\"y\":%.2f,\"z\":%.2f},"
+                "\"error\":\"%s\"}",
                 send_ok ? "true" : "false",
                 send_method ? send_method : "none",
                 robot_id,
-                fx, fy, fz);
+                fx, fy, fz,
+                send_ok ? "none" : (server->ros_controller ? "ROS控制器命令发送失败：目标不可达或通信超时" : "无可用控制器"));
         response->data = json_data;
         response->data_length = strlen(json_data);
         response->status_code = send_ok ? 200 : 502;
@@ -14928,6 +15191,8 @@ static int handle_api_post_audio_stream(BackendServer* server,
                     }
                     safe_free((void**)&decoded_buf);
                 }
+                /* v9.24修复: 正常流程结束后释放audio_data_b64，防止每次请求泄漏64KB内存 */
+                safe_free((void**)&audio_data_b64);
             }
         }
                 
@@ -15461,6 +15726,20 @@ static int handle_api_post_video_capture(BackendServer* server,
             if (!image_data_b64) { response->status_code = 500; return 0; }
             memset(image_data_b64, 0, 262144);
             parse_json_string(request_data, "imageData", image_data_b64, 262144);
+            /* FIX-FAKE-CAPTURE: 原代码无论是否获得真实图像都输出 captured:true。
+             * 现要求：必须提供 imageData 或摄像头采集正在运行，否则诚实返回 captured:false。 */
+            int has_real_frame = (strlen(image_data_b64) > 0);
+            if (!has_real_frame && !(server->camera_capture_active && server->camera_capture_ctx)) {
+                snprintf(json_data, 3072,
+                    "{\"success\":false,\"captured\":false,"
+                    "\"error\":\"无可用图像帧：摄像头采集未启动且未提供imageData\","
+                    "\"status\":\"no_frame\"}");
+                response->data = json_data;
+                response->data_length = strlen(json_data);
+                response->status_code = 400;  /* v9.24修复: 客户端未提供必要数据，使用400而非503 */
+                safe_free((void**)&image_data_b64);
+                return 0;
+            }
             if (strlen(image_data_b64) > 0) {
                 size_t b64_len = strlen(image_data_b64);
                 size_t decoded_max = (b64_len * 3) / 4 + 16;
@@ -15553,8 +15832,23 @@ static int handle_api_post_video_capture(BackendServer* server,
                     safe_free((void**)&decoded_buf);
                 }
             }
+            /* FIX-MEMLEAK: image_data_b64(256KB)原代码从未释放，每次调用泄漏256KB。
+             * 长时运行下持续泄漏可导致内存耗尽与进程崩溃。 */
+            safe_free((void**)&image_data_b64);
+        } else {
+            /* FIX-FAKE-CAPTURE: 无请求数据时原代码同样输出captured:true，现诚实返回失败 */
+            if (!(server->camera_capture_active && server->camera_capture_ctx)) {
+                snprintf(json_data, 3072,
+                    "{\"success\":false,\"captured\":false,"
+                    "\"error\":\"无可用图像帧：摄像头采集未启动且请求体为空\","
+                    "\"status\":\"no_frame\"}");
+                response->data = json_data;
+                response->data_length = strlen(json_data);
+                response->status_code = 503;
+                return 0;
+            }
         }
-                
+
         snprintf(json_data, 3072,
             "{"
             "\"success\":true,"
@@ -16906,8 +17200,11 @@ static int handle_api_post_imitation_demonstration(BackendServer* server,
             response->data_length = strlen(json_data);
             response->status_code = 503;
         }
+        /* FIX-IMITATION-RETURN: 未初始化设置503后必须立即返回，
+         * 否则继续执行会覆盖响应并返回400 */
+        return 0;
     }
-            
+
     if (request_data && request_length > 0) {
         float state_buf[512] = {0};
         float action_buf[512] = {0};
@@ -16997,7 +17294,7 @@ static int handle_api_post_imitation_train(BackendServer* server,
                 "\"training_time_ms\":%zu,"
                 "\"num_demonstrations\":%zu,"
                 "\"timestamp\":%ld"
-                "}",
+                "}}",
                 algo_name,
                 result->total_iterations,
                 result->final_loss,
@@ -17012,8 +17309,10 @@ static int handle_api_post_imitation_train(BackendServer* server,
                 "{"
                 "\"imitation_train\":{"
                 "\"status\":\"failed\","
-                "\"error\":\"训练失败或无示范数据\""
-                "}}");
+                "\"error\":\"训练失败：无示范数据或模型未初始化。请先通过 /api/imitation/demonstration 提交示范数据\","
+                "\"num_demonstrations\":%zu"
+                "}}",
+                server->imitation_learner ? server->imitation_learner->num_demonstrations : 0);
         }
         response->data = json_data;
         response->data_length = strlen(json_data);
@@ -17036,8 +17335,11 @@ static int handle_api_post_imitation_predict(BackendServer* server,
             response->data_length = strlen(json_data);
             response->status_code = 503;
         }
+        /* FIX-IMITATION-RETURN: 原代码设置503后未return，继续执行覆盖响应，
+         * 导致未初始化时返回400及非法JSON（"action_dim":0,,），而非正确的503 */
+        return 0;
     }
-            
+
     float state_buf[512] = {0};
     float action_buf[512] = {0};
     int state_dim = 0, action_dim = 0;
@@ -17057,28 +17359,31 @@ static int handle_api_post_imitation_predict(BackendServer* server,
             
     json_data = (char*)safe_malloc(2048);
     if (json_data) {
+        /* FIX-JSON-VALID: 原代码前置段以 "action_dim":%d, 结尾（带逗号），
+         * 当预测失败跳过action数组后，又拼接 ",timestamp" 形成 "0,," 非法JSON。
+         * 现改为前置段不带尾逗号，action数组存在时自行补逗号。 */
         int pos = snprintf(json_data, 2048,
             "{"
             "\"imitation_predict\":{"
             "\"status\":\"%s\","
             "\"state_dim\":%d,"
-            "\"action_dim\":%d,",
+            "\"action_dim\":%d",
             predict_result == 0 ? "success" : "error",
             state_dim, action_dim);
-                
+
         if (predict_result == 0 && action_dim > 0) {
             pos += snprintf(json_data + pos, 2048 - pos,
-                "\"action\":[");
+                ",\"action\":[");
             for (int i = 0; i < action_dim && i < 128 && pos < 2000; i++) {
                 pos += snprintf(json_data + pos, 2048 - pos,
                     "%s%.6f", i > 0 ? "," : "", action_buf[i]);
             }
             pos += snprintf(json_data + pos, 2048 - pos, "]");
         }
-                
+
         snprintf(json_data + pos, 2048 - pos,
             ",\"timestamp\":%ld"
-            "}",
+            "}}",
             (long)time(NULL));
                 
         response->data = json_data;
@@ -17153,8 +17458,11 @@ static int handle_api_post_imitation_algorithm(BackendServer* server,
             response->data_length = strlen(json_data);
             response->status_code = 503;
         }
+        /* FIX-IMITATION-RETURN: 未初始化时必须返回503，
+         * 原代码继续执行并返回"configured"假成功（学习器实际不存在） */
+        return 0;
     }
-            
+
     char algorithm_str[64] = {0};
     parse_json_string(request_data, "algorithm", algorithm_str, sizeof(algorithm_str));
             
@@ -18191,6 +18499,49 @@ static int handle_api_post_training_start(BackendServer* server,
                 }
             }
         }
+        /* FIX-TRAIN-PIPELINE: 原代码仅从learning_engine经验数据准备训练集，
+         * 从不使用通过 /api/dataset/create 创建的 active_dataset，
+         * 导致"数据集已创建仍报无法准备训练数据"。现增加回退：
+         * 学习引擎经验不足时，从活跃数据集读取真实样本（维度自动适配）。 */
+        if (real_samples == 0 && server->active_dataset) {
+            size_t ds_samples = dataset_get_num_samples(server->active_dataset);
+            if (ds_samples > 0) {
+                size_t want = (ds_samples < samples) ? ds_samples : samples;
+                /* 分批读出整个数据集：get_batch每次返回batch_data/batch_labels，
+                 * 其布局为 [batch*input_dim] / [batch*output_dim]（数据集自身维度）。
+                 * 维度与LNN不一致时拷贝min并补零。 */
+                DatasetStats dstat; memset(&dstat, 0, sizeof(dstat));
+                dataset_compute_stats(server->active_dataset, &dstat);
+                size_t d_in = dstat.input_dim > 0 ? dstat.input_dim : net_config.input_size;
+                size_t d_out = dstat.output_dim > 0 ? dstat.output_dim : net_config.output_size;
+                size_t copy_in = d_in < net_config.input_size ? d_in : net_config.input_size;
+                size_t copy_out = d_out < net_config.output_size ? d_out : net_config.output_size;
+                float* bin = (float*)safe_calloc(want * d_in, sizeof(float));
+                float* bout = (float*)safe_calloc(want * d_out, sizeof(float));
+                if (bin && bout) {
+                    size_t got = 0;
+                    size_t batch = (want < 128) ? want : 128;
+                    while (got < want) {
+                        size_t this_batch = (want - got < batch) ? (want - got) : batch;
+                        int nb = dataset_get_batch(server->active_dataset, this_batch,
+                                                   bin + got * d_in, bout + got * d_out);
+                        if (nb <= 0) break;
+                        got += (size_t)nb;
+                    }
+                    for (size_t si = 0; si < got; si++) {
+                        memcpy(&inputs[real_samples * net_config.input_size],
+                               bin + si * d_in, copy_in * sizeof(float));
+                        memcpy(&targets[real_samples * net_config.output_size],
+                               bout + si * d_out, copy_out * sizeof(float));
+                        real_samples++;
+                    }
+                    log_info("[训练] 从活跃数据集准备训练样本: %zu条(维度%zu→%zu)",
+                             real_samples, d_in, net_config.input_size);
+                }
+                if (bin) safe_free((void**)&bin);
+                if (bout) safe_free((void**)&bout);
+            }
+        }
         if (real_samples > 0) {
             samples = real_samples;
             data_ready = 1;
@@ -18300,6 +18651,21 @@ static int handle_api_post_training_start(BackendServer* server,
         }
         /* 线程池不可用，回退到同步训练 */
         log_warn("[训练] 线程池不可用，回退到同步训练");
+    }
+    /* P0-011修复: 同步训练前校验trainer/inputs/targets/samples有效性，
+     * 防止safe_calloc失败或异步提交失败后NULL指针解引用导致SEH崩溃。 */
+    if (!server->trainer || !inputs || !targets || samples == 0) {
+        safe_free((void**)&inputs);
+        safe_free((void**)&targets);
+        json_data = (char*)safe_malloc(256);
+        if (json_data) {
+            snprintf(json_data, 256,
+                    "{\"training\":{\"status\":\"failed\",\"error\":\"训练参数无效，无法启动同步训练\"}}");
+            response->data = json_data;
+            response->data_length = strlen(json_data);
+            response->status_code = 200;
+        }
+        return 0;
     }
     int train_result = trainer_train(server->trainer, inputs, targets, samples, NULL, NULL);
     uint64_t end_ms = platform_get_time_ms();
@@ -19457,10 +19823,14 @@ static int handle_api_post_devices_emergency_stop(BackendServer* server,
                                    ApiResponse* response) {
     char* json_data = NULL;
     /* P25修复: 真实调用紧急停止系统 */
+    /* FIX-ESTOP-LEVEL: 原代码传入级别0(EMERGENCY_LEVEL_NONE)，
+     * emergency_stop_execute的关键回调检查不匹配任何停止级别case
+     * → has_valid_callback=0 → 返回-1 → 急停永远失败(503)。
+     * 设备急停应使用HARD_STOP级别（立即中断+保存快照）。 */
     int stopped = 0;
     if (server->emergency_stop_sys) {
         stopped = (emergency_stop_manual_trigger(server->emergency_stop_sys,
-                    0, "前端触发设备紧急停止") == 0) ? 1 : 0;
+                    EMERGENCY_LEVEL_HARD_STOP, "前端触发设备紧急停止") == 0) ? 1 : 0;
     }
     /* 同时通过安全监控触发停止 */
     if (server->safety_monitor) {
@@ -19952,17 +20322,36 @@ static int handle_api_post_safety_emergency_stop(BackendServer* server,
                                    size_t request_length,
                                    ApiResponse* response) {
     char* json_data = NULL;
-    /* v9.13修复: 先设置响应，安全操作在后，防止崩溃导致无响应 */
-    json_data = (char*)safe_malloc(128);
+    /* FIX-ESTOP-BYPASS: 恢复真实紧急停止执行。
+     * v9.13曾绕过安全模块直接返回假成功（因当时hardware_stop回调签名不匹配
+     * 导致SEH崩溃，开发者选择跳过而非修复）。现签名崩溃已修复
+     * (backend_hardware_stop_wrapper)，恢复真实急停：设置安全等级为EMERGENCY、
+     * 清零安全评分、触发外部紧急停止系统、记录安全事件。 */
+    int executed = 0;
+    if (server->safety_monitor) {
+        safety_emergency_stop(server->safety_monitor);
+        executed = 1;
+    }
+    /* WebSocket实时推送紧急停止安全告警 */
+    if (server->ws_push_server) {
+        char alert_json[512];
+        snprintf(alert_json, sizeof(alert_json),
+            "{\"type\":\"safety_alert\",\"level\":\"emergency\","
+            "\"message\":\"紧急停止已激活\",\"timestamp\":%lld}", (long long)time(NULL));
+        ws_push_broadcast_json(server->ws_push_server, alert_json);
+    }
+    json_data = (char*)safe_malloc(192);
     if (json_data) {
-        snprintf(json_data, 128, "{\"success\":true,\"message\":\"紧急停止已激活\"}");
+        if (executed) {
+            snprintf(json_data, 192, "{\"success\":true,\"message\":\"紧急停止已激活\",\"level\":\"emergency\"}");
+            response->status_code = 200;
+        } else {
+            snprintf(json_data, 192, "{\"success\":false,\"error\":\"安全监控器未初始化，无法执行紧急停止\"}");
+            response->status_code = 503;
+        }
         response->data = json_data;
         response->data_length = strlen(json_data);
-        response->status_code = 200;
     }
-    /* v9.13修复: 跳过可能崩溃的安全模块调用，直接返回响应。
-     * 安全模块(safety_monitor/content_filter/audit_logger)的内部函数
-     * 可能在未完全初始化时触发SEH访问冲突。 */
     return 0;
 }
 static int handle_api_post_safety_soft_stop(BackendServer* server,
@@ -20630,9 +21019,11 @@ static int handle_api_post_robot_analyze_screen(BackendServer* server,
     }
     json_data = (char*)safe_malloc(768);
     if (json_data) {
+        /* FIX-JSON-VALID: elements为空时原代码输出 "elements":,（非法JSON，前端JSON.parse必崩），
+         * 现修正为空数组 [] */
         snprintf(json_data, 768,
             "{\"robot\":{\"action\":\"analyze_screen\",\"elements\":%s,\"count\":%d,\"status\":\"%s\"}}",
-            elements_found > 0 ? elements_json : "", elements_found,
+            elements_found > 0 ? elements_json : "[]", elements_found,
             server->internal_simulator ? "ok" : "no_simulator");
         response->data = json_data;
         response->data_length = strlen(json_data);
@@ -21436,7 +21827,7 @@ static int handle_api_post_audio_capture_start(BackendServer* server,
                                    const char* request_data,
                                    size_t request_length,
                                    ApiResponse* response) {
-    char* json_data = (char*)safe_malloc(1024);
+    char* json_data = (char*)safe_malloc(4096);
     if (!json_data) return -1;
     if (!server) { snprintf(json_data,1024,"{\"success\":false,\"error\":\"服务器未初始化\"}"); goto audio_start_done; }
     /* 停止旧采集上下文 */
@@ -21525,7 +21916,8 @@ static int handle_api_post_camera_capture_start(BackendServer* server,
                                    const char* request_data,
                                    size_t request_length,
                                    ApiResponse* response) {
-    char* json_data = (char*)safe_malloc(1024);
+    /* P0-009修复: 缓冲区从1024扩容到4096，防止中文查询+推理输出+JSON开销溢出 */
+    char* json_data = (char*)safe_malloc(4096);
     if (!json_data) return -1;
     if (!server) { snprintf(json_data,1024,"{\"success\":false,\"error\":\"服务器未初始化\"}"); goto cam_start_done; }
     /* 停止旧采集上下文 */
@@ -21738,6 +22130,24 @@ static int handle_api_post_gpu_benchmark(BackendServer* server,
             "\"error\":\"后端不可用\",\"backend\":\"%s\","
             "\"diagnostic\":\"%s\"}}",
             bench_backend_name, avail.diagnostic[0] ? avail.diagnostic : "后端未检测到设备");
+        response->data = json_data;
+        response->data_length = strlen(json_data);
+        response->status_code = 200;
+        return 0;
+    }
+
+    /* P0-012修复: CPU后端基准测试耗时过长（单线程阻塞），返回快速诊断信息。
+     * 仅真实GPU后端执行完整基准测试。 */
+    if (backend == GPU_BACKEND_CPU) {
+        char* json_data = (char*)safe_malloc(512);
+        if (!json_data) return -1;
+        snprintf(json_data, 512,
+            "{\"success\":true,\"benchmark\":{"
+            "\"backend\":\"%s\",\"device_index\":%d,"
+            "\"message\":\"CPU后端不支持完整基准测试，请使用GPU设备\","
+            "\"matmul_gflops\":0,\"average_gflops\":0,"
+            "\"overall_score\":0,\"total_time_s\":0}}",
+            bench_backend_name, device_index);
         response->data = json_data;
         response->data_length = strlen(json_data);
         response->status_code = 200;
@@ -22009,7 +22419,8 @@ static int handle_api_post_agi_think(BackendServer* server,
     /* v9.23修复: 移除backend_check_agi_busy检查。
      * AGI思考是核心推理能力，不应被认知循环阻塞。
      * 共享状态保护应通过互斥锁实现，而非全局503拒绝。 */
-    char* json_data = (char*)safe_malloc(1024);
+    /* P0-009修复: 缓冲区从1024扩容到4096，防止中文查询+推理输出+JSON开销溢出 */
+    char* json_data = (char*)safe_malloc(4096);
     if (!json_data) return -1;
 
     char query[256] = {0};
@@ -22031,15 +22442,22 @@ static int handle_api_post_agi_think(BackendServer* server,
         for (size_t k = 0; k < q_len && k < 64; k++) {
             query_vec[k] = (float)(unsigned char)query[k] / 255.0f;
         }
-/* reasoning_forward不存在，改用真实函数 reasoning_infer */
-        int r_result = reasoning_infer((ReasoningEngine*)server->reasoning_engine,
-                                       query_vec, (size_t)(q_len < 64 ? q_len : 64),
-                                       reasoning_result, 128,
-                                       REASONING_DEDUCTIVE);
-        if (r_result == 0) {
-            reasoning_active = 1;
+        /* P0-009修复: 使用reasoning_engine_has_lnn()检查LNN实例，避免访问不完整类型struct ReasoningEngine */
+        if (reasoning_engine_has_lnn((ReasoningEngine*)server->reasoning_engine)) {
+            int r_result = reasoning_infer((ReasoningEngine*)server->reasoning_engine,
+                                           query_vec, (size_t)(q_len < 64 ? q_len : 64),
+                                           reasoning_result, 128,
+                                           REASONING_DEDUCTIVE);
+            if (r_result == 0) {
+                reasoning_active = 1;
+                snprintf(reasoning_output, sizeof(reasoning_output),
+                        "深度思考完成: 问题维数=%zu, 认知活跃=%s",
+                        q_len, (server->cognition_system ? "是" : "否"));
+            }
+        } else {
+            /* LNN未就绪时使用确定性推理作为回退 */
             snprintf(reasoning_output, sizeof(reasoning_output),
-                    "深度思考完成: 问题维数=%zu, 认知活跃=%s",
+                    "推理引擎初始化中: 问题维数=%zu, 认知活跃=%s",
                     q_len, (server->cognition_system ? "是" : "否"));
         }
     }
@@ -22047,6 +22465,8 @@ static int handle_api_post_agi_think(BackendServer* server,
 /* 因果推理API——SCM因果模型驱动的深度推理 */
     if (!reasoning_active && server->reasoning_engine && query[0]) {
         ReasoningEngine* engine = (ReasoningEngine*)server->reasoning_engine;
+        /* P0-009修复: 使用reasoning_engine_has_lnn()检查，避免不完整类型访问 */
+        if (!reasoning_engine_has_lnn((ReasoningEngine*)server->reasoning_engine)) goto skip_causal;
         float cause_vec[64] = {0};
         float effect_vec[64] = {0};
         size_t cause_len = q_len < 32 ? q_len : 32;
@@ -22058,31 +22478,35 @@ static int handle_api_post_agi_think(BackendServer* server,
             effect_vec[k] = (float)(unsigned char)query[cause_len + k] / 255.0f;
 
         float causal_confidence = 0.0f;
-        int causal_result = reasoning_causal_infer(engine, cause_vec, cause_len,
+        float causal_result = reasoning_causal_infer(engine, cause_vec, cause_len,
                                                     effect_vec, effect_len,
                                                     &causal_confidence);
-        if (causal_result == 0 && causal_confidence > 0.3f) {
+        if (causal_result > 0.3f && causal_confidence > 0.3f) {
             reasoning_active = 1;
             snprintf(reasoning_output, sizeof(reasoning_output),
                     "因果推理完成: 置信度=%.3f, 问题维数=%zu",
                     causal_confidence, q_len);
-        } else {
+        } else if (effect_len >= 2) {
             int discover_result = reasoning_discover_causal_structure(engine,
                 cause_vec, cause_len, effect_len,
                 causal_edges, 128);
-            if (discover_result == 0) {
+            if (discover_result > 0) {
                 reasoning_active = 1;
                 snprintf(reasoning_output, sizeof(reasoning_output),
-                        "因果结构发现完成: 问题维数=%zu", q_len);
+                        "因果结构发现完成: 问题维数=%zu, 发现边=%d",
+                        q_len, discover_result);
             }
         }
-    } else if (server->cognition_system && query[0]) {
+        skip_causal: ;
+    } else if (!reasoning_active && server->cognition_system && query[0]) {
         char assessment[512] = {0};
-        self_cognition_neutral_assessment((SelfCognitionSystem*)server->cognition_system,
+        int cog_ret = self_cognition_neutral_assessment((SelfCognitionSystem*)server->cognition_system,
                                          0, assessment, sizeof(assessment));
-        snprintf(reasoning_output, sizeof(reasoning_output),
-                "认知评估: %s", assessment);
-        reasoning_active = 1;
+        if (cog_ret == 0) {
+            snprintf(reasoning_output, sizeof(reasoning_output),
+                    "认知评估: %s", assessment);
+            reasoning_active = 1;
+        }
     }
 
 /* 当推理和认知都不可用时，返回真实的错误状态 */
@@ -22091,7 +22515,7 @@ static int handle_api_post_agi_think(BackendServer* server,
                 "推理引擎和认知系统均未就绪，无法处理查询: \"%.128s\"", query);
     }
 
-    snprintf(json_data, 1024,
+    snprintf(json_data, 4096,
         "{\"status\":\"success\",\"action\":\"think\","
         "\"query\":\"%s\",\"reflection\":\"%s\","
         "\"cognition_active\":%s,\"timestamp\":%ld}",
@@ -22343,14 +22767,55 @@ static int handle_api_post_agi_evolve(BackendServer* server,
         return 0;
     }
 
-    int evolve_result = -1;
-    float best_fitness = 0.0f;
-    float avg_fitness = 0.0f;
-    float diversity = 0.0f;
-    int final_gen = 0;
-
-/* 实现真实的演化触发 —— 调用evolution_step并通过后台循环完成 */
+    /* v9.24修复: 异步演化 - 提交到线程池，HTTP请求立即返回任务ID，
+     * 解决evolution_step同步阻塞导致HTTP超时的问题。
+     * 客户端通过 /api/agi/task/status 查询演化进度 */
     {
+        agi_task_cleanup(server);
+        int task_id = agi_task_register(server, "evolve", "异步演化任务");
+        if (task_id > 0 && server->thread_pool) {
+            AsyncEvolveContext* evo_ctx = (AsyncEvolveContext*)safe_malloc(sizeof(AsyncEvolveContext));
+            if (evo_ctx) {
+                memset(evo_ctx, 0, sizeof(AsyncEvolveContext));
+                evo_ctx->server = server;
+                evo_ctx->generations = generations;
+                evo_ctx->task_id = task_id;
+                evo_ctx->start_ms = platform_get_time_ms();
+                strncpy(evo_ctx->evolve_target, evolve_target, sizeof(evo_ctx->evolve_target) - 1);
+                
+                int submit_ret = thread_pool_submit(server->thread_pool, async_evolve_worker, evo_ctx, 0);
+                if (submit_ret == 0) {
+                    snprintf(json_data, 3072,
+                        "{"
+                        "\"status\":\"started\","
+                        "\"action\":\"evolve\","
+                        "\"task_id\":%d,"
+                        "\"generations\":%d,"
+                        "\"target\":\"%s\","
+                        "\"message\":\"异步演化已提交，请通过/api/agi/task/status查询进度\""
+                        "}",
+                        task_id, generations,
+                        evolve_target[0] ? evolve_target : "general");
+                    response->data = json_data;
+                    response->data_length = strlen(json_data);
+                    response->status_code = 200;
+                    return 0;
+                }
+                safe_free((void**)&evo_ctx);
+            }
+        }
+        /* 线程池不可用，回退到同步演化（带超时警告） */
+        log_warn("[演化] 线程池不可用，回退到同步演化（可能超时）");
+    }
+
+    /* 同步回退：直接执行演化（仅在线程池不可用时） */
+    {
+        int evolve_result = -1;
+        float best_fitness = 0.0f;
+        float avg_fitness = 0.0f;
+        float diversity = 0.0f;
+        int final_gen = 0;
+
         EvolutionStats evo_stats;
         memset(&evo_stats, 0, sizeof(evo_stats));
         evolve_result = evolution_step((EvolutionEngine*)evo);
@@ -22364,28 +22829,28 @@ static int handle_api_post_agi_evolve(BackendServer* server,
             int applied = evolution_engine_apply_best_to_lnn((EvolutionEngine*)evo);
             (void)applied;
         }
-    }   /* evolution_step block */
 
-    snprintf(json_data, 3072,
-        "{"
-        "\"status\":\"success\","
-        "\"action\":\"evolve\","
-        "\"evolution_result\":{"
-            "\"success\":%s,"
-            "\"generations_completed\":%d,"
-            "\"best_fitness\":%.6f,"
-            "\"avg_fitness\":%.6f,"
-            "\"diversity\":%.6f"
-        "},"
-        "\"message\":\"%s\","
-        "\"target\":\"%s\","
-        "\"timestamp\":%ld"
-        "}",
-        (evo && evolve_result == 0) ? "true" : "false",
-        final_gen, best_fitness, avg_fitness, diversity,
-        (evo && capability_is_enabled(CAP_SELF_EVOLUTION)) ? "演化引擎已执行" : "演化引擎未就绪或已禁用",
-        evolve_target[0] ? evolve_target : "general",
-        (long)time(NULL));
+        snprintf(json_data, 3072,
+            "{"
+            "\"status\":\"success\","
+            "\"action\":\"evolve\","
+            "\"evolution_result\":{"
+                "\"success\":%s,"
+                "\"generations_completed\":%d,"
+                "\"best_fitness\":%.6f,"
+                "\"avg_fitness\":%.6f,"
+                "\"diversity\":%.6f"
+            "},"
+            "\"message\":\"%s\","
+            "\"target\":\"%s\","
+            "\"timestamp\":%ld"
+            "}",
+            (evo && evolve_result == 0) ? "true" : "false",
+            final_gen, best_fitness, avg_fitness, diversity,
+            (evo && capability_is_enabled(CAP_SELF_EVOLUTION)) ? "演化引擎已执行" : "演化引擎未就绪或已禁用",
+            evolve_target[0] ? evolve_target : "general",
+            (long)time(NULL));
+    }
 
     response->data = json_data;
     response->data_length = strlen(json_data);
@@ -23721,10 +24186,117 @@ static int handle_api_post_knowledge_import(BackendServer* server,
     char filepath[512] = {0};
     parse_json_string(data, "filepath", filepath, sizeof(filepath));
     if (filepath[0] != '\0') {
-        int loaded = knowledge_base_load_from_file(server->knowledge_base, filepath);
-        if (loaded > 0) imported = loaded;
-        else if (loaded == 0) skipped = 1;
-        else failed = 1;
+        /* [P1-07修复] 检测文件格式：JSON文件使用JSON解析器，
+         * 其他文件使用tab分隔格式解析器。
+         * 原代码只支持tab分隔格式，与JSON导出格式不兼容。 */
+        int is_json_file = 0;
+        const char* ext = strrchr(filepath, '.');
+        if (ext && (_stricmp(ext, ".json") == 0 || _stricmp(ext, ".jsonl") == 0)) {
+            is_json_file = 1;
+        }
+        if (!is_json_file) {
+            /* 检查文件前几个字符判断是否为JSON */
+            FILE* test_fp = fopen(filepath, "r");
+            if (test_fp) {
+                char first_char = (char)fgetc(test_fp);
+                fclose(test_fp);
+                if (first_char == '{' || first_char == '[') is_json_file = 1;
+            }
+        }
+        if (is_json_file) {
+            /* JSON文件：读取整个文件内容并使用JSON条目解析器 */
+            FILE* fp = fopen(filepath, "rb");
+            if (fp) {
+                fseek(fp, 0, SEEK_END);
+                long fsize = ftell(fp);
+                fseek(fp, 0, SEEK_SET);
+                if (fsize > 0 && fsize < 16 * 1024 * 1024) {
+                    char* file_content = (char*)safe_malloc((size_t)fsize + 1);
+                    if (file_content) {
+                        fread(file_content, 1, (size_t)fsize, fp);
+                        file_content[fsize] = '\0';
+                        /* 解析JSON中的entries数组 */
+                        const char* entries_arr = strstr(file_content, "\"entries\"");
+                        if (entries_arr) {
+                            const char* bracket = strchr(entries_arr, '[');
+                            if (bracket) {
+                                /* 使用JSON条目解析器（与下方entries_begin逻辑相同） */
+                                const char* p = bracket + 1;
+                                int parsed = 0;
+                                const int max_batch = 1000;
+                                while (parsed < max_batch) {
+                                    const char* obj_start = strchr(p, '{');
+                                    if (!obj_start) break;
+                                    /* 括号深度计数找到匹配的 } */
+                                    int depth = 1;
+                                    const char* obj_end = obj_start + 1;
+                                    while (*obj_end && depth > 0) {
+                                        if (*obj_end == '{') depth++;
+                                        else if (*obj_end == '}') depth--;
+                                        if (depth > 0) obj_end++;
+                                    }
+                                    if (depth != 0) break;
+                                    size_t obj_len = (size_t)(obj_end - obj_start) + 1;
+                                    if (obj_len == 1) { p = obj_end + 1; continue; }
+                                    char subject[256] = {0}, predicate[256] = {0}, obj[256] = {0};
+                                    char type_str[32] = {0}, conf_str[32] = {0};
+                                    float weight = 1.0f;
+                                    { char temp[1024];
+                                      size_t cp_len = obj_len < sizeof(temp)-1 ? obj_len : sizeof(temp)-1;
+                                      memcpy(temp, obj_start, cp_len); temp[cp_len] = '\0';
+                                      parse_json_string(temp, "s", subject, sizeof(subject));
+                                      parse_json_string(temp, "p", predicate, sizeof(predicate));
+                                      parse_json_string(temp, "o", obj, sizeof(obj));
+                                      parse_json_string(temp, "t", type_str, sizeof(type_str));
+                                      parse_json_string(temp, "c", conf_str, sizeof(conf_str));
+                                      const char* w_key = strstr(temp, "\"w\":");
+                                      if (w_key) { const char* wv = w_key+4;
+                                          while (*wv==' '||*wv==':') wv++;
+                                          weight = (float)atof(wv); } }
+                                    if (subject[0]=='\0') { const char* sj=strstr(obj_start,"\"subject\"");
+                                        if(sj){const char*sv=strchr(sj+9,'\"');if(sv){sv++;
+                                        char*d=subject;while(*sv&&*sv!='\"'&&(d-subject)<255)*d++=*sv++;*d='\0';}}}
+                                    if (predicate[0]=='\0') { const char* pj=strstr(obj_start,"\"predicate\"");
+                                        if(pj){const char*pv=strchr(pj+11,'\"');if(pv){pv++;
+                                        char*d=predicate;while(*pv&&*pv!='\"'&&(d-predicate)<255)*d++=*pv++;*d='\0';}}}
+                                    if (obj[0]=='\0') { const char* oj=strstr(obj_start,"\"object\"");
+                                        if(oj){const char*ov=strchr(oj+8,'\"');if(ov){ov++;
+                                        char*d=obj;while(*ov&&*ov!='\"'&&(d-obj)<255)*d++=*ov++;*d='\0';}}}
+                                    if (subject[0] && predicate[0]) {
+                                        KnowledgeEntry entry;
+                                        memset(&entry, 0, sizeof(KnowledgeEntry));
+                                        entry.subject = subject; entry.predicate = predicate; entry.object = obj;
+                                        if (type_str[0]) {
+                                            if (strcmp(type_str, "FACT")==0||strcmp(type_str,"fact")==0) entry.type=KNOWLEDGE_FACT;
+                                            else if (strcmp(type_str,"RULE")==0||strcmp(type_str,"rule")==0) entry.type=KNOWLEDGE_RULE;
+                                            else if (strcmp(type_str,"CONCEPT")==0||strcmp(type_str,"concept")==0) entry.type=KNOWLEDGE_CONCEPT;
+                                            else if (strcmp(type_str,"RELATION")==0||strcmp(type_str,"relation")==0) entry.type=KNOWLEDGE_RELATION;
+                                            else if (strcmp(type_str,"OBSERVATION")==0||strcmp(type_str,"observation")==0) entry.type=KNOWLEDGE_OBSERVATION;
+                                        }
+                                        if (conf_str[0]) {
+                                            if (strcmp(conf_str,"HIGH")==0||strcmp(conf_str,"high")==0) entry.confidence=CONFIDENCE_HIGH;
+                                            else if (strcmp(conf_str,"MEDIUM")==0||strcmp(conf_str,"medium")==0) entry.confidence=CONFIDENCE_MEDIUM;
+                                            else if (strcmp(conf_str,"LOW")==0||strcmp(conf_str,"low")==0) entry.confidence=CONFIDENCE_LOW;
+                                        }
+                                        entry.weight = weight; entry.source = SOURCE_USER;
+                                        if (knowledge_base_add(server->knowledge_base, &entry) == 0) imported++;
+                                        else failed++;
+                                    } else { skipped++; }
+                                    p = obj_end + 1; parsed++;
+                                }
+                            }
+                        }
+                        safe_free((void**)&file_content);
+                    }
+                }
+                fclose(fp);
+            }
+        } else {
+            int loaded = knowledge_base_load_from_file(server->knowledge_base, filepath);
+            if (loaded > 0) imported = loaded;
+            else if (loaded == 0) skipped = 1;
+            else failed = 1;
+        }
         /* 同时尝试导入到知识图谱 */
         {
             void* kg_ptr = selflnn_get_knowledge_graph();
@@ -24254,13 +24826,85 @@ static int handle_api_post_memory_search(BackendServer* server,
     } else {
         search_count = (int)(total_mem > 0 ? (int)(total_mem) : 0);
     }
-    snprintf(buf, remaining, "],\"count\":%d}", search_count);
+    snprintf(buf, remaining, "],\"count\":%d", search_count);
     size_t j_size = 4096 + 512;
     char* j = (char*)safe_malloc(j_size);
     if (j) {
         snprintf(j, j_size, "{\"success\":true,\"memory_search\":{\"query\":\"%s\",\"results\":%s,\"total_memories\":%zu,\"consolidation_ratio\":%.4f}}",
             query, results_json, total_mem, ratio);
         resp->data = j; resp->data_length = strlen(j); resp->status_code = 200;
+    }
+    return 0;
+}
+
+/**
+ * @brief 记忆持久化保存处理器
+ * 审计修复：将记忆管理器全部记忆序列化保存到磁盘文件
+ * 请求体: {"path": "memories.slmm"}
+ */
+static int handle_api_post_memory_save(BackendServer* server,
+        ApiRequestType rt, const char* data, size_t len, ApiResponse* resp) {
+    (void)rt;
+    if (!server->memory_manager) {
+        char* j = (char*)safe_malloc(256);
+        if (j) {
+            snprintf(j, 256, "{\"success\":false,\"error\":\"记忆管理器不可用\"}");
+            resp->data = j; resp->data_length = strlen(j); resp->status_code = 503;
+        }
+        return 0;
+    }
+    char path[512] = "memories.slmm";
+    if (data && len > 0) {
+        parse_json_string(data, "path", path, sizeof(path));
+    }
+    int result = memory_manager_save(server->memory_manager, path);
+    size_t j_size = 512;
+    char* j = (char*)safe_malloc(j_size);
+    if (j) {
+        if (result == 0) {
+            snprintf(j, j_size, "{\"success\":true,\"memory_save\":{\"path\":\"%s\",\"status\":\"saved\"}}", path);
+            resp->status_code = 200;
+        } else {
+            snprintf(j, j_size, "{\"success\":false,\"memory_save\":{\"path\":\"%s\",\"error\":\"保存失败\"}}", path);
+            resp->status_code = 500;
+        }
+        resp->data = j; resp->data_length = strlen(j);
+    }
+    return 0;
+}
+
+/**
+ * @brief 记忆持久化加载处理器
+ * 审计修复：从磁盘文件加载记忆到记忆管理器
+ * 请求体: {"path": "memories.slmm"}
+ */
+static int handle_api_post_memory_load(BackendServer* server,
+        ApiRequestType rt, const char* data, size_t len, ApiResponse* resp) {
+    (void)rt;
+    if (!server->memory_manager) {
+        char* j = (char*)safe_malloc(256);
+        if (j) {
+            snprintf(j, 256, "{\"success\":false,\"error\":\"记忆管理器不可用\"}");
+            resp->data = j; resp->data_length = strlen(j); resp->status_code = 503;
+        }
+        return 0;
+    }
+    char path[512] = "memories.slmm";
+    if (data && len > 0) {
+        parse_json_string(data, "path", path, sizeof(path));
+    }
+    int result = memory_manager_load(server->memory_manager, path);
+    size_t j_size = 512;
+    char* j = (char*)safe_malloc(j_size);
+    if (j) {
+        if (result == 0) {
+            snprintf(j, j_size, "{\"success\":true,\"memory_load\":{\"path\":\"%s\",\"status\":\"loaded\"}}", path);
+            resp->status_code = 200;
+        } else {
+            snprintf(j, j_size, "{\"success\":false,\"memory_load\":{\"path\":\"%s\",\"error\":\"加载失败\"}}", path);
+            resp->status_code = 500;
+        }
+        resp->data = j; resp->data_length = strlen(j);
     }
     return 0;
 }
@@ -28501,6 +29145,8 @@ static void init_handler_table(RequestHandler* table) {
     table[281] = handle_api_post_memory_clear;
     table[282] = handle_api_post_memory_search;
     table[283] = handle_api_post_memory_sleep_consolidation;
+    table[394] = handle_api_post_memory_save;
+    table[395] = handle_api_post_memory_load;
     table[284] = handle_api_post_task_create;
 
     /* ===== 前端-后端API端点对齐修复 ===== */
@@ -28551,8 +29197,8 @@ static void init_handler_table(RequestHandler* table) {
     table[311] = handle_api_post_task_pause; /* 从305移到311，避免覆盖仿真端点 */
     table[312] = handle_api_post_task_cancel; /* 从306移到312，避免覆盖仿真端点 */
 
-/* POST产品规格生成 — v9.23: 槽位从330移到332，避免与KG连通分量端点冲突 */
-    table[332] = handle_api_post_product_spec;
+/* POST产品规格生成 — v9.23: 槽位移到393，枚举已修正为393不与training/meta(332)冲突 */
+    table[393] = handle_api_post_product_spec;
 
 /* 学习/知识一致性检查 */
     table[350] = handle_api_post_learning_consistency;
@@ -28991,9 +29637,12 @@ ApiResponse* backend_handle_request(BackendServer* server,
         }
         
         /* evolution相关 */
+        /* v9.25修复: 添加API_POST_EVOLUTION_TRIGGER(390)到预检列表。
+         * API_POST_AGI_EVOLVE(204)也在此检查，但handler内部已有防线。
+         * 条件: 演化引擎未初始化(evolution_generation<=0)或演化能力已禁用 */
         if ((request_type == API_POST_AGI_EVOLVE || request_type == API_POST_EVOLUTION ||
-             request_type == API_POST_EVOLUTION_PARETO) &&
-            server->evolution_generation < 0) {
+             request_type == API_POST_EVOLUTION_PARETO || request_type == API_POST_EVOLUTION_TRIGGER) &&
+            (server->evolution_generation < 0 || !capability_is_enabled(CAP_SELF_EVOLUTION))) {
             skip_handler = 1;
             snprintf(skip_reason, sizeof(skip_reason), "evolution");
         }
@@ -29018,7 +29667,9 @@ ApiResponse* backend_handle_request(BackendServer* server,
         
         /* audio/camera/voice硬件子系统：需要对应采集上下文 */
         /* v9.23修复: audio/recognize 不需要 audio_capture_ctx，可直接使用LNN+知识库处理原始音频数据 */
-        if ((request_type == API_POST_AUDIO_STREAM ||
+        /* v9.24修复: audio_stream/audio_command/voice_recognize 均通过请求体接收base64编码数据，
+         * 不依赖硬件音频采集上下文，移除虚假依赖检查 */
+        if (0 && (request_type == API_POST_AUDIO_STREAM ||
              request_type == API_POST_AUDIO_COMMAND || request_type == API_POST_VOICE_RECOGNIZE) &&
             !server->audio_capture_ctx) {
             skip_handler = 1;
@@ -29876,7 +30527,10 @@ int backend_log_request(const char* ip, const char* path, int status, size_t req
      * 2. 轮转策略：重命名当前日志文件为 .log.1, .log.2 等，保留最近N个文件
      * 3. 使用backend_get_log_summary()定期将内存日志批量写入磁盘
      * 4. 考虑使用异步日志写入线程，避免阻塞请求处理 */
-    if (!ip || !path || req_log_count >= 1024) return -1;
+    /* v9.25修复: 环形缓冲区回绕。注释说明应回绕到0，但原代码req_log_count>=1024时直接返回-1。
+     * 修正为回绕到0覆盖旧日志，确保日志记录永不丢失。 */
+    if (!ip || !path) return -1;
+    if (req_log_count >= 1024) req_log_count = 0;  /* 环形缓冲区回绕 */
     RequestLog* l = &req_logs[req_log_count++];
 /* 使用snprintf确保null终止 */
     snprintf(l->ip, sizeof(l->ip), "%s", ip);

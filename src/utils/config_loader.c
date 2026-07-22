@@ -128,10 +128,12 @@ int selflnn_config_load_from_file(const char* filepath, SystemConfig* config) {
         config->gpu_backend = GPU_BACKEND_AUTO;  /* P0-03修复: 默认自动检测GPU后端 */
     }
 
-/* 加载与保存的字段集保持一致 */
+/* v9.25修复: model_path为const char*指针，原snprintf写入1024字节存在缓冲区溢出风险。
+     * 改用safe_strdup安全分配，确保缓冲区大小精确匹配字符串长度。 */
     str_val = json_get_string(root, "model_path");
-    if (str_val && config->model_path) {
-        snprintf((char*)config->model_path, 1024, "%s", str_val);
+    if (str_val) {
+        safe_free((void**)&config->model_path);
+        config->model_path = safe_strdup(str_val);
     }
 
 /* 加载端口字段（原只保存不加载） */
@@ -528,7 +530,8 @@ int selflnn_config_load_from_file(const char* filepath, SystemConfig* config) {
                 strncpy(config->system_log_level, ll_str, sizeof(config->system_log_level) - 1);
                 config->system_log_level[sizeof(config->system_log_level) - 1] = '\0';
             } else {
-                strcpy(config->system_log_level, "info");
+                strncpy(config->system_log_level, "info", sizeof(config->system_log_level) - 1);
+                config->system_log_level[sizeof(config->system_log_level) - 1] = '\0';
             }
 
             v = json_get(sys_v, "web_ui_enabled");
@@ -544,7 +547,8 @@ int selflnn_config_load_from_file(const char* filepath, SystemConfig* config) {
             /* 设置默认值 */
             config->system_auto_restart_on_failure = 0;
             config->system_auto_save_interval_minutes = 60;
-            strcpy(config->system_log_level, "info");
+            strncpy(config->system_log_level, "info", sizeof(config->system_log_level) - 1);
+            config->system_log_level[sizeof(config->system_log_level) - 1] = '\0';
             config->system_web_ui_enabled = 1;
         }
     }

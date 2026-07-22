@@ -28,9 +28,8 @@
 #define thread_mutex_unlock(m) pthread_mutex_unlock(m)
 #define thread_mutex_destroy(m) pthread_mutex_destroy(m)
 #define shard_aligned_alloc(alignment, size) aligned_alloc(alignment, size)
-/* P2-2修复: free后置NULL防止悬空指针，统一置空保护(原实现直接free绕过safe_free，
- * 释放后指针仍指向已释放内存，存在重复释放/悬空访问风险) */
-#define shard_aligned_free(ptr) do { if (ptr) { free(ptr); (ptr) = NULL; } } while(0)
+/* P2-2修复: 使用safe_free统一内存管理，释放后自动置NULL防止悬空指针 */
+#define shard_aligned_free(ptr) safe_free((void**)&ptr)
 #else
 /* P2-06修复: 未识别平台兜底分支，使用safe_malloc/safe_free保证内存管理一致性 */
 #define shard_aligned_alloc(alignment, size) safe_malloc(size)

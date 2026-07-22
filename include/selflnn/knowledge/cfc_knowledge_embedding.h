@@ -34,6 +34,8 @@ typedef enum {
 typedef struct {
     int num_entities;
     int num_relations;
+    int max_entities;          /**< 实体最大容量，默认4096 */
+    int max_relations;         /**< 关系最大容量，默认1024 */
     int embedding_dim;
     CfCEmbedType embed_type;
     float learning_rate;

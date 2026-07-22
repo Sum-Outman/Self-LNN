@@ -1505,6 +1505,133 @@ int metacognition_neutral_self_assessment(MetacognitionSystem* system,
     return 0;
 }
 
+/* ================================================================
+ * 数据驱动修正计划模板表
+ * 每个错误类型对应一个结构化模板，模板中的占位符 {key} 
+ * 在运行时由metacog_format_template替换为实际值。
+ * 新增模板只需在此表中添加条目，无需修改查找逻辑。
+ * ================================================================ */
+
+/** @brief 修正计划模板条目 */
+typedef struct {
+    int error_type;           /**< 错误类型ID */
+    const char* name;         /**< 错误类型名称 */
+    const char* template_str; /**< 修正计划模板 */
+} CorrectionPlanTemplate;
+
+/** @brief 修正计划模板表（静态常量，编译期确定） */
+static const CorrectionPlanTemplate g_correction_templates[] = {
+    {0, "性能下降",
+     "检测到性能下降（当前值：{value:.2f}）。修正计划：\n"
+     "1. 收集最近100个样本进行详细分析\n"
+     "2. 检查模型权重是否有异常变化\n"
+     "3. 验证输入数据分布是否发生变化\n"
+     "4. 调整学习率到当前值的{lr:.2f}倍\n"
+     "5. 增加正则化强度到{reg:.2f}\n"
+     "6. 监控接下来50个样本的性能变化"},
+    {1, "高不确定性",
+     "检测到高不确定性（当前值：{value:.2f}）。修正计划：\n"
+     "1. 增加训练数据多样性\n"
+     "2. 降低模型复杂度（减少{param_pct:.2f}%%参数）\n"
+     "3. 实施集成学习以减少方差\n"
+     "4. 添加不确定性校准层\n"
+     "5. 增加蒙特卡洛采样次数到{mc_samples}次\n"
+     "6. 定期重新校准不确定性估计"},
+    {2, "预测误差增加",
+     "检测到预测误差增加（当前值：{value:.2f}）。修正计划：\n"
+     "1. 重新训练预测模型\n"
+     "2. 扩展特征工程，添加{features:.2f}个新特征\n"
+     "3. 调整预测时间范围到{time_horizon:.2f}秒\n"
+     "4. 实施滚动预测更新机制\n"
+     "5. 添加误差纠正反馈循环\n"
+     "6. 验证预测假设是否仍然成立"},
+    {3, "资源使用异常",
+     "检测到资源使用异常（当前值：{value:.2f}）。修正计划：\n"
+     "1. 优化内存分配模式\n"
+     "2. 实施资源使用限制（限制到{resource_pct:.2f}%%）\n"
+     "3. 添加资源监控和预警机制\n"
+     "4. 优化算法复杂度（目标减少{complexity_pct:.2f}%%）\n"
+     "5. 实施懒加载和缓存策略\n"
+     "6. 定期进行资源使用分析"},
+    {-1, "未知错误",
+     "检测到未知错误类型（类型：{type}，值：{value:.2f}）。修正计划：\n"
+     "1. 记录错误详细信息\n"
+     "2. 进行根本原因分析\n"
+     "3. 设计针对性解决方案\n"
+     "4. 实施解决方案并监控效果\n"
+     "5. 更新错误处理知识库\n"
+     "6. 预防类似错误再次发生"}
+};
+
+#define CORRECTION_TEMPLATE_COUNT \
+    (sizeof(g_correction_templates) / sizeof(g_correction_templates[0]))
+
+/**
+ * @brief 模板替换：将{key}占位符替换为格式化值
+ * 支持 {value} {lr} {reg} {param_pct} {mc_samples}
+ * {features} {time_horizon} {resource_pct} {complexity_pct} {type}
+ */
+static int metacog_format_template(char* buf, size_t buf_size,
+                                    const char* tmpl, int error_type,
+                                    float error_value, 
+                                    float lr, float reg, int param_pct,
+                                    int mc_samples, float features,
+                                    float time_horizon, float resource_pct,
+                                    float complexity_pct) {
+    size_t pos = 0;
+    const char* p = tmpl;
+    while (*p && pos < buf_size - 1) {
+        if (*p == '{') {
+            const char* end = strchr(p, '}');
+            if (!end) { buf[pos++] = *p++; continue; }
+            size_t key_len = (size_t)(end - p - 1);
+            char key[32];
+            if (key_len >= sizeof(key)) key_len = sizeof(key) - 1;
+            memcpy(key, p + 1, key_len);
+            key[key_len] = '\0';
+
+            char* fmt = strchr(key, ':');
+            if (fmt) *fmt++ = '\0';
+
+            if (strcmp(key, "value") == 0) {
+                pos += (size_t)snprintf(buf + pos, buf_size - pos, "%.2f", (double)error_value);
+            } else if (strcmp(key, "lr") == 0) {
+                pos += (size_t)snprintf(buf + pos, buf_size - pos, "%.2f", (double)lr);
+            } else if (strcmp(key, "reg") == 0) {
+                pos += (size_t)snprintf(buf + pos, buf_size - pos, "%.2f", (double)reg);
+            } else if (strcmp(key, "param_pct") == 0) {
+                pos += (size_t)snprintf(buf + pos, buf_size - pos, "%.2f", (double)param_pct);
+            } else if (strcmp(key, "mc_samples") == 0) {
+                pos += (size_t)snprintf(buf + pos, buf_size - pos, "%d", mc_samples);
+            } else if (strcmp(key, "features") == 0) {
+                pos += (size_t)snprintf(buf + pos, buf_size - pos, "%.2f", (double)features);
+            } else if (strcmp(key, "time_horizon") == 0) {
+                pos += (size_t)snprintf(buf + pos, buf_size - pos, "%.2f", (double)time_horizon);
+            } else if (strcmp(key, "resource_pct") == 0) {
+                pos += (size_t)snprintf(buf + pos, buf_size - pos, "%.2f", (double)resource_pct);
+            } else if (strcmp(key, "complexity_pct") == 0) {
+                pos += (size_t)snprintf(buf + pos, buf_size - pos, "%.2f", (double)complexity_pct);
+            } else if (strcmp(key, "type") == 0) {
+                pos += (size_t)snprintf(buf + pos, buf_size - pos, "%d", error_type);
+            } else {
+                buf[pos++] = '{';
+                size_t klen = strlen(key);
+                if (pos + klen < buf_size) {
+                    memcpy(buf + pos, key, klen);
+                    pos += klen;
+                }
+                if (fmt && pos < buf_size) { buf[pos++] = ':'; }
+                buf[pos++] = '}';
+            }
+            p = end + 1;
+        } else {
+            buf[pos++] = *p++;
+        }
+    }
+    buf[pos] = '\0';
+    return (int)pos;
+}
+
 /**
  * @brief 执行元认知驱动的自我修正
  */
@@ -1531,55 +1658,27 @@ int metacognition_self_correction(MetacognitionSystem* system,
         return -1;
     }
     
-    /* 基于错误类型生成修正计划 */
-    const char* plan_template = NULL;
-    
-    switch (error_type) {
-        case 0:  /* 性能下降错误 */
-            plan_template = "检测到性能下降（当前值：%.2f）。修正计划：\n"
-                           "1. 收集最近100个样本进行详细分析\n"
-                           "2. 检查模型权重是否有异常变化\n"
-                           "3. 验证输入数据分布是否发生变化\n"
-                           "4. 调整学习率到当前值的%.2f倍\n"
-                           "5. 增加正则化强度到%.2f\n"
-                           "6. 监控接下来50个样本的性能变化";
+    /* 数据驱动：从模板表中查找匹配的修正计划模板 */
+    const CorrectionPlanTemplate* matched_template = NULL;
+    for (size_t i = 0; i < CORRECTION_TEMPLATE_COUNT; i++) {
+        if (g_correction_templates[i].error_type == error_type) {
+            matched_template = &g_correction_templates[i];
             break;
-        case 1:  /* 高不确定性错误 */
-            plan_template = "检测到高不确定性（当前值：%.2f）。修正计划：\n"
-                           "1. 增加训练数据多样性\n"
-                           "2. 降低模型复杂度（减少%.2f%%参数）\n"
-                           "3. 实施集成学习以减少方差\n"
-                           "4. 添加不确定性校准层\n"
-                           "5. 增加蒙特卡洛采样次数到%d次\n"
-                           "6. 定期重新校准不确定性估计";
-            break;
-        case 2:  /* 预测误差增加 */
-            plan_template = "检测到预测误差增加（当前值：%.2f）。修正计划：\n"
-                           "1. 重新训练预测模型\n"
-                           "2. 扩展特征工程，添加%.2f个新特征\n"
-                           "3. 调整预测时间范围到%.2f秒\n"
-                           "4. 实施滚动预测更新机制\n"
-                           "5. 添加误差纠正反馈循环\n"
-                           "6. 验证预测假设是否仍然成立";
-            break;
-        case 3:  /* 资源使用异常 */
-            plan_template = "检测到资源使用异常（当前值：%.2f）。修正计划：\n"
-                           "1. 优化内存分配模式\n"
-                           "2. 实施资源使用限制（限制到%.2f%%）\n"
-                           "3. 添加资源监控和预警机制\n"
-                           "4. 优化算法复杂度（目标减少%.2f%%）\n"
-                           "5. 实施懒加载和缓存策略\n"
-                           "6. 定期进行资源使用分析";
-            break;
-        default:
-            plan_template = "检测到未知错误类型（类型：%d，值：%.2f）。修正计划：\n"
-                           "1. 记录错误详细信息\n"
-                           "2. 进行根本原因分析\n"
-                           "3. 设计针对性解决方案\n"
-                           "4. 实施解决方案并监控效果\n"
-                           "5. 更新错误处理知识库\n"
-                           "6. 预防类似错误再次发生";
-            break;
+        }
+    }
+    /* 未匹配到则使用默认模板（error_type=-1） */
+    if (!matched_template) {
+        for (size_t i = 0; i < CORRECTION_TEMPLATE_COUNT; i++) {
+            if (g_correction_templates[i].error_type == -1) {
+                matched_template = &g_correction_templates[i];
+                break;
+            }
+        }
+    }
+    if (!matched_template) {
+        selflnn_set_last_error(SELFLNN_ERROR_GENERIC, __func__, __FILE__, __LINE__,
+                              "元认知驱动的自我修正：未找到模板表");
+        return -1;
     }
     
     float error_value = 0.0f;
@@ -1587,17 +1686,21 @@ int metacognition_self_correction(MetacognitionSystem* system,
         error_value = error_data[0];
     }
     
-    snprintf(correction_plan, plan_size, plan_template, error_value,
-             system->model_update_config.learning_rate * 0.8f,
-             system->model_update_config.regularization_strength * 1.2f,
-             (int)(system->prediction_model_size * 0.9f),
-             100,
-             error_value * 1.5f,
-             system->prediction_config.prediction_horizon * 0.8f,
-             error_value,
-             error_value * 0.8f,
-             error_value * 0.7f,
-             error_type, error_value);
+    /* 使用数据驱动模板格式化修正计划 */
+    float lr = system->model_update_config.learning_rate * 0.8f;
+    float reg = system->model_update_config.regularization_strength * 1.2f;
+    int param_pct = (int)(system->prediction_model_size * 0.9f);
+    int mc_samples = 100;
+    float features = error_value * 1.5f;
+    float time_horizon = system->prediction_config.prediction_horizon * 0.8f;
+    float resource_pct = error_value;
+    float complexity_pct = error_value * 0.8f;
+    
+    metacog_format_template(correction_plan, plan_size, 
+                            matched_template->template_str,
+                            error_type, error_value, lr, reg, param_pct,
+                            mc_samples, features, time_horizon, 
+                            resource_pct, complexity_pct);
 
     /* S-006修复: 执行实际的系统参数修正，而非仅生成文本计划 */
     switch (error_type) {

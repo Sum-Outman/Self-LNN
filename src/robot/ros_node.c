@@ -180,8 +180,12 @@ int ros_node_advertise(RosNode* node, const char* topic, const char* type,
     if (!node || !topic || !type) return -1;
     if (node->num_publishers >= ROS_NODE_MAX_PUBLISHERS) return -1;
 
-    /* 通过rosbridge广告话题 */
-    if (node->bridge && node->connected) {
+    /* FIX-FAKE-ROS: 未连接rosbridge时禁止假通告，统一返回失败 */
+    if (!node->bridge || !node->connected) {
+        log_error("[ROS节点] 通告话题失败（未连接ROS Master）: %s [%s]", topic, type);
+        return -1;
+    }
+    {
         char json_buf[512];
         snprintf(json_buf, sizeof(json_buf),
                  "{\"op\":\"advertise\",\"topic\":\"%s\",\"type\":\"%s\"}",
@@ -230,11 +234,15 @@ int ros_node_subscribe(RosNode* node, const char* topic, const char* type,
     if (!node || !topic || !type) return -1;
     if (node->num_subscribers >= ROS_NODE_MAX_SUBSCRIBERS) return -1;
 
-    /* 通过rosbridge订阅话题 */
-    if (node->bridge && node->connected) {
-        ros_bridge_subscribe(node->bridge, topic, type,
-                             (RosTopicCallback)callback, user_data);
+    /* FIX-FAKE-ROS: 原代码未连接rosbridge时仍在本地记录订阅并返回成功，
+     * 导致API层对用户谎称"已订阅话题"（实际数据永远不会到达，违反禁止虚假实现原则）。
+     * 现要求必须已连接ROS Master，否则返回失败。 */
+    if (!node->bridge || !node->connected) {
+        log_error("[ROS节点] 订阅话题失败（未连接ROS Master）: %s [%s]", topic, type);
+        return -1;
     }
+    ros_bridge_subscribe(node->bridge, topic, type,
+                         (RosTopicCallback)callback, user_data);
 
     int idx = node->num_subscribers;
     snprintf(node->subscribers[idx].topic, sizeof(node->subscribers[idx].topic), "%s", topic);
@@ -297,8 +305,13 @@ int ros_node_advertise_service(RosNode* node, const char* service_name,
     if (!node || !service_name) return -1;
     if (node->num_services >= ROS_NODE_MAX_SERVICES) return -1;
 
-    /* 通过rosbridge广告服务 */
-    if (node->bridge && node->connected) {
+    /* FIX-FAKE-ROS: 原代码未连接rosbridge时仍在本地注册服务并返回成功，
+     * 导致API层谎称"服务已注册到ROS Master"。现要求必须已连接。 */
+    if (!node->bridge || !node->connected) {
+        log_error("[ROS节点] 注册服务失败（未连接ROS Master）: %s", service_name);
+        return -1;
+    }
+    {
         char json_buf[512];
         snprintf(json_buf, sizeof(json_buf),
                  "{\"op\":\"advertise_service\",\"type\":\"%s\",\"service\":\"%s\"}",

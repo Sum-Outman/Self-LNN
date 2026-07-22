@@ -36,6 +36,7 @@ typedef struct {
     int object_is_var;
     char object_value[256];
     int optional;
+    int union_separator;   /**< 标记此模式后为UNION分隔（1=此模式是UNION前最后一条） */
     float min_confidence;
 } QueryTriplePattern;
 

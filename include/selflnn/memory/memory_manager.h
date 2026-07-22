@@ -250,6 +250,30 @@ int memory_manager_pool_defragment(MemoryManager* manager);
  */
 int memory_manager_get_buddy_stats(const MemoryManager* manager, BuddyAllocatorStats* stats);
 
+/**
+ * @brief 将记忆管理器全部记忆持久化到磁盘文件
+ *
+ * 将所有记忆类型（短期/长期/情景/语义）的条目序列化写入二进制文件。
+ * 文件格式：SLMM魔数 + 版本号 + 配置 + 条目数 + 逐条序列化 + FNV校验和。
+ *
+ * @param manager 记忆管理器句柄
+ * @param filepath 保存路径
+ * @return int 成功返回0，失败返回-1
+ */
+int memory_manager_save(const MemoryManager* manager, const char* filepath);
+
+/**
+ * @brief 从磁盘文件加载记忆到记忆管理器
+ *
+ * 从二进制文件反序列化所有记忆条目并恢复到管理器中。
+ * 加载前会清空现有记忆数据。
+ *
+ * @param manager 记忆管理器句柄
+ * @param filepath 加载路径
+ * @return int 成功返回0，失败返回-1
+ */
+int memory_manager_load(MemoryManager* manager, const char* filepath);
+
 #ifdef __cplusplus
 }
 #endif

@@ -410,6 +410,18 @@ int graph_query_parse_sparql(const char* query_str,
             continue;
         }
         if (str_eq_ic(token, "OPTIONAL")) continue;
+        if (str_eq_ic(token, "UNION")) {
+            /* UNION: 将当前模式组标记为结束，后续模式属于新组
+             * 在解析阶段记录UNION位置，执行阶段分别执行各组并合并结果 */
+            if (in_where && *pattern_count < max_patterns) {
+                /* 在最后一个已解析的模式上标记UNION分隔 */
+                /* 通过设置一个特殊的可选标记实现UNION分组 */
+                if (*pattern_count > 0) {
+                    patterns[*pattern_count - 1].union_separator = 1;
+                }
+            }
+            continue;
+        }
 
         if (parsing_select) {
             if (token[0] == '?' && *var_count < max_vars) {
@@ -536,11 +548,13 @@ QueryResultSet* graph_query_execute_sparql(RDFTripleStore* store,
     int pat_s_var[64], pat_p_var[64], pat_o_var[64];
     int pat_s_const[64], pat_p_const[64], pat_o_const[64];
     int pat_s_val[64], pat_p_val[64], pat_o_val[64];
+    int pat_is_optional[64]; /* 记录每个模式是否为OPTIONAL */
 
     for (size_t i = 0; i < pattern_count; i++) {
         pat_s_var[i] = pat_p_var[i] = pat_o_var[i] = -1;
         pat_s_const[i] = pat_p_const[i] = pat_o_const[i] = 0;
         pat_s_val[i] = pat_p_val[i] = pat_o_val[i] = -1;
+        pat_is_optional[i] = patterns[i].optional;
 
         for (size_t v = 0; v < var_count; v++) {
             if (!patterns[i].subject_is_var && !pat_s_const[i]) {
@@ -621,6 +635,7 @@ QueryResultSet* graph_query_execute_sparql(RDFTripleStore* store,
                     RDFTriple* t = &batch[bi];
                     int all_ok = 1;
                     for (size_t pi = 0; pi < pattern_count && all_ok; pi++) {
+                        if (pat_is_optional[pi]) continue; /* OPTIONAL模式不阻止匹配 */
                         if (pat_s_const[pi] && t->subject_id != pat_s_val[pi]) all_ok = 0;
                         if (pat_p_const[pi] && t->predicate_id != pat_p_val[pi]) all_ok = 0;
                         if (pat_o_const[pi] && t->object_id != pat_o_val[pi]) all_ok = 0;
@@ -664,6 +679,7 @@ QueryResultSet* graph_query_execute_sparql(RDFTripleStore* store,
                 RDFTriple* t = &batch[bi];
                 int all_ok = 1;
                 for (size_t pi = 0; pi < pattern_count && all_ok; pi++) {
+                    if (pat_is_optional[pi]) continue; /* OPTIONAL模式不阻止匹配 */
                     if (pat_s_const[pi] && t->subject_id != pat_s_val[pi]) all_ok = 0;
                     if (pat_p_const[pi] && t->predicate_id != pat_p_val[pi]) all_ok = 0;
                     if (pat_o_const[pi] && t->object_id != pat_o_val[pi]) all_ok = 0;
@@ -713,8 +729,50 @@ QueryResultSet* graph_query_sparql(RDFTripleStore* store,
         return NULL;
     }
 
-    return graph_query_execute_sparql(store, patterns, pattern_count,
-                                      variables, var_count, limit, NULL);
+    /* 检查是否有UNION分组 */
+    int has_union = 0;
+    for (size_t i = 0; i < pattern_count; i++) {
+        if (patterns[i].union_separator) {
+            has_union = 1;
+            break;
+        }
+    }
+
+    if (!has_union) {
+        /* 无UNION：直接执行 */
+        return graph_query_execute_sparql(store, patterns, pattern_count,
+                                          variables, var_count, limit, NULL);
+    }
+
+    /* UNION分组执行：按union_separator拆分模式组，分别执行后合并 */
+    QueryResultSet* final_result = NULL;
+    size_t group_start = 0;
+
+    for (size_t i = 0; i <= pattern_count; i++) {
+        if (i == pattern_count || patterns[i].union_separator) {
+            /* 执行当前组 [group_start, i] */
+            size_t group_size = i - group_start + 1;
+            QueryResultSet* group_rs = graph_query_execute_sparql(
+                store, &patterns[group_start], group_size,
+                variables, var_count, limit, NULL);
+
+            if (group_rs) {
+                if (final_result) {
+                    /* 合并到已有结果 */
+                    QueryResultSet* merged = query_result_set_union(final_result, group_rs);
+                    query_result_set_free(final_result);
+                    query_result_set_free(group_rs);
+                    final_result = merged;
+                } else {
+                    final_result = group_rs;
+                }
+            }
+
+            group_start = i + 1;
+        }
+    }
+
+    return final_result ? final_result : query_result_set_create(var_count, variables);
 }
 
 /* ============================================================================

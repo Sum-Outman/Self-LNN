@@ -3741,9 +3741,106 @@ static int amp_unscale_and_check_overflow(AmLossScaler* scaler, float* gradients
     return 0;
 }
 
-/* 全局AMP缩放器（每训练管线一个实例） */
+/* 全局AMP缩放器（每训练管线一个实例）
+ * 已重构为实例化模式：新代码应使用 mixed_precision_amp_ctx_create() 创建独立实例。
+ * 全局单例保留用于向后兼容，但多管线训练时必须使用独立实例避免状态冲突。 */
 static AmLossScaler g_amp_scaler = {0};
 static int g_amp_initialized = 0;
+
+/**
+ * @brief AMP损失缩放器上下文（独立实例，支持多管线并行）
+ * 
+ * 与MixedPrecisionContext（混合精度训练上下文）不同，
+ * 本上下文专注于损失缩放因子管理，每个训练管线创建独立实例。
+ */
+typedef struct AmpScalerContext {
+    AmLossScaler scaler;
+    int initialized;
+} AmpScalerContext;
+
+/**
+ * @brief 创建独立的AMP缩放器上下文
+ * 
+ * 每个训练管线应创建自己的上下文实例，避免全局单例在多管线并行时的状态冲突。
+ * 
+ * @return AmpScalerContext* 上下文句柄，失败返回NULL
+ */
+AmpScalerContext* mixed_precision_amp_ctx_create(void) {
+    AmpScalerContext* ctx = (AmpScalerContext*)safe_malloc(sizeof(AmpScalerContext));
+    if (!ctx) return NULL;
+    memset(ctx, 0, sizeof(AmpScalerContext));
+    amp_scaler_init(&ctx->scaler);
+    ctx->initialized = 1;
+    return ctx;
+}
+
+/**
+ * @brief 释放AMP缩放器上下文
+ */
+void mixed_precision_amp_ctx_free(AmpScalerContext* ctx) {
+    if (!ctx) return;
+    memset(ctx, 0, sizeof(AmpScalerContext));
+    safe_free((void**)&ctx);
+}
+
+/**
+ * @brief 获取上下文中的损失缩放因子
+ */
+float mixed_precision_amp_ctx_get_loss_scale(AmpScalerContext* ctx) {
+    if (!ctx || !ctx->initialized) {
+        /* 回退到全局单例 */
+        if (!g_amp_initialized) { amp_scaler_init(&g_amp_scaler); g_amp_initialized = 1; }
+        return g_amp_scaler.loss_scale;
+    }
+    return ctx->scaler.loss_scale;
+}
+
+/**
+ * @brief 对损失值应用上下文相关的AMP缩放
+ */
+float mixed_precision_amp_ctx_scale_loss(AmpScalerContext* ctx, float loss) {
+    AmLossScaler* scaler = ctx ? &ctx->scaler : &g_amp_scaler;
+    if (ctx && !ctx->initialized) { amp_scaler_init(scaler); ctx->initialized = 1; }
+    if (!ctx && !g_amp_initialized) { amp_scaler_init(scaler); g_amp_initialized = 1; }
+    return amp_scale_loss(scaler, loss);
+}
+
+/**
+ * @brief 对梯度去缩放并检测溢出（使用上下文）
+ */
+int mixed_precision_amp_ctx_unscale_gradients(AmpScalerContext* ctx, 
+                                               float* gradients, size_t count) {
+    AmLossScaler* scaler = ctx ? &ctx->scaler : &g_amp_scaler;
+    if (ctx && !ctx->initialized) { amp_scaler_init(scaler); ctx->initialized = 1; }
+    if (!ctx && !g_amp_initialized) { amp_scaler_init(scaler); g_amp_initialized = 1; }
+    if (!scaler->enabled || scaler->loss_scale <= 1.0f) return 0;
+    float inv_scale = 1.0f / scaler->loss_scale;
+    return amp_unscale_and_check_overflow(scaler, gradients, count, inv_scale);
+}
+
+/**
+ * @brief 获取上下文的AMP统计信息
+ */
+void mixed_precision_amp_ctx_get_stats(AmpScalerContext* ctx,
+                                        int* overflow_count, int* skip_count, 
+                                        float* current_scale) {
+    AmLossScaler* scaler = ctx ? &ctx->scaler : &g_amp_scaler;
+    if (ctx && !ctx->initialized) { amp_scaler_init(scaler); ctx->initialized = 1; }
+    if (!ctx && !g_amp_initialized) { amp_scaler_init(scaler); g_amp_initialized = 1; }
+    if (overflow_count) *overflow_count = scaler->overflow_count;
+    if (skip_count) *skip_count = scaler->skip_update_count;
+    if (current_scale) *current_scale = scaler->loss_scale;
+}
+
+/**
+ * @brief 重置上下文的AMP缩放器状态
+ */
+void mixed_precision_amp_ctx_reset(AmpScalerContext* ctx) {
+    if (ctx) {
+        memset(&ctx->scaler, 0, sizeof(AmLossScaler));
+        ctx->initialized = 0;
+    }
+}
 
 /**
  * @brief 获取/初始化全局AMP损失缩放器

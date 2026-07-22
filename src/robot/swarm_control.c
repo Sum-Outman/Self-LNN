@@ -297,6 +297,11 @@ int swarm_add_robot(SwarmController* controller, int robot_id, const RobotConfig
     rs->is_active = 1;
     rs->battery_level = 1.0f;
     rs->task_progress = 0.0f;
+    /* 默认质量1.0kg，转动惯量1.0，可通过config覆盖 */
+    rs->mass = 1.0f;
+    rs->inertia[0] = 1.0f;
+    rs->inertia[1] = 1.0f;
+    rs->inertia[2] = 1.0f;
     if (config) {
         controller->config.flocking_params.max_velocity = config->max_linear_velocity;
         controller->config.flocking_params.max_acceleration = config->max_acceleration;
@@ -753,9 +758,15 @@ int swarm_update_flocking(SwarmController* controller, float dt)
             force[2] *= scale;
         }
 
-        robot->velocity[0] += force[0] * dt;
-        robot->velocity[1] += force[1] * dt;
-        robot->velocity[2] += force[2] * dt;
+        /* 牛顿第二定律: a = F / m，质量越大加速度越小
+         * 默认质量1.0保持与旧版兼容，机器人个性化质量可模拟不同尺寸/负载 */
+        float inv_mass = 1.0f;
+        if (robot->mass > 0.001f) {
+            inv_mass = 1.0f / robot->mass;
+        }
+        robot->velocity[0] += force[0] * dt * inv_mass;
+        robot->velocity[1] += force[1] * dt * inv_mass;
+        robot->velocity[2] += force[2] * dt * inv_mass;
 
         float v_len = sqrtf(robot->velocity[0] * robot->velocity[0] +
                             robot->velocity[1] * robot->velocity[1] +
@@ -1406,9 +1417,13 @@ int swarm_update_flocking_enhanced(SwarmController* controller, float dt)
                 float scale = fp->max_force / f_len;
                 force[0] *= scale; force[1] *= scale; force[2] *= scale;
             }
-            robot->velocity[0] += force[0] * dt;
-            robot->velocity[1] += force[1] * dt;
-            robot->velocity[2] += force[2] * dt;
+            float inv_mass = 1.0f;
+            if (robot->mass > 0.001f) {
+                inv_mass = 1.0f / robot->mass;
+            }
+            robot->velocity[0] += force[0] * dt * inv_mass;
+            robot->velocity[1] += force[1] * dt * inv_mass;
+            robot->velocity[2] += force[2] * dt * inv_mass;
             float v_len = sqrtf(robot->velocity[0] * robot->velocity[0] +
                                 robot->velocity[1] * robot->velocity[1] +
                                 robot->velocity[2] * robot->velocity[2]);

@@ -40,6 +40,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
+#include <time.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -2705,6 +2706,15 @@ int long_term_planning_resolve_conflicts(LongTermPlanningSystem* system,
     }
     
     int resolved_count = 0;
+
+    /* 局部静态统计变量，替代不存在的 system->conflict_stats/ resource_stats/ priority_stats */
+    static int conflict_rescheduled_count = 0;
+    static int conflict_failed_resolutions = 0;
+    static time_t conflict_last_resolution_time = 0;
+    static int resource_reallocation_count = 0;
+    static time_t resource_last_reallocation_time = 0;
+    static int priority_conflicts_resolved = 0;
+    static time_t priority_last_resolution_time = 0;
     
     // 根据解决策略处理冲突
     switch (resolution_strategy) {
@@ -2982,25 +2992,21 @@ int long_term_planning_resolve_conflicts(LongTermPlanningSystem* system,
                 if (resolution_success) {
                     resolved_count += 2;
                     
-                    // 更新系统统计信息（如果存在）
-                    // if (system->conflict_stats) {
-                    //     system->conflict_stats->rescheduled_count++;
-                    //     system->conflict_stats->last_resolution_time = time(NULL);
-                    // }
+                    /* 更新系统统计信息（使用局部静态变量） */
+                    conflict_rescheduled_count++;
+                    conflict_last_resolution_time = time(NULL);
                     
-                    // 记录解决详情（在实际系统中）
-                    // char log_msg[128];
-                    // snprintf(log_msg, sizeof(log_msg), "重新调度解决冲突: idx1=%d, idx2=%d, 类型=%d", 
-                    //          idx1, idx2, conflict_type);
-                    // system_log_info(system, log_msg);
+                    /* 记录解决详情（在实际系统中） */
+                    /* char log_msg[128];
+                    snprintf(log_msg, sizeof(log_msg), "重新调度解决冲突: idx1=%d, idx2=%d, 类型=%d", 
+                             idx1, idx2, conflict_type);
+                    system_log_info(system, log_msg); */
                 } else {
                     // 冲突解决失败，尝试降级策略
                     resolved_count += 1;  // 部分解决
                     
-                    // 记录失败信息（如果存在）
-                    // if (system->conflict_stats) {
-                    //     system->conflict_stats->failed_resolutions++;
-                    // }
+                    /* 记录失败信息（使用局部静态变量） */
+                    conflict_failed_resolutions++;
                 }
             }
             break;
@@ -3079,20 +3085,18 @@ int long_term_planning_resolve_conflicts(LongTermPlanningSystem* system,
                 }
                 resolved_count = conflict_count;
                 
-                // 记录资源重新分配统计（在实际系统中会更新统计信息）
-                // if (system->resource_stats) {
-                //     system->resource_stats->reallocation_count++;
-                //     system->resource_stats->last_reallocation_time = time(NULL);
-                // }
+                /* 记录资源重新分配统计（使用局部静态变量） */
+                resource_reallocation_count++;
+                resource_last_reallocation_time = time(NULL);
                 
-                // 记录日志
-                // char log_msg[256];
-                // snprintf(log_msg, sizeof(log_msg), 
-                //          "资源重新分配成功: 冲突数=%d, 缩放因子=[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f]", 
-                //          conflict_count,
-                //          scaling_factors[0], scaling_factors[1], scaling_factors[2], scaling_factors[3],
-                //          scaling_factors[4], scaling_factors[5], scaling_factors[6], scaling_factors[7]);
-                // system_log_info(system, log_msg);
+                /* 记录日志 */
+                /* char log_msg[256];
+                snprintf(log_msg, sizeof(log_msg), 
+                         "资源重新分配成功: 冲突数=%d, 缩放因子=[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f]", 
+                         conflict_count,
+                         scaling_factors[0], scaling_factors[1], scaling_factors[2], scaling_factors[3],
+                         scaling_factors[4], scaling_factors[5], scaling_factors[6], scaling_factors[7]);
+                system_log_info(system, log_msg); */
             } else {
                 // 资源不足，无法完全解决所有冲突
                 // 部分解决：仅重新分配部分资源（例如，只处理需求较低的动作）
@@ -3269,19 +3273,17 @@ int long_term_planning_resolve_conflicts(LongTermPlanningSystem* system,
             
             // 步骤4：记录优先级解决结果
             if (resolved_count > 0) {
-                // 更新统计信息（在实际系统中会更新优先级统计）
-                // if (system->priority_stats) {
-                //     system->priority_stats->conflicts_resolved_by_priority += resolved_count;
-                //     system->priority_stats->last_priority_resolution_time = time(NULL);
-                // }
+                /* 更新统计信息（使用局部静态变量） */
+                priority_conflicts_resolved += resolved_count;
+                priority_last_resolution_time = time(NULL);
                 
-                // 记录日志
-                // char log_msg[256];
-                // snprintf(log_msg, sizeof(log_msg), 
-                //          "优先级冲突解决: 总计=%d, 高=%d, 中=%d, 低=%d, 解决=%d", 
-                //          conflict_count, high_priority_count, medium_priority_count, 
-                //          low_priority_count, resolved_count);
-                // system_log_info(system, log_msg);
+                /* 记录日志 */
+                /* char log_msg[256];
+                snprintf(log_msg, sizeof(log_msg), 
+                         "优先级冲突解决: 总计=%d, 高=%d, 中=%d, 低=%d, 解决=%d", 
+                         conflict_count, high_priority_count, medium_priority_count, 
+                         low_priority_count, resolved_count);
+                system_log_info(system, log_msg); */
             }
             
             // 清理内存

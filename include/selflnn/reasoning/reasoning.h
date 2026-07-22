@@ -333,6 +333,13 @@ int reasoning_engine_is_knowledge_ready(const ReasoningEngine* engine);
  */
 int reasoning_engine_set_lnn(ReasoningEngine* engine, LNN* lnn);
 
+/**
+ * @brief 检查推理引擎是否已绑定有效的LNN实例
+ * @param engine 推理引擎句柄
+ * @return 1=已绑定LNN, 0=未绑定或引擎无效
+ */
+int reasoning_engine_has_lnn(const ReasoningEngine* engine);
+
 /* ========== P2-2: 因果模型驱动的规划 ========== */
 
 /**

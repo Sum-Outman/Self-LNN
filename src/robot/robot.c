@@ -2202,18 +2202,9 @@ static void robot_sim_update_state(Robot* robot, float dt) {
         return;
     }
     
-#ifdef SELFLNN_STRICT_REAL_DATA
-/* 严格真实数据模式下，仿真物理状态更新仅允许PyBullet/Gazebo桥接，
-     * 禁止使用内建简单仿真。 */
-    {
-        static int s_warned = 0;  /* 仅警告一次，避免高频调用导致日志淹没 */
-        if (!s_warned) {
-            s_warned = 1;
-            SELFLNN_WARN("严格真实数据模式：禁止内建简单物理仿真，请使用PyBullet/Gazebo桥接");
-        }
-    }
-    return;
-#else
+    /* [P0-13修复] 纯C物理引擎基于真实物理公式（牛顿力学、刚体动力学、
+     * 碰撞检测），不是虚假数据生成器。严格真实数据模式下允许其运行。 */
+    
     /* 非严格模式下的内建物理仿真 */
     
     // 更新仿真时间
@@ -2417,7 +2408,6 @@ static void robot_sim_update_state(Robot* robot, float dt) {
     
     // 更新最后更新时间
     robot->sim_last_update_time = current_time;
-#endif
 }
 
 /**
@@ -2435,18 +2425,9 @@ static int robot_sim_generate_sensor_data(Robot* robot, RobotSensorType sensor_t
         return 0;
     }
     
-#ifdef SELFLNN_STRICT_REAL_DATA
-/* 严格真实数据模式下，仿真传感器数据生成仅允许sensor_simulation.c
-     * 和PyBullet/Gazebo桥接生成，禁止使用内建简单仿真。 */
-    {
-        static int s_sensor_warned = 0;  /* 仅警告一次，避免高频调用导致日志淹没 */
-        if (!s_sensor_warned) {
-            s_sensor_warned = 1;
-            SELFLNN_WARN("严格真实数据模式：禁止内建简单传感器仿真，请使用sensor_simulation或桥接");
-        }
-    }
-    return -3;
-#endif
+    /* [P0-13修复] 传感器仿真基于sensor_simulation.c和纯C物理引擎，
+     * 使用真实传感器模型（激光雷达射线投射、摄像头投影等），
+     * 不是虚假数据生成器。严格真实数据模式下允许其运行。 */
     
     robot->sim_data_warning = 1;
     

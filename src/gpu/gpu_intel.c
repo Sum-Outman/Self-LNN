@@ -1,4 +1,4 @@
-#include "selflnn/gpu/gpu.h"
+﻿#include "selflnn/gpu/gpu.h"
 #include "selflnn/gpu/gpu_hardware_detect.h"
 #include "selflnn/core/common.h"
 #include "selflnn/utils/memory_utils.h"
@@ -682,7 +682,7 @@ static int intel_backend_get_device_info(int device_index, GpuDeviceInfo* info) 
 }
 
 static GpuContext* intel_backend_context_create(int device_index) {
-    GpuContext* ctx = (GpuContext*)calloc(1, sizeof(GpuContext));
+    GpuContext* ctx = (GpuContext*)safe_calloc(1, sizeof(GpuContext));
     if (!ctx) return NULL;
 
     ctx->backend = GPU_BACKEND_INTEL;
@@ -706,15 +706,15 @@ static void intel_backend_context_free(GpuContext* context) {
     if (!context) return;
     struct GpuContext* ctx = (struct GpuContext*)context;
     if (ctx->kernel_optimizer) {
-        free(ctx->kernel_optimizer);
+        safe_free((void**)&ctx->kernel_optimizer);
         ctx->kernel_optimizer = NULL;
     }
-    free(ctx);
+    safe_free((void**)&ctx);
 }
 
 static GpuMemory* intel_backend_memory_alloc(GpuContext* context, size_t size, GpuMemoryType memory_type) {
     if (!context || size == 0) return NULL;
-    GpuMemory* mem = (GpuMemory*)calloc(1, sizeof(GpuMemory));
+    GpuMemory* mem = (GpuMemory*)safe_calloc(1, sizeof(GpuMemory));
     if (!mem) return NULL;
 
     mem->context = context;
@@ -745,9 +745,9 @@ static GpuMemory* intel_backend_memory_alloc(GpuContext* context, size_t size, G
         }
     }
 
-    mem->data = calloc(1, size);
+    mem->data = safe_calloc(1, size);
     if (!mem->data) {
-        free(mem);
+        safe_free((void**)&mem);
         return NULL;
     }
     mem->is_device_memory = 0;
@@ -759,9 +759,9 @@ static void intel_backend_memory_free(GpuMemory* memory) {
     if (g_intel_state.use_level_zero && g_ze_lib.init_called && memory->is_device_memory && memory->data) {
         g_ze_lib.zeMemFree(g_ze_lib.context, memory->data);
     } else if (memory->data) {
-        free(memory->data);
+        safe_free((void**)&memory->data);
     }
-    free(memory);
+    safe_free((void**)&memory);
 }
 
 static int intel_backend_memory_copy_to_device(GpuMemory* dst, const void* src, size_t size) {
@@ -884,7 +884,7 @@ static int intel_backend_memory_copy_from_device_async(void* dst, GpuMemory* src
 
 static GpuKernel* intel_backend_kernel_create(GpuContext* context, const char* kernel_source, const char* kernel_name) {
     if (!context || !kernel_name) return NULL;
-    GpuKernel* kernel = (GpuKernel*)calloc(1, sizeof(GpuKernel));
+    GpuKernel* kernel = (GpuKernel*)safe_calloc(1, sizeof(GpuKernel));
     if (!kernel) return NULL;
 
     struct GpuContext* ctx = (struct GpuContext*)context;
@@ -896,13 +896,13 @@ static GpuKernel* intel_backend_kernel_create(GpuContext* context, const char* k
         kernel->kernel_source = string_duplicate(kernel_source);
     }
     kernel->arg_capacity = 16;
-    kernel->arg_values = (void**)calloc(kernel->arg_capacity, sizeof(void*));
-    kernel->arg_sizes = (size_t*)calloc(kernel->arg_capacity, sizeof(size_t));
+    kernel->arg_values = (void**)safe_calloc(kernel->arg_capacity, sizeof(void*));
+    kernel->arg_sizes = (size_t*)safe_calloc(kernel->arg_capacity, sizeof(size_t));
     /* H-MED-004d: calloc后NULL检查，防止内存分配失败导致空指针解引用 */
     if (!kernel->arg_values || !kernel->arg_sizes) {
         LOG_ERROR("GPU内核参数内存分配失败");
-        free(kernel->arg_values);
-        free(kernel->arg_sizes);
+        safe_free((void**)&kernel->arg_values);
+        safe_free((void**)&kernel->arg_sizes);
         kernel->arg_values = NULL;
         kernel->arg_sizes = NULL;
         /* 清理已分配的内核结构 */
@@ -956,19 +956,19 @@ static void intel_backend_kernel_free(GpuKernel* kernel) {
     if (kernel->kernel_name) { safe_free((void**)&kernel->kernel_name); }
     if (kernel->arg_values) {
         for (int i = 0; i < kernel->arg_capacity; i++) {
-            if (kernel->arg_values[i]) free(kernel->arg_values[i]);
+            if (kernel->arg_values[i]) safe_free((void**)&kernel->arg_values[i]);
         }
-        free(kernel->arg_values);
+        safe_free((void**)&kernel->arg_values);
     }
-    if (kernel->arg_sizes) free(kernel->arg_sizes);
-    free(kernel);
+    if (kernel->arg_sizes) safe_free((void**)&kernel->arg_sizes);
+    safe_free((void**)&kernel);
 }
 
 static int intel_backend_kernel_set_arg(GpuKernel* kernel, int arg_index, size_t arg_size, const void* arg_value) {
     if (!kernel || arg_index < 0 || arg_index >= kernel->arg_capacity) return -1;
-    if (kernel->arg_values[arg_index]) { free(kernel->arg_values[arg_index]); kernel->arg_values[arg_index] = NULL; }
+    if (kernel->arg_values[arg_index]) { safe_free((void**)&kernel->arg_values[arg_index]); kernel->arg_values[arg_index] = NULL; }
     if (arg_size > 0 && arg_value) {
-        kernel->arg_values[arg_index] = malloc(arg_size);
+        kernel->arg_values[arg_index] = safe_malloc(arg_size);
         if (!kernel->arg_values[arg_index]) return -1;
         memcpy(kernel->arg_values[arg_index], arg_value, arg_size);
         kernel->arg_sizes[arg_index] = arg_size;
@@ -1037,7 +1037,7 @@ static int intel_backend_kernel_execute_nd(GpuKernel* kernel, int work_dim,
 
 static GpuStream* intel_backend_stream_create(GpuContext* context) {
     if (!context) return NULL;
-    GpuStream* stream = (GpuStream*)calloc(1, sizeof(GpuStream));
+    GpuStream* stream = (GpuStream*)safe_calloc(1, sizeof(GpuStream));
     if (!stream) return NULL;
     stream->context = context;
     stream->is_completed = 1;
@@ -1046,7 +1046,7 @@ static GpuStream* intel_backend_stream_create(GpuContext* context) {
 
 static void intel_backend_stream_free(GpuStream* stream) {
     if (!stream) return;
-    free(stream);
+    safe_free((void**)&stream);
 }
 
 static int intel_backend_stream_synchronize(GpuStream* stream) {

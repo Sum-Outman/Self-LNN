@@ -244,6 +244,11 @@ int reasoning_engine_set_lnn(ReasoningEngine* engine, LNN* lnn) {
     return 0;
 }
 
+int reasoning_engine_has_lnn(const ReasoningEngine* engine) {
+    if (!engine) return 0;
+    return (engine->lnn_instance != NULL) ? 1 : 0;
+}
+
 /* v9.19: 语义网络集成 — 扩散激活增强推理 */
 int reasoning_engine_set_semantic_network(ReasoningEngine* engine, void* network) {
     if (!engine) return -1;
@@ -920,10 +925,10 @@ static int pc_extract_column(const float* data, size_t num_samples, size_t num_v
 /* 偏相关系数: r_{ij|k} = (r_{ij} - r_{ik}*r_{jk}) / sqrt((1-r_{ik}^2)*(1-r_{jk}^2)) */
 static float pc_partial_correlation_single(const float* data, size_t num_samples,
     size_t num_vars, size_t i, size_t j, size_t k) {
-    float* xi = (float*)calloc(num_samples, sizeof(float));
-    float* xj = (float*)calloc(num_samples, sizeof(float));
-    float* xk = (float*)calloc(num_samples, sizeof(float));
-    if (!xi || !xj || !xk) { free(xi); free(xj); free(xk); return 0.0f; }
+    float* xi = (float*)safe_calloc(num_samples, sizeof(float));
+    float* xj = (float*)safe_calloc(num_samples, sizeof(float));
+    float* xk = (float*)safe_calloc(num_samples, sizeof(float));
+    if (!xi || !xj || !xk) { safe_free((void**)&xi); safe_free((void**)&xj); safe_free((void**)&xk); return 0.0f; }
 
     pc_extract_column(data, num_samples, num_vars, i, xi);
     pc_extract_column(data, num_samples, num_vars, j, xj);
@@ -933,7 +938,7 @@ static float pc_partial_correlation_single(const float* data, size_t num_samples
     float r_ik = pc_pearson_correlation(xi, xk, num_samples);
     float r_jk = pc_pearson_correlation(xj, xk, num_samples);
 
-    free(xi); free(xj); free(xk);
+    safe_free((void**)&xi); safe_free((void**)&xj); safe_free((void**)&xk);
 
     float num = r_ij - r_ik * r_jk;
     float den = sqrtf((1.0f - r_ik * r_ik) * (1.0f - r_jk * r_jk));
@@ -984,13 +989,13 @@ int reasoning_discover_causal_structure(ReasoningEngine* engine,
     if (num_variables > 256) num_variables = 256;
 
     /* 初始化邻接矩阵: 完全连接(除对角线) */
-    float** adj = (float**)calloc(num_variables, sizeof(float*));
+    float** adj = (float**)safe_calloc(num_variables, sizeof(float*));
     if (!adj) return -1;
     for (size_t i = 0; i < num_variables; i++) {
-        adj[i] = (float*)calloc(num_variables, sizeof(float));
+        adj[i] = (float*)safe_calloc(num_variables, sizeof(float));
         if (!adj[i]) {
-            for (size_t k = 0; k < i; k++) free(adj[k]);
-            free(adj);
+            for (size_t k = 0; k < i; k++) safe_free((void**)&adj[k]);
+            safe_free((void**)&adj);
             return -1;
         }
         for (size_t j = 0; j < num_variables; j++) {
@@ -999,18 +1004,18 @@ int reasoning_discover_causal_structure(ReasoningEngine* engine,
     }
 
     /* 提取所有变量数据列 */
-    float** var_data = (float**)calloc(num_variables, sizeof(float*));
+    float** var_data = (float**)safe_calloc(num_variables, sizeof(float*));
     if (!var_data) {
-        for (size_t i = 0; i < num_variables; i++) free(adj[i]);
-        free(adj); return -1;
+        for (size_t i = 0; i < num_variables; i++) safe_free((void**)&adj[i]);
+        safe_free((void**)&adj); return -1;
     }
     for (size_t i = 0; i < num_variables; i++) {
-        var_data[i] = (float*)calloc(num_samples, sizeof(float));
+        var_data[i] = (float*)safe_calloc(num_samples, sizeof(float));
         if (!var_data[i]) {
-            for (size_t k = 0; k < i; k++) free(var_data[k]);
-            free(var_data);
-            for (size_t k = 0; k < num_variables; k++) free(adj[k]);
-            free(adj); return -1;
+            for (size_t k = 0; k < i; k++) safe_free((void**)&var_data[k]);
+            safe_free((void**)&var_data);
+            for (size_t k = 0; k < num_variables; k++) safe_free((void**)&adj[k]);
+            safe_free((void**)&adj); return -1;
         }
         pc_extract_column(data, num_samples, num_variables, i, var_data[i]);
     }
@@ -1089,9 +1094,9 @@ int reasoning_discover_causal_structure(ReasoningEngine* engine,
 
     /* 释放资源 */
     for (size_t i = 0; i < num_variables; i++) {
-        free(var_data[i]); free(adj[i]);
+        safe_free((void**)&var_data[i]); safe_free((void**)&adj[i]);
     }
-    free(var_data); free(adj);
+    safe_free((void**)&var_data); safe_free((void**)&adj);
 
     return (int)edge_count;
 }
@@ -1122,10 +1127,10 @@ int reasoning_sync_knowledge(ReasoningEngine* engine) {
 
 /* 贝叶斯网络创建 (MSVC编译路径) */
 BayesianNetwork* bayesian_network_create(size_t max_nodes) {
-    BayesianNetwork* bn = (BayesianNetwork*)calloc(1, sizeof(BayesianNetwork));
+    BayesianNetwork* bn = (BayesianNetwork*)safe_calloc(1, sizeof(BayesianNetwork));
     if (!bn) return NULL;
-    bn->nodes = (BayesianNode*)calloc(max_nodes, sizeof(BayesianNode));
-    if (!bn->nodes) { free(bn); return NULL; }
+    bn->nodes = (BayesianNode*)safe_calloc(max_nodes, sizeof(BayesianNode));
+    if (!bn->nodes) { safe_free((void**)&bn); return NULL; }
     bn->node_capacity = max_nodes;
     bn->num_nodes = 0;
     bn->num_edges = 0;
@@ -1136,9 +1141,9 @@ BayesianNetwork* bayesian_network_create(size_t max_nodes) {
 /* 贝叶斯网络释放 (MSVC编译路径) */
 void bayesian_network_free(BayesianNetwork* bn) {
     if (!bn) return;
-    if (bn->nodes) free(bn->nodes);
-    if (bn->edges) free(bn->edges);
-    free(bn);
+    if (bn->nodes) safe_free((void**)&bn->nodes);
+    if (bn->edges) safe_free((void**)&bn->edges);
+    safe_free((void**)&bn);
 }
 
 /* M-022修复: 获取因果推理引擎用于规划桥接（MSVC编译路径） */

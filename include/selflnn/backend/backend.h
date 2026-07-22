@@ -482,7 +482,8 @@ typedef enum {
     API_GET_MODEL_INFO = 276,                /**< 获取LNN模型详细信息 /api/model/info */
     API_GET_EVOLUTION_STATUS = 277,          /**< 获取自我演化系统状态 /api/evolution/status */
 
-    API_POST_PRODUCT_SPEC = 332,           /**< POST产品规格生成 /api/product/spec (v9.23: 从330移出，避免与KG连通分量冲突) */
+    /* FIX-ENUM-CONFLICT: API_POST_PRODUCT_SPEC原值332与API_POST_TRAINING_META冲突，
+     * 已移至枚举尾部393槽位（见下方API_POST_SEMANTIC_DIFFUSE之后）。此处保留332给元学习训练。 */
 
     /* ===== 前端-后端API端点对齐修复 ===== */
     API_GET_PROGRAMMING_SAMPLE = 285,      /**< 获取编程示例代码 /api/programming/sample */
@@ -579,7 +580,16 @@ typedef enum {
     API_POST_COGNITION_SELF = 391,             /**< 自我认知 POST /api/cognition/self */
     API_POST_SEMANTIC_DIFFUSE = 392,           /**< 语义扩散激活 POST /api/semantic/diffuse */
 
-    /* v9.18: 新增6个知识图谱高级图算法端点(323-331)，API_REQUEST_COUNT自动更新为393 */
+    /* FIX-ENUM-CONFLICT: API_POST_PRODUCT_SPEC原值332与API_POST_TRAINING_META冲突
+     * （table[332]先注册元学习训练、后被产品规格覆盖，/api/training/meta被错误路由）。
+     * 现移至枚举尾部393槽位，API_REQUEST_COUNT自动更新为394。 */
+    API_POST_PRODUCT_SPEC = 393,           /**< POST产品规格生成 /api/product/spec */
+
+    /* ===== 记忆持久化 (审计修复) ===== */
+    API_POST_MEMORY_SAVE = 394,            /**< 持久化记忆到磁盘 POST /api/memory/save */
+    API_POST_MEMORY_LOAD = 395,            /**< 从磁盘加载记忆 POST /api/memory/load */
+
+    /* v9.18: 新增6个知识图谱高级图算法端点(323-331)，API_REQUEST_COUNT自动更新为394 */
     API_REQUEST_COUNT                        /**< 自动计算枚举最大值+1，反映API处理程序分发表大小 */
 } ApiRequestType;
 

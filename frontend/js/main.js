@@ -1,4 +1,4 @@
-﻿// SELF-LNN AGI 管理系统 - 主JavaScript文件
+// SELF-LNN AGI 管理系统 - 主JavaScript文件
 'use strict';
 var g_dataEngine = null;
 var g_usingDataEngine = false;  /* P0-F01修复: 将在DataEngine创建成功后置为true */
@@ -17,6 +17,38 @@ window._cleanupAllEventListeners = function() {
         if (entry.target && entry.target.removeEventListener) {
             try { entry.target.removeEventListener(entry.event, entry.handler, entry.options); } catch(e) {}
         }
+    }
+};
+
+/* 轮询去重/防抖机制：防止同一轮询函数并发执行导致重复请求
+ * 每个轮询函数在调用前检查是否已在执行中，避免请求堆积 */
+window._pollLocks = {};
+window._pollGuard = function(key, fn, timeoutMs) {
+    timeoutMs = timeoutMs || 15000; /* 默认15秒超时 */
+    if (window._pollLocks[key]) {
+        /* 如果上次调用超过超时时间，强制重置锁 */
+        if (Date.now() - window._pollLocks[key] > timeoutMs) {
+            window._pollLocks[key] = 0;
+        } else {
+            return; /* 跳过重复调用 */
+        }
+    }
+    window._pollLocks[key] = Date.now();
+    try {
+        var result = fn();
+        /* 处理Promise */
+        if (result && typeof result.then === 'function') {
+            result.catch(function(e) {
+                console.warn('[轮询防抖] ' + key + ' 异常:', e);
+            }).finally(function() {
+                window._pollLocks[key] = 0;
+            });
+        } else {
+            window._pollLocks[key] = 0;
+        }
+    } catch(e) {
+        console.warn('[轮询防抖] ' + key + ' 异常:', e);
+        window._pollLocks[key] = 0;
     }
 };
 
@@ -1838,9 +1870,13 @@ function updateLearningStatus(learningStatus) {
  */
 var g_pollThinkCounter = 0;
 async function pollRealTimeUpdates() {
+    /* 防抖: 防止并发重复调用 */
+    if (window._pollLocks['realtime']) {
+        if (Date.now() - window._pollLocks['realtime'] < 15000) return;
+    }
+    window._pollLocks['realtime'] = Date.now();
     try {
         const cogState = await window.SelfLnnApi.getCognitionState();
-        if (cogState.success && cogState.data) {
             const d = cogState.data;
             /* 自我反思 (H-002) */
             setEl('#cog-reflection', d.reflection || (d.data && d.data.reflection) || '等待自我反思数据更新...');
@@ -1901,7 +1937,6 @@ async function pollRealTimeUpdates() {
                 setEl('#cog-identity-consistency', id.self_consistency !== undefined ? (id.self_consistency * 100).toFixed(1) + '%' : '--');
                 setEl('#cog-identity-continuity',  id.continuity_score !== undefined ? (id.continuity_score * 100).toFixed(1) + '%' : '--');
             }
-        }
     } catch (e) {
         console.warn('[轮询] 认知状态请求失败:', e.message);
     }
@@ -1920,6 +1955,7 @@ async function pollRealTimeUpdates() {
             console.warn('[轮询] AGI思维请求失败:', e.message);
         }
     }
+    window._pollLocks['realtime'] = 0;
 }
 
 /* ToM智能体卡片动态渲染器
@@ -3574,6 +3610,8 @@ function startSensorDataStream() {
  * 传感器数据轮询回调
  */
 async function pollSensorDataStream() {
+    if (window._pollLocks['sensor'] && Date.now() - window._pollLocks['sensor'] < 15000) return;
+    window._pollLocks['sensor'] = Date.now();
     try {
         if (window.SelfLnnApi && typeof window.SelfLnnApi.getRobotSensorData === 'function') {
             const result = await window.SelfLnnApi.getRobotSensorData();
@@ -3588,6 +3626,7 @@ async function pollSensorDataStream() {
     } catch (error) {
         console.error('获取传感器数据时出错:', error);
     }
+    window._pollLocks['sensor'] = 0;
 }
 
 /**
@@ -3601,6 +3640,7 @@ function stopSensorDataStream() {
     if (typeof g_dataEngine !== 'undefined' && g_dataEngine) {
         g_dataEngine.unregisterModule('sensor_stream');
     }
+    window._pollLocks['sensor'] = 0;
 }
 
 /**
@@ -5371,6 +5411,10 @@ function pollHyperparameterStatus() {
 }
 
 async function _hpPollTick() {
+    /* 防抖: 防止并发重复调用 */
+    if (window._pollLocks['hp'] && Date.now() - window._pollLocks['hp'] < 5000) return;
+    window._pollLocks['hp'] = Date.now();
+
     _hpPollCount++;
     if (_hpPollCount > _hpMaxPolls || !hyperparameterOptimizer) {
         if (typeof g_dataEngine !== 'undefined' && g_dataEngine) {
@@ -5404,6 +5448,7 @@ async function _hpPollTick() {
     } catch (error) {
         console.error('轮询超参数状态失败:', error);
     }
+    window._pollLocks['hp'] = 0;
 }
 
 /**
@@ -5669,6 +5714,8 @@ function startFleetPolling() {
  * 舰队状态轮询回调
  */
 async function pollFleetStatus() {
+    if (window._pollLocks['fleet'] && Date.now() - window._pollLocks['fleet'] < 3000) return;
+    window._pollLocks['fleet'] = Date.now();
     try {
         if (window.SelfLnnApi && typeof window.SelfLnnApi.getFleetStatus === 'function') {
             const result = await window.SelfLnnApi.getFleetStatus();
@@ -5679,6 +5726,7 @@ async function pollFleetStatus() {
     } catch (error) {
         console.error('舰队状态轮询失败:', error);
     }
+    window._pollLocks['fleet'] = 0;
 }
 
 /**
@@ -5692,6 +5740,7 @@ function stopFleetPolling() {
     if (typeof g_dataEngine !== 'undefined' && g_dataEngine) {
         g_dataEngine.unregisterModule('fleet_status');
     }
+    window._pollLocks['fleet'] = 0;
 }
 
 /**
@@ -8655,6 +8704,8 @@ async function unregisterDevice() {
 var _safetyPollTimer = null;
 
 async function pollSafety() {
+    if (window._pollLocks['safety'] && Date.now() - window._pollLocks['safety'] < 10000) return;
+    window._pollLocks['safety'] = Date.now();
     try {
 /* getSecurityStatus现在调用/safety/status返回{success,data}，
          * data格式: {level,level_name,safety_score,total_events,...} */
@@ -8665,6 +8716,7 @@ async function pollSafety() {
         }
         if (result && result.data) updateSafetyUI(result.data);
     } catch(e) { console.warn('[安全] 轮询失败:', e.message); }
+    window._pollLocks['safety'] = 0;
 }
 
 function updateSafetyUI(safety) {

@@ -285,10 +285,15 @@ int memory_unlock(void* ptr, size_t size);
 
 /* 深拷贝宏定义 (用于知识库和决策引擎)
  * DEEP-FIX: 使用 safe_free 替代 raw free，统一分配器，
- * 防止 mixed allocator (safe_malloc + raw free) 导致的堆损坏 */
+ * 防止 mixed allocator (safe_malloc + raw free) 导致的堆损坏
+ * 使用 memcpy + 手动null终止替代strcpy，防止缓冲区溢出 */
 #define DEEP_COPY_STRING(dest, src) do { \
     if (dest) { safe_free((void**)&(dest)); } \
-    if (src) { dest = (char*)safe_malloc(strlen(src) + 1); if (dest) strcpy(dest, src); } \
+    if (src) { \
+        size_t _len = strlen(src); \
+        dest = (char*)safe_malloc(_len + 1); \
+        if (dest) { memcpy(dest, src, _len); dest[_len] = '\0'; } \
+    } \
 } while(0)
 
 #define DEEP_COPY_SCALAR(dest, src) do { (dest) = (src); } while(0)
@@ -303,7 +308,11 @@ int memory_unlock(void* ptr, size_t size);
 
 #define DEEP_COPY_STRING_SAFE(dest, src, free_fn) do { \
     if (dest) { free_fn((void**)&(dest)); dest = NULL; } \
-    if (src) { dest = (char*)safe_malloc(strlen(src) + 1); if (dest) strcpy(dest, src); } \
+    if (src) { \
+        size_t _len = strlen(src); \
+        dest = (char*)safe_malloc(_len + 1); \
+        if (dest) { memcpy(dest, src, _len); dest[_len] = '\0'; } \
+    } \
 } while(0)
 
 /* float数组深拷贝 - DEEP-FIX: 使用safe_malloc/safe_free */

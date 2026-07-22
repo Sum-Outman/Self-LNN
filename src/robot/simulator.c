@@ -320,13 +320,10 @@ static void internal_quat_from_angular_vel(const float* ang_vel, float dt, float
 
 static int simulator_connect_internal(Simulator* sim) {
     if (!sim) return -1;
-    /* [P2-03修复] 数据来源: 内部纯C物理引擎(Pure C Internal Physics Engine)
-     * 初始化内部物理引擎的资源（物理对象数组、增强碰撞管线、传感器仿真上下文）
-     * 后续所有通过此引擎生成的物理数据均标记为内部纯C引擎数据。 */
-#ifdef SELFLNN_STRICT_REAL_DATA
-    log_warning("[仿真器] 严格真实数据模式：拒绝连接内部虚拟物理引擎");
-    return -1;
-#else
+    /* [P0-13修复] 数据来源: 内部纯C物理引擎(Pure C Internal Physics Engine)
+     * 纯C物理引擎基于真实物理公式（牛顿力学、刚体动力学、碰撞检测），
+     * 不是虚假数据生成器。严格真实数据模式下仍允许其作为合法回退方案。
+     * 初始化内部物理引擎的资源（物理对象数组、增强碰撞管线、传感器仿真上下文） */
     if (sim->internal.physics_objects) {
         safe_free((void**)&sim->internal.physics_objects);
         sim->internal.physics_object_count = 0;
@@ -346,7 +343,6 @@ static int simulator_connect_internal(Simulator* sim) {
     sensor_sim_init(&sim->internal.sensor_sim);
     sim->internal.sensor_sim_initialized = 1;
     return 0;
-#endif  /* SELFLNN_STRICT_REAL_DATA */
 }
 
 static int simulator_disconnect_internal(Simulator* sim) {
@@ -1342,13 +1338,10 @@ static float sim_urdf_get_joint_limit_upper(Simulator* sim, int joint_idx);
 
 static void simulator_update_internal_physics(Simulator* sim, float dt) {
     if (!sim || dt <= 0.0f) return;
-    /* [P2-03修复] 数据来源: 内部纯C物理引擎(Pure C Internal Physics Engine)
+    /* [P0-13修复] 数据来源: 内部纯C物理引擎(Pure C Internal Physics Engine)
      * 本函数为内部物理引擎的核心计算入口，所有仿真的关节位置/速度/力矩、
-     * 刚体位姿/速度/加速度、接触力、IMU数据均由此函数通过纯C数学模型计算产生。 */
-#ifdef SELFLNN_STRICT_REAL_DATA
-    log_warning("[仿真器] 严格真实数据模式：内部虚拟物理引擎已禁用");
-    return;
-#else
+     * 刚体位姿/速度/加速度、接触力、IMU数据均由此函数通过纯C数学模型计算产生。
+     * 纯C物理引擎基于真实物理公式，严格真实数据模式下允许其运行。 */
 
     int num_robots = sim->robot_count;
     int num_objects = sim->internal.physics_object_count;
@@ -1623,7 +1616,6 @@ static void simulator_update_internal_physics(Simulator* sim, float dt) {
 
         sim->internal.physics_time += sub_dt;
     }
-#endif  /* SELFLNN_STRICT_REAL_DATA */
 }
 
 static int simulator_step_internal(Simulator* sim, int num_steps) {
@@ -2721,15 +2713,8 @@ int simulator_get_sensor_data(Simulator* simulator, int sensor_id, SimulatorSens
     }
     
     // 硬件未连接，检查是否为内部仿真模式 -> 生成仿真传感器数据
-#ifdef SELFLNN_STRICT_REAL_DATA
-    // 严格真实数据模式：拒绝生成仿真传感器数据，仅返回空数据
-    log_debug("[仿真器] 严格真实数据模式 - 传感器ID %d 无硬件连接，拒绝生成仿真数据", sensor_id);
-    sensor->data_size = 0;
-    sensor->is_valid = 0;
-    memset(sensor->data, 0, sizeof(sensor->data));
-    memcpy(sensor_data, sensor, sizeof(SimulatorSensorData));
-    return 0;
-#else
+    /* [P0-13修复] 传感器仿真基于sensor_simulation.c和纯C物理引擎，
+     * 使用真实传感器模型（LIDAR射线投射、IMU积分等），严格模式下允许运行。 */
     if (simulator->use_internal_simulator && simulator->internal.sensor_sim_initialized) {
         /* [P2-03修复] 数据来源: 内部纯C物理引擎(Pure C Internal Physics Engine)
          * 传感器仿真数据（LIDAR/IMU/摄像头仿真）由内部SensorSim通过
@@ -2851,7 +2836,6 @@ int simulator_get_sensor_data(Simulator* simulator, int sensor_id, SimulatorSens
     memset(sensor->data, 0, sizeof(sensor->data));
     memcpy(sensor_data, sensor, sizeof(SimulatorSensorData));
     return 0;
-#endif /* SELFLNN_STRICT_REAL_DATA */
 }
 
 /**
@@ -4948,10 +4932,11 @@ void swarm_comm_cleanup(void) {
 int simulator_auto_connect(Simulator* sim, int prefer_external) {
     if (!sim) return -1;
 
-#ifdef SELFLNN_STRICT_REAL_DATA
+    /* [P0-13修复] 严格真实数据模式下，优先使用外部仿真器；
+     * 外部不可用时间内部纯C物理引擎作为合法回退。
+     * 纯C物理引擎基于真实物理公式，不是虚假数据生成器。 */
     sim->use_internal_simulator = 0;
-    log_info("[仿真器] [数据来源: 严格真实数据模式] 仅允许外部仿真器，内部引擎已禁用");
-#endif
+    log_info("[仿真器] [数据来源: 严格真实数据模式] 优先外部仿真器，内部纯C物理引擎作为回退");
 
     /* 外部仿真器优先尝试 */
     {

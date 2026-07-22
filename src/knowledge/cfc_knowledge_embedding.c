@@ -180,41 +180,41 @@ CfCEmbedState* cfc_embed_create(const CfCEmbedConfig* config) {
         safe_calloc(state->triple_capacity, sizeof(TripleEntry));
 
     state->entity_embeddings = (float*)
-        safe_calloc(CFC_EMBED_MAX_ENTITIES * dim, sizeof(float));
+        safe_calloc(state->entity_capacity * dim, sizeof(float));
 
     if (config->embed_type == CFC_EMBED_QUATERNION ||
         config->embed_type == CFC_EMBED_HYBRID) {
         state->entity_quaternion_r = (float*)
-            safe_calloc(CFC_EMBED_MAX_ENTITIES * dim, sizeof(float));
+            safe_calloc(state->entity_capacity * dim, sizeof(float));
         state->entity_quaternion_i = (float*)
-            safe_calloc(CFC_EMBED_MAX_ENTITIES * dim, sizeof(float));
+            safe_calloc(state->entity_capacity * dim, sizeof(float));
         state->entity_quaternion_j = (float*)
-            safe_calloc(CFC_EMBED_MAX_ENTITIES * dim, sizeof(float));
+            safe_calloc(state->entity_capacity * dim, sizeof(float));
         state->entity_quaternion_k = (float*)
-            safe_calloc(CFC_EMBED_MAX_ENTITIES * dim, sizeof(float));
+            safe_calloc(state->entity_capacity * dim, sizeof(float));
 
         /* P1-01修复：为关系也分配四元数分量 */
         state->relation_quaternion_r = (float*)
-            safe_calloc(CFC_EMBED_MAX_RELATIONS * dim, sizeof(float));
+            safe_calloc(state->relation_capacity * dim, sizeof(float));
         state->relation_quaternion_i = (float*)
-            safe_calloc(CFC_EMBED_MAX_RELATIONS * dim, sizeof(float));
+            safe_calloc(state->relation_capacity * dim, sizeof(float));
         state->relation_quaternion_j = (float*)
-            safe_calloc(CFC_EMBED_MAX_RELATIONS * dim, sizeof(float));
+            safe_calloc(state->relation_capacity * dim, sizeof(float));
         state->relation_quaternion_k = (float*)
-            safe_calloc(CFC_EMBED_MAX_RELATIONS * dim, sizeof(float));
+            safe_calloc(state->relation_capacity * dim, sizeof(float));
     }
 
     state->relation_embeddings = (float*)
-        safe_calloc(CFC_EMBED_MAX_RELATIONS * dim, sizeof(float));
+        safe_calloc(state->relation_capacity * dim, sizeof(float));
 
     state->cfc_state_buffer = (float*)safe_calloc(dim, sizeof(float));
     state->cfc_graph_state = (float*)safe_calloc(dim, sizeof(float));
 
     /* Adam优化器状态初始化 */
-    state->entity_momentum = (float*)safe_calloc(CFC_EMBED_MAX_ENTITIES * dim, sizeof(float));
-    state->entity_velocity = (float*)safe_calloc(CFC_EMBED_MAX_ENTITIES * dim, sizeof(float));
-    state->relation_momentum = (float*)safe_calloc(CFC_EMBED_MAX_RELATIONS * dim, sizeof(float));
-    state->relation_velocity = (float*)safe_calloc(CFC_EMBED_MAX_RELATIONS * dim, sizeof(float));
+    state->entity_momentum = (float*)safe_calloc(state->entity_capacity * dim, sizeof(float));
+    state->entity_velocity = (float*)safe_calloc(state->entity_capacity * dim, sizeof(float));
+    state->relation_momentum = (float*)safe_calloc(state->relation_capacity * dim, sizeof(float));
+    state->relation_velocity = (float*)safe_calloc(state->relation_capacity * dim, sizeof(float));
 
     if (!state->entity_embeddings || !state->relation_embeddings) {
         cfc_embed_destroy(state);
@@ -222,14 +222,14 @@ CfCEmbedState* cfc_embed_create(const CfCEmbedConfig* config) {
     }
 
     /* 随机初始化嵌入 */
-    for (int i = 0; i < CFC_EMBED_MAX_ENTITIES * dim; i++)
+    for (int i = 0; i < state->entity_capacity * dim; i++)
         state->entity_embeddings[i] = embed_rand_normal() * 0.1f;
 
-    for (int i = 0; i < CFC_EMBED_MAX_RELATIONS * dim; i++)
+    for (int i = 0; i < state->relation_capacity * dim; i++)
         state->relation_embeddings[i] = embed_rand_normal() * 0.1f;
 
     if (state->entity_quaternion_r) {
-        int total = CFC_EMBED_MAX_ENTITIES * dim;
+        int total = state->entity_capacity * dim;
         for (int i = 0; i < total; i++) {
             state->entity_quaternion_r[i] = embed_rand_normal() * 0.1f;
             state->entity_quaternion_i[i] = embed_rand_normal() * 0.1f;
@@ -240,7 +240,7 @@ CfCEmbedState* cfc_embed_create(const CfCEmbedConfig* config) {
 
     /* P1-01修复：初始化关系四元数分量 */
     if (state->relation_quaternion_r) {
-        int total = CFC_EMBED_MAX_RELATIONS * dim;
+        int total = state->relation_capacity * dim;
         for (int i = 0; i < total; i++) {
             state->relation_quaternion_r[i] = embed_rand_normal() * 0.1f;
             state->relation_quaternion_i[i] = embed_rand_normal() * 0.1f;
@@ -292,12 +292,70 @@ int cfc_embed_add_entity(CfCEmbedState* state, const char* entity_name) {
     if (!state || !entity_name) return -1;
 
     if (state->entity_count >= state->entity_capacity) {
+        int old_cap = state->entity_capacity;
         int new_cap = state->entity_capacity * 2;
         if (new_cap > CFC_EMBED_MAX_ENTITIES) new_cap = CFC_EMBED_MAX_ENTITIES;
         EntityEntry* new_ents = (EntityEntry*)
             safe_realloc(state->entities, new_cap * sizeof(EntityEntry));
         if (!new_ents) return -1;
         state->entities = new_ents;
+
+        /* 扩容实体嵌入数组 */
+        int dim = state->config.embedding_dim;
+        float* new_emb = (float*)
+            safe_realloc(state->entity_embeddings, new_cap * dim * sizeof(float));
+        if (!new_emb) return -1;
+        state->entity_embeddings = new_emb;
+        /* 新扩容部分初始化为0 */
+        memset(state->entity_embeddings + old_cap * dim, 0,
+               (size_t)(new_cap - old_cap) * dim * sizeof(float));
+
+        /* 扩容实体momentum和velocity */
+        float* new_em = (float*)
+            safe_realloc(state->entity_momentum, new_cap * dim * sizeof(float));
+        if (!new_em) return -1;
+        state->entity_momentum = new_em;
+        memset(state->entity_momentum + old_cap * dim, 0,
+               (size_t)(new_cap - old_cap) * dim * sizeof(float));
+
+        float* new_ev = (float*)
+            safe_realloc(state->entity_velocity, new_cap * dim * sizeof(float));
+        if (!new_ev) return -1;
+        state->entity_velocity = new_ev;
+        memset(state->entity_velocity + old_cap * dim, 0,
+               (size_t)(new_cap - old_cap) * dim * sizeof(float));
+
+        /* 扩容四元数分量（如果存在） */
+        if (state->entity_quaternion_r) {
+            float* new_qr = (float*)
+                safe_realloc(state->entity_quaternion_r, new_cap * dim * sizeof(float));
+            if (!new_qr) return -1;
+            state->entity_quaternion_r = new_qr;
+            memset(state->entity_quaternion_r + old_cap * dim, 0,
+                   (size_t)(new_cap - old_cap) * dim * sizeof(float));
+
+            float* new_qi = (float*)
+                safe_realloc(state->entity_quaternion_i, new_cap * dim * sizeof(float));
+            if (!new_qi) return -1;
+            state->entity_quaternion_i = new_qi;
+            memset(state->entity_quaternion_i + old_cap * dim, 0,
+                   (size_t)(new_cap - old_cap) * dim * sizeof(float));
+
+            float* new_qj = (float*)
+                safe_realloc(state->entity_quaternion_j, new_cap * dim * sizeof(float));
+            if (!new_qj) return -1;
+            state->entity_quaternion_j = new_qj;
+            memset(state->entity_quaternion_j + old_cap * dim, 0,
+                   (size_t)(new_cap - old_cap) * dim * sizeof(float));
+
+            float* new_qk = (float*)
+                safe_realloc(state->entity_quaternion_k, new_cap * dim * sizeof(float));
+            if (!new_qk) return -1;
+            state->entity_quaternion_k = new_qk;
+            memset(state->entity_quaternion_k + old_cap * dim, 0,
+                   (size_t)(new_cap - old_cap) * dim * sizeof(float));
+        }
+
         state->entity_capacity = new_cap;
     }
 
@@ -313,12 +371,70 @@ int cfc_embed_add_relation(CfCEmbedState* state, const char* relation_name) {
     if (!state || !relation_name) return -1;
 
     if (state->relation_count >= state->relation_capacity) {
+        int old_cap = state->relation_capacity;
         int new_cap = state->relation_capacity * 2;
         if (new_cap > CFC_EMBED_MAX_RELATIONS) new_cap = CFC_EMBED_MAX_RELATIONS;
         RelationEntry* new_rels = (RelationEntry*)
             safe_realloc(state->relations, new_cap * sizeof(RelationEntry));
         if (!new_rels) return -1;
         state->relations = new_rels;
+
+        /* 扩容关系嵌入数组 */
+        int dim = state->config.embedding_dim;
+        float* new_emb = (float*)
+            safe_realloc(state->relation_embeddings, new_cap * dim * sizeof(float));
+        if (!new_emb) return -1;
+        state->relation_embeddings = new_emb;
+        /* 新扩容部分初始化为0 */
+        memset(state->relation_embeddings + old_cap * dim, 0,
+               (size_t)(new_cap - old_cap) * dim * sizeof(float));
+
+        /* 扩容关系momentum和velocity */
+        float* new_rm = (float*)
+            safe_realloc(state->relation_momentum, new_cap * dim * sizeof(float));
+        if (!new_rm) return -1;
+        state->relation_momentum = new_rm;
+        memset(state->relation_momentum + old_cap * dim, 0,
+               (size_t)(new_cap - old_cap) * dim * sizeof(float));
+
+        float* new_rv = (float*)
+            safe_realloc(state->relation_velocity, new_cap * dim * sizeof(float));
+        if (!new_rv) return -1;
+        state->relation_velocity = new_rv;
+        memset(state->relation_velocity + old_cap * dim, 0,
+               (size_t)(new_cap - old_cap) * dim * sizeof(float));
+
+        /* 扩容关系四元数分量（如果存在） */
+        if (state->relation_quaternion_r) {
+            float* new_qr = (float*)
+                safe_realloc(state->relation_quaternion_r, new_cap * dim * sizeof(float));
+            if (!new_qr) return -1;
+            state->relation_quaternion_r = new_qr;
+            memset(state->relation_quaternion_r + old_cap * dim, 0,
+                   (size_t)(new_cap - old_cap) * dim * sizeof(float));
+
+            float* new_qi = (float*)
+                safe_realloc(state->relation_quaternion_i, new_cap * dim * sizeof(float));
+            if (!new_qi) return -1;
+            state->relation_quaternion_i = new_qi;
+            memset(state->relation_quaternion_i + old_cap * dim, 0,
+                   (size_t)(new_cap - old_cap) * dim * sizeof(float));
+
+            float* new_qj = (float*)
+                safe_realloc(state->relation_quaternion_j, new_cap * dim * sizeof(float));
+            if (!new_qj) return -1;
+            state->relation_quaternion_j = new_qj;
+            memset(state->relation_quaternion_j + old_cap * dim, 0,
+                   (size_t)(new_cap - old_cap) * dim * sizeof(float));
+
+            float* new_qk = (float*)
+                safe_realloc(state->relation_quaternion_k, new_cap * dim * sizeof(float));
+            if (!new_qk) return -1;
+            state->relation_quaternion_k = new_qk;
+            memset(state->relation_quaternion_k + old_cap * dim, 0,
+                   (size_t)(new_cap - old_cap) * dim * sizeof(float));
+        }
+
         state->relation_capacity = new_cap;
     }
 
@@ -785,9 +901,9 @@ int cfc_embed_save(const CfCEmbedState* state, const char* filepath) {
     fwrite(&state->relation_count, sizeof(int), 1, f);
     fwrite(&state->triple_count, sizeof(int), 1, f);
     fwrite(state->entity_embeddings, sizeof(float),
-           CFC_EMBED_MAX_ENTITIES * state->config.embedding_dim, f);
+           state->entity_count * state->config.embedding_dim, f);
     fwrite(state->relation_embeddings, sizeof(float),
-           CFC_EMBED_MAX_RELATIONS * state->config.embedding_dim, f);
+           state->relation_count * state->config.embedding_dim, f);
 
     fclose(f);
     return 0;
@@ -841,19 +957,18 @@ CfCEmbedState* cfc_embed_load(const char* filepath) {
 
     /* P0修复(修复1): 使用 state->config.embedding_dim（已由 cfc_embed_create 限制为
      * CFC_EMBED_MAX_DIM<=1024），而非原始 config.embedding_dim。
-     * entity_embeddings 缓冲区按 CFC_EMBED_MAX_ENTITIES * dim 分配，dim 最大1024，
-     * 总计约 262144*1024*4 ≈ 1GB。若文件中 config.embedding_dim=2048，fread 会读取
-     * 2GB 数据写入仅 1GB 的缓冲区造成堆溢出。此处使用已限制后的维度值确保不越界。 */
+     * 使用 entity_count/relation_count 代替 CFC_EMBED_MAX_ENTITIES/CFC_EMBED_MAX_RELATIONS
+     * 避免读取超出实际存储的数据量。 */
     if (fread(state->entity_embeddings, sizeof(float),
-              CFC_EMBED_MAX_ENTITIES * state->config.embedding_dim, f)
-        != (size_t)(CFC_EMBED_MAX_ENTITIES * state->config.embedding_dim)) {
+              state->entity_count * state->config.embedding_dim, f)
+        != (size_t)(state->entity_count * state->config.embedding_dim)) {
         cfc_embed_destroy(state);
         fclose(f);
         return NULL;
     }
     if (fread(state->relation_embeddings, sizeof(float),
-              CFC_EMBED_MAX_RELATIONS * state->config.embedding_dim, f)
-        != (size_t)(CFC_EMBED_MAX_RELATIONS * state->config.embedding_dim)) {
+              state->relation_count * state->config.embedding_dim, f)
+        != (size_t)(state->relation_count * state->config.embedding_dim)) {
         cfc_embed_destroy(state);
         fclose(f);
         return NULL;
@@ -868,6 +983,8 @@ CfCEmbedConfig cfc_embed_default_config(void) {
     memset(&config, 0, sizeof(CfCEmbedConfig));
     config.num_entities = 0;
     config.num_relations = 0;
+    config.max_entities = 4096;    /**< 默认实体最大容量 */
+    config.max_relations = 1024;   /**< 默认关系最大容量 */
     config.embedding_dim = CFC_EMBED_DEFAULT_DIM;
     config.embed_type = CFC_EMBED_CONTINUOUS;
     config.learning_rate = 0.01f;
